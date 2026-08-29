@@ -124,23 +124,23 @@ export function createApp(
   const docker = new DockerApi(config.dockerSocket);
   const orchestrator = deps.orchestrator ?? createSessionOrchestrator(config, db, docker);
   const exec = deps.exec ?? docker;
-  api.use(createSessionsRouter(createSessionService(config, db, orchestrator, exec)));
-  api.use(
-    createPlanningRouter(
-      deps.planning ?? createPlanningService(config, db, terminals, orchestrator),
-    ),
-  );
+  const planning = deps.planning ?? createPlanningService(config, db, terminals, orchestrator);
   // What the build loop does with a finished session: push, then open the pull
   // request. It is both the loop's completion hand-off and its own endpoint, so
   // a delivery that failed can be retried without rerunning a story.
   const delivery = deps.delivery ?? createDeliveryService(config, db, orchestrator, exec);
-  api.use(createDeliveryRouter(delivery));
+  const builds =
+    deps.builds ?? createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery);
+  // Deleting a session (US-015) has to unwind whatever is running in its
+  // container first, so the session service is built last and given both.
   api.use(
-    createBuildRouter(
-      deps.builds ??
-        createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery),
+    createSessionsRouter(
+      createSessionService(config, db, orchestrator, exec, { builds, planning }),
     ),
   );
+  api.use(createPlanningRouter(planning));
+  api.use(createDeliveryRouter(delivery));
+  api.use(createBuildRouter(builds));
 
   app.use('/api', api);
 

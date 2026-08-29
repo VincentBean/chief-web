@@ -209,6 +209,8 @@ export interface Session {
   containerId: string | null;
   prUrl: string | null;
   lastError: string | null;
+  /** Story progress for the dashboard; both 0 until the PRD has been parsed. */
+  stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
   cloned: boolean;
   createdAt: string;
@@ -257,6 +259,14 @@ export async function fetchSessions(signal?: AbortSignal): Promise<Session[]> {
  */
 export async function createSession(input: SessionInput): Promise<SessionWithSetup> {
   return api<SessionWithSetup>('/api/sessions', { method: 'POST', body: JSON.stringify(input) });
+}
+
+/**
+ * Deletes the session, its container and its workspace (US-015). The feature
+ * branch on the remote and its pull request are deliberately left alone.
+ */
+export async function deleteSession(id: string): Promise<void> {
+  await api<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /** "Retry setup" on a pending session whose clone did not finish. */

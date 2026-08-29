@@ -5,6 +5,7 @@ export {
   type ReadyResult,
   type SessionContainers,
   SessionError,
+  type SessionLifecycle,
   SessionService,
   type SessionSetupView,
   type SessionView,

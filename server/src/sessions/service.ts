@@ -3,8 +3,10 @@ import path from 'node:path';
 
 import type { Config } from '../config.js';
 import {
+  countStories,
   createSession,
   type Database,
+  deleteSession,
   featureBranchFor,
   getRepository,
   getSession,
@@ -15,13 +17,14 @@ import {
   type Session,
   type SessionStatus,
   type Story,
+  type StoryCounts,
   type StoryInput,
   syncStories,
   updateSession,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
-import { sessionRepoDir } from '../orchestrator/index.js';
+import { removeSessionWorkspace, sessionRepoDir } from '../orchestrator/index.js';
 import {
   type PrdStatus,
   type PrdStory,
@@ -60,6 +63,22 @@ export interface SessionContainers {
   remove(sessionId: string): Promise<void>;
 }
 
+/**
+ * The processes a deletion has to unwind before the container and the
+ * workspace can go (US-015).
+ *
+ * They are declared here as one-method seams rather than imported, because
+ * both services are built *after* this one — and because a `SessionService`
+ * without them (every test that never builds or plans) then simply has nothing
+ * to stop.
+ */
+export interface SessionLifecycle {
+  /** The Ralph loop (US-013): signalled, and awaited, before anything is removed. */
+  readonly builds?: { stop(sessionId: string): Promise<unknown> };
+  /** The planning terminal (US-011): closed so no exec is left attached. */
+  readonly planning?: { stop(sessionId: string): Promise<unknown> };
+}
+
 /** A session as the API returns it. */
 export interface SessionView {
   readonly id: string;
@@ -76,6 +95,11 @@ export interface SessionView {
   readonly containerId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
+  /**
+   * Story progress for the dashboard's `4/9 done`. Both are 0 until the
+   * session has been marked ready and its PRD parsed into stories.
+   */
+  readonly stories: StoryCounts;
   /**
    * Whether `/workspace/repo` is a git clone. Read from the data volume rather
    * than remembered in memory, so a restart still knows which sessions never
@@ -126,6 +150,7 @@ export class SessionService {
     private readonly db: Database,
     private readonly containers: SessionContainers,
     private readonly exec: SessionExecutor,
+    private readonly lifecycle: SessionLifecycle = {},
   ) {}
 
   list(repositoryId?: string): SessionView[] {
@@ -302,6 +327,69 @@ export class SessionService {
     };
   }
 
+  /**
+   * Deletes the session, its container and its workspace (US-015).
+   *
+   * Everything chief-web created *here* goes; nothing on the remote does. The
+   * branch that was pushed and the pull request that was opened are the whole
+   * point of the session and stay exactly as they are — deleting a session is
+   * cleaning up this server, not undoing the work.
+   *
+   * A `building` session is stopped first, so the agent process is signalled
+   * and the loop unwound before its container is pulled out from under it.
+   * Docker is asked before anything local is removed: if the daemon cannot be
+   * reached, the container's fate is unknown, and the honest answer is to
+   * refuse rather than to orphan a running container next to a deleted
+   * workspace.
+   */
+  async delete(id: string): Promise<void> {
+    const session = this.requireSession(id);
+
+    if (session.status === 'building' && this.lifecycle.builds !== undefined) {
+      try {
+        await this.lifecycle.builds.stop(session.id);
+      } catch (cause) {
+        // The loop loses its container in a moment either way; a refused stop
+        // must not leave the session undeletable.
+        logger.warn('could not stop the build of a session being deleted', {
+          session: session.id,
+          error: describe(cause),
+        });
+      }
+    }
+
+    if (this.lifecycle.planning !== undefined) {
+      try {
+        await this.lifecycle.planning.stop(session.id);
+      } catch (cause) {
+        logger.warn('could not close the planning terminal of a session being deleted', {
+          session: session.id,
+          error: describe(cause),
+        });
+      }
+    }
+
+    try {
+      await this.containers.remove(session.id);
+    } catch (cause) {
+      throw new SessionError(
+        502,
+        'session_container_unavailable',
+        `The container of "${session.name}" could not be removed, so nothing was deleted: ${describe(cause)}`,
+      );
+    }
+
+    removeSessionWorkspace(this.config, session.id);
+    // The stories go with it, by cascade.
+    deleteSession(this.db, session.id);
+
+    logger.info('session deleted', {
+      session: session.id,
+      name: session.name,
+      featureBranch: session.featureBranch,
+    });
+  }
+
   private refusal(session: Session, prd: PrdStatus): ReadyResult {
     logger.info('session not marked ready: the PRD does not parse', {
       session: session.id,
@@ -427,6 +515,7 @@ export class SessionService {
       containerId: session.containerId,
       prUrl: session.prUrl,
       lastError: session.lastError,
+      stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
@@ -460,8 +549,9 @@ export function createSessionService(
   db: Database,
   containers: SessionContainers,
   exec: SessionExecutor,
+  lifecycle: SessionLifecycle = {},
 ): SessionService {
-  return new SessionService(config, db, containers, exec);
+  return new SessionService(config, db, containers, exec, lifecycle);
 }
 
 /**

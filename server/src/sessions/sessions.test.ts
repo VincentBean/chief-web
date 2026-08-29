@@ -13,16 +13,23 @@ import {
   IN_MEMORY,
   openDatabase,
   type Repository,
+  updateSession,
 } from '../db/index.js';
 import { type ExecScript, FakeDockerDaemon, type FakeExec } from '../docker/fake-daemon.js';
 import { DockerApi, type ExecOutput, type ExecSpec } from '../docker/index.js';
-import { sessionContainerName, SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
+import {
+  sessionContainerName,
+  SessionOrchestrator,
+  sessionRepoDir,
+  sessionWorkspaceDir,
+} from '../orchestrator/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import {
   CONTAINER_REPO_DIR,
   runSessionSetup,
   type SessionExecutor,
   SessionError,
+  type SessionLifecycle,
   sessionPrdFile,
   SessionService,
   setupExecSpec,
@@ -169,7 +176,9 @@ after(async () => {
  * The real service, orchestrator and Docker client, talking to a fake daemon
  * over a real socket — only the git commands themselves are scripted.
  */
-async function fixture(options: { withKey?: boolean } = {}): Promise<Fixture> {
+async function fixture(
+  options: { withKey?: boolean; lifecycle?: SessionLifecycle } = {},
+): Promise<Fixture> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-sessions-'));
   const daemon = await FakeDockerDaemon.start();
   const config = loadConfig({ DATA_DIR: dataDir, DOCKER_SOCKET: daemon.socketPath });
@@ -191,6 +200,7 @@ async function fixture(options: { withKey?: boolean } = {}): Promise<Fixture> {
     db,
     new SessionOrchestrator(config, db, docker),
     docker,
+    options.lifecycle ?? {},
   );
 
   fixtures.push({ db, daemon, dataDir });
@@ -500,6 +510,132 @@ describe('session readiness', () => {
       () => f.service.stories('nope'),
       (error: unknown) => error instanceof SessionError && error.status === 404,
     );
+  });
+});
+
+describe('session deletion', () => {
+  it('removes the container, the workspace and the row, and leaves the remote alone', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    f.script(successfulGit(f.config, created));
+    await f.service.setup(created);
+    // A delivered session: the PR link is what deleting must not touch.
+    updateSession(f.db, created, { prUrl: 'https://github.com/acme/demo/pull/7' });
+    assert.equal(f.daemon.listContainers().length, 1);
+
+    await f.service.delete(created);
+
+    assert.equal(f.daemon.listContainers().length, 0);
+    assert.equal(fs.existsSync(sessionWorkspaceDir(f.config, created)), false);
+    assert.equal(getSession(f.db, created), null);
+    assert.deepEqual(f.service.list(), []);
+  });
+
+  it('stops the build loop and the planning terminal before anything is removed', async () => {
+    const order: string[] = [];
+    const lifecycle: SessionLifecycle = {
+      builds: {
+        stop(id) {
+          order.push(`build:${id}`);
+          return Promise.resolve(undefined);
+        },
+      },
+      planning: {
+        stop(id) {
+          order.push(`planning:${id}`);
+          return Promise.resolve(undefined);
+        },
+      },
+    };
+    const f = await fixture({ lifecycle });
+    const created = createSessionRow(f);
+    f.script(successfulGit(f.config, created));
+    await f.service.setup(created);
+    updateSession(f.db, created, { status: 'building' });
+
+    await f.service.delete(created);
+
+    assert.deepEqual(order, [`build:${created}`, `planning:${created}`]);
+    assert.equal(f.daemon.listContainers().length, 0);
+    assert.equal(getSession(f.db, created), null);
+  });
+
+  it('does not stop a build for a session that is not building', async () => {
+    const stopped: string[] = [];
+    const f = await fixture({
+      lifecycle: {
+        builds: {
+          stop(id) {
+            stopped.push(id);
+            return Promise.resolve(undefined);
+          },
+        },
+      },
+    });
+    const created = createSessionRow(f);
+    f.script(successfulGit(f.config, created));
+    await f.service.setup(created);
+
+    await f.service.delete(created);
+
+    assert.deepEqual(stopped, []);
+  });
+
+  it('deletes anyway when stopping the build is refused', async () => {
+    const f = await fixture({
+      lifecycle: { builds: { stop: () => Promise.reject(new Error('no loop here')) } },
+    });
+    const created = createSessionRow(f);
+    f.script(successfulGit(f.config, created));
+    await f.service.setup(created);
+    updateSession(f.db, created, { status: 'building' });
+
+    await f.service.delete(created);
+
+    assert.equal(getSession(f.db, created), null);
+  });
+
+  it('keeps everything when the container cannot be removed', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    f.script(successfulGit(f.config, created));
+    await f.service.setup(created);
+    await f.daemon.close();
+
+    await assert.rejects(
+      () => f.service.delete(created),
+      (error: unknown) =>
+        error instanceof SessionError &&
+        error.status === 502 &&
+        error.code === 'session_container_unavailable',
+    );
+    assert.ok(getSession(f.db, created), 'the session row survives');
+    assert.equal(fs.existsSync(sessionWorkspaceDir(f.config, created)), true);
+  });
+
+  it('reports an unknown session as a 404', async () => {
+    const f = await fixture();
+
+    await assert.rejects(
+      () => f.service.delete('nope'),
+      (error: unknown) => error instanceof SessionError && error.status === 404,
+    );
+  });
+});
+
+describe('session story progress', () => {
+  it('counts the done stories of every session for the dashboard', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+
+    assert.deepEqual(f.service.get(created)?.stories, { total: 0, done: 0 });
+
+    f.service.markReady(created);
+
+    // READY_PRD has US-001 todo and US-002 done.
+    assert.deepEqual(f.service.get(created)?.stories, { total: 2, done: 1 });
+    assert.deepEqual(f.service.list()[0]?.stories, { total: 2, done: 1 });
   });
 });
 

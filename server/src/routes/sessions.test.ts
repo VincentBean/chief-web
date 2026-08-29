@@ -312,6 +312,39 @@ describe('sessions api', () => {
     assert.equal(missing.status, 404);
   });
 
+  it('deletes a session, its container and its workspace', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    fs.mkdirSync(path.join(config.workspacesDir, id, 'repo'), { recursive: true });
+
+    const response = await call('DELETE', `/api/sessions/${id}`);
+
+    assert.equal(response.status, 204);
+    assert.deepEqual(removed, [id]);
+    assert.equal(fs.existsSync(path.join(config.workspacesDir, id)), false);
+    assert.deepEqual(listSessions(db), []);
+
+    const gone = await call('DELETE', `/api/sessions/${id}`);
+    assert.equal(gone.status, 404);
+    assert.equal(((await gone.json()) as ErrorBody).error, 'session_not_found');
+  });
+
+  it('reports the story progress of every session', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    // Nothing has been parsed yet, so there is no progress to report.
+    assert.deepEqual(body.session.stories, { total: 0, done: 0 });
+
+    writePrd(id, 'add-login', PRD);
+    await call('POST', `/api/sessions/${id}/ready`);
+
+    const listed = (await (await call('GET', '/api/sessions')).json()) as {
+      sessions: SessionView[];
+    };
+    // The PRD has US-001 todo and US-002 done.
+    assert.deepEqual(listed.sessions[0]?.stories, { total: 2, done: 1 });
+  });
+
   it('marks a session ready, lists its stories and sends it back to planning', async () => {
     const { body } = await create();
     const id = body.session.id;

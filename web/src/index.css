@@ -5,6 +5,8 @@
   --ok: #3fb950;
   --error: #f85149;
   --accent: #58a6ff;
+  --warn: #d29922;
+  --delivered: #a371f7;
 
   background-color: var(--bg);
   color: var(--fg);
@@ -376,10 +378,21 @@ textarea.field__input {
   vertical-align: middle;
 }
 
-.badge--ready,
-.badge--finished {
+/* Still being planned: the PRD is not usable yet. */
+.badge--pending {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.badge--ready {
   border-color: var(--ok);
   color: var(--ok);
+}
+
+/* Every story done, pushed, and a pull request open. */
+.badge--finished {
+  border-color: var(--delivered);
+  color: var(--delivered);
 }
 
 .badge--failed {
@@ -396,6 +409,21 @@ textarea.field__input {
 
 select.field__input {
   appearance: auto;
+}
+
+/* Dashboard filters (US-015): status and repository, side by side. */
+.filters {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.filters__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 /* Parsed story list of a ready session (US-012). */

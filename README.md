@@ -178,7 +178,7 @@ unanswerable daemon is not evidence that anything is gone.
 ## Sessions
 
 A session is one feature: its own container, its own clone, its own branch. The
-`/sessions` page creates one from a repository, a name, a base branch, a PR
+[dashboard](#dashboard) creates one from a repository, a name, a base branch, a PR
 target (`develop` or `main`) and an optional scheduled start. The name is a slug
 (letters, numbers, hyphens, underscores), unique per repository, and becomes both
 the feature branch **`chief/<session-name>`** and the workspace directory.
@@ -344,6 +344,47 @@ already committed, there is nothing to rebuild — **Retry push & PR**
 story again. Like session setup, it answers `200 { ok: false, … }` for a remote
 failure and reserves `409` for the wrong state (still building, or a story left
 outstanding).
+
+## Dashboard
+
+The home page (and `/sessions`) is the dashboard: every session, most recently
+updated first, with its repository, status badge, story progress (`4/9 done`),
+feature branch, scheduled start and pull request link. Each row links to the
+[session page](#planning), and the "New session" form lives here too, so the
+page an operator lands on is the one they work from.
+
+**The list is polled every 3 seconds, not pushed.** A session is moved along by
+the build loop, the planning terminal and the delivery step — all in other
+processes, none of them able to reach a browser tab — and the whole list is a
+handful of database rows plus one `stat` per session, so re-reading it is
+cheaper than a socket per browser would be. A status change is on screen within
+one poll.
+
+The status and repository filters are applied in the browser over that same
+list, so filtering never costs a request and never reorders anything.
+
+### Deleting a session
+
+**Delete** removes what chief-web created *here*, and nothing on the remote:
+
+1. a `building` session is stopped first — the agent process is signalled and
+   the loop unwound, exactly like **Stop build**, so no container is pulled out
+   from under a running agent;
+2. the planning terminal, if one is open, is closed;
+3. the container is removed;
+4. the workspace on the data volume is deleted — the clone, the PRD, and
+   anything the agent wrote that was never committed;
+5. the row goes, and its stories with it.
+
+The feature branch on `origin` and the pull request are **left untouched**. They
+are the output of the session, and deleting a session is cleaning up this
+server, not undoing the work. The confirmation dialog says all of this, and says
+the extra sentence about stopping the loop when the session is building.
+
+Docker is asked before anything local is removed: if the daemon cannot be
+reached the deletion is refused with `502 session_container_unavailable` and
+nothing changes, because an orphaned container next to a deleted workspace is
+worse than a session that is still there.
 
 ## Browser terminals
 

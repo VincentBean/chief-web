@@ -98,6 +98,16 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // Deletes the session, its container and its workspace (US-015). Mounted
+  // after `/sessions/:id/ready` and `/sessions/:id/setup`, which are longer
+  // paths and therefore unaffected. Nothing on the remote is touched.
+  router.delete('/sessions/:id', (req, res) => {
+    sessions
+      .delete(req.params.id)
+      .then(() => res.status(204).end())
+      .catch((cause: unknown) => respondWithFailure(res, cause));
+  });
+
   return router;
 }
 

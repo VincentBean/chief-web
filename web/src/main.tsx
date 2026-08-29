@@ -1,11 +1,10 @@
 import { type ComponentType, lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { App } from './App.tsx';
+import { Dashboard } from './Dashboard.tsx';
 import './index.css';
 import { Login } from './Login.tsx';
 import { Repositories } from './Repositories.tsx';
-import { Sessions } from './Sessions.tsx';
 import { Settings } from './Settings.tsx';
 
 const container = document.getElementById('root');
@@ -28,7 +27,7 @@ const Session = lazy(() =>
 const PAGES: Record<string, ComponentType> = {
   '/login': Login,
   '/repositories': Repositories,
-  '/sessions': Sessions,
+  '/sessions': Dashboard,
   '/settings': Settings,
   '/terminal': Terminals,
 };
@@ -36,8 +35,11 @@ const PAGES: Record<string, ComponentType> = {
 /** `/sessions/<id>`: one session, with its PRD state and planning terminal. */
 const SESSION_PATH = /^\/sessions\/[^/]+\/?$/;
 
+// The dashboard (US-015) is the home page, and the fallback: the server serves
+// index.html for every non-`/api` path, so an unknown URL lands on the list of
+// sessions rather than on a blank screen.
 const pathname = window.location.pathname;
-const Page = PAGES[pathname] ?? (SESSION_PATH.test(pathname) ? Session : App);
+const Page = PAGES[pathname] ?? (SESSION_PATH.test(pathname) ? Session : Dashboard);
 
 createRoot(container).render(
   <StrictMode>

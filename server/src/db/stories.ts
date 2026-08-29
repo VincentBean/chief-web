@@ -73,6 +73,29 @@ export function listStories(db: Database, sessionId: string): Story[] {
     .map(mapStory);
 }
 
+/** A session's story progress: `done` of `total` are complete (US-015). */
+export interface StoryCounts {
+  readonly total: number;
+  readonly done: number;
+}
+
+/**
+ * Counts a session's stories in one aggregate, so the dashboard can show
+ * `4/9 done` for every session without loading each story list.
+ */
+export function countStories(db: Database, sessionId: string): StoryCounts {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done
+         FROM stories WHERE session_id = ?`,
+    )
+    .get(sessionId);
+  return row === undefined
+    ? { total: 0, done: 0 }
+    : { total: integer(row, 'total'), done: integer(row, 'done') };
+}
+
 export function getStory(db: Database, sessionId: string, storyId: string): Story | null {
   const row = db
     .prepare('SELECT * FROM stories WHERE session_id = ? AND story_id = ?')
