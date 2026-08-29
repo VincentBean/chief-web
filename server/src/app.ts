@@ -4,6 +4,7 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 
 import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.js';
+import { type BuildService, createAgentRunner, createBuildService } from './build/index.js';
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
@@ -11,6 +12,7 @@ import { DockerApi } from './docker/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createAuthRouter } from './routes/auth.js';
+import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
 import { createHealthRouter } from './routes/health.js';
 import { createPlanningRouter } from './routes/planning.js';
@@ -60,6 +62,11 @@ export interface AppDependencies {
    * terminal manager and orchestrator; tests pass one built on stubs.
    */
   readonly planning?: PlanningService;
+  /**
+   * The Ralph loop (US-013). Defaults to a service that execs `claude -p` in
+   * the session container; tests pass one built on a mocked agent runner.
+   */
+  readonly builds?: BuildService;
 }
 
 /**
@@ -99,18 +106,26 @@ export function createApp(
   const guard = requireClaudeAuth(claude);
   api.post('/sessions', guard);
   api.post('/sessions/:id/setup', guard);
-  // Planning *is* an interactive `claude`, so it is blocked by the same guard.
+  // Planning *is* an interactive `claude`, so it is blocked by the same guard;
+  // so is a build, which is a headless one.
   api.post('/sessions/:id/planning', guard);
+  api.post('/sessions/:id/build', guard);
 
   // The client is cheap to construct — nothing is dialled until the first
   // request — so one instance serves both the orchestrator and the setup
   // commands, and either can be replaced independently.
   const docker = new DockerApi(config.dockerSocket);
   const orchestrator = deps.orchestrator ?? createSessionOrchestrator(config, db, docker);
-  api.use(createSessionsRouter(createSessionService(config, db, orchestrator, deps.exec ?? docker)));
+  const exec = deps.exec ?? docker;
+  api.use(createSessionsRouter(createSessionService(config, db, orchestrator, exec)));
   api.use(
     createPlanningRouter(
       deps.planning ?? createPlanningService(config, db, terminals, orchestrator),
+    ),
+  );
+  api.use(
+    createBuildRouter(
+      deps.builds ?? createBuildService(config, db, orchestrator, createAgentRunner(exec)),
     ),
   );
 

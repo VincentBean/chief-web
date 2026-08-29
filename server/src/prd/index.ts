@@ -4,7 +4,7 @@ export {
   readPrdDocument,
   readPrdStatus,
 } from './file.js';
-export { PRD_ROOT, prdDirFor, prdPathFor } from './location.js';
+export { PRD_ROOT, prdDirFor, prdPathFor, progressPathFor } from './location.js';
 export {
   type ParsedPrd,
   type PrdAcceptanceCriterion,

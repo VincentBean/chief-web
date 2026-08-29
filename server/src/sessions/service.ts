@@ -22,7 +22,13 @@ import {
 import { logger } from '../lib/logger.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
-import { type PrdStatus, type PrdStory, prdPathFor, readPrdDocument } from '../prd/index.js';
+import {
+  type PrdStatus,
+  type PrdStory,
+  prdPathFor,
+  progressPathFor,
+  readPrdDocument,
+} from '../prd/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
 
@@ -258,7 +264,7 @@ export class SessionService {
       return this.refusal(session, document.status);
     }
 
-    const stories = syncStories(this.db, session.id, document.parsed.stories.map(toStoryInput));
+    const stories = syncStories(this.db, session.id, document.parsed.stories.map(storyInputOf));
     const updated = updateSession(this.db, session.id, { status: 'ready', lastError: null }) ?? session;
 
     logger.info('session marked ready', {
@@ -436,6 +442,14 @@ export function sessionPrdFile(
   return path.join(sessionRepoDir(config, session.id), prdPathFor(session.name));
 }
 
+/** Absolute path of the build loop's `progress.md`, next to the PRD (US-013). */
+export function sessionProgressFile(
+  config: Pick<Config, 'workspacesDir'>,
+  session: Pick<Session, 'id' | 'name'>,
+): string {
+  return path.join(sessionRepoDir(config, session.id), progressPathFor(session.name));
+}
+
 /** True once `/workspace/repo` on the data volume is a git working copy. */
 export function isCloned(config: Pick<Config, 'workspacesDir'>, sessionId: string): boolean {
   return fs.existsSync(path.join(sessionRepoDir(config, sessionId), '.git'));
@@ -450,7 +464,12 @@ export function createSessionService(
   return new SessionService(config, db, containers, exec);
 }
 
-function toStoryInput(story: PrdStory): StoryInput {
+/**
+ * The parsed PRD's story as the `stories` table takes it. Exported because
+ * every re-read of `prd.md` — "Mark ready" here, and each iteration of the
+ * build loop (US-013) — has to sync the table the same way.
+ */
+export function storyInputOf(story: PrdStory): StoryInput {
   return {
     storyId: story.id,
     title: story.title,

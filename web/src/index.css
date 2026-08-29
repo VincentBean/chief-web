@@ -4,6 +4,7 @@
   --muted: #8b949e;
   --ok: #3fb950;
   --error: #f85149;
+  --accent: #58a6ff;
 
   background-color: var(--bg);
   color: var(--fg);
@@ -384,6 +385,13 @@ textarea.field__input {
 .badge--failed {
   border-color: var(--error);
   color: var(--error);
+}
+
+/* The build loop is running (US-013). */
+.badge--building,
+.badge--in-progress {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 select.field__input {

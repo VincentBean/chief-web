@@ -271,6 +271,47 @@ byte of the file, including its prose, ordering and CRLF endings, untouched.
 The PRD is the agent's document; the status line is the only thing chief-web
 writes into it.
 
+## The build loop
+
+**Start build** turns a **ready** session into a **building** one and hands it to
+the Ralph loop (`server/src/build/`). One iteration is:
+
+1. Re-read `prd.md`, sync the `stories` table, and pick the story with the
+   lowest priority number that is not `done`.
+2. Write `**Status:** in-progress` for that story, into the file *and* the row.
+3. Exec `claude --dangerously-skip-permissions -p "<prompt>"` in
+   `/workspace/repo` inside the session container. The prompt is chief's
+   `embed/prompt.txt`, ported verbatim into `server/src/build/templates.ts`,
+   with the story inlined as JSON plus a chief-web addendum carrying the PRD's
+   own context, the current `progress.md`, and what the agent has to leave
+   behind: a commit `feat: US-xxx - <title>`, `**Status:** done` with the
+   acceptance criteria checked off in `prd.md`, and a learnings entry appended
+   to `.chief/prds/<session-name>/progress.md`.
+4. Re-read `prd.md` and `git rev-parse HEAD`. A story that is `done` in the file
+   is done; a HEAD that moved is recorded as that story's commit SHA. Nothing is
+   taken on the agent's word.
+
+The loop stops itself in four ways:
+
+- **Completion.** Every story `done` hands off to push/PR (US-014); until that
+  lands, the session simply becomes **finished**.
+- **A stalled story.** An iteration that produces neither a status change nor a
+  commit is retried twice; the third one marks the session **failed** with the
+  agent's last output in `last_error`.
+- **The iteration cap.** A run may take the outstanding stories plus 50%, never
+  fewer than 10. A loop that is committing but never finishing anything hits it
+  and fails, rather than churning forever.
+- **Stop build.** The running agent is signalled (`SIGTERM`, via a pid file it
+  writes inside the container) and the session goes back to **ready**.
+  Everything already committed is kept, so a stopped build resumes rather than
+  restarts.
+
+Nothing about a run is stored in memory that matters: the statuses are in
+`prd.md` on the data volume, the work is in commits, and the learnings are in
+`progress.md`. A server restart therefore loses at most the iteration that was
+in flight — startup reconciliation marks such a session `failed` with
+`container lost`.
+
 ## Browser terminals
 
 The `/terminal` page opens a real PTY inside a running container and streams it

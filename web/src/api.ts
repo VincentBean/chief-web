@@ -435,6 +435,42 @@ export async function backToPlanning(id: string): Promise<Readiness> {
   return api<Readiness>(`/api/sessions/${encodeURIComponent(id)}/ready`, { method: 'DELETE' });
 }
 
+/** Mirrors the server's `BuildView` (US-013): the state of the Ralph loop. */
+export interface Build {
+  sessionId: string;
+  sessionName: string;
+  status: Session['status'];
+  /** True while the server is driving a loop for this session. */
+  running: boolean;
+  /** Iterations started in the current run; 0 when none is running. */
+  iteration: number;
+  /** The dynamic cap the run aborts at: remaining stories + 50%, min 10. */
+  maxIterations: number;
+  /** The story the current iteration is implementing. */
+  currentStoryId: string | null;
+  /** Consecutive fruitless iterations on that story; 2 retries are allowed. */
+  attempts: number;
+  stories: Story[];
+  prd: PrdStatus;
+  lastError: string | null;
+  startedAt: string | null;
+}
+
+/** Polled by the session page while a build runs; a file read plus a map lookup. */
+export async function fetchBuild(id: string, signal?: AbortSignal): Promise<Build> {
+  return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, signal ? { signal } : {});
+}
+
+/** "Start build": promotes a ready session to `building` and starts the loop. */
+export async function startBuild(id: string): Promise<Build> {
+  return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'POST' });
+}
+
+/** "Stop build": signals the agent and returns the session to `ready`. */
+export async function stopBuild(id: string): Promise<Build> {
+  return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'DELETE' });
+}
+
 /** The session detail page, which is where planning happens. */
 export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;

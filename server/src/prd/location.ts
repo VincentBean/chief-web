@@ -18,3 +18,14 @@ export function prdDirFor(sessionName: string): string {
 export function prdPathFor(sessionName: string): string {
   return `${prdDirFor(sessionName)}/prd.md`;
 }
+
+/**
+ * `.chief/prds/<session name>/progress.md`, relative to the repository root.
+ *
+ * chief's own `prd.ProgressPath` is "next to the PRD"; the build loop (US-013)
+ * inlines this file into every prompt and the agent appends its learnings to it,
+ * so the path is part of the format exactly like `prd.md` is.
+ */
+export function progressPathFor(sessionName: string): string {
+  return `${prdDirFor(sessionName)}/progress.md`;
+}

@@ -3,15 +3,18 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   backToPlanning,
+  type Build,
+  fetchBuild,
   fetchPlanning,
   fetchSession,
-  fetchStories,
   markSessionReady,
   type Planning,
   type PrdParseError,
   type PrdStatus,
   type Session as SessionData,
+  startBuild,
   startPlanning,
+  stopBuild,
   stopPlanning,
   type Story,
 } from './api.ts';
@@ -54,8 +57,10 @@ export function Session() {
   const [planning, setPlanning] = useState<Planning | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [busy, setBusy] = useState<'start' | 'stop' | 'ready' | 'planning' | null>(null);
-  const [stories, setStories] = useState<Story[]>([]);
+  const [busy, setBusy] = useState<
+    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | null
+  >(null);
+  const [build, setBuild] = useState<Build | null>(null);
   /** Why the last "Mark ready" was refused; cleared by the next attempt. */
   const [readyErrors, setReadyErrors] = useState<readonly PrdParseError[] | null>(null);
   const [context, setContext] = useState('');
@@ -76,12 +81,12 @@ export function Session() {
       Promise.all([
         fetchSession(id, controller.signal),
         fetchPlanning(id, controller.signal),
-        fetchStories(id, controller.signal),
+        fetchBuild(id, controller.signal),
       ])
-        .then(([loadedSession, loadedPlanning, loadedStories]) => {
+        .then(([loadedSession, loadedPlanning, loadedBuild]) => {
           setSession(loadedSession);
           setPlanning(loadedPlanning);
-          setStories(loadedStories);
+          setBuild(loadedBuild);
           // A terminal the server still knows about (a reload, or another tab)
           // is attached to straight away.
           setAttached((current) =>
@@ -168,7 +173,7 @@ export function Session() {
     markSessionReady(id)
       .then((result) => {
         setSession(result.session);
-        setStories(result.stories);
+        setBuild((current) => (current === null ? current : { ...current, stories: result.stories }));
         setReadyErrors(result.ok ? null : result.prd.errors);
         setNotice(
           result.ok
@@ -192,9 +197,38 @@ export function Session() {
     backToPlanning(id)
       .then((result) => {
         setSession(result.session);
-        setStories(result.stories);
+        setBuild((current) => (current === null ? current : { ...current, stories: result.stories }));
         setReadyErrors(null);
         setNotice({ kind: 'ok', text: 'Back to planning — edit the PRD and mark it ready again.' });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
+  const onStartBuild = (): void => {
+    setBusy('build');
+    setNotice(null);
+    startBuild(id)
+      .then((next) => {
+        setBuild(next);
+        setSession((current) => (current === null ? current : { ...current, status: next.status }));
+        setNotice({
+          kind: 'ok',
+          text: `Build started — up to ${String(next.maxIterations)} iterations, one story at a time.`,
+        });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
+  const onStopBuild = (): void => {
+    setBusy('stop-build');
+    setNotice(null);
+    stopBuild(id)
+      .then((next) => {
+        setBuild(next);
+        setSession((current) => (current === null ? current : { ...current, status: next.status }));
+        setNotice({ kind: 'ok', text: 'Build stopped. Everything already committed is kept.' });
       })
       .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
       .finally(() => setBusy(null));
@@ -256,11 +290,19 @@ export function Session() {
       <ReadinessCard
         status={session.status}
         prd={planning.prd}
-        stories={stories}
+        stories={build?.stories ?? []}
         errors={readyErrors}
         busy={busy}
         onMarkReady={onMarkReady}
         onBackToPlanning={onBackToPlanning}
+      />
+
+      <BuildCard
+        status={session.status}
+        build={build}
+        busy={busy}
+        onStart={onStartBuild}
+        onStop={onStopBuild}
       />
 
       <section className="card">
@@ -465,6 +507,117 @@ function ReadinessCard({
               <span className="mono">{story.storyId}</span>
               <span>{story.title}</span>
               <span className="story__priority">priority {story.priority}</span>
+              <span className={`badge badge--${story.status}`}>{story.status}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The Ralph loop (US-013).
+ *
+ * A build is the session running itself: one headless `claude -p` per story,
+ * in priority order, until every `**Status:**` in `prd.md` reads `done`. The
+ * server owns the loop, so this card is a view of it — the numbers come from
+ * the same poll as everything else, and closing the tab changes nothing.
+ */
+function BuildCard({
+  status,
+  build,
+  busy,
+  onStart,
+  onStop,
+}: {
+  status: SessionData['status'];
+  build: Build | null;
+  busy: string | null;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  if (build === null || status === 'pending') return null;
+
+  const building = status === 'building';
+  const done = build.stories.filter((story) => story.status === 'done').length;
+  const current = build.stories.find((story) => story.storyId === build.currentStoryId) ?? null;
+
+  return (
+    <section className="card">
+      <div className="card__header">
+        <h2 className="card__title">
+          Build <span className={`badge badge--${status}`}>{status}</span>
+        </h2>
+        <div className="field__actions">
+          {status === 'ready' && (
+            <button type="button" className="button" onClick={onStart} disabled={busy !== null}>
+              {busy === 'build' ? 'Starting…' : 'Start build'}
+            </button>
+          )}
+          {building && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={onStop}
+              disabled={busy !== null}
+            >
+              {busy === 'stop-build' ? 'Stopping…' : 'Stop build'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <dl className="meta">
+        <dt>Stories done</dt>
+        <dd>
+          {done}/{build.stories.length}
+        </dd>
+        {building && (
+          <>
+            <dt>Iteration</dt>
+            <dd>
+              {build.iteration} of at most {build.maxIterations}
+              {build.attempts > 0 && ` (retry ${String(build.attempts)} of 2)`}
+            </dd>
+            <dt>Current story</dt>
+            <dd>
+              {current === null ? (
+                build.currentStoryId ?? 'starting…'
+              ) : (
+                <>
+                  <span className="mono">{current.storyId}</span> {current.title}
+                </>
+              )}
+            </dd>
+          </>
+        )}
+      </dl>
+
+      {status === 'ready' && (
+        <p className="field__hint">
+          Starting the build runs one headless Claude per story, lowest priority number first. After
+          each iteration chief-web re-reads {build.prd.path} and the git history — a story only
+          counts as done when the file says so.
+        </p>
+      )}
+
+      {building && !build.running && (
+        <p className="field__hint">
+          This session is marked building but no loop is running here, which means the server was
+          restarted. Stop the build to return it to ready.
+        </p>
+      )}
+
+      {build.stories.length > 0 && (
+        <ul className="stories">
+          {build.stories.map((story) => (
+            <li className="story" key={story.storyId}>
+              <span className="mono">{story.storyId}</span>
+              <span>{story.title}</span>
+              <span className="mono story__priority">
+                {story.commitSha === null ? '—' : story.commitSha.slice(0, 7)}
+              </span>
               <span className={`badge badge--${story.status}`}>{story.status}</span>
             </li>
           ))}
