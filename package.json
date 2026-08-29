@@ -1,0 +1,32 @@
+{
+  "name": "chief-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted web version of chief, the autonomous PRD-driven coding agent",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "npm run start -w server",
+    "dev": "npm run dev -w server",
+    "test": "npm run test -w server",
+    "typecheck": "npm run typecheck --workspaces",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "check": "npm run typecheck && npm run lint"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.9.1",
+    "globals": "^17.11.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.68.0"
+  }
+}

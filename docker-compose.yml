@@ -1,0 +1,32 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chief-web:latest
+    container_name: chief-web
+    restart: unless-stopped
+    ports:
+      # Host port is configurable via .env; the container always listens on 8080.
+      - "${CHIEF_WEB_PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      DATA_DIR: /data
+      CLAUDE_AUTH_DIR: /claude-auth
+      DOCKER_SOCKET: /var/run/docker.sock
+      CHIEF_WEB_PASSWORD: ${CHIEF_WEB_PASSWORD:-}
+      MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # Application data: SQLite database, SSH deploy keys, session workspaces.
+      - chief-data:/data
+      # Claude Code credentials, shared with every session container (FR-5).
+      - claude-auth:/claude-auth
+      # Lets the server spawn one container per session (FR-6).
+      # WARNING: this grants root-equivalent control of the host. See README.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  chief-data:
+  claude-auth:
