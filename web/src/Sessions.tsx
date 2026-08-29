@@ -12,6 +12,7 @@ import {
   type Session,
   type SessionInput,
   type SessionSetup,
+  sessionPath,
 } from './api.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
@@ -174,11 +175,16 @@ export function Sessions() {
             <li className="card" key={session.id}>
               <div className="card__header">
                 <h2 className="card__title">
-                  {session.name}{' '}
+                  <a className="link" href={sessionPath(session.id)}>
+                    {session.name}
+                  </a>{' '}
                   <span className={`badge badge--${session.status}`}>{session.status}</span>
                 </h2>
-                {session.status === 'pending' && !session.cloned && (
-                  <div className="field__actions">
+                <div className="field__actions">
+                  <a className="button button--quiet" href={sessionPath(session.id)}>
+                    {session.status === 'pending' ? 'Plan' : 'Open'}
+                  </a>
+                  {session.status === 'pending' && !session.cloned && (
                     <button
                       type="button"
                       className="button button--quiet"
@@ -187,8 +193,8 @@ export function Sessions() {
                     >
                       {busyId === session.id ? 'Setting up…' : 'Retry setup'}
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
               <dl className="meta">

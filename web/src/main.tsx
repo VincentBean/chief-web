@@ -16,6 +16,11 @@ if (!container) throw new Error('Root element #root not found');
 const Terminals = lazy(() =>
   import('./Terminals.tsx').then((module) => ({ default: module.Terminals })),
 );
+// The session page embeds the planning terminal (US-011), so it pays the same
+// xterm.js cost and is loaded the same way.
+const Session = lazy(() =>
+  import('./Session.tsx').then((module) => ({ default: module.Session })),
+);
 
 // A handful of entry points, matched on the pathname; the server redirects
 // unauthenticated navigations to `/login` and serves index.html for the rest,
@@ -28,7 +33,11 @@ const PAGES: Record<string, ComponentType> = {
   '/terminal': Terminals,
 };
 
-const Page = PAGES[window.location.pathname] ?? App;
+/** `/sessions/<id>`: one session, with its PRD state and planning terminal. */
+const SESSION_PATH = /^\/sessions\/[^/]+\/?$/;
+
+const pathname = window.location.pathname;
+const Page = PAGES[pathname] ?? (SESSION_PATH.test(pathname) ? Session : App);
 
 createRoot(container).render(
   <StrictMode>

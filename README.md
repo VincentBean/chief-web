@@ -208,6 +208,43 @@ stored on the session, and a **Retry setup** action. The container of a failed
 setup is removed; the workspace is not, so a retry reuses an existing clone
 instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
 
+## Planning
+
+Each session has a page of its own at `/sessions/<id>`, and while the session is
+**pending** that page is `chief new` in the browser: it opens a browser terminal
+inside the session's container running **`claude` interactively in
+`/workspace/repo`**, started with chief's PRD-generation prompt targeting
+`.chief/prds/<session-name>/prd.md`.
+
+The prompts are ported from chief's `embed/init_prompt.txt` and
+`embed/edit_prompt.txt` into `server/src/planning/templates.ts`, so the
+conversation is the one chief has: 3–5 clarifying questions with lettered
+options ("1A, 2C, 3B"), then a PRD written in chief's exact format —
+`### US-xxx: Title` headings with `**Status:**`, `**Priority:**`,
+`**Description:**` and `- [ ]` acceptance criteria. chief's own prompts leave
+the status line implicit (chief writes it itself), so chief-web appends the
+story format it parses to both prompts.
+
+- **Start planning** uses the init prompt, with the optional "what do you want
+  to build?" text filling chief's `{{CONTEXT}}` slot.
+- **Resume planning** uses the *edit* prompt whenever `prd.md` already exists,
+  exactly like `chief edit`: an existing PRD is changed, never rewritten.
+- The terminal is an ordinary [browser terminal](#browser-terminals), so the
+  server owns the process. Reloading the page or opening a second tab rejoins
+  the same conversation; only **Close terminal** ends it.
+
+The page also shows a live indicator for `prd.md`: whether it exists, when it
+was last written, how many stories it holds, and — when it does not parse — the
+parse errors with their line numbers. It is polled from the workspace on the
+data volume (a `stat` plus a parse of a small markdown file), never through
+Docker. The parser lives in `server/src/prd/` and follows chief's
+`internal/prd/markdown.go`; US-012 turns "it parses" into the **Mark ready**
+transition.
+
+Planning is behind the same guard as session creation: Claude Code has to be
+signed in once (see [Claude authentication](#claude-authentication)) before an
+interactive `claude` can be started.
+
 ## Browser terminals
 
 The `/terminal` page opens a real PTY inside a running container and streams it

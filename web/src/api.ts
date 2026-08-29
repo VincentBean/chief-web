@@ -325,3 +325,72 @@ export function terminalSocketUrl(id: string): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${scheme}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/stream`;
 }
+
+/** A problem the PRD parser found; `line` is 1-based, or 0 for the whole file. */
+export interface PrdParseError {
+  line: number;
+  message: string;
+}
+
+/** Mirrors the server's `PrdStatus` (US-011): the state of `prd.md` on disk. */
+export interface PrdStatus {
+  /** Path relative to the repository root. */
+  path: string;
+  exists: boolean;
+  /** True only when the file exists and has no parse errors. */
+  parses: boolean;
+  storyCount: number;
+  errors: PrdParseError[];
+  updatedAt: string | null;
+  bytes: number;
+}
+
+export type PlanningMode = 'create' | 'edit';
+
+/** Mirrors the server's `PlanningView` (US-011). */
+export interface Planning {
+  sessionId: string;
+  sessionName: string;
+  status: Session['status'];
+  /** Terminal to attach to, or null when planning has never been started. */
+  terminalId: string | null;
+  running: boolean;
+  exitCode: number | null;
+  /** Which prompt the current (or last) terminal was started with. */
+  mode: PlanningMode | null;
+  /** Which prompt starting one now would use: `edit` once a PRD exists. */
+  nextMode: PlanningMode;
+  cwd: string;
+  prd: PrdStatus;
+}
+
+export async function fetchSession(id: string, signal?: AbortSignal): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}`, signal ? { signal } : {});
+}
+
+/** Polled by the session page: it is a file stat plus a parse, never a Docker call. */
+export async function fetchPlanning(id: string, signal?: AbortSignal): Promise<Planning> {
+  return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, signal ? { signal } : {});
+}
+
+/**
+ * Starts the interactive `claude` that writes the PRD. `context` fills chief's
+ * `{{CONTEXT}}` slot and is only used when no `prd.md` exists yet — otherwise
+ * the server starts chief's edit prompt instead.
+ */
+export async function startPlanning(id: string, context?: string): Promise<Planning> {
+  return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, {
+    method: 'POST',
+    body: JSON.stringify(context === undefined || context === '' ? {} : { context }),
+  });
+}
+
+/** Ends the conversation and kills the process. */
+export async function stopPlanning(id: string): Promise<Planning> {
+  return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, { method: 'DELETE' });
+}
+
+/** The session detail page, which is where planning happens. */
+export function sessionPath(id: string): string {
+  return `/sessions/${encodeURIComponent(id)}`;
+}

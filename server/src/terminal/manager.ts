@@ -31,6 +31,9 @@ export const DEFAULT_TERMINAL_COMMAND: readonly string[] = [
 /** Enough for xterm.js to render before the browser reports its real size. */
 export const DEFAULT_TERMINAL_SIZE: TerminalSize = { cols: 80, rows: 24 };
 
+/** How much of a terminal's argv is written to the log; see `describeCommand`. */
+const MAX_LOGGED_COMMAND_CHARS = 200;
+
 export const MIN_TERMINAL_DIMENSION = 1;
 export const MAX_TERMINAL_DIMENSION = 1000;
 
@@ -161,7 +164,7 @@ export class TerminalManager {
       logger.info('terminal opened', {
         terminal: session.id,
         container: containerName,
-        command: command.join(' '),
+        command: describeCommand(command),
       });
       return session.toView();
     } catch (error) {
@@ -194,6 +197,18 @@ export function createTerminalManager(config: Config): TerminalManager {
     scrollbackBytes: config.terminalScrollbackBytes,
     maxTerminals: config.maxTerminals,
   });
+}
+
+/**
+ * A log line, not the command itself: a planning terminal (US-011) carries a
+ * multi-kilobyte prompt as its second argument, which would otherwise be
+ * written out in full on every start.
+ */
+function describeCommand(command: readonly string[]): string {
+  const joined = command.join(' ');
+  return joined.length <= MAX_LOGGED_COMMAND_CHARS
+    ? joined
+    : `${joined.slice(0, MAX_LOGGED_COMMAND_CHARS)}… (${String(joined.length)} chars)`;
 }
 
 /** Docker being unreachable is an upstream problem, so 502 — never 401. */

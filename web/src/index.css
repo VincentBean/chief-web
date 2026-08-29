@@ -73,6 +73,16 @@ h1 {
   opacity: 0.5;
 }
 
+/* A link that acts as an action (the "Plan" button on a session card). */
+a.button {
+  display: inline-block;
+  text-decoration: none;
+}
+
+textarea.field__input {
+  resize: vertical;
+}
+
 .button--quiet {
   background-color: transparent;
   font-size: 0.875rem;

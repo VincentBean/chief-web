@@ -9,9 +9,11 @@ import type { Config } from './config.js';
 import type { Database } from './db/index.js';
 import { DockerApi } from './docker/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
+import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createClaudeRouter } from './routes/claude.js';
 import { createHealthRouter } from './routes/health.js';
+import { createPlanningRouter } from './routes/planning.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
@@ -53,6 +55,11 @@ export interface AppDependencies {
    * Engine API client.
    */
   readonly exec?: SessionExecutor;
+  /**
+   * The planning terminal (US-011). Defaults to a service driving the shared
+   * terminal manager and orchestrator; tests pass one built on stubs.
+   */
+  readonly planning?: PlanningService;
 }
 
 /**
@@ -92,6 +99,8 @@ export function createApp(
   const guard = requireClaudeAuth(claude);
   api.post('/sessions', guard);
   api.post('/sessions/:id/setup', guard);
+  // Planning *is* an interactive `claude`, so it is blocked by the same guard.
+  api.post('/sessions/:id/planning', guard);
 
   // The client is cheap to construct — nothing is dialled until the first
   // request — so one instance serves both the orchestrator and the setup
@@ -99,6 +108,11 @@ export function createApp(
   const docker = new DockerApi(config.dockerSocket);
   const orchestrator = deps.orchestrator ?? createSessionOrchestrator(config, db, docker);
   api.use(createSessionsRouter(createSessionService(config, db, orchestrator, deps.exec ?? docker)));
+  api.use(
+    createPlanningRouter(
+      deps.planning ?? createPlanningService(config, db, terminals, orchestrator),
+    ),
+  );
 
   app.use('/api', api);
 
