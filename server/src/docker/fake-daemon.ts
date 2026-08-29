@@ -22,13 +22,23 @@ export interface FakeContainerSpec {
   readonly name: string;
   readonly image?: string;
   readonly running?: boolean;
+  readonly labels?: Readonly<Record<string, string>>;
 }
 
-interface FakeContainer {
+export interface FakeContainer {
   readonly id: string;
   readonly name: string;
   readonly image: string;
-  readonly running: boolean;
+  running: boolean;
+  readonly labels: Readonly<Record<string, string>>;
+  /** `source:target[:ro]` entries the container was created with. */
+  readonly binds: readonly string[];
+  readonly env: readonly string[];
+  readonly workingDir: string | null;
+  /** Set by `POST /containers/{id}/stop`. */
+  stopped: boolean;
+  /** Whether removal was asked to force-kill a running container. */
+  removedForce: boolean;
 }
 
 export interface FakeExec {
@@ -72,6 +82,11 @@ export class FakeDockerDaemon {
   private readonly sockets = new Set<Socket>();
   private nextExec = 1;
   private nextPid = 1000;
+  private nextContainer = 1;
+  /** Volumes `GET /volumes/{name}` reports, name → host mountpoint. */
+  private readonly volumes = new Map<string, string>();
+  /** Ids passed to `DELETE /containers/{id}`, in order. */
+  readonly removed: string[] = [];
 
   private constructor(
     private readonly server: Server,
@@ -101,7 +116,27 @@ export class FakeDockerDaemon {
       name: spec.name,
       image: spec.image ?? 'chief-web-runner:latest',
       running: spec.running ?? true,
+      labels: spec.labels ?? {},
+      binds: [],
+      env: [],
+      workingDir: null,
+      stopped: false,
+      removedForce: false,
     });
+  }
+
+  /** Makes `GET /volumes/{name}` answer for `name`. */
+  addVolume(name: string, mountpoint: string): void {
+    this.volumes.set(name, mountpoint);
+  }
+
+  container(id: string): FakeContainer | undefined {
+    return this.containers.get(id);
+  }
+
+  /** Every container the daemon still knows about, creation order preserved. */
+  listContainers(): FakeContainer[] {
+    return [...this.containers.values()];
   }
 
   /** Every exec created, oldest first. */
@@ -163,17 +198,80 @@ export class FakeDockerDaemon {
 
     if (route === '/containers/json') {
       const all = url.searchParams.get('all') === '1';
+      const wanted = parseLabelFilters(url.searchParams.get('filters'));
       const list = [...this.containers.values()]
         .filter((container) => all || container.running)
+        .filter((container) => wanted.every((filter) => matchesLabel(container.labels, filter)))
         .map((container) => ({
           Id: container.id,
           Names: [`/${container.name}`],
           Image: container.image,
           State: container.running ? 'running' : 'exited',
           Status: container.running ? 'Up 1 minute' : 'Exited (0) 1 minute ago',
-          Labels: {},
+          Labels: container.labels,
         }));
       json(res, 200, list);
+      return;
+    }
+
+    if (route === '/containers/create') {
+      void readBody(req).then((body) => {
+        const spec = JSON.parse(body === '' ? '{}' : body) as {
+          Image?: string;
+          Env?: string[];
+          Labels?: Record<string, string>;
+          WorkingDir?: string;
+          HostConfig?: { Binds?: string[] };
+        };
+        const name = url.searchParams.get('name') ?? `generated-${this.nextContainer}`;
+        if ([...this.containers.values()].some((existing) => existing.name === name)) {
+          json(res, 409, { message: `Conflict. The container name "/${name}" is already in use` });
+          return;
+        }
+        const id = `container-${this.nextContainer++}`;
+        this.containers.set(id, {
+          id,
+          name,
+          image: spec.Image ?? '',
+          running: false,
+          labels: spec.Labels ?? {},
+          binds: spec.HostConfig?.Binds ?? [],
+          env: spec.Env ?? [],
+          workingDir: spec.WorkingDir ?? null,
+          stopped: false,
+          removedForce: false,
+        });
+        json(res, 201, { Id: id, Warnings: [] });
+      });
+      return;
+    }
+
+    const volume = /^\/volumes\/([^/]+)$/.exec(route);
+    if (volume !== null) {
+      const name = decodeURIComponent(volume[1] as string);
+      const mountpoint = this.volumes.get(name);
+      if (mountpoint === undefined) {
+        json(res, 404, { message: `get ${name}: no such volume` });
+        return;
+      }
+      json(res, 200, { Name: name, Driver: 'local', Mountpoint: mountpoint });
+      return;
+    }
+
+    const lifecycle = /^\/containers\/([^/]+)\/(start|stop|kill)$/.exec(route);
+    if (lifecycle !== null) {
+      const container = this.containers.get(decodeURIComponent(lifecycle[1] as string));
+      if (container === undefined) {
+        json(res, 404, { message: 'No such container' });
+        return;
+      }
+      if (lifecycle[2] === 'start') {
+        container.running = true;
+      } else {
+        container.running = false;
+        container.stopped = true;
+      }
+      res.writeHead(204).end();
       return;
     }
 
@@ -187,9 +285,41 @@ export class FakeDockerDaemon {
       json(res, 200, {
         Id: container.id,
         Name: `/${container.name}`,
-        State: { Running: container.running },
+        State: {
+          Running: container.running,
+          Status: container.running ? 'running' : 'exited',
+          ExitCode: container.running ? 0 : 137,
+        },
+        Config: { Image: container.image, Labels: container.labels },
       });
       return;
+    }
+
+    if (req.method === 'DELETE') {
+      const target = /^\/containers\/([^/]+)$/.exec(route);
+      if (target !== null) {
+        const id = decodeURIComponent(target[1] as string);
+        const container = this.containers.get(id);
+        if (container === undefined) {
+          json(res, 404, { message: 'No such container' });
+          return;
+        }
+        const force = url.searchParams.get('force') === '1';
+        if (container.running && !force) {
+          json(res, 409, { message: 'You cannot remove a running container' });
+          return;
+        }
+        // `v=1` would take the volumes with it; the client must never send it.
+        if (url.searchParams.get('v') === '1') {
+          json(res, 500, { message: 'fake daemon: refusing to remove volumes' });
+          return;
+        }
+        container.removedForce = force;
+        this.containers.delete(id);
+        this.removed.push(id);
+        res.writeHead(204).end();
+        return;
+      }
     }
 
     const createExec = /^\/containers\/([^/]+)\/exec$/.exec(route);
@@ -325,6 +455,24 @@ export class FakeDockerDaemon {
     });
     socket.on('error', () => socket.destroy());
   }
+}
+
+/** `{"label":["a","b=c"]}` → `['a', 'b=c']`. */
+function parseLabelFilters(raw: string | null): string[] {
+  if (raw === null || raw === '') return [];
+  try {
+    const parsed = JSON.parse(raw) as { label?: unknown };
+    return Array.isArray(parsed.label) ? parsed.label.filter((v) => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Docker matches `key` on presence and `key=value` on equality. */
+function matchesLabel(labels: Readonly<Record<string, string>>, filter: string): boolean {
+  const separator = filter.indexOf('=');
+  if (separator === -1) return filter in labels;
+  return labels[filter.slice(0, separator)] === filter.slice(separator + 1);
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {

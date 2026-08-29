@@ -20,6 +20,14 @@ export interface Config {
   readonly sshKeysDir: string;
   /** Directory holding per-session repository clones. */
   readonly workspacesDir: string;
+  /**
+   * Name of the Docker volume backing {@link dataDir}. Empty outside Docker,
+   * where the data directory is already a host path. Inside Docker it is the
+   * only way to hand a session container a subdirectory of the data volume:
+   * bind sources are resolved on the host, so the path must be translated to
+   * the volume's host mountpoint first.
+   */
+  readonly dataVolume: string;
   /** Mount point of the shared `claude-auth` volume with agent credentials. */
   readonly claudeAuthDir: string;
   /**
@@ -38,6 +46,8 @@ export interface Config {
   readonly dockerBin: string;
   /** Image sessions and one-off helper containers run (built by US-006). */
   readonly runnerImage: string;
+  /** Grace period a session container gets to exit before it is killed. */
+  readonly sessionStopTimeoutSeconds: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -88,6 +98,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databasePath: path.resolve(str('DATABASE_PATH', path.join(dataDir, 'chief-web.db'))),
     sshKeysDir: path.resolve(str('SSH_KEYS_DIR', path.join(dataDir, 'ssh-keys'))),
     workspacesDir: path.resolve(str('WORKSPACES_DIR', path.join(dataDir, 'workspaces'))),
+    dataVolume: str('CHIEF_DATA_VOLUME', ''),
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
     claudeAuthVolume: str('CLAUDE_AUTH_VOLUME', ''),
     claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 30_000),
@@ -95,6 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
+    sessionStopTimeoutSeconds: int('SESSION_STOP_TIMEOUT_SECONDS', 10),
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),

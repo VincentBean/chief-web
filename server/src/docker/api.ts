@@ -43,6 +43,50 @@ export interface ContainerSummary {
   readonly labels: Readonly<Record<string, string>>;
 }
 
+export interface ContainerDetails {
+  readonly id: string;
+  /** Primary name without Docker's leading slash. */
+  readonly name: string;
+  readonly image: string;
+  readonly running: boolean;
+  /** `created`, `running`, `exited`, … as the daemon names it. */
+  readonly state: string;
+  /** Exit code once the container has stopped; `null` while it runs. */
+  readonly exitCode: number | null;
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+/** What `POST /containers/create` needs; the fields chief-web actually sets. */
+export interface ContainerSpec {
+  readonly image: string;
+  readonly cmd?: readonly string[];
+  /** `KEY=value` entries. */
+  readonly env?: readonly string[];
+  readonly labels?: Readonly<Record<string, string>>;
+  readonly workingDir?: string;
+  readonly user?: string;
+  /** `source:target[:ro]` entries, exactly as `docker run --volume` takes them. */
+  readonly binds?: readonly string[];
+}
+
+export interface ListContainersOptions {
+  /** Include stopped containers; by default only running ones are listed. */
+  readonly all?: boolean;
+  /** Label filters, either `key` or `key=value`, as the daemon expects them. */
+  readonly labels?: readonly string[];
+}
+
+export interface VolumeDetails {
+  readonly name: string;
+  /**
+   * Path **on the host** where the volume's contents live. Bind-mounting a
+   * subdirectory of it is the only way to give a spawned container part of a
+   * volume the server itself has mounted: the daemon resolves bind sources on
+   * the host, not inside the requesting container.
+   */
+  readonly mountpoint: string;
+}
+
 export interface ExecSpec {
   readonly cmd: readonly string[];
   /** `KEY=value` entries added to the process environment. */
@@ -108,19 +152,91 @@ export class DockerApi {
     }
   }
 
-  async listContainers(all = false): Promise<ContainerSummary[]> {
-    const raw = await this.json<RawContainer[]>('GET', `/containers/json?all=${all ? 1 : 0}`);
+  async listContainers(options: ListContainersOptions = {}): Promise<ContainerSummary[]> {
+    const query = new URLSearchParams({ all: options.all === true ? '1' : '0' });
+    if (options.labels !== undefined && options.labels.length > 0) {
+      query.set('filters', JSON.stringify({ label: [...options.labels] }));
+    }
+    const raw = await this.json<RawContainer[]>('GET', `/containers/json?${query.toString()}`);
     return raw.map(toContainerSummary);
   }
 
   /** Throws {@link DockerApiError} with status 404 when there is no such container. */
-  async inspectContainer(id: string): Promise<{ id: string; name: string; running: boolean }> {
+  async inspectContainer(id: string): Promise<ContainerDetails> {
     const raw = await this.json<RawContainerInspect>('GET', `/containers/${encodeURIComponent(id)}/json`);
+    const state = raw.State ?? {};
+    const running = state.Running === true;
+    const image = raw.Config?.Image;
+    const labels = raw.Config?.Labels;
     return {
       id: raw.Id,
       name: stripLeadingSlash(raw.Name ?? ''),
-      running: raw.State?.Running === true,
+      image: typeof image === 'string' ? image : '',
+      running,
+      state: typeof state.Status === 'string' ? state.Status : running ? 'running' : 'unknown',
+      exitCode: running ? null : typeof state.ExitCode === 'number' ? state.ExitCode : null,
+      labels: isStringRecord(labels) ? labels : {},
     };
+  }
+
+  /**
+   * Creates a container from {@link ContainerSpec}; it is not started yet.
+   * Returns its id.
+   */
+  async createContainer(name: string, spec: ContainerSpec): Promise<string> {
+    const body: Record<string, unknown> = {
+      Image: spec.image,
+      HostConfig: {
+        Binds: spec.binds === undefined ? [] : [...spec.binds],
+        // Restarting a session container behind the server's back would resume
+        // a build nobody is watching; reconciliation decides what comes back.
+        RestartPolicy: { Name: 'no' },
+        AutoRemove: false,
+      },
+    };
+    if (spec.cmd !== undefined) body['Cmd'] = [...spec.cmd];
+    if (spec.env !== undefined) body['Env'] = [...spec.env];
+    if (spec.labels !== undefined) body['Labels'] = { ...spec.labels };
+    if (spec.workingDir !== undefined) body['WorkingDir'] = spec.workingDir;
+    if (spec.user !== undefined) body['User'] = spec.user;
+
+    const created = await this.json<{ Id?: string }>(
+      'POST',
+      `/containers/create?name=${encodeURIComponent(name)}`,
+      body,
+    );
+    if (typeof created.Id !== 'string' || created.Id === '') {
+      throw new DockerApiError(502, 'Docker did not return a container id.');
+    }
+    return created.Id;
+  }
+
+  async startContainer(id: string): Promise<void> {
+    await this.json('POST', `/containers/${encodeURIComponent(id)}/start`);
+  }
+
+  /** SIGTERM, then SIGKILL after `timeoutSeconds`. */
+  async stopContainer(id: string, timeoutSeconds = 10): Promise<void> {
+    await this.json('POST', `/containers/${encodeURIComponent(id)}/stop?t=${timeoutSeconds}`);
+  }
+
+  /**
+   * Removes the container. `v` is deliberately never sent: anonymous volumes
+   * declared by the runner image must outlive the containers using them, and a
+   * session's workspace must survive its container (US-009).
+   */
+  async removeContainer(id: string, options: { force?: boolean } = {}): Promise<void> {
+    const force = options.force === true ? 1 : 0;
+    await this.json('DELETE', `/containers/${encodeURIComponent(id)}?force=${force}`);
+  }
+
+  /** Throws {@link DockerApiError} with status 404 when there is no such volume. */
+  async inspectVolume(name: string): Promise<VolumeDetails> {
+    const raw = await this.json<RawVolume>('GET', `/volumes/${encodeURIComponent(name)}`);
+    if (typeof raw.Mountpoint !== 'string' || raw.Mountpoint === '') {
+      throw new DockerApiError(502, `Docker reported no mountpoint for volume "${name}".`);
+    }
+    return { name: typeof raw.Name === 'string' ? raw.Name : name, mountpoint: raw.Mountpoint };
   }
 
   /** Creates a TTY-backed exec instance; returns its id. It is not started yet. */
@@ -283,7 +399,13 @@ interface RawContainer {
 interface RawContainerInspect {
   Id: string;
   Name?: string;
-  State?: { Running?: boolean };
+  State?: { Running?: boolean; Status?: string; ExitCode?: number };
+  Config?: { Image?: string; Labels?: unknown };
+}
+
+interface RawVolume {
+  Name?: unknown;
+  Mountpoint?: unknown;
 }
 
 interface RawExecInspect {

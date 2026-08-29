@@ -148,7 +148,7 @@ describe('Docker Engine API client', () => {
       ['chief-session-one'],
     );
     assert.equal(containers[0]?.state, 'running');
-    assert.equal((await docker.listContainers(true)).length, 2);
+    assert.equal((await docker.listContainers({ all: true })).length, 2);
   });
 
   it('reports an unknown container as a 404', async () => {

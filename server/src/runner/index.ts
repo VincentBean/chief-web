@@ -7,6 +7,7 @@ export {
   RUNNER_UID,
   RUNNER_USER,
   RUNNER_WORKSPACE_DIR,
+  runnerBinds,
   runnerEnvArgs,
   runnerEnvironment,
   type RunnerMounts,

@@ -73,16 +73,22 @@ export interface RunnerMounts {
   readonly sshKeyPath?: string;
 }
 
-/** `docker run`/`docker create` bind-mount arguments for a session container. */
-export function runnerMountArgs(mounts: RunnerMounts): string[] {
-  const args = [
-    '--volume',
+/**
+ * `source:target[:ro]` bind specifications for a session container, the form
+ * both `docker run --volume` and the Engine API's `HostConfig.Binds` take.
+ */
+export function runnerBinds(mounts: RunnerMounts): string[] {
+  const binds = [
     `${mounts.claudeAuth}:${RUNNER_CLAUDE_DIR}`,
-    '--volume',
     `${mounts.workspaceDir}:${RUNNER_WORKSPACE_DIR}`,
   ];
   if (mounts.sshKeyPath !== undefined) {
-    args.push('--volume', `${mounts.sshKeyPath}:${RUNNER_SSH_KEY_PATH}:ro`);
+    binds.push(`${mounts.sshKeyPath}:${RUNNER_SSH_KEY_PATH}:ro`);
   }
-  return args;
+  return binds;
+}
+
+/** The same mounts as `docker run`/`docker create` arguments. */
+export function runnerMountArgs(mounts: RunnerMounts): string[] {
+  return runnerBinds(mounts).flatMap((bind) => ['--volume', bind]);
 }

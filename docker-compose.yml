@@ -19,6 +19,11 @@ services:
       # by name: a bind mount of /claude-auth would be resolved on the host,
       # where that path does not exist.
       CLAUDE_AUTH_VOLUME: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}
+      # Name of the data volume below. A session container gets *part* of it
+      # (its own workspace) mounted at /workspace, which a volume name alone
+      # cannot express, so the server looks up the volume's host mountpoint and
+      # bind-mounts the subdirectory (US-009).
+      CHIEF_DATA_VOLUME: ${CHIEF_DATA_VOLUME:-chief-web-data}
       DOCKER_SOCKET: /var/run/docker.sock
       # Image used for session containers and short-lived helpers such as the
       # repository connection test (built by US-006).
@@ -50,8 +55,10 @@ services:
       replicas: 0
 
 volumes:
+  # Both volumes are explicitly named rather than <project>_<key>, so the names
+  # the server passes to the Docker socket are knowable without inspecting the
+  # compose project.
   chief-data:
-  # Explicitly named rather than <project>_claude-auth, so the name the server
-  # passes to `docker run` is knowable without inspecting the compose project.
+    name: ${CHIEF_DATA_VOLUME:-chief-web-data}
   claude-auth:
     name: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}

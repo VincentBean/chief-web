@@ -5,6 +5,7 @@ import { createAuthService } from './auth/index.js';
 import { loadConfig } from './config.js';
 import { closeDatabase, openDatabase } from './db/index.js';
 import { logger } from './lib/logger.js';
+import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createTerminalManager, createTerminalSocketRoute } from './terminal/index.js';
 import { WebSocketGateway } from './ws/gateway.js';
 
@@ -30,6 +31,19 @@ async function main(): Promise<void> {
   // Terminals outlive the browser tabs attached to them, so the registry is
   // owned here and shared by the REST routes and the WebSocket gateway.
   const terminals = createTerminalManager(config);
+
+  // Session containers outlive the server process, so the daemon and the
+  // database can disagree after a crash or a `docker compose down` mid-build.
+  // Reconciling before the first request means nothing ever sees a session
+  // pointing at a container that is no longer there.
+  const orchestrator = createSessionOrchestrator(config, db);
+  try {
+    await orchestrator.reconcile();
+  } catch (error) {
+    // A daemon that cannot be reached is not evidence that anything is gone;
+    // start anyway and let the next reconcile sort it out.
+    logger.error('could not reconcile session containers', { error: String(error) });
+  }
 
   const app = createApp(config, auth, db, { terminals });
 

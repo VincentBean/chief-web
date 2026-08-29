@@ -31,7 +31,7 @@ curl http://localhost:8080/api/health   # -> {"status":"ok"}
 
 ```
 docker-compose.yml   the whole stack: the `server` service, the `runner` image
-                     and two named volumes
+                     and its two named volumes
 Dockerfile           multi-stage build producing the production server image
 runner/              Dockerfile for the image every session container runs
 server/              Node.js + TypeScript backend (API, WebSockets, orchestrator)
@@ -42,12 +42,12 @@ Persistent state lives in two named Docker volumes:
 
 | Volume                   | Mount          | Contents                                      |
 | ------------------------ | -------------- | --------------------------------------------- |
-| `chief-data`             | `/data`        | SQLite database, SSH deploy keys, workspaces   |
+| `chief-web-data`         | `/data`        | SQLite database, SSH deploy keys, workspaces   |
 | `chief-web-claude-auth`  | `/claude-auth` | Claude Code credentials shared by all sessions |
 
-The credentials volume is named explicitly (`CLAUDE_AUTH_VOLUME`) rather than
-carrying the compose project prefix, because the server passes that name to
-`docker run` when it spawns containers.
+Both are named explicitly (`CHIEF_DATA_VOLUME`, `CLAUDE_AUTH_VOLUME`) rather than
+carrying the compose project prefix, because the server passes those names to the
+Docker socket when it spawns containers.
 
 ## Data layer
 
@@ -122,6 +122,58 @@ The image ships git, OpenSSH, Node.js 22 and the Claude Code CLI (`claude`), and
 
 `server/src/runner/image.ts` is the server-side mirror of these paths — change
 both together.
+
+## Session containers
+
+`server/src/orchestrator` owns one container per session. It talks to the Docker
+socket directly (`server/src/docker/api.ts`) rather than through the CLI, and
+every container it creates carries the label **`chief-web.session=<session-id>`**
+— the only reliable way to find a session's container again after a restart, and
+what `docker ps --filter label=chief-web.session` lists.
+
+Each session container mounts exactly three things:
+
+| Source                                | Target                | Mode |
+| ------------------------------------- | --------------------- | ---- |
+| `claude-auth` volume                  | `/home/node/.claude`  | rw   |
+| `workspaces/<session-id>/`            | `/workspace`          | rw   |
+| the repository's SSH private key      | `/keys/id_ed25519`    | ro   |
+
+No ports are published; the container needs outbound network only.
+
+The workspace lives on the data volume at `workspaces/<session-id>/`, with the
+clone in `repo/` inside it. **Stopping or removing a container never deletes it**
+— the clone and the `.chief/` state are what a retry resumes from. Only deleting
+the session itself removes a workspace.
+
+Two details are easy to get wrong:
+
+- **Bind sources are resolved on the host.** The server's own `/data` means
+  nothing to the daemon, so the workspace path is translated through the data
+  volume's host mountpoint (`docker volume inspect`) before it is mounted. That
+  is why `CHIEF_DATA_VOLUME` exists.
+- **The key is mounted as a copy.** The registered key is `0600` and owned by
+  root, and the runner is uid 1000, so it could never open it. The orchestrator
+  stages a copy at `ssh-keys/sessions/<session-id>.key` owned by uid 1000 and
+  mounts that read-only. The copy is disposable and is deleted with the
+  container; the registered key is never touched.
+
+### Reconciliation
+
+The daemon and the database can disagree — the stack can be stopped mid-build, a
+container can die unwatched. On every startup the orchestrator compares the two
+and:
+
+- removes containers whose session is `finished`, `failed` or gone;
+- removes containers that are no longer running (a stopped runner cannot be
+  exec'd into, so it is as good as missing);
+- marks a `building` session with no running container as `failed` with the error
+  **`container lost`**;
+- adopts a running container onto its session, and clears a `container_id` that
+  points at something that no longer exists.
+
+If Docker cannot be reached the server still starts and changes nothing: an
+unanswerable daemon is not evidence that anything is gone.
 
 ## Browser terminals
 
@@ -246,7 +298,10 @@ All environment variables are documented in [`.env.example`](.env.example).
   SSH private keys in plain text on the data volume (`0600`): the server must be
   able to use both unattended, so protect the data volume rather than the values.
   Private keys never leave the server — no API response, log line or UI element
-  contains one.
+  contains one. The per-session copy a container mounts is `0400`, owned by the
+  runner user, and is staged outside the workspace so it can never end up inside
+  the clone or a commit. Inside the container the agent runs as that same user
+  and can read the key — it has to, in order to push.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.
 
