@@ -9,6 +9,8 @@ export const SETTING_KEYS = [
   'github_token',
   /** Hash of the generated shared password when `CHIEF_WEB_PASSWORD` is unset (US-003). */
   'password_hash',
+  /** Long-lived HMAC secret used to sign session cookies (US-003). */
+  'session_secret',
   /** Max simultaneously building sessions (US-018). */
   'max_concurrent_sessions',
   /** Git identity used for agent commits inside session containers (US-006). */

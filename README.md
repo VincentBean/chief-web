@@ -65,7 +65,15 @@ All environment variables are documented in [`.env.example`](.env.example).
 ## Security model
 
 - The UI is protected by a **single shared password** (`CHIEF_WEB_PASSWORD`).
-  There are no user accounts.
+  There are no user accounts. If the variable is unset, the server generates a
+  password on first boot, logs it once and persists only its scrypt hash; setting
+  the variable always takes precedence over that stored hash.
+- Logging in sets `chief_session`, an `HttpOnly`, `SameSite=Lax` cookie holding an
+  HMAC-signed, 7-day token. Changing the password invalidates every existing
+  cookie. Everything requires it except `GET /api/health`, `POST /api/auth/login`,
+  the `/login` page and the static frontend bundle (which serves that page).
+  Unauthenticated page loads redirect to `/login`; API calls get `401`; WebSocket
+  handshakes are closed with code `4401`.
 - The `server` container mounts `/var/run/docker.sock` so it can spawn one
   container per session. **This grants the server root-equivalent control of the
   host.** This is accepted for a single-operator, self-hosted deployment; do not

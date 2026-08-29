@@ -3,14 +3,19 @@ import path from 'node:path';
 
 import express, { type Express } from 'express';
 
+import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.js';
 import type { Config } from './config.js';
+import { createAuthRouter } from './routes/auth.js';
 import { createHealthRouter } from './routes/health.js';
 
 /**
  * Builds the Express application: the JSON API under `/api`, and the built
  * React frontend as static files with an SPA fallback for client-side routes.
+ *
+ * Everything is behind the shared password (US-003) except `GET /api/health`,
+ * `POST /api/auth/login` and the `/login` page.
  */
-export function createApp(config: Config): Express {
+export function createApp(config: Config, auth: AuthService): Express {
   const app = express();
 
   app.disable('x-powered-by');
@@ -18,18 +23,22 @@ export function createApp(config: Config): Express {
 
   const api = express.Router();
   api.use(createHealthRouter());
+  api.use(createAuthRouter(auth));
+  // Guard for every API route added below (and for unknown ones, which must
+  // not reveal whether they exist).
+  api.use(requireApiAuth(auth));
   app.use('/api', api);
 
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'not_found' });
   });
 
-  mountFrontend(app, config);
+  mountFrontend(app, config, auth);
 
   return app;
 }
 
-function mountFrontend(app: Express, config: Config): void {
+function mountFrontend(app: Express, config: Config, auth: AuthService): void {
   const indexHtml = path.join(config.webRoot, 'index.html');
 
   if (!fs.existsSync(indexHtml)) {
@@ -44,7 +53,10 @@ function mountFrontend(app: Express, config: Config): void {
     return;
   }
 
+  // Static assets stay public: the login page is served from the same bundle,
+  // so gating them would leave an unauthenticated visitor with a blank screen.
   app.use(express.static(config.webRoot, { index: false, maxAge: '1h' }));
+  app.use(requirePageAuth(auth));
   app.use((_req, res) => {
     res.sendFile(indexHtml);
   });
