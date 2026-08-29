@@ -58,6 +58,21 @@ Migrations in `server/src/db/migrations.ts` run automatically on server start.
 They are append-only and recorded in `schema_migrations`, so restarting the stack
 re-applies nothing and never touches existing data.
 
+## Settings
+
+`/settings` holds the configuration that is not environment-specific, stored in
+the `settings` table so it can be changed without a restart:
+
+- **GitHub Personal Access Token** — used to open pull requests on your behalf.
+  A classic PAT needs the `repo` scope; a fine-grained token needs *Contents:
+  read/write* and *Pull requests: read/write* on the target repositories. The
+  token is write-only: after saving, the API only ever reports whether one is
+  configured plus its last four characters. **Validate** calls
+  `GET https://api.github.com/user` with the token and shows the account it
+  authenticates as, or GitHub's error.
+- **Max concurrent building sessions** — the build concurrency cap.
+  `MAX_CONCURRENT_SESSIONS` only supplies the default until a value is saved here.
+
 ## Configuration
 
 All environment variables are documented in [`.env.example`](.env.example).
@@ -78,6 +93,9 @@ All environment variables are documented in [`.env.example`](.env.example).
   container per session. **This grants the server root-equivalent control of the
   host.** This is accepted for a single-operator, self-hosted deployment; do not
   expose chief-web to untrusted users.
+- The GitHub token is stored in plain text in the SQLite database (like the SSH
+  deploy keys on the data volume): the server must be able to use it
+  unattended, so protect the data volume rather than the value.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.
 

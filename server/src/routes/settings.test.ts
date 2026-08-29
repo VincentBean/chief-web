@@ -1,0 +1,237 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { after, before, beforeEach, describe, it } from 'node:test';
+
+import { createApp } from '../app.js';
+import { createAuthService } from '../auth/index.js';
+import { loadConfig } from '../config.js';
+import { closeDatabase, type Database, deleteSetting, IN_MEMORY, openDatabase } from '../db/index.js';
+
+const PASSWORD = 'correct horse battery staple';
+const TOKEN = 'ghp_exampleTokenValue1234';
+
+/** What the stub GitHub API answers with on the next `GET /user`. */
+let githubReply: { status: number; body: unknown } = { status: 200, body: { login: 'octocat' } };
+let githubAuthHeader: string | undefined;
+
+describe('settings api', () => {
+  let baseUrl: string;
+  let cookie: string;
+  let db: Database;
+  let server: http.Server;
+  let github: http.Server;
+
+  before(async () => {
+    github = http.createServer((req, res) => {
+      githubAuthHeader = req.headers.authorization;
+      res.writeHead(githubReply.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(githubReply.body));
+    });
+    github.listen(0, '127.0.0.1');
+    await new Promise((resolve) => github.once('listening', resolve));
+    const githubPort = (github.address() as AddressInfo).port;
+
+    const config = loadConfig({
+      CHIEF_WEB_PASSWORD: PASSWORD,
+      GITHUB_API_URL: `http://127.0.0.1:${githubPort}`,
+    });
+    db = openDatabase(IN_MEMORY);
+    const app = createApp(config, createAuthService(config, db), db);
+    server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: PASSWORD }),
+    });
+    cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => github.close(resolve));
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'github_token');
+    deleteSetting(db, 'max_concurrent_sessions');
+    githubReply = { status: 200, body: { login: 'octocat' } };
+    githubAuthHeader = undefined;
+  });
+
+  const get = async (): Promise<Response> =>
+    fetch(`${baseUrl}/api/settings`, { headers: { cookie } });
+
+  const put = async (body: unknown): Promise<Response> =>
+    fetch(`${baseUrl}/api/settings`, {
+      method: 'PUT',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const validate = async (body: unknown = {}): Promise<Response> =>
+    fetch(`${baseUrl}/api/settings/github/validate`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('requires authentication', async () => {
+    const response = await fetch(`${baseUrl}/api/settings`);
+
+    assert.equal(response.status, 401);
+  });
+
+  it('reports no token and the default concurrency on a fresh install', async () => {
+    const response = await get();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      githubToken: { configured: false, last4: null },
+      maxConcurrentSessions: 3,
+    });
+  });
+
+  it('stores the token and returns only its last four characters', async () => {
+    const saved = await put({ githubToken: TOKEN });
+
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), {
+      githubToken: { configured: true, last4: '1234' },
+      maxConcurrentSessions: 3,
+    });
+  });
+
+  it('never returns the token in full from any response', async () => {
+    await put({ githubToken: TOKEN, maxConcurrentSessions: 5 });
+
+    for (const response of [await get(), await put({ maxConcurrentSessions: 6 }), await validate()]) {
+      const raw = await response.text();
+      assert.ok(!raw.includes(TOKEN), `token leaked in: ${raw}`);
+    }
+  });
+
+  it('trims the saved token', async () => {
+    await put({ githubToken: `  ${TOKEN}  ` });
+    await validate();
+
+    assert.equal(githubAuthHeader, `Bearer ${TOKEN}`);
+  });
+
+  it('leaves the stored token alone when the field is omitted', async () => {
+    await put({ githubToken: TOKEN });
+
+    const response = await put({ maxConcurrentSessions: 7 });
+
+    assert.deepEqual(await response.json(), {
+      githubToken: { configured: true, last4: '1234' },
+      maxConcurrentSessions: 7,
+    });
+  });
+
+  it('removes the stored token when null is sent', async () => {
+    await put({ githubToken: TOKEN });
+
+    const response = await put({ githubToken: null });
+
+    assert.deepEqual((await response.json()) as { githubToken: unknown }, {
+      githubToken: { configured: false, last4: null },
+      maxConcurrentSessions: 3,
+    });
+  });
+
+  it('rejects an empty token rather than silently clearing it', async () => {
+    await put({ githubToken: TOKEN });
+
+    const response = await put({ githubToken: '   ' });
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: string }).error, 'invalid_github_token');
+    assert.equal(
+      ((await (await get()).json()) as { githubToken: { configured: boolean } }).githubToken
+        .configured,
+      true,
+    );
+  });
+
+  it('persists max concurrent sessions and rejects out-of-range values', async () => {
+    assert.equal((await put({ maxConcurrentSessions: 8 })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { maxConcurrentSessions: number }).maxConcurrentSessions,
+      8,
+    );
+
+    for (const value of [0, -1, 51, 2.5, '4', null]) {
+      const response = await put({ maxConcurrentSessions: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_max_concurrent_sessions',
+      );
+    }
+  });
+
+  it('validates the stored token and returns the login', async () => {
+    await put({ githubToken: TOKEN });
+
+    const response = await validate();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { login: 'octocat' });
+    assert.equal(githubAuthHeader, `Bearer ${TOKEN}`);
+  });
+
+  it('validates a token supplied in the body before it is saved', async () => {
+    const response = await validate({ token: 'ghp_unsavedToken' });
+
+    assert.equal(response.status, 200);
+    assert.equal(githubAuthHeader, 'Bearer ghp_unsavedToken');
+    assert.equal(
+      ((await (await get()).json()) as { githubToken: { configured: boolean } }).githubToken
+        .configured,
+      false,
+    );
+  });
+
+  it('explains that there is nothing to validate when no token is set', async () => {
+    const response = await validate();
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: string }).error, 'github_token_missing');
+  });
+
+  it('surfaces a rejected token as 400, not 401', async () => {
+    githubReply = { status: 401, body: { message: 'Bad credentials' } };
+
+    const response = await validate({ token: 'ghp_bad' });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string; message: string };
+    assert.equal(body.error, 'github_unauthorized');
+    assert.match(body.message, /Bad credentials/);
+  });
+
+  it('surfaces a forbidden token with GitHub’s explanation', async () => {
+    githubReply = { status: 403, body: { message: 'Resource not accessible' } };
+
+    const response = await validate({ token: 'ghp_scopeless' });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string; message: string };
+    assert.equal(body.error, 'github_forbidden');
+    assert.match(body.message, /Resource not accessible/);
+  });
+
+  it('reports an unexpected GitHub status', async () => {
+    githubReply = { status: 500, body: { message: 'boom' } };
+
+    const response = await validate({ token: 'ghp_whatever' });
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: string }).error, 'github_error');
+  });
+});

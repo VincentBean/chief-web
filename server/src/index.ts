@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   // hash in settings — generating and logging one on first boot.
   const auth = createAuthService(config, db);
 
-  const app = createApp(config, auth);
+  const app = createApp(config, auth, db);
 
   // Terminals (US-007) and log streams (US-013) register their routes here;
   // the gateway enforces the same session cookie on every handshake.

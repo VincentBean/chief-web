@@ -157,7 +157,7 @@ describe('page authentication', () => {
     const auth = createAuthService(config, db);
     cookie = auth.sessionCookie().split(';')[0] ?? '';
 
-    server = createApp(config, auth).listen(0, '127.0.0.1');
+    server = createApp(config, auth, db).listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });

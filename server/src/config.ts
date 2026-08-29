@@ -26,8 +26,10 @@ export interface Config {
   readonly dockerSocket: string;
   /** Shared password protecting the UI (see US-003); empty when unset. */
   readonly password: string;
-  /** Maximum number of sessions building at the same time (see US-018). */
+  /** Default max number of sessions building at the same time (see US-018). */
   readonly maxConcurrentSessions: number;
+  /** Base URL of the GitHub REST API; overridable for self-hosted GitHub. */
+  readonly githubApiUrl: string;
   /** Directory containing the built frontend assets. */
   readonly webRoot: string;
   readonly nodeEnv: string;
@@ -68,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     password: str('CHIEF_WEB_PASSWORD', ''),
     maxConcurrentSessions: int('MAX_CONCURRENT_SESSIONS', 3),
+    githubApiUrl: str('GITHUB_API_URL', 'https://api.github.com'),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),
     nodeEnv: env['NODE_ENV'] ?? 'development',
   };

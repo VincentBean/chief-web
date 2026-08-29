@@ -40,9 +40,14 @@ export function App() {
     <main className="shell">
       <header className="topbar">
         <h1>chief-web</h1>
-        <button type="button" className="button button--quiet" onClick={onLogout}>
-          Log out
-        </button>
+        <nav className="topbar__nav">
+          <a className="link" href="/settings">
+            Settings
+          </a>
+          <button type="button" className="button button--quiet" onClick={onLogout}>
+            Log out
+          </button>
+        </nav>
       </header>
       <p className="tagline">Autonomous PRD-driven coding agent, in your browser.</p>
       <p className={`health health--${health.status}`}>

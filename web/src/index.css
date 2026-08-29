@@ -110,3 +110,79 @@ h1 {
   font-size: 0.875rem;
   margin: 0;
 }
+
+.topbar__nav {
+  align-items: baseline;
+  display: flex;
+  gap: 1rem;
+}
+
+.link {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.link:hover {
+  color: var(--fg);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  margin-top: 2rem;
+  max-width: 32rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.field__label {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.field__hint {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.field__input {
+  border: 1px solid #30363d;
+  border-radius: 0.375rem;
+  background-color: #010409;
+  color: var(--fg);
+  font: inherit;
+  padding: 0.5rem 0.75rem;
+}
+
+.field__input:focus {
+  border-color: #388bfd;
+  outline: none;
+}
+
+.field__input--narrow {
+  max-width: 8rem;
+}
+
+.field__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.notice {
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.notice--ok {
+  color: var(--ok);
+}
+
+.notice--error {
+  color: var(--error);
+}

@@ -1,15 +1,26 @@
-import { StrictMode } from 'react';
+import { type JSX, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App.tsx';
 import './index.css';
 import { Login } from './Login.tsx';
+import { Settings } from './Settings.tsx';
 
 const container = document.getElementById('root');
 if (!container) throw new Error('Root element #root not found');
 
-// The app has exactly two entry points today; the server redirects
-// unauthenticated navigations to `/login`, so a router is not warranted yet.
-const page = window.location.pathname === '/login' ? <Login /> : <App />;
+// A handful of entry points, matched on the pathname; the server redirects
+// unauthenticated navigations to `/login` and serves index.html for the rest,
+// so a router library is still not warranted.
+const PAGES: Record<string, () => JSX.Element> = {
+  '/login': Login,
+  '/settings': Settings,
+};
 
-createRoot(container).render(<StrictMode>{page}</StrictMode>);
+const Page = PAGES[window.location.pathname] ?? App;
+
+createRoot(container).render(
+  <StrictMode>
+    <Page />
+  </StrictMode>,
+);
