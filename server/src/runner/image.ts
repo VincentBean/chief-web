@@ -1,3 +1,4 @@
+import type { Config } from '../config.js';
 import type { GitIdentity } from '../settings/index.js';
 
 /**
@@ -42,9 +43,26 @@ export function runnerEnvArgs(identity: GitIdentity): string[] {
   ]);
 }
 
+/**
+ * What to mount at {@link RUNNER_CLAUDE_DIR} so a spawned container sees the
+ * same Claude credentials as every other one.
+ *
+ * Inside Docker the server's own `/claude-auth` path is meaningless to the
+ * daemon — a bind mount is resolved on the *host*, not in the requesting
+ * container — so containers we spawn must reference the shared volume **by
+ * name**. Outside Docker there is no volume and `claudeAuthDir` is a real host
+ * directory, which bind-mounts correctly as-is.
+ */
+export function claudeAuthSource(config: Pick<Config, 'claudeAuthDir' | 'claudeAuthVolume'>): string {
+  return config.claudeAuthVolume === '' ? config.claudeAuthDir : config.claudeAuthVolume;
+}
+
 export interface RunnerMounts {
-  /** Host path of the `claude-auth` volume, mounted read-write at `~/.claude`. */
-  readonly claudeAuthDir: string;
+  /**
+   * Volume name or host path holding the Claude credentials, mounted
+   * read-write at `~/.claude`. See {@link claudeAuthSource}.
+   */
+  readonly claudeAuth: string;
   /** Host path of this session's workspace, mounted at `/workspace`. */
   readonly workspaceDir: string;
   /**
@@ -59,7 +77,7 @@ export interface RunnerMounts {
 export function runnerMountArgs(mounts: RunnerMounts): string[] {
   const args = [
     '--volume',
-    `${mounts.claudeAuthDir}:${RUNNER_CLAUDE_DIR}`,
+    `${mounts.claudeAuth}:${RUNNER_CLAUDE_DIR}`,
     '--volume',
     `${mounts.workspaceDir}:${RUNNER_WORKSPACE_DIR}`,
   ];

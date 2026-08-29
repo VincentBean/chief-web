@@ -14,6 +14,11 @@ services:
       PORT: 8080
       DATA_DIR: /data
       CLAUDE_AUTH_DIR: /claude-auth
+      # Name of the volume below. Containers the server spawns (the Claude
+      # login and auth-probe containers, and every session container) mount it
+      # by name: a bind mount of /claude-auth would be resolved on the host,
+      # where that path does not exist.
+      CLAUDE_AUTH_VOLUME: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}
       DOCKER_SOCKET: /var/run/docker.sock
       # Image used for session containers and short-lived helpers such as the
       # repository connection test (built by US-006).
@@ -46,4 +51,7 @@ services:
 
 volumes:
   chief-data:
+  # Explicitly named rather than <project>_claude-auth, so the name the server
+  # passes to `docker run` is knowable without inspecting the compose project.
   claude-auth:
+    name: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}

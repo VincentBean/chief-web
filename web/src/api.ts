@@ -84,6 +84,52 @@ export async function validateGithubToken(token?: string): Promise<{ login: stri
   });
 }
 
+/** Mirrors the server's `ClaudeAuthStatus` (US-008). */
+export interface ClaudeAuthStatus {
+  authenticated: boolean;
+  authMethod: string | null;
+  account: string | null;
+  organization: string | null;
+  subscription: string | null;
+  checkedAt: string;
+  /** Why the check could not run; `authenticated` is then always false. */
+  error: string | null;
+}
+
+/** The temporary `claude auth login` container and its terminal, if running. */
+export interface ClaudeLogin {
+  active: boolean;
+  terminalId: string | null;
+  containerId: string | null;
+  containerName: string;
+}
+
+export interface ClaudeState {
+  status: ClaudeAuthStatus;
+  login: ClaudeLogin;
+}
+
+/**
+ * `refresh` skips the server's cached probe result — worth paying the extra
+ * container start for right after a login, not on every page load.
+ */
+export async function fetchClaudeState(
+  options: { refresh?: boolean; signal?: AbortSignal } = {},
+): Promise<ClaudeState> {
+  const path = options.refresh === true ? '/api/claude?refresh=1' : '/api/claude';
+  return api<ClaudeState>(path, options.signal ? { signal: options.signal } : {});
+}
+
+/** Spawns the login container and opens the terminal running the login flow. */
+export async function startClaudeLogin(): Promise<ClaudeState> {
+  return api<ClaudeState>('/api/claude/login', { method: 'POST' });
+}
+
+/** Closes the login terminal, removes the container, and re-checks the status. */
+export async function stopClaudeLogin(): Promise<ClaudeState> {
+  return api<ClaudeState>('/api/claude/login', { method: 'DELETE' });
+}
+
 /** Mirrors the server's `RepositoryView`: the private key is never included. */
 export interface Repository {
   id: string;

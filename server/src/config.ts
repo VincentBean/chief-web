@@ -22,6 +22,16 @@ export interface Config {
   readonly workspacesDir: string;
   /** Mount point of the shared `claude-auth` volume with agent credentials. */
   readonly claudeAuthDir: string;
+  /**
+   * Name of the Docker volume holding those credentials, mounted into every
+   * container the server spawns. Empty outside Docker, where
+   * {@link claudeAuthDir} is a real host path and can be bind-mounted instead.
+   */
+  readonly claudeAuthVolume: string;
+  /** Cap on how long the `claude auth status` probe container may take. */
+  readonly claudeProbeTimeoutMs: number;
+  /** How long a probe result is reused before another container is spawned. */
+  readonly claudeStatusCacheMs: number;
   /** Docker socket used to spawn session containers. */
   readonly dockerSocket: string;
   /** Docker CLI binary used to spawn short-lived helper containers. */
@@ -79,6 +89,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sshKeysDir: path.resolve(str('SSH_KEYS_DIR', path.join(dataDir, 'ssh-keys'))),
     workspacesDir: path.resolve(str('WORKSPACES_DIR', path.join(dataDir, 'workspaces'))),
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
+    claudeAuthVolume: str('CLAUDE_AUTH_VOLUME', ''),
+    claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 30_000),
+    claudeStatusCacheMs: int('CLAUDE_STATUS_CACHE_MS', 15_000),
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),

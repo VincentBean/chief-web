@@ -4,9 +4,11 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 
 import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.js';
+import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
 import { createAuthRouter } from './routes/auth.js';
+import { createClaudeRouter } from './routes/claude.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createSettingsRouter } from './routes/settings.js';
@@ -27,6 +29,11 @@ export interface AppDependencies {
    * it at a fake Docker daemon.
    */
   readonly terminals?: TerminalManager;
+  /**
+   * Claude Code authentication (US-008). Defaults to a service that probes the
+   * shared credentials volume with a real container.
+   */
+  readonly claude?: ClaudeService;
 }
 
 /**
@@ -55,7 +62,13 @@ export function createApp(
   api.use(requireApiAuth(auth));
   api.use(createSettingsRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
-  api.use(createTerminalsRouter(deps.terminals ?? createTerminalManager(config)));
+  const terminals = deps.terminals ?? createTerminalManager(config);
+  api.use(createTerminalsRouter(terminals));
+  const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
+  api.use(createClaudeRouter(claude));
+  // Mounted ahead of the sessions router (US-010) so session creation is
+  // blocked, with a reason, until Claude Code has been signed in once.
+  api.post('/sessions', requireClaudeAuth(claude));
   app.use('/api', api);
 
   app.use('/api', (_req, res) => {

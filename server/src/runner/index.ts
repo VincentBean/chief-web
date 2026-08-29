@@ -1,4 +1,5 @@
 export {
+  claudeAuthSource,
   RUNNER_CLAUDE_DIR,
   RUNNER_GID,
   RUNNER_HOME,

@@ -1,11 +1,15 @@
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
 
 import {
   ApiError,
+  type ClaudeState,
+  fetchClaudeState,
   fetchSettings,
   saveSettings,
   type Settings as SettingsData,
   type SettingsUpdate,
+  startClaudeLogin,
+  stopClaudeLogin,
   validateGithubToken,
 } from './api.ts';
 
@@ -13,6 +17,12 @@ type Notice = { kind: 'ok' | 'error'; text: string };
 
 const describe = (error: unknown): string =>
   error instanceof ApiError ? error.message : String(error);
+
+// xterm.js only matters once an operator actually signs Claude in, so it stays
+// in its own chunk rather than in the bundle every page load pays for.
+const TerminalPane = lazy(() =>
+  import('./TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })),
+);
 
 /**
  * Global settings (US-004): the GitHub PAT used to open pull requests and the
@@ -28,6 +38,12 @@ export function Settings() {
   const [authorEmail, setAuthorEmail] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
+  const [claude, setClaude] = useState<ClaudeState | null>(null);
+  const [claudeNotice, setClaudeNotice] = useState<Notice | null>(null);
+  const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
+  // Kept apart from `claude.login.active` so the pane stays on screen (and
+  // readable) after the login process itself has exited.
+  const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -43,8 +59,85 @@ export function Settings() {
         setLoadError(describe(error));
       });
 
+    // A login terminal survives a page reload, so an in-progress one is picked
+    // back up rather than started again.
+    fetchClaudeState({ signal: controller.signal })
+      .then((state) => {
+        setClaude(state);
+        if (state.login.terminalId !== null) setLoginTerminal(state.login.terminalId);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setClaudeNotice({ kind: 'error', text: describe(error) });
+      });
+
     return () => controller.abort();
   }, []);
+
+  const runClaude = (
+    kind: NonNullable<typeof claudeBusy>,
+    action: () => Promise<Notice>,
+  ): void => {
+    setClaudeBusy(kind);
+    setClaudeNotice(null);
+    action()
+      .then(setClaudeNotice)
+      .catch((error: unknown) => setClaudeNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setClaudeBusy(null));
+  };
+
+  const onSetUpClaude = (): void => {
+    runClaude('start', async () => {
+      const state = await startClaudeLogin();
+      setClaude(state);
+      setLoginTerminal(state.login.terminalId);
+      return {
+        kind: 'ok',
+        text: 'Login terminal ready — follow the URL it prints, then paste the code back.',
+      };
+    });
+  };
+
+  // Closing the terminal removes the temporary container and re-checks the
+  // credentials, so the indicator above shows the result of the login at once.
+  const onCloseLogin = (): void => {
+    runClaude('stop', async () => {
+      const state = await stopClaudeLogin();
+      setClaude(state);
+      setLoginTerminal(null);
+      return state.status.authenticated
+        ? { kind: 'ok', text: 'Claude Code is authenticated.' }
+        : { kind: 'error', text: 'Claude Code is still not authenticated.' };
+    });
+  };
+
+  // The login process exiting is the earliest moment the answer can have
+  // changed, so the indicator is refreshed there rather than on a timer.
+  const onLoginExit = (): void => {
+    fetchClaudeState({ refresh: true })
+      .then((state) => {
+        setClaude(state);
+        setClaudeNotice(
+          state.status.authenticated
+            ? { kind: 'ok', text: 'Claude Code is authenticated. Close the terminal to clean up.' }
+            : {
+                kind: 'error',
+                text: 'The login ended without authenticating. Close the terminal and try again.',
+              },
+        );
+      })
+      .catch((error: unknown) => setClaudeNotice({ kind: 'error', text: describe(error) }));
+  };
+
+  const onCheckClaude = (): void => {
+    runClaude('check', async () => {
+      const state = await fetchClaudeState({ refresh: true });
+      setClaude(state);
+      return state.status.authenticated
+        ? { kind: 'ok', text: 'Claude Code is authenticated.' }
+        : { kind: 'error', text: state.status.error ?? 'Claude Code is not authenticated.' };
+    });
+  };
 
   function applyLoaded(loaded: SettingsData): void {
     setSettings(loaded);
@@ -125,9 +218,10 @@ export function Settings() {
 
   const stored = settings.githubToken;
   const canValidate = token.trim() !== '' || stored.configured;
+  const claudeStatus = claude?.status ?? null;
 
   return (
-    <main className="shell">
+    <main className={loginTerminal === null ? 'shell' : 'shell shell--wide'}>
       <Header />
       <p className="tagline">Applies to every repository and session.</p>
 
@@ -246,6 +340,89 @@ export function Settings() {
           </p>
         )}
       </form>
+
+      <section className="form form--card">
+        <h2 className="card__title">Claude Code</h2>
+        <p className="field__hint">
+          Sign in once: the credentials are written to the shared <code>claude-auth</code> volume,
+          which every session container mounts at <code>~/.claude</code> and which survives
+          restarts of the stack. Sessions cannot be created until this says Authenticated.
+        </p>
+
+        <p
+          className={`health health--${claudeStatus?.authenticated === true ? 'ok' : 'error'}`}
+          role="status"
+        >
+          {claudeStatus === null
+            ? 'Checking…'
+            : claudeStatus.authenticated
+              ? 'Authenticated'
+              : 'Not authenticated'}
+          {claudeStatus?.account !== null && claudeStatus?.account !== undefined
+            ? ` — ${claudeStatus.account}`
+            : ''}
+          {claudeStatus?.subscription !== null && claudeStatus?.subscription !== undefined
+            ? ` (${claudeStatus.subscription})`
+            : ''}
+        </p>
+
+        {claudeStatus?.error === null || claudeStatus?.error === undefined ? null : (
+          <p className="field__hint">Status check: {claudeStatus.error}</p>
+        )}
+
+        <div className="field__actions">
+          <button
+            type="button"
+            className="button"
+            onClick={onSetUpClaude}
+            disabled={claudeBusy !== null || loginTerminal !== null}
+          >
+            {claudeBusy === 'start'
+              ? 'Starting…'
+              : claudeStatus?.authenticated === true
+                ? 'Sign in again'
+                : 'Set up Claude'}
+          </button>
+          <button
+            type="button"
+            className="button button--quiet"
+            onClick={onCheckClaude}
+            disabled={claudeBusy !== null}
+          >
+            {claudeBusy === 'check' ? 'Checking…' : 'Re-check'}
+          </button>
+        </div>
+
+        {claudeNotice !== null && (
+          <p className={`notice notice--${claudeNotice.kind}`} role="alert">
+            {claudeNotice.text}
+          </p>
+        )}
+
+        {loginTerminal === null ? null : (
+          <div className="terminal">
+            <div className="card__header">
+              <h3 className="card__title mono">{claude?.login.containerName ?? 'claude login'}</h3>
+              <button
+                type="button"
+                className="button button--quiet button--danger"
+                onClick={onCloseLogin}
+                disabled={claudeBusy !== null}
+              >
+                {claudeBusy === 'stop' ? 'Closing…' : 'Close login terminal'}
+              </button>
+            </div>
+            <Suspense fallback={<p className="tagline">Loading terminal…</p>}>
+              <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
+            </Suspense>
+            <p className="field__hint">
+              Open the URL the terminal prints, approve the request, then paste the code back here
+              (Ctrl+Shift+V). Closing the terminal removes the temporary container and re-checks the
+              status.
+            </p>
+          </div>
+        )}
+      </section>
     </main>
   );
 }

@@ -40,13 +40,13 @@ describe('runner image contract', () => {
 
   it('mounts the auth volume read-write and the key read-only', () => {
     const args = runnerMountArgs({
-      claudeAuthDir: '/claude-auth',
+      claudeAuth: 'chief-web-claude-auth',
       workspaceDir: '/data/workspaces/s1',
       sshKeyPath: '/data/ssh-keys/r1.key',
     });
     assert.deepEqual(args, [
       '--volume',
-      `/claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
       '--volume',
       `/data/workspaces/s1:${RUNNER_WORKSPACE_DIR}`,
       '--volume',
@@ -55,7 +55,7 @@ describe('runner image contract', () => {
   });
 
   it('omits the key mount when the session has no repository key', () => {
-    const args = runnerMountArgs({ claudeAuthDir: '/claude-auth', workspaceDir: '/w' });
+    const args = runnerMountArgs({ claudeAuth: '/claude-auth', workspaceDir: '/w' });
     assert.equal(args.length, 4);
     assert.ok(!args.some((arg) => arg.includes(RUNNER_SSH_KEY_PATH)));
   });

@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 
-import { api, ApiError, logout } from './api.ts';
+import { api, ApiError, type ClaudeState, fetchClaudeState, logout } from './api.ts';
 
 type HealthState = { status: 'loading' } | { status: 'ok' } | { status: 'error'; message: string };
 
 export function App() {
   const [health, setHealth] = useState<HealthState>({ status: 'loading' });
+  const [claude, setClaude] = useState<ClaudeState | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -21,6 +22,14 @@ export function App() {
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         setHealth({ status: 'error', message: String(error) });
+      });
+
+    // Sessions need a signed-in Claude Code (US-008); saying so here beats
+    // finding out when the first session refuses to be created.
+    fetchClaudeState({ signal: controller.signal })
+      .then(setClaude)
+      .catch(() => {
+        // The settings page reports why; the home page just stays quiet.
       });
 
     // The server already redirects page loads, but a session can expire while
@@ -59,6 +68,15 @@ export function App() {
       <p className={`health health--${health.status}`}>
         API: {health.status === 'error' ? `unreachable (${health.message})` : health.status}
       </p>
+      {claude === null || claude.status.authenticated ? null : (
+        <p className="notice notice--error" role="alert">
+          Claude Code is not authenticated, so sessions cannot be created. Open{' '}
+          <a className="link" href="/settings">
+            Settings
+          </a>{' '}
+          and use “Set up Claude”.
+        </p>
+      )}
     </main>
   );
 }
