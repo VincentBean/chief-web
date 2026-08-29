@@ -84,6 +84,23 @@ export function getGithubToken(db: Database): string | null {
   return getSetting(db, 'github_token');
 }
 
+/**
+ * How many sessions may build at the same time (US-004, enforced in US-018).
+ *
+ * The env var is only the default: once the operator has saved a value on the
+ * settings page, the row wins. Clamped to the bounds the settings route
+ * validates, so a value written straight into the database — or an
+ * `MAX_CONCURRENT_SESSIONS=0` in the environment — cannot wedge the queue with
+ * a cap no build can ever fit under.
+ */
+export function getMaxConcurrentSessions(
+  db: Database,
+  config: Pick<Config, 'maxConcurrentSessions'>,
+): number {
+  const stored = getSettingNumber(db, 'max_concurrent_sessions', config.maxConcurrentSessions);
+  return Math.min(MAX_CONCURRENT_SESSIONS, Math.max(MIN_CONCURRENT_SESSIONS, stored));
+}
+
 /** The commit identity runner containers are started with (US-006). */
 export function getGitIdentity(db: Database): GitIdentity {
   return {

@@ -6,14 +6,18 @@ import { after, before, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
+  countSessionsByStatus,
   createRepository,
   createSession,
   type Database,
   getSession,
   IN_MEMORY,
+  listQueuedSessions,
+  listSessions,
   listStories,
   openDatabase,
   type Session,
+  setSettingNumber,
   type Story,
   syncStories,
   updateSession,
@@ -234,15 +238,22 @@ describe('the iteration prompt', () => {
 });
 
 /**
- * A fake world: the session's clone on disk, a container that is always there,
- * and an agent that does whatever the test tells it to.
+ * A fake world: the session's clone on disk, a container per session, and an
+ * agent that does whatever the test tells it to.
+ *
+ * One repository with as many sessions as a test needs — US-018 is about
+ * several of them at once, and two sessions of the *same* repository is the
+ * case that has to keep its workspaces and branches apart.
  */
 class World {
   readonly config: Config;
   readonly db: Database;
+  readonly repositoryId: string;
   readonly session: Session;
   readonly containers: SessionContainers;
   readonly runner: MockRunner;
+  /** Every container start, in order: `docker` as the loop used it. */
+  readonly containerStarts: string[] = [];
 
   constructor(prd: string = PRD) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-build-'));
@@ -250,66 +261,91 @@ class World {
     this.config = loadConfig({ DATA_DIR: dir });
     this.db = openDatabase(IN_MEMORY);
 
-    const repository = createRepository(this.db, {
+    this.repositoryId = createRepository(this.db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',
       githubSlug: 'acme/demo',
-    });
-    this.session =
+    }).id;
+
+    this.containers = {
+      // A container of its own per session, named after it: what the tests
+      // assert on when they check that two builds never share one.
+      start: (session): Promise<SessionContainerView> => {
+        this.containerStarts.push(session.id);
+        return Promise.resolve({
+          id: `container-${session.name}`,
+          name: `chief-web-${session.name}`,
+          running: true,
+          state: 'running',
+        });
+      },
+      remove: (): Promise<void> => Promise.resolve(),
+    };
+    this.runner = new MockRunner();
+    this.session = this.addSession('add-login', prd);
+  }
+
+  /** Another ready session on the same repository, with its own clone. */
+  addSession(name: string, prd: string = PRD): Session {
+    const session =
       updateSession(
         this.db,
         createSession(this.db, {
-          repositoryId: repository.id,
-          name: 'add-login',
+          repositoryId: this.repositoryId,
+          name,
           baseBranch: 'main',
           prTargetBranch: 'main',
         }).id,
         { status: 'ready' },
       ) ?? (undefined as never);
 
-    fs.mkdirSync(path.join(this.repoDir, '.git'), { recursive: true });
-    fs.mkdirSync(path.dirname(this.prdFile), { recursive: true });
-    fs.writeFileSync(this.prdFile, prd);
-    this.sync();
+    const file = this.prdFileOf(session);
+    fs.mkdirSync(path.join(this.repoDirOf(session), '.git'), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, prd);
+    this.sync(session);
+    return session;
+  }
 
-    this.containers = {
-      start: (): Promise<SessionContainerView> =>
-        Promise.resolve({ id: 'container-1', name: 'chief-web-add-login', running: true, state: 'running' }),
-      remove: (): Promise<void> => Promise.resolve(),
-    };
-    this.runner = new MockRunner();
+  repoDirOf(session: Session = this.session): string {
+    return path.join(this.config.workspacesDir, session.id, 'repo');
+  }
+
+  prdFileOf(session: Session = this.session): string {
+    return path.join(this.repoDirOf(session), prdPathFor(session.name));
   }
 
   get repoDir(): string {
-    return path.join(this.config.workspacesDir, this.session.id, 'repo');
+    return this.repoDirOf();
   }
 
   get prdFile(): string {
-    return path.join(this.repoDir, prdPathFor(this.session.name));
+    return this.prdFileOf();
   }
 
   /** Brings the `stories` table in line with the file, as "Mark ready" does. */
-  sync(): Story[] {
-    const parsed = parsePrd(fs.readFileSync(this.prdFile, 'utf8'));
-    return syncStories(this.db, this.session.id, parsed.stories.map(storyInputOf));
+  sync(session: Session = this.session): Story[] {
+    const parsed = parsePrd(fs.readFileSync(this.prdFileOf(session), 'utf8'));
+    return syncStories(this.db, session.id, parsed.stories.map(storyInputOf));
   }
 
   /** What the agent does when it finishes a story. */
-  markDone(storyId: string): void {
-    const written = setStoryStatus(fs.readFileSync(this.prdFile, 'utf8'), storyId, 'done');
-    fs.writeFileSync(this.prdFile, written.content);
+  markDone(storyId: string, session: Session = this.session): void {
+    const file = this.prdFileOf(session);
+    const written = setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done');
+    fs.writeFileSync(file, written.content);
   }
 
-  status(): string {
-    return getSession(this.db, this.session.id)?.status ?? 'gone';
+  status(session: Session = this.session): string {
+    return getSession(this.db, session.id)?.status ?? 'gone';
   }
 
-  error(): string | null {
-    return getSession(this.db, this.session.id)?.lastError ?? null;
+  error(session: Session = this.session): string | null {
+    return getSession(this.db, session.id)?.lastError ?? null;
   }
 
-  stories(): Story[] {
-    return listStories(this.db, this.session.id);
+  stories(session: Session = this.session): Story[] {
+    return listStories(this.db, session.id);
   }
 }
 
@@ -709,6 +745,315 @@ describe('the build loop', () => {
     assert.throws(
       () => serviceFor(world).status('nope'),
       (error: unknown) => error instanceof BuildError && error.status === 404,
+    );
+  });
+});
+
+/** A promise a test resolves when it wants the agent to return. */
+interface Gate {
+  readonly promise: Promise<void>;
+  release(): void;
+}
+
+function gate(): Gate {
+  let release = (): void => {};
+  const promise = new Promise<void>((resolve) => {
+    release = (): void => {
+      resolve();
+    };
+  });
+  return { promise, release: () => {release();} };
+}
+
+/** Waits for something another task has to do first; fails rather than hangs. */
+async function until(what: string, condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`timed out waiting until ${what}`);
+}
+
+describe('concurrency and the build queue', () => {
+  /**
+   * Several sessions building at the same time, and a queue for the rest
+   * (US-018).
+   *
+   * The cap is read from the settings row on every decision rather than
+   * captured at construction, so raising it on the settings page while a build
+   * runs is honoured by the next slot that frees.
+   */
+  class Fleet {
+    readonly world: World;
+    readonly builds: ReturnType<typeof serviceFor>;
+    /** The sessions an iteration has been entered for, in order. */
+    readonly entered: string[] = [];
+    /** Which container each session's agent was run in. */
+    readonly containers = new Map<string, string>();
+    private readonly gates = new Map<string, Gate>();
+
+    constructor(cap: number, names: readonly string[]) {
+      this.world = new World();
+      for (const name of names) this.world.addSession(name);
+      setSettingNumber(this.world.db, 'max_concurrent_sessions', cap);
+
+      this.world.runner.behaviour = async (invocation): Promise<void> => {
+        this.entered.push(invocation.sessionId);
+        this.containers.set(invocation.sessionId, invocation.containerId);
+        await this.gate(invocation.sessionId).promise;
+        // Whatever it was asked to do, the agent finished the whole PRD.
+        const session = this.session(invocation.sessionId);
+        this.world.markDone('US-002', session);
+        this.world.markDone('US-001', session);
+        this.world.runner.commit();
+      };
+      this.builds = serviceFor(this.world);
+    }
+
+    session(id: string): Session {
+      const found = listSessions(this.world.db).find((candidate) => candidate.id === id);
+      if (found === undefined) throw new Error(`no session ${id}`);
+      return found;
+    }
+
+    named(name: string): Session {
+      const found = listSessions(this.world.db).find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`no session named ${name}`);
+      return found;
+    }
+
+    /** The gate the agent of this session waits on; created on first use. */
+    gate(sessionId: string): Gate {
+      const existing = this.gates.get(sessionId);
+      if (existing !== undefined) return existing;
+      const created = gate();
+      this.gates.set(sessionId, created);
+      return created;
+    }
+
+    /** Lets a session's agent return, and waits for its loop to unwind. */
+    async finish(session: Session): Promise<void> {
+      this.gate(session.id).release();
+      await this.builds.whenIdle(session.id);
+    }
+
+    building(): string[] {
+      return listSessions(this.world.db, { status: 'building' }).map((s) => s.name);
+    }
+
+    queue(): string[] {
+      return listQueuedSessions(this.world.db).map((s) => s.name);
+    }
+  }
+
+  it('builds several sessions at once, each in its own container', async () => {
+    const fleet = new Fleet(2, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    const first = await fleet.builds.start(login.id);
+    const second = await fleet.builds.start(billing.id);
+
+    assert.equal(first.status, 'building');
+    assert.equal(second.status, 'building');
+    assert.equal(second.activeBuilds, 2);
+    assert.equal(second.maxConcurrentBuilds, 2);
+    assert.deepEqual(fleet.building().sort(), ['add-billing', 'add-login']);
+
+    // Both agents are inside an iteration at the same moment, in containers of
+    // their own — the whole point of the story.
+    await until('both agents are running', () => fleet.entered.length === 2);
+    assert.equal(fleet.containers.get(login.id), 'container-add-login');
+    assert.equal(fleet.containers.get(billing.id), 'container-add-billing');
+    assert.equal(countSessionsByStatus(fleet.world.db, 'building'), 2);
+
+    await fleet.finish(login);
+    await fleet.finish(billing);
+    assert.equal(fleet.world.status(login), 'finished');
+    assert.equal(fleet.world.status(billing), 'finished');
+  });
+
+  it('queues a start beyond the cap instead of refusing it', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    await fleet.builds.start(login.id);
+    const queued = await fleet.builds.start(billing.id);
+
+    // The cap comes from the settings row, not from the environment default.
+    assert.equal(fleet.world.config.maxConcurrentSessions, 3);
+    assert.equal(queued.maxConcurrentBuilds, 1);
+    // Queued is a sub-state of ready, persisted as a timestamp.
+    assert.equal(queued.status, 'ready');
+    assert.equal(queued.queued, true);
+    assert.equal(queued.queuePosition, 1);
+    assert.notEqual(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    // Nothing at all was spawned for it.
+    assert.deepEqual(
+      fleet.world.containerStarts.filter((id) => id === billing.id),
+      [],
+    );
+    assert.equal(fleet.entered.includes(billing.id), false);
+
+    await fleet.finish(login);
+    await fleet.finish(billing);
+  });
+
+  it('starts the queue in FIFO order as slots free', async () => {
+    const fleet = new Fleet(1, ['add-billing', 'add-search']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const search = fleet.named('add-search');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    const third = await fleet.builds.start(search.id);
+    assert.equal(third.queuePosition, 2);
+    assert.deepEqual(fleet.queue(), ['add-billing', 'add-search']);
+
+    // Finishing the running build hands its slot to the head of the queue,
+    // with nobody having to ask.
+    await fleet.finish(login);
+    await until('the queued session started', () => fleet.building().length === 1);
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.deepEqual(fleet.queue(), ['add-search']);
+    assert.equal(fleet.builds.status(search.id).queuePosition, 1);
+
+    await fleet.finish(billing);
+    await until('the last session started', () => fleet.building().length === 1);
+    assert.deepEqual(fleet.building(), ['add-search']);
+
+    await fleet.finish(search);
+    assert.deepEqual(fleet.queue(), []);
+    assert.deepEqual(fleet.entered, [login.id, billing.id, search.id]);
+  });
+
+  it('keeps a queued session in its place when start is pressed again', async () => {
+    const fleet = new Fleet(1, ['add-billing', 'add-search']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const search = fleet.named('add-search');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    await fleet.builds.start(search.id);
+    const queuedAt = getSession(fleet.world.db, billing.id)?.queuedAt;
+
+    const again = await fleet.builds.start(billing.id);
+    assert.equal(again.queuePosition, 1);
+    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, queuedAt);
+    assert.deepEqual(fleet.queue(), ['add-billing', 'add-search']);
+
+    await fleet.finish(login);
+    await fleet.finish(billing);
+    await fleet.finish(search);
+  });
+
+  it('spends a schedule the queue absorbed, so it cannot fire twice (US-017)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    updateSession(fleet.world.db, billing.id, { scheduledStartAt: '2026-08-29T02:00:00.000Z' });
+
+    await fleet.builds.start(login.id);
+    const queued = await fleet.builds.start(billing.id);
+
+    assert.equal(queued.queued, true);
+    assert.equal(getSession(fleet.world.db, billing.id)?.scheduledStartAt, null);
+
+    await fleet.finish(login);
+    await fleet.finish(billing);
+  });
+
+  it('takes a session out of the queue on request', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+
+    const left = fleet.builds.dequeue(billing.id);
+    assert.equal(left.queued, false);
+    assert.equal(left.queuePosition, null);
+    assert.equal(left.status, 'ready');
+    assert.deepEqual(fleet.queue(), []);
+
+    // A session that is not waiting has nothing to give back.
+    assert.throws(
+      () => fleet.builds.dequeue(billing.id),
+      (error: unknown) =>
+        error instanceof BuildError &&
+        error.status === 409 &&
+        error.code === 'session_not_queued',
+    );
+
+    // And the slot goes to nobody: it was never its turn.
+    await fleet.finish(login);
+    await until('the finished build released its slot', () => fleet.building().length === 0);
+    assert.equal(fleet.world.status(billing), 'ready');
+    assert.equal(fleet.entered.includes(billing.id), false);
+  });
+
+  it('picks the queue up again after a restart, from queued_at alone', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const billing = fleet.named('add-billing');
+    // What a restart leaves behind: a row waiting for a slot, and no loop
+    // anywhere that could ever free one.
+    updateSession(fleet.world.db, billing.id, { queuedAt: '2026-08-29T09:00:00.000Z' });
+
+    await fleet.builds.pump();
+
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    await fleet.finish(billing);
+    assert.equal(fleet.world.status(billing), 'finished');
+  });
+
+  it('drops a session that can no longer be built, and moves on to the next', async () => {
+    const fleet = new Fleet(1, ['add-billing', 'add-search']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const search = fleet.named('add-search');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    await fleet.builds.start(search.id);
+
+    // It went back to planning while it waited: its turn comes, and it cannot
+    // take it.
+    updateSession(fleet.world.db, billing.id, { status: 'pending' });
+    await fleet.finish(login);
+    await until('the next session started', () => fleet.building().length === 1);
+
+    assert.deepEqual(fleet.building(), ['add-search']);
+    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    assert.match(fleet.world.error(billing) ?? '', /Only a ready or failed session/);
+
+    await fleet.finish(search);
+  });
+
+  it('never lets two sessions of one repository share a workspace or a branch', () => {
+    const world = new World();
+    const second = world.addSession('add-billing');
+
+    assert.equal(world.session.repositoryId, second.repositoryId);
+    assert.notEqual(world.repoDirOf(), world.repoDirOf(second));
+    assert.ok(world.repoDirOf(second).includes(second.id));
+    assert.notEqual(world.session.featureBranch, second.featureBranch);
+    assert.equal(world.session.featureBranch, 'chief/add-login');
+    assert.equal(second.featureBranch, 'chief/add-billing');
+    // Two sessions of one repository cannot even be given the same name.
+    assert.throws(
+      () =>
+        createSession(world.db, {
+          repositoryId: world.repositoryId,
+          name: 'add-login',
+          baseBranch: 'main',
+          prTargetBranch: 'main',
+        }),
+      /UNIQUE constraint failed/,
     );
   });
 });

@@ -6,7 +6,15 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
 import { loadConfig } from '../config.js';
-import { closeDatabase, type Database, deleteSetting, IN_MEMORY, openDatabase } from '../db/index.js';
+import {
+  closeDatabase,
+  type Database,
+  deleteSetting,
+  IN_MEMORY,
+  openDatabase,
+  setSetting,
+} from '../db/index.js';
+import { getMaxConcurrentSessions } from '../settings/index.js';
 
 const PASSWORD = 'correct horse battery staple';
 const TOKEN = 'ghp_exampleTokenValue1234';
@@ -293,5 +301,21 @@ describe('settings api', () => {
 
     assert.equal(response.status, 400);
     assert.equal(((await response.json()) as { error: string }).error, 'github_error');
+  });
+
+  it('resolves the concurrency cap the build queue enforces (US-018)', async () => {
+    const config = loadConfig({ MAX_CONCURRENT_SESSIONS: '4' });
+
+    // The environment is only the default; the saved row wins.
+    assert.equal(getMaxConcurrentSessions(db, config), 4);
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(getMaxConcurrentSessions(db, config), 2);
+
+    // A value written straight into the database cannot wedge the queue with a
+    // cap no build could ever fit under.
+    setSetting(db, 'max_concurrent_sessions', '0');
+    assert.equal(getMaxConcurrentSessions(db, config), 1);
+    setSetting(db, 'max_concurrent_sessions', '9999');
+    assert.equal(getMaxConcurrentSessions(db, config), 50);
   });
 });

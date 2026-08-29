@@ -7,6 +7,7 @@ import {
   fetchBuild,
   fetchPlanning,
   fetchSession,
+  leaveQueue,
   markSessionReady,
   type Planning,
   type PrdParseError,
@@ -60,7 +61,16 @@ export function Session() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<
-    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | 'delivery' | 'schedule' | null
+    | 'start'
+    | 'stop'
+    | 'ready'
+    | 'planning'
+    | 'build'
+    | 'stop-build'
+    | 'leave-queue'
+    | 'delivery'
+    | 'schedule'
+    | null
   >(null);
   const [build, setBuild] = useState<Build | null>(null);
   /** Why the last "Mark ready" was refused; cleared by the next attempt. */
@@ -186,7 +196,11 @@ export function Session() {
             ? {
                 kind: 'ok',
                 text: result.started
-                  ? `${synced} Its missed schedule was honoured, so the build has started.`
+                  ? result.session.queuePosition === null
+                    ? `${synced} Its missed schedule was honoured, so the build has started.`
+                    : `${synced} Its missed schedule was honoured, but every build slot is taken: ` +
+                      `it is queued (#${String(result.session.queuePosition)}) and starts as soon ` +
+                      'as one frees.'
                   : synced,
               }
             : {
@@ -240,7 +254,11 @@ export function Session() {
         setSession((current) => (current === null ? current : { ...current, status: next.status }));
         setNotice({
           kind: 'ok',
-          text: `Build started — up to ${String(next.maxIterations)} iterations, one story at a time.`,
+          text: next.queued
+            ? `Queued (#${String(next.queuePosition ?? 1)}) — ${String(next.activeBuilds)} of ` +
+              `${String(next.maxConcurrentBuilds)} build slots are in use. It starts on its own ` +
+              'as soon as one frees.'
+            : `Build started — up to ${String(next.maxIterations)} iterations, one story at a time.`,
         });
       })
       .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
@@ -255,6 +273,22 @@ export function Session() {
         setBuild(next);
         setSession((current) => (current === null ? current : { ...current, status: next.status }));
         setNotice({ kind: 'ok', text: 'Build stopped. Everything already committed is kept.' });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
+  const onLeaveQueue = (): void => {
+    setBusy('leave-queue');
+    setNotice(null);
+    leaveQueue(id)
+      .then((next) => {
+        setBuild(next);
+        setSession((current) => (current === null ? current : { ...current, status: next.status }));
+        setNotice({
+          kind: 'ok',
+          text: 'Left the build queue. Nothing was started, so nothing was lost.',
+        });
       })
       .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
       .finally(() => setBusy(null));
@@ -374,6 +408,7 @@ export function Session() {
         busy={busy}
         onStart={onStartBuild}
         onStop={onStopBuild}
+        onLeaveQueue={onLeaveQueue}
         onRetryDelivery={onRetryDelivery}
       />
 
@@ -547,7 +582,9 @@ function ScheduleCard({
             </label>
             <p className="field__hint">
               Read in this browser&rsquo;s timezone and stored as UTC. The session has to be ready
-              by then — a schedule that passes while it is still pending is missed, not queued.
+              by then — a schedule that passes while it is still being planned is missed, and
+              nothing runs. If every build slot is taken at that moment, the session takes a place
+              in the build queue instead and starts as soon as one frees.
             </p>
             <input
               id="session-schedule"
@@ -773,6 +810,7 @@ function BuildCard({
   busy,
   onStart,
   onStop,
+  onLeaveQueue,
   onRetryDelivery,
 }: {
   status: SessionData['status'];
@@ -781,6 +819,7 @@ function BuildCard({
   busy: string | null;
   onStart: () => void;
   onStop: () => void;
+  onLeaveQueue: () => void;
   onRetryDelivery: () => void;
 }) {
   if (build === null || status === 'pending') return null;
@@ -800,12 +839,25 @@ function BuildCard({
     <section className="card">
       <div className="card__header">
         <h2 className="card__title">
-          Build <span className={`badge badge--${status}`}>{status}</span>
+          Build <span className={`badge badge--${status}`}>{status}</span>{' '}
+          {build.queued && (
+            <span className="badge badge--queued">Queued (#{build.queuePosition ?? 1})</span>
+          )}
         </h2>
         <div className="field__actions">
-          {(status === 'ready' || canRetryBuild) && (
+          {(status === 'ready' || canRetryBuild) && !build.queued && (
             <button type="button" className="button" onClick={onStart} disabled={busy !== null}>
               {busy === 'build' ? 'Starting…' : canRetryBuild ? 'Retry build' : 'Start build'}
+            </button>
+          )}
+          {build.queued && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={onLeaveQueue}
+              disabled={busy !== null}
+            >
+              {busy === 'leave-queue' ? 'Leaving…' : 'Leave queue'}
             </button>
           )}
           {building && (
@@ -835,6 +887,18 @@ function BuildCard({
         <dt>Stories done</dt>
         <dd>
           {done}/{build.stories.length}
+        </dd>
+        {build.queued && (
+          <>
+            <dt>Queue</dt>
+            <dd>
+              #{build.queuePosition ?? 1} of the sessions waiting for a build slot
+            </dd>
+          </>
+        )}
+        <dt>Build slots</dt>
+        <dd>
+          {build.activeBuilds} of {build.maxConcurrentBuilds} in use
         </dd>
         {building && (
           <>
@@ -874,7 +938,19 @@ function BuildCard({
         </p>
       )}
 
-      {status === 'ready' && (
+      {build.queued && (
+        <p className="field__hint">
+          Every build slot is taken, so this session is waiting its turn. It starts on its own the
+          moment one frees — no container has been spawned for it yet, and &ldquo;Leave queue&rdquo;
+          takes it back to ready with nothing lost. The cap lives on the{' '}
+          <a className="link" href="/settings">
+            settings page
+          </a>
+          .
+        </p>
+      )}
+
+      {status === 'ready' && !build.queued && (
         <p className="field__hint">
           Starting the build runs one headless Claude per story, lowest priority number first. After
           each iteration chief-web re-reads {build.prd.path} and the git history — a story only

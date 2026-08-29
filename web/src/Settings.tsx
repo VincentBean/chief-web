@@ -272,7 +272,11 @@ export function Settings() {
           <label className="field__label" htmlFor="max-sessions">
             Max concurrent building sessions
           </label>
-          <p className="field__hint">Sessions started beyond this cap are queued.</p>
+          <p className="field__hint">
+            Sessions started beyond this cap are queued in the order they were started, and each
+            one begins on its own as soon as a build slot frees. A new value applies to the next
+            session that starts; nothing already building is stopped.
+          </p>
           <input
             id="max-sessions"
             name="max-sessions"

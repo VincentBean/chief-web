@@ -5,6 +5,7 @@ export {
   DEFAULT_GIT_AUTHOR_NAME,
   getGitIdentity,
   getGithubToken,
+  getMaxConcurrentSessions,
   type GitIdentity,
   type GithubTokenView,
   isValidGitAuthorEmail,

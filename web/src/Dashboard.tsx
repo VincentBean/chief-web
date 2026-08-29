@@ -9,6 +9,7 @@ import {
   fetchClaudeState,
   fetchRepositories,
   fetchSessions,
+  leaveQueue,
   logout,
   type PrTargetBranch,
   type Repository,
@@ -150,6 +151,21 @@ export function Dashboard() {
       .finally(() => setBusyId(null));
   };
 
+  const onLeaveQueue = (session: Session): void => {
+    setBusyId(session.id);
+    setNotice(null);
+    leaveQueue(session.id)
+      .then(async () => {
+        await reload();
+        setNotice({
+          kind: 'ok',
+          text: `${session.name} left the build queue and is ready again.`,
+        });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusyId(null));
+  };
+
   const onDelete = (session: Session): void => {
     if (!window.confirm(deletionWarning(session))) return;
     setBusyId(session.id);
@@ -283,6 +299,7 @@ export function Dashboard() {
               busy={busyId === session.id}
               setup={setups[session.id]}
               onRetry={() => onRetry(session)}
+              onLeaveQueue={() => onLeaveQueue(session)}
               onDelete={() => onDelete(session)}
             />
           ))}
@@ -383,10 +400,11 @@ interface CardProps {
   busy: boolean;
   setup: SessionSetup | undefined;
   onRetry: () => void;
+  onLeaveQueue: () => void;
   onDelete: () => void;
 }
 
-function SessionCard({ session, busy, setup, onRetry, onDelete }: CardProps) {
+function SessionCard({ session, busy, setup, onRetry, onLeaveQueue, onDelete }: CardProps) {
   return (
     <li className="card">
       <div className="card__header">
@@ -394,12 +412,25 @@ function SessionCard({ session, busy, setup, onRetry, onDelete }: CardProps) {
           <a className="link" href={sessionPath(session.id)}>
             {session.name}
           </a>{' '}
-          <span className={`badge badge--${session.status}`}>{session.status}</span>
+          <span className={`badge badge--${session.status}`}>{session.status}</span>{' '}
+          {session.queuePosition !== null && (
+            <span className="badge badge--queued">Queued (#{session.queuePosition})</span>
+          )}
         </h2>
         <div className="field__actions">
           <a className="button button--quiet" href={sessionPath(session.id)}>
             {session.status === 'pending' ? 'Plan' : 'Open'}
           </a>
+          {session.queuePosition !== null && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={onLeaveQueue}
+              disabled={busy}
+            >
+              {busy ? 'Working…' : 'Leave queue'}
+            </button>
+          )}
           {session.status === 'pending' && !session.cloned && (
             <button
               type="button"
@@ -436,6 +467,14 @@ function SessionCard({ session, busy, setup, onRetry, onDelete }: CardProps) {
         <dd className="mono">{session.baseBranch}</dd>
         <dt>PR target</dt>
         <dd className="mono">{session.prTargetBranch}</dd>
+        {session.queuePosition !== null && (
+          <>
+            <dt>Queue</dt>
+            <dd>
+              #{session.queuePosition} — starts on its own as soon as a build slot frees.
+            </dd>
+          </>
+        )}
         {session.scheduledStartAt !== null && (
           <>
             <dt>Scheduled</dt>

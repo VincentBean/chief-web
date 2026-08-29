@@ -407,6 +407,13 @@ textarea.field__input {
   color: var(--accent);
 }
 
+/* Waiting for a build slot (US-018): ready, but not its turn yet. */
+.badge--queued {
+  border-color: var(--warn);
+  color: var(--warn);
+  text-transform: none;
+}
+
 select.field__input {
   appearance: auto;
 }

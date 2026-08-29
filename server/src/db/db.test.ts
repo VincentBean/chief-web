@@ -25,6 +25,7 @@ import {
   MIGRATIONS,
   nextIncompleteStory,
   openDatabase,
+  queuePosition,
   type Repository,
   runMigrations,
   setSetting,
@@ -302,12 +303,42 @@ describe('sessions', () => {
       listQueuedSessions(db).map((session) => session.id),
       [first.id, second.id],
     );
+    // The "#2" the UI shows, counted with the same order (US-018).
+    assert.equal(queuePosition(db, { id: first.id, queuedAt: '2026-08-29T09:00:00.000Z' }), 1);
+    assert.equal(queuePosition(db, { id: second.id, queuedAt: '2026-08-29T10:00:00.000Z' }), 2);
+    assert.equal(queuePosition(db, { id: first.id, queuedAt: null }), null);
 
     updateSession(db, first.id, { queuedAt: null });
     assert.deepEqual(
       listQueuedSessions(db).map((session) => session.id),
       [second.id],
     );
+    assert.equal(queuePosition(db, { id: second.id, queuedAt: '2026-08-29T10:00:00.000Z' }), 1);
+  });
+
+  it('orders two sessions queued in the same millisecond by id', () => {
+    const at = '2026-08-29T11:00:00.000Z';
+    const ids = ['alpha', 'beta', 'gamma'].map((name) => {
+      const session = createSession(db, {
+        repositoryId: repository.id,
+        name,
+        baseBranch: 'main',
+        prTargetBranch: 'main',
+        status: 'ready',
+      });
+      updateSession(db, session.id, { queuedAt: at });
+      return session.id;
+    });
+
+    // A tie on the timestamp is broken on the id, so every reader — the queue
+    // itself and the position shown next to a session — agrees on the order.
+    assert.deepEqual(
+      listQueuedSessions(db).map((session) => session.id),
+      [...ids].sort(),
+    );
+    for (const [index, id] of [...ids].sort().entries()) {
+      assert.equal(queuePosition(db, { id, queuedAt: at }), index + 1);
+    }
   });
 
   it('finds ready sessions whose schedule is due', () => {

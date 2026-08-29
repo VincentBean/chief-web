@@ -16,6 +16,7 @@ import {
   listStories,
   nowIso,
   type PrTargetBranch,
+  queuePosition,
   type Session,
   type SessionStatus,
   type Story,
@@ -107,6 +108,11 @@ export interface SessionView {
    */
   readonly scheduleMissed: boolean;
   readonly queuedAt: string | null;
+  /**
+   * 1-based place in the FIFO build queue (US-018), or `null` when the session
+   * is not waiting for a slot. The dashboard shows it as "Queued (#2)".
+   */
+  readonly queuePosition: number | null;
   readonly containerId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
@@ -573,6 +579,7 @@ export class SessionService {
       scheduledStartAt: session.scheduledStartAt,
       scheduleMissed: isScheduleMissed(session),
       queuedAt: session.queuedAt,
+      queuePosition: queuePosition(this.db, session),
       containerId: session.containerId,
       prUrl: session.prUrl,
       lastError: session.lastError,

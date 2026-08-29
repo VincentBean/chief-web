@@ -274,7 +274,8 @@ writes into it.
 ## The build loop
 
 **Start build** turns a **ready** session into a **building** one and hands it to
-the Ralph loop (`server/src/build/`). One iteration is:
+the Ralph loop (`server/src/build/`) — or, when every build slot is taken, into
+the [FIFO queue](#concurrency-and-the-build-queue). One iteration is:
 
 1. Re-read `prd.md`, sync the `stories` table, and pick the story with the
    lowest priority number that is not `done`.
@@ -396,8 +397,9 @@ start*, and marking it ready then starts the build immediately, after a
 confirmation that says so.
 
 Schedules are **one-shot**. The timestamp is cleared the moment the session
-enters `building`, whether the scheduler fired it or someone pressed **Start
-build** early, so a session that is later stopped or fails can never restart
+enters `building` — or the build queue below, which is the same promise
+honoured as far as the concurrency cap allows — whether the scheduler fired it
+or someone pressed **Start build** early, so a session that is later stopped or fails can never restart
 itself from a timestamp that has long passed. A fire that could not be honoured
 (no container, say) clears it too and records the reason on the session, rather
 than retrying every half minute for the rest of the day.
@@ -406,12 +408,47 @@ The dashboard and the session page both show the scheduled time in the visitor's
 own timezone with a `starts in …` countdown, refreshed by the same three-second
 poll as everything else.
 
+## Concurrency and the build queue
+
+Several sessions build at the same time, each in its **own container, its own
+workspace and its own branch**. Nothing is shared between two sessions of the
+same repository: the workspace is `workspaces/<session-id>/` (a UUID, not a
+name), the container is labelled with that id, and the branch is
+`chief/<session name>`, which `UNIQUE (repository_id, name)` keeps distinct.
+
+How many may run at once is the **Max concurrent building sessions** setting
+(`MAX_CONCURRENT_SESSIONS` supplies the default until a value is saved). The cap
+is read on every start decision, so raising it takes effect at the next slot,
+without a restart.
+
+A start beyond the cap — pressed by hand, or fired by a schedule — is **not
+refused**: the session stays `ready` with a `queued_at` timestamp and waits its
+turn. `POST /api/sessions/<id>/build` answers `200` with `queued: true` and the
+session's 1-based `queuePosition`; the dashboard and the session page show
+*Queued (#2)*.
+
+- **FIFO, and it survives a restart.** The order is the `queued_at` column
+  ordered by timestamp then id, so it is the same order before and after a
+  reboot. Nothing is spawned for a queued session, so waiting costs nothing.
+- **It starts on its own.** Every run that ends — finished, stopped, failed or
+  deleted — hands its slot to the head of the queue. The scheduler's tick pumps
+  the queue too, which is what picks it up again after a restart, when no run of
+  this process ever ended to free a slot.
+- **Pressing start again does not lose your place.** The first `queued_at` is
+  kept.
+- **Leave queue** (`DELETE /api/sessions/<id>/queue`) takes a waiting session
+  back to plain `ready` in one click. Nothing was started, so nothing is lost.
+- A session that can no longer be built when its turn comes (it went back to
+  planning, its stories are all done) **leaves the queue with the reason on it**
+  and the next session gets the slot.
+
 ## Dashboard
 
 The home page (and `/sessions`) is the dashboard: every session, most recently
 updated first, with its repository, status badge, story progress (`4/9 done`),
-feature branch, [scheduled start](#scheduled-starts) with its countdown, and
-pull request link. Each row links to the
+feature branch, [scheduled start](#scheduled-starts) with its countdown, its
+place in the [build queue](#concurrency-and-the-build-queue) if it is waiting
+for a slot, and pull request link. Each row links to the
 [session page](#planning), and the "New session" form lives here too, so the
 page an operator lands on is the one they work from.
 

@@ -187,12 +187,38 @@ export function listSessions(db: Database, filter: ListSessionsFilter = {}): Ses
     .map(mapSession);
 }
 
-/** Sessions waiting for a build slot, oldest first — the FIFO queue of US-018. */
+/**
+ * Sessions waiting for a build slot, oldest first — the FIFO queue of US-018.
+ *
+ * The id is the tie-break, so two sessions queued in the same millisecond still
+ * have a total order and every reader agrees on it; {@link queuePosition}
+ * counts with exactly the same comparison.
+ */
 export function listQueuedSessions(db: Database): Session[] {
   return db
-    .prepare('SELECT * FROM sessions WHERE queued_at IS NOT NULL ORDER BY queued_at ASC')
+    .prepare('SELECT * FROM sessions WHERE queued_at IS NOT NULL ORDER BY queued_at ASC, id ASC')
     .all()
     .map(mapSession);
+}
+
+/**
+ * Where a session stands in that queue, 1-based — the "#2" the UI shows — or
+ * `null` when it is not queued. Counted in SQL rather than from a list, so the
+ * dashboard's per-session view costs one row instead of the whole queue.
+ */
+export function queuePosition(
+  db: Database,
+  session: Pick<Session, 'id' | 'queuedAt'>,
+): number | null {
+  if (session.queuedAt === null) return null;
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM sessions
+        WHERE queued_at IS NOT NULL
+          AND (queued_at < :queued_at OR (queued_at = :queued_at AND id <= :id))`,
+    )
+    .get({ ':queued_at': session.queuedAt, ':id': session.id });
+  return row ? integer(row, 'count') : null;
 }
 
 /** Ready sessions whose scheduled start time has passed (US-017). */

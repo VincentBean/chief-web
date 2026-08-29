@@ -211,6 +211,8 @@ export interface Session {
    */
   scheduleMissed: boolean;
   queuedAt: string | null;
+  /** 1-based place in the FIFO build queue (US-018); null when not waiting. */
+  queuePosition: number | null;
   containerId: string | null;
   prUrl: string | null;
   lastError: string | null;
@@ -485,6 +487,14 @@ export interface Build {
   prd: PrdStatus;
   lastError: string | null;
   startedAt: string | null;
+  /** Waiting for a build slot: ready, in the queue, nothing spawned yet. */
+  queued: boolean;
+  /** Its 1-based place in that queue — shown as "Queued (#2)" — or null. */
+  queuePosition: number | null;
+  /** Sessions building right now, across the whole server. */
+  activeBuilds: number;
+  /** The cap they are counted against, from the settings page. */
+  maxConcurrentBuilds: number;
 }
 
 /** Polled by the session page while a build runs; a file read plus a map lookup. */
@@ -500,6 +510,14 @@ export async function startBuild(id: string): Promise<Build> {
 /** "Stop build": signals the agent and returns the session to `ready`. */
 export async function stopBuild(id: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'DELETE' });
+}
+
+/**
+ * "Leave queue": takes a waiting session back to plain `ready` (US-018).
+ * Nothing was spawned for it, so there is nothing to unwind.
+ */
+export async function leaveQueue(id: string): Promise<Build> {
+  return api<Build>(`/api/sessions/${encodeURIComponent(id)}/queue`, { method: 'DELETE' });
 }
 
 /** One iteration's section of the build log (US-016). */

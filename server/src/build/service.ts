@@ -2,10 +2,13 @@ import fs from 'node:fs';
 
 import type { Config } from '../config.js';
 import {
+  countSessionsByStatus,
   type Database,
   getSession,
+  listQueuedSessions,
   listStories,
   nowIso,
+  queuePosition,
   type Session,
   type SessionStatus,
   type Story,
@@ -30,6 +33,7 @@ import {
   sessionProgressFile,
   storyInputOf,
 } from '../sessions/index.js';
+import { getMaxConcurrentSessions } from '../settings/index.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
@@ -88,6 +92,14 @@ export interface BuildView {
   readonly prd: PrdStatus;
   readonly lastError: string | null;
   readonly startedAt: string | null;
+  /** Waiting for a build slot: a `ready` session with a `queued_at` (US-018). */
+  readonly queued: boolean;
+  /** Its 1-based place in the FIFO queue — the "#2" the UI shows — or null. */
+  readonly queuePosition: number | null;
+  /** Sessions building right now, across the whole server. */
+  readonly activeBuilds: number;
+  /** The cap those builds are counted against (US-004). */
+  readonly maxConcurrentBuilds: number;
 }
 
 /**
@@ -148,6 +160,14 @@ interface PrdSnapshot {
 
 export class BuildService {
   private readonly runs = new Map<string, RunState>();
+  /**
+   * Sessions whose container is being started right now. They are not
+   * `building` in the database yet, so they have to be counted against the cap
+   * here or two simultaneous starts would both see the same free slot.
+   */
+  private readonly launching = new Set<string>();
+  /** Serialises {@link pump}, so one freed slot is handed to one session. */
+  private draining: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly config: Config,
@@ -163,14 +183,107 @@ export class BuildService {
   }
 
   /**
-   * Starts the loop. The container is brought up first so a broken environment
-   * is a failed *request* rather than a session that flickers into `building`
-   * and straight back out to `failed`.
+   * Starts the loop, or takes a place in the queue (US-018).
+   *
+   * The cap is checked before anything is spawned, so a start beyond it costs
+   * nothing and is not a refusal: the session stays `ready` with a `queued_at`
+   * and is launched by {@link pump} the moment a slot frees. Everything below
+   * the cap behaves exactly as it did — the container is brought up first, so a
+   * broken environment is a failed *request* rather than a session that
+   * flickers into `building` and straight back out to `failed`.
    */
   async start(sessionId: string): Promise<BuildView> {
     const session = this.requireSession(sessionId);
     if (this.runs.has(sessionId)) return this.toView(session);
 
+    this.assertStartable(session);
+    if (this.freeSlots() <= 0) return this.toView(this.enqueue(session));
+    return this.toView(await this.launch(session));
+  }
+
+  /**
+   * "Leave queue": one click that takes a waiting session back to plain
+   * `ready`. Nothing has been spawned for it yet, so there is nothing to
+   * unwind — it simply stops being next.
+   */
+  dequeue(sessionId: string): BuildView {
+    const session = this.requireSession(sessionId);
+    if (session.queuedAt === null) {
+      throw new BuildError(
+        409,
+        'session_not_queued',
+        `"${session.name}" is not waiting for a build slot.`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { queuedAt: null }) ?? session;
+    logger.info('session left the build queue', { session: session.id, name: session.name });
+    return this.toView(updated);
+  }
+
+  /**
+   * Gives every free slot to the head of the queue.
+   *
+   * Called whenever a run ends — that is what "starts automatically when a slot
+   * frees" means — and from the scheduler's tick, which is what picks the queue
+   * up again after a restart: `queued_at` is in the database, so the order
+   * survives even though nothing about this loop does.
+   *
+   * Serialised on a single promise chain: two slots freeing at the same moment
+   * must not be offered to the same session.
+   */
+  pump(): Promise<void> {
+    this.draining = this.draining
+      // Never let one failed pass poison the chain, and never reject: callers
+      // fire this and forget it.
+      .catch(() => undefined)
+      .then(() => this.drain())
+      .catch((cause: unknown) => {
+        logger.warn('could not start the next queued build', { error: describe(cause) });
+      });
+    return this.draining;
+  }
+
+  /** Free build slots right now; zero or negative when the cap is reached. */
+  private freeSlots(): number {
+    const max = getMaxConcurrentSessions(this.db, this.config);
+    // A session whose container is still coming up is not `building` yet, but
+    // its slot is already spoken for.
+    return max - (countSessionsByStatus(this.db, 'building') + this.launching.size);
+  }
+
+  private async drain(): Promise<void> {
+    for (;;) {
+      if (this.freeSlots() <= 0) return;
+
+      const next = listQueuedSessions(this.db).find(
+        (candidate) => !this.runs.has(candidate.id) && !this.launching.has(candidate.id),
+      );
+      if (next === undefined) return;
+
+      try {
+        this.assertStartable(next);
+      } catch (cause) {
+        // Something changed while it waited — it went back to planning, or its
+        // stories are all done. It leaves the queue with the reason on it and
+        // the session behind it gets the slot.
+        this.leaveQueue(next, describe(cause));
+        continue;
+      }
+
+      try {
+        await this.launch(next);
+      } catch (cause) {
+        this.leaveQueue(
+          next,
+          `The queued build could not be started, so the session left the queue: ${describe(cause)}`,
+        );
+      }
+    }
+  }
+
+  /** Everything that has to be true before a session can be built at all. */
+  private assertStartable(session: Session): void {
     // `failed` is startable too, and that is the "Retry" of the session page:
     // a run that stopped because the agent stalled, the PRD broke or the
     // delivery failed leaves everything it did commit in place, so starting
@@ -200,54 +313,105 @@ export class BuildService {
           : `Every story of "${session.name}" is already done.`,
       );
     }
+  }
 
-    let containerId: string;
-    try {
-      containerId = (await this.containers.start(session)).id;
-    } catch (cause) {
-      throw new BuildError(
-        502,
-        'session_container_unavailable',
-        `The session container could not be started: ${describe(cause)}`,
-      );
-    }
-
-    // A schedule is spent the moment its session starts building, however that
-    // happened (US-017): the scheduler fired it, or someone pressed the button
-    // early. Clearing it here — the one place `building` is entered — is what
-    // stops a session that is later stopped or failed from starting itself
-    // again from a timestamp that has long passed.
-    const building =
+  /**
+   * Puts the session in the FIFO queue. Idempotent: a session already waiting
+   * keeps its original `queued_at`, so pressing the button twice — or a
+   * scheduler that fires the same session again — never sends it to the back.
+   *
+   * The schedule is spent here just as it is on a real start (US-017): the
+   * session *did* start, in the only sense the operator asked for, and a
+   * timestamp left behind would fire it a second time.
+   */
+  private enqueue(session: Session): Session {
+    const queued =
       updateSession(this.db, session.id, {
-        status: 'building',
-        lastError: null,
+        status: 'ready',
+        queuedAt: session.queuedAt ?? nowIso(),
         scheduledStartAt: null,
       }) ?? session;
-    const state: RunState = {
-      containerId,
-      iteration: 0,
-      attempts: 0,
-      storyId: null,
-      maxIterations: iterationCap(remainingStories(stories)),
-      startedAt: nowIso(),
-      stopping: false,
-      finished: Promise.resolve(),
-    };
-    this.runs.set(sessionId, state);
-    state.finished = this.runLoop(sessionId, state).finally(() => {
-      // Only ever forget *this* run: a session started again in the meantime
-      // has its own state in the map.
-      if (this.runs.get(sessionId) === state) this.runs.delete(sessionId);
-    });
-
-    logger.info('build started', {
+    logger.info('build queued: the concurrency cap is reached', {
       session: session.id,
       name: session.name,
-      container: containerId,
-      stories: stories.length,
-      maxIterations: state.maxIterations,
+      position: queuePosition(this.db, queued),
+      maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     });
-    return this.toView(building);
+    return queued;
+  }
+
+  /** Drops a queued session out of the queue with the reason on the session. */
+  private leaveQueue(session: Session, message: string): void {
+    updateSession(this.db, session.id, { queuedAt: null, lastError: message });
+    logger.warn('queued session removed from the queue', {
+      session: session.id,
+      name: session.name,
+      error: message,
+    });
+  }
+
+  /** Brings the container up and puts the session into `building`. */
+  private async launch(session: Session): Promise<Session> {
+    this.launching.add(session.id);
+    try {
+      let containerId: string;
+      try {
+        containerId = (await this.containers.start(session)).id;
+      } catch (cause) {
+        throw new BuildError(
+          502,
+          'session_container_unavailable',
+          `The session container could not be started: ${describe(cause)}`,
+        );
+      }
+
+      const stories = listStories(this.db, session.id);
+      // A schedule is spent the moment its session starts building, however
+      // that happened (US-017): the scheduler fired it, or someone pressed the
+      // button early. Clearing it here — the one place `building` is entered —
+      // is what stops a session that is later stopped or failed from starting
+      // itself again from a timestamp that has long passed. The queue entry
+      // goes the same way: the session is no longer waiting for a slot, it has
+      // one.
+      const building =
+        updateSession(this.db, session.id, {
+          status: 'building',
+          lastError: null,
+          scheduledStartAt: null,
+          queuedAt: null,
+        }) ?? session;
+      const state: RunState = {
+        containerId,
+        iteration: 0,
+        attempts: 0,
+        storyId: null,
+        maxIterations: iterationCap(remainingStories(stories)),
+        startedAt: nowIso(),
+        stopping: false,
+        finished: Promise.resolve(),
+      };
+      this.runs.set(session.id, state);
+      state.finished = this.runLoop(session.id, state).finally(() => {
+        // Only ever forget *this* run: a session started again in the meantime
+        // has its own state in the map.
+        if (this.runs.get(session.id) === state) this.runs.delete(session.id);
+        // The slot this run held is free now. Detached on purpose: "Stop
+        // build" awaits `finished`, and it must not also wait for the next
+        // session's container to come up.
+        void this.pump();
+      });
+
+      logger.info('build started', {
+        session: session.id,
+        name: session.name,
+        container: containerId,
+        stories: stories.length,
+        maxIterations: state.maxIterations,
+      });
+      return building;
+    } finally {
+      this.launching.delete(session.id);
+    }
   }
 
   /**
@@ -269,8 +433,11 @@ export class BuildService {
         );
       }
       // `building` with no loop behind it: this server was restarted while the
-      // session was running. Returning it to `ready` is the whole of "stop".
-      return this.toView(this.returnToReady(session));
+      // session was running. Returning it to `ready` is the whole of "stop" —
+      // and it frees the slot it was counted against.
+      const idle = this.returnToReady(session);
+      void this.pump();
+      return this.toView(idle);
     }
 
     state.stopping = true;
@@ -589,6 +756,10 @@ export class BuildService {
       prd: document.status,
       lastError: session.lastError,
       startedAt: state?.startedAt ?? null,
+      queued: session.queuedAt !== null,
+      queuePosition: queuePosition(this.db, session),
+      activeBuilds: countSessionsByStatus(this.db, 'building'),
+      maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     };
   }
 }

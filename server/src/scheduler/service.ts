@@ -20,15 +20,26 @@ import { logger } from '../lib/logger.js';
  * to be told.
  *
  * Schedules are one-shot. The timestamp is spent the moment its session enters
- * `building` (see `BuildService.start`), so a build that is later stopped or
- * fails can never be restarted by a leftover schedule; and a fire that could
- * not be honoured clears it too, with the reason on the session, rather than
- * retrying it every interval for the rest of the day.
+ * `building` — or the build queue (US-018), which is the same promise honoured
+ * as far as the cap allows — so a build that is later stopped or fails can
+ * never be restarted by a leftover schedule; and a fire that could not be
+ * honoured clears it too, with the reason on the session, rather than retrying
+ * it every interval for the rest of the day.
+ *
+ * The same tick drives that queue, for the same reason: `queued_at` is a
+ * column, so the sessions waiting for a slot when the stack went down are
+ * simply waiting for one now.
  */
 
 /** The slice of the build loop (US-013) the scheduler drives. */
 export interface ScheduledBuilds {
   start(sessionId: string): Promise<unknown>;
+  /**
+   * Gives any free build slot to the head of the FIFO queue (US-018). The
+   * queue is a column too, so the same tick that catches up on schedules is
+   * what picks it up again after a restart.
+   */
+  pump(): Promise<unknown>;
 }
 
 /** What a scheduler offers its callers; `SchedulerService` is the real one. */
@@ -104,6 +115,16 @@ export class SchedulerService implements SessionScheduler {
     let started = 0;
     for (const session of due) {
       if (await this.startSession(session)) started += 1;
+    }
+
+    // Whatever did not fit under the concurrency cap is queued rather than
+    // started (US-018); this is also the heartbeat that gets the queue moving
+    // again after a restart, when no run of this process ever ended to free a
+    // slot.
+    try {
+      await this.builds.pump();
+    } catch (cause) {
+      logger.warn('could not start the next queued build', { error: describe(cause) });
     }
     return started;
   }

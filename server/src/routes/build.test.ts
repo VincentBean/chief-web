@@ -16,10 +16,13 @@ import {
   createRepository,
   createSession,
   type Database,
+  deleteSession,
+  deleteSetting,
   featureBranchFor,
   IN_MEMORY,
   openDatabase,
   type Session,
+  setSettingNumber,
   syncStories,
   updateSession,
 } from '../db/index.js';
@@ -221,5 +224,46 @@ describe('build api', () => {
 
     assert.equal(response.status, 409);
     assert.equal(body.error, 'session_not_building');
+  });
+
+  it('queues a start beyond the cap, and gives the place back on request', async () => {
+    // Another session of the same repository is already using the only slot.
+    setSettingNumber(db, 'max_concurrent_sessions', 1);
+    const other = createSession(db, {
+      repositoryId: session.repositoryId,
+      name: 'add-billing',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      status: 'building',
+    });
+
+    try {
+      const queued = (await (
+        await call('POST', `/api/sessions/${session.id}/build`)
+      ).json()) as BuildView;
+
+      // Accepted, not refused: the start is a place in the queue.
+      assert.equal(queued.status, 'ready');
+      assert.equal(queued.queued, true);
+      assert.equal(queued.queuePosition, 1);
+      assert.equal(queued.activeBuilds, 1);
+      assert.equal(queued.maxConcurrentBuilds, 1);
+      assert.equal(invocations.length, 0);
+
+      const left = (await (
+        await call('DELETE', `/api/sessions/${session.id}/queue`)
+      ).json()) as BuildView;
+      assert.equal(left.queued, false);
+      assert.equal(left.queuePosition, null);
+      assert.equal(left.status, 'ready');
+
+      const again = await call('DELETE', `/api/sessions/${session.id}/queue`);
+      const body = (await again.json()) as ErrorBody;
+      assert.equal(again.status, 409);
+      assert.equal(body.error, 'session_not_queued');
+    } finally {
+      deleteSession(db, other.id);
+      deleteSetting(db, 'max_concurrent_sessions');
+    }
   });
 });

@@ -29,6 +29,8 @@ after(() => {
  */
 class FakeBuilds implements ScheduledBuilds {
   readonly started: string[] = [];
+  /** How often the tick asked the build queue to move (US-018). */
+  pumps = 0;
   /** Session ids the build refuses to start, and why. */
   readonly refuse = new Map<string, string>();
 
@@ -43,6 +45,11 @@ class FakeBuilds implements ScheduledBuilds {
       lastError: null,
       scheduledStartAt: null,
     });
+    return Promise.resolve({});
+  }
+
+  pump(): Promise<unknown> {
+    this.pumps += 1;
     return Promise.resolve({});
   }
 }
@@ -183,6 +190,19 @@ describe('the session scheduler', () => {
     // The second caller joined the pass in flight rather than firing again.
     assert.equal(second, 1);
     assert.equal(w.builds.started.length, 1);
+  });
+
+  it('drives the build queue on every tick, so a restart picks it up (US-018)', async () => {
+    const w = world();
+    // Nothing is due: the queue is moved along regardless, which is what makes
+    // the boot tick the catch-up for sessions that were queued when the stack
+    // went down.
+    await w.scheduler.tick();
+    assert.equal(w.builds.pumps, 1);
+
+    w.session({ at: PAST });
+    await w.scheduler.tick();
+    assert.equal(w.builds.pumps, 2);
   });
 
   it('refuses an interval that would break the 30 second promise', () => {
