@@ -8,6 +8,38 @@ inside a dedicated Docker container, and opens a pull request when it is done.
 
 Installation requires nothing but Docker.
 
+**New here?** [Prerequisites](#prerequisites) → [Setup](#setup) →
+[Your first session](#your-first-session) → [Architecture](#architecture) →
+[Troubleshooting](#troubleshooting).
+
+## Prerequisites
+
+- **Docker Engine 24+ with the Compose v2 plugin.** Check with
+  `docker --version` and `docker compose version` — if the second one prints
+  usage instead of a version, you have the old `docker-compose` binary and need
+  the plugin. Docker Desktop (macOS/Windows) and Docker Engine (Linux) both ship
+  it.
+- **Access to the Docker socket**, because chief-web starts a container per
+  session (see [Architecture](#architecture)). On Linux that means your user is
+  in the `docker` group or you run compose with `sudo`. Rootless Docker works
+  too, but its socket is elsewhere (`$XDG_RUNTIME_DIR/docker.sock`), so both the
+  bind mount in `docker-compose.yml` and `DOCKER_SOCKET` have to point at it.
+- **A GitHub account with admin rights on the repositories you want worked on** —
+  you need to add a deploy key to each of them, and a personal access token that
+  may open pull requests.
+- **A Claude account you can sign into interactively** (a Claude Pro/Max
+  subscription or Anthropic Console credentials). There is no API key to paste:
+  Claude Code is signed in once, in a browser terminal, and the credentials are
+  reused by every session.
+- **Outbound network** to `github.com` over SSH (port 22) and to
+  `api.github.com` and Anthropic over HTTPS.
+- **A couple of GB of disk** for the two images, plus a full clone per session
+  on the data volume, and enough RAM for the sessions you run at once — each one
+  is a container running an agent and, usually, your test suite.
+
+Nothing else is needed on the host: git, Node.js and the Claude Code CLI all
+live inside the images.
+
 ## Quick start
 
 ```sh
@@ -18,8 +50,8 @@ docker compose up --build
 The UI is then available on <http://localhost:8080> (change the host port with
 `CHIEF_WEB_PORT` in `.env`). First-run setup is completed in the browser: log in
 with the password, add a GitHub token and repositories, and sign Claude Code in
-once from **Settings → Set up Claude** (see
-[Claude authentication](#claude-authentication)).
+once from **Settings → Set up Claude**. [Setup](#setup) walks through all of it
+step by step.
 
 Health check:
 
@@ -27,7 +59,286 @@ Health check:
 curl http://localhost:8080/api/health   # -> {"status":"ok"}
 ```
 
-## Layout
+## Setup
+
+Six steps from a clean host to a repository chief-web can build. Steps 1–3 are
+the terminal; 4–6 are the browser and take a couple of minutes.
+
+### 1. Configure `.env`
+
+```sh
+git clone https://github.com/<you>/chief-web.git
+cd chief-web
+cp .env.example .env
+```
+
+Every value has a working default; the one worth setting by hand is the
+password protecting the whole UI:
+
+```ini
+CHIEF_WEB_PASSWORD=a-long-random-passphrase
+CHIEF_WEB_PORT=8080          # host port; the container always listens on 8080
+```
+
+If you leave `CHIEF_WEB_PASSWORD` empty the server generates a password on first
+boot and logs it exactly once (`docker compose logs server | grep -i password`).
+Setting the variable later always wins over that generated one.
+
+Two more are worth a look now; the rest are documented in
+[`.env.example`](.env.example) and can wait:
+
+```ini
+PUBLIC_URL=https://chief.example.com   # only used to link a PR back to its session
+MAX_CONCURRENT_SESSIONS=3              # default build concurrency (changeable in the UI)
+```
+
+### 2. Start the stack
+
+```sh
+docker compose up --build
+```
+
+This builds **two** images — the server (`chief-web:latest`) and the runner
+(`chief-web-runner:latest`, the image every session container runs) — and starts
+only the server. The first build takes a few minutes. Add `-d` to run it in the
+background; `docker compose logs -f server` follows the logs afterwards.
+
+Check it is up:
+
+```sh
+curl http://localhost:8080/api/health    # -> {"status":"ok"}
+```
+
+### 3. First login
+
+Open <http://localhost:8080>. Every page redirects to `/login` until you are
+signed in; enter the password from step 1. There are no user accounts — the
+password *is* the operator — and the session cookie lasts 7 days.
+
+The home page is the [dashboard](#dashboard), and it is the hub: links to
+**Repositories**, **Settings**, **Terminals** and **Log out** are in its header,
+and every other page links back to it. It also says what is still missing — no
+repository yet, Claude Code not authenticated — which is steps 4–6.
+
+### 4. Add a GitHub token
+
+chief-web opens pull requests with a **GitHub Personal Access Token**. Create
+one at <https://github.com/settings/tokens>, in either flavour:
+
+| Token type | Where | What to grant |
+| --- | --- | --- |
+| **Classic PAT** | Settings → Developer settings → Personal access tokens → **Tokens (classic)** | the **`repo`** scope (that whole checkbox; it covers private repositories and pull requests) |
+| **Fine-grained token** | … → **Fine-grained tokens** | *Repository access*: the repositories chief-web will work on. *Repository permissions*: **Contents: Read and write** and **Pull requests: Read and write** |
+
+Prefer the fine-grained token: it can be limited to the repositories you
+actually hand to chief-web. If those repositories belong to an organisation, a
+fine-grained token has to be approved by an org owner before it works.
+
+Give it an expiry you are willing to renew — an expired token fails at the very
+last step of a session, when the pull request is opened
+([troubleshooting](#recovering-a-failed-session)).
+
+Then in chief-web: **Settings → GitHub Personal Access Token**, paste, **Save**,
+then press **Validate**. Validate calls `GET https://api.github.com/user` and
+shows the account the token authenticates as, so a typo is caught here rather
+than at the end of a build. The token is write-only from then on: the UI only
+ever shows whether one is stored plus its last four characters.
+
+The token opens pull requests. It is *not* how sessions push code — that is the
+per-repository deploy key in the next step.
+
+### 5. Add a repository and its deploy key
+
+Go to **Repositories → Add repository**:
+
+| Field | Value |
+| --- | --- |
+| **Name** | how it appears in chief-web |
+| **SSH URL** | `git@github.com:owner/repo.git` — SSH, not HTTPS |
+| **GitHub slug** | `owner/repo`, derived from the URL; override it only for an unusual remote |
+| **Default base branch** | what sessions branch from by default (`main`, `develop`, …) |
+| **SSH key** | leave **Generate a new ed25519 keypair** selected |
+
+Save. chief-web generates the keypair and shows you the **public** half under
+**Deploy key**, with a **Copy public key** button and a link straight to the
+right GitHub page.
+
+On GitHub, go to `https://github.com/<owner>/<repo>/settings/keys/new`, paste the
+key, give it a title (`chief-web`), and — this is the part everyone forgets —
+**tick "Allow write access"**. Sessions push their feature branch with this key;
+a read-only deploy key clones fine and then fails at the first push.
+
+Back in chief-web, press **Test connection**. It runs `git ls-remote` in a
+short-lived runner container using that key and reports either success or git's
+own stderr. Do not skip it: it turns a mistake here into one line of output now
+instead of a failed session later.
+
+If you would rather use a key you already have, pick **Paste an existing private
+key** instead. It must be **unencrypted** — a session container has no way to
+answer a passphrase prompt. The private half never leaves the server: it is
+stored `0600` on the data volume and is never returned by the API, shown in the
+UI, or written to a log.
+
+Repeat for every repository you want chief-web to work on. Each gets its own
+key.
+
+### 6. Sign Claude Code in
+
+Go to **Settings → Claude Code** and press **Set up Claude**. chief-web starts a
+temporary container with only the credentials volume mounted, runs
+`claude auth login` in it, and shows the terminal inline:
+
+1. Select the URL it prints, copy it with **Ctrl+Shift+C**, and open it in a
+   new tab.
+2. Approve the request in your browser and copy the code Claude gives you back.
+3. Paste it into the terminal with **Ctrl+Shift+V** and press Enter.
+4. Press **Close login terminal**.
+
+The indicator flips to **Authenticated** immediately — closing the terminal
+removes the container and re-probes. The credentials live in the named
+`chief-web-claude-auth` volume and are shared by every session container, so
+this is a one-time step that survives `docker compose down` and restarts.
+
+**Creating or planning a session is blocked until this says Authenticated**, on
+purpose: an agent that cannot authenticate would otherwise fail on its first
+invocation, a long way from the cause.
+
+Setup is done. Everything after this is per session.
+
+## Your first session
+
+One session is one feature: its own container, its own clone, its own branch,
+one pull request at the end. Here it is end to end.
+
+### 1. Create the session
+
+On the dashboard, open **New session**:
+
+| Field | Notes |
+| --- | --- |
+| **Repository** | one you registered in [step 5](#5-add-a-repository-and-its-deploy-key) |
+| **Session name** | a slug (`letters-numbers-hyphens`), unique per repository. It becomes the feature branch **`chief/<name>`** and the workspace directory — so name it after the feature: `rate-limiting`, not `test1` |
+| **Base branch** | what to branch from; defaults to the repository's |
+| **PR target branch** | where the pull request will be opened (`develop` or `main`) |
+| **Scheduled start** | optional — see [Scheduled starts](#scheduled-starts) |
+
+**Create session** starts the container, checks that `chief/<name>` does not
+already exist on `origin`, clones the base branch and creates the feature
+branch. That takes a few seconds on a small repository. If it fails — bad key,
+missing base branch, unreachable remote — the session stays **pending** with
+git's own stderr on screen and a **Retry setup** button; fix the cause and press
+it, and the existing clone is reused.
+
+### 2. Plan the PRD
+
+The session page (`/sessions/<id>`) opens on a browser terminal running Claude
+Code **inside the session's container**, in the clone. Press **Start planning**,
+optionally filling in the "What do you want to build?" box first — a paragraph
+of context is plenty.
+
+This is `chief new` in a browser. Claude asks 3–5 clarifying questions with
+lettered options; answer them the compact way (`1A, 2C, 3B`) or in prose. It
+then writes `.chief/prds/<session-name>/prd.md`: a numbered list of user stories
+with a status, a priority and acceptance criteria.
+
+- The panel above the terminal shows whether `prd.md` exists, when it was last
+  written and how many stories it holds. It polls the workspace, so it updates
+  on its own as Claude writes.
+- The terminal belongs to the server, not to the tab. Reload the page, close the
+  laptop, come back tomorrow — **Resume planning** rejoins the same
+  conversation. Only **Close terminal** ends it.
+- Reopening planning on a session that already has a PRD uses the *edit* prompt,
+  so an existing PRD is amended, never rewritten.
+
+Read the PRD before you go on. Stories that are too big are the single most
+common reason a build stalls: one story should be one commit's worth of work.
+You can ask Claude to split, merge, reorder or reprioritise them right in the
+same conversation.
+
+### 3. Mark it ready
+
+Press **Mark ready**. chief-web parses `prd.md` and only promotes the session
+from **pending** to **ready** if the whole file is usable — nothing is ever built
+against a PRD it cannot read. The stories then appear on the page with their id,
+title, priority and status.
+
+If the file does not parse, the session stays pending and you get the specific
+errors with line numbers (an unknown status, a duplicated story id, a story with
+no acceptance criteria). Fix them the same way you wrote them: **Resume
+planning** and tell Claude what to correct.
+
+**Back to planning** returns a ready session to pending whenever you want to
+change the PRD again.
+
+### 4. Build
+
+Press **Start build**. From here it is autonomous. Each iteration:
+
+1. picks the lowest-priority-number story that is not `done`;
+2. marks it `in-progress` in `prd.md`;
+3. runs one fresh headless `claude -p` on it inside the container;
+4. verifies the result against the world — did the story's status change, did
+   `git rev-parse HEAD` move — never against what the agent claims.
+
+Watch it in the **live log** on the session page. It streams from the agent as
+it works and is also written to `.chief/prds/<session-name>/agent.log` in the
+workspace, so the history is there after a reload, a restart, or a week later.
+The story list updates as stories are completed, and the feature branch is
+pushed to `origin` **after every completed story** — so what the remote has is
+never more than one story behind.
+
+While it runs you can:
+
+- **Stop build** — signals the agent and returns the session to **ready**.
+  Everything already committed stays, so pressing **Start build** again resumes
+  rather than restarts.
+- Open a [browser terminal](#browser-terminals) into the same container to look
+  around while the agent works.
+- Leave. Nothing depends on the tab being open, and if all the build slots are
+  taken the session waits in a [FIFO queue](#concurrency-and-the-build-queue)
+  and starts by itself.
+
+Expect a build to take from minutes to hours depending on the PRD. The default
+budget is 30 minutes per story iteration (**Settings → Agent timeout**), two
+retries for a story that makes no progress, and an overall iteration cap of the
+outstanding stories plus 50%.
+
+### 5. Push and pull request
+
+When the last story is `done`, chief-web pushes the branch once more and opens
+the pull request itself:
+
+- **title**: the session name;
+- **body**: the completed stories by id and title with their short commit SHAs,
+  the branches involved, and a link back to the session page when `PUBLIC_URL`
+  is set;
+- **base**: the PR target branch you chose.
+
+The session becomes **finished** and the pull request URL appears on both the
+session page and the dashboard. An open pull request for the same head/base is
+adopted rather than duplicated, so this is safe to retry.
+
+If the push or the PR fails — expired token, protected branch, no commits — the
+session goes **failed** at the `push` or `pull_request` stage with the underlying
+message, and **Retry push & PR** re-attempts *only* that step. No story is ever
+rebuilt.
+
+### 6. Review and merge
+
+Review the pull request like any other. It is ordinary git: the branch is
+`chief/<session-name>`, one commit per story, and the PRD, the progress notes
+and the agent log are in `.chief/prds/<session-name>/` in the workspace (the
+agent commits the PRD and progress file; the log is excluded from commits).
+
+Needs another round? The session is finished, but the workspace and branch are
+still there: open a new session for the follow-up work, or push commits of your
+own. Merge, and you have gone from zero to a merged PR.
+
+When you no longer need it, **Delete** removes the container, the workspace and
+the row. **It never touches the remote** — the branch and the pull request are
+the output of the session and outlive it.
+
+## Architecture
 
 ```
 docker-compose.yml   the whole stack: the `server` service, the `runner` image
@@ -38,16 +349,100 @@ server/              Node.js + TypeScript backend (API, WebSockets, orchestrator
 web/                 React + Vite frontend, served as static files by the server
 ```
 
-Persistent state lives in two named Docker volumes:
+### One container per session
 
-| Volume                   | Mount          | Contents                                      |
-| ------------------------ | -------------- | --------------------------------------------- |
-| `chief-web-data`         | `/data`        | SQLite database, SSH deploy keys, workspaces   |
-| `chief-web-claude-auth`  | `/claude-auth` | Claude Code credentials shared by all sessions |
+The `server` container never runs an agent. It is a Node process that serves the
+UI and the API and **spawns one container per session** from the runner image,
+through the Docker socket:
 
-Both are named explicitly (`CHIEF_DATA_VOLUME`, `CLAUDE_AUTH_VOLUME`) rather than
-carrying the compose project prefix, because the server passes those names to the
-Docker socket when it spawns containers.
+```
+      browser
+         │  HTTP + WebSocket
+   ┌─────▼──────────────────────────┐        ┌──────────────────────────┐
+   │ server (chief-web:latest)      │ Docker │ session container        │
+   │  API · orchestrator · build    │ socket │  claude · git · node     │
+   │  loop · SQLite · deploy keys   ├───────▶│  /workspace = its clone  │
+   └────────────────────────────────┘        └──────────────────────────┘
+         │                                    (one per session, plus
+         └── /data, /claude-auth               short-lived helpers)
+```
+
+Each session container gets the repository's deploy key, its own clone at
+`/workspace/repo` and its own branch, and is labelled
+`chief-web.session=<session-id>` — the only durable link between a database row
+and a container, and what `docker ps --filter label=chief-web.session` lists.
+
+Why a container per session, rather than one shared workspace:
+
+- **Isolation.** Sessions of the same repository never see each other's working
+  tree, branch, dependencies or half-finished edits, so several can build at
+  once ([concurrency](#concurrency-and-the-build-queue)).
+- **Blast radius.** The agent runs with
+  `--dangerously-skip-permissions`, so it must not be able to touch the host or
+  another session. It runs as an unprivileged user (uid 1000) in a container
+  with no published ports and nothing mounted but its own workspace, the shared
+  credentials and one key.
+- **Recoverability.** The container is disposable; the *workspace* is the state.
+  A lost container is replaced over the same clone and the build resumes.
+
+Short-lived containers are started the same way for the repository connection
+test, the Claude auth probe and the Claude login. Details:
+[Session containers](#session-containers), [Runner image](#runner-image).
+
+### Volumes
+
+Everything that must survive a restart is in **two named Docker volumes** — the
+containers themselves hold nothing you would miss:
+
+| Volume                  | Mounted in server at | Contents                                                          |
+| ----------------------- | -------------------- | ----------------------------------------------------------------- |
+| `chief-web-data`        | `/data`              | the SQLite database, the per-repository SSH deploy keys, and one workspace (clone + `.chief/` state) per session |
+| `chief-web-claude-auth` | `/claude-auth`       | the Claude Code credentials, shared by every session container     |
+
+Both are named explicitly (`CHIEF_DATA_VOLUME`, `CLAUDE_AUTH_VOLUME`) rather
+than carrying the compose project prefix, because the server passes those names
+to the Docker socket when it spawns containers. A container mounts the
+credentials volume **by name**; its own workspace is a *subdirectory* of the data
+volume, which a name cannot express, so the server looks the volume's host
+mountpoint up once and bind-mounts the subdirectory — bind sources are always
+resolved on the host.
+
+`docker compose down` keeps both volumes. `docker compose down -v` destroys
+them: every session, every workspace, every deploy key and the Claude login.
+Backing chief-web up means backing up `chief-web-data`.
+
+### The Docker socket, and what it costs
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+The server needs the socket because spawning, exec'ing into and removing session
+containers *is* what chief-web does. There is no way to do it without.
+
+**This grants the server container root-equivalent control of the host.** A
+process that can talk to the Docker socket can start a privileged container that
+mounts `/`, so it is not meaningfully weaker than root on the machine — the
+container boundary around the server is not a security boundary against the
+server itself. What follows from that:
+
+- **Anyone with the chief-web password effectively has root on the host.** The
+  browser terminal is a shell inside a container of their choosing, and
+  `GET /api/containers` lists every running container on the host. Treat the
+  shared password as a root password: long, random, and never reused.
+- **Do not put chief-web on a machine you share with people you would not give
+  root to**, and do not expose it to the public internet. It is designed for a
+  single operator on their own host or VM.
+- **There is no HTTPS termination.** If it must be reachable beyond localhost,
+  put a reverse proxy with TLS (and, ideally, your own auth) in front of it, or
+  reach it over a VPN or an SSH tunnel.
+- **The agent itself runs unprivileged**, in a container that has no access to
+  the socket — only the server does. Nothing chief-web starts gives an agent the
+  host.
+
+The rest of the threat model — where the token and the keys are stored, what the
+cookie is, what a terminal can reach — is in [Security model](#security-model).
 
 ## Data layer
 
@@ -652,6 +1047,113 @@ All environment variables are documented in [`.env.example`](.env.example).
   and can read the key — it has to, in order to push.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.
+
+## Troubleshooting
+
+Most failures show the underlying command's own output on the session or
+repository page — read that first; the sections below are what the common ones
+mean. Server-side detail is in `docker compose logs -f server`, and
+`LOG_LEVEL=debug` in `.env` turns up the volume.
+
+### A clone or push fails over SSH
+
+Symptoms: **Test connection** fails, or a new session stays **pending** with a
+setup error, or a build fails at the `push` stage. The message is git's own
+stderr.
+
+| What you see | What it means |
+| --- | --- |
+| `Permission denied (publickey)` | The deploy key is not on the repository, or you added a *different* key. Compare the fingerprint shown on the Repositories page with the one on `github.com/<owner>/<repo>/settings/keys`. |
+| Clone works, **push** is rejected (`remote: Write access to repository not granted`) | The classic one: the deploy key was added **without "Allow write access"**. Tick it on GitHub — the key does not have to be replaced. |
+| `Repository not found` / `Could not read from remote repository` | Wrong slug or wrong URL. It must be the SSH form, `git@github.com:owner/repo.git`, not `https://…`. |
+| `Load key … error in libcrypto` or an interactive passphrase prompt | You pasted a **passphrase-protected** private key. A container cannot answer the prompt; import an unencrypted key or let chief-web generate one. |
+| `Host key verification failed` | A non-GitHub remote whose host key changed. github.com's keys are pinned in the runner image; other hosts use `accept-new`. |
+| The step times out on a very large repository | Raise `SESSION_SETUP_TIMEOUT_MS` (clone/checkout) or `PUSH_TIMEOUT_MS` in `.env` and restart the stack. |
+| `Connection timed out` on port 22 | The host blocks outbound SSH. |
+
+Always re-run **Test connection** after a fix: it is the same key and the same
+container the session will use, so a green result there means the session will
+clone.
+
+A repository whose key is listed as `missing — edit and paste a private key` lost
+its key file (a restored backup that skipped the data volume, usually). Edit the
+repository, generate a new keypair, and add the new public key on GitHub.
+
+### Claude says "Not authenticated"
+
+The indicator on **Settings → Claude Code** is the verdict of a real
+`claude auth status` run in a container, so it is the truth, not a cached guess.
+Session creation, planning and any retry that runs an agent are blocked while it
+says this — deliberately, so you find out here instead of two hours into a
+build.
+
+- **Credentials expired**, or you signed the account out elsewhere: press **Set
+  up Claude** again and repeat the login. It is the same flow as first-time
+  setup, and it replaces what is in the volume. Nothing else has to be restarted;
+  sessions already running pick the new credentials up on their next iteration,
+  because the volume is mounted live.
+- **A build failed mid-run with an auth error**: re-authenticate, then press
+  **Retry** on the session. Completed stories are not rebuilt.
+- **It says Not authenticated with an error next to it** (`docker: …`, `image
+  not found`, a timeout): the *probe* could not run. chief-web fails closed — an
+  unanswerable check is not a pass. Usually the runner image is missing
+  (`docker compose build runner`) or the Docker socket is unreachable. Fix that
+  and press **Re-check**.
+- **The login terminal shows nothing**: the login container did not start. Check
+  `docker compose logs server` and that `RUNNER_IMAGE` exists locally
+  (`docker image ls chief-web-runner`).
+- The status is cached for 15 seconds (`CLAUDE_STATUS_CACHE_MS`) because each
+  probe costs a container start; **Re-check** ignores the cache.
+
+The credentials survive `docker compose down` and restarts. They are lost only
+by removing the volume (`docker volume rm chief-web-claude-auth`), which is what
+a `docker compose down -v` does.
+
+### Recovering a failed session
+
+A **failed** session shows the reason at the top of its page, a **stage** badge
+saying where it broke, and one **Retry** button whose label tells you what it
+will do. Nothing already committed is ever redone: every story `prd.md` calls
+`done` is skipped.
+
+| Stage | Usual cause | What **Retry** does | What to fix first |
+| --- | --- | --- | --- |
+| `agent` | A story stalled three times, or an iteration ran out of time | Restarts the loop at the first story that is not `done` | Read the tail of the live log. A story too big for one iteration should be split (**Back to planning**); a slow test suite may just need a bigger **Agent timeout** in Settings |
+| `prd` | `prd.md` no longer parses — usually an agent mangled the file | Same, once it parses again | Open the session's terminal (or **Back to planning**) and fix the file; the errors name the lines |
+| `container_lost` | The container died or the stack was restarted mid-build | Starts a **fresh container on the same workspace** and resumes | Nothing, normally — just retry. If it recurs, check `docker compose logs` and the host's memory |
+| `push` | Deploy key without write access, protected branch, network | Re-runs the push and the pull request only | See [SSH failures](#a-clone-or-push-fails-over-ssh) |
+| `pull_request` | Expired/insufficient GitHub token, no commits between the branches, org approval missing | Same — an existing PR is adopted, never duplicated | Re-check the token on Settings with **Validate** ([token setup](#4-add-a-github-token)) |
+
+Notes that save time:
+
+- **A failed *setup* is not a failed session.** A clone that fails leaves the
+  session **pending** with a **Retry setup** button, because there is nothing to
+  resume yet.
+- **A retry after a `push`/`pull_request` failure does not need Claude.** Only
+  the half that runs an agent is behind the auth guard.
+- **Work is never lost by a failure.** The commits are in the clone on the data
+  volume and, for every completed story, already on `origin`. Even deleting the
+  session leaves the remote branch and the pull request untouched.
+- **If a retry keeps failing the same way**, stop retrying and look at the
+  workspace: open a browser terminal into the session's container and run `git
+  status`, `git log --oneline` and your test suite by hand. It is an ordinary
+  clone.
+- **After a host reboot or `docker compose up` following a crash**, startup
+  reconciliation compares the database with the daemon: containers whose session
+  is gone are removed, and a `building` session with no container is marked
+  failed at `container_lost`. If Docker is unreachable at boot the server starts
+  and changes nothing, on purpose — retry once the daemon is back.
+
+### The stack itself
+
+| Symptom | Check |
+| --- | --- |
+| `/api/health` does not answer | `docker compose ps` and `docker compose logs server`. Port already in use → change `CHIEF_WEB_PORT`. |
+| The login page rejects your password | If `CHIEF_WEB_PASSWORD` is set in `.env` it always wins, but only after a `docker compose up -d` that recreates the container. Otherwise grep the logs for the generated one. |
+| Every request bounces to `/login` | The cookie is `HttpOnly` and 7 days; changing the password invalidates all of them. |
+| `permission denied … /var/run/docker.sock` in the logs | The host user running compose is not in the `docker` group. |
+| Sessions never start, all say *Queued* | The concurrency cap. Raise **Max concurrent building sessions** in Settings; it takes effect at the next free slot with no restart. |
+| Disk filling up | Each session keeps a full clone under the data volume. Delete finished sessions — the branch and PR on GitHub survive it. |
 
 ## Development
 
