@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
@@ -18,6 +18,8 @@ import {
   syncStories,
   updateSession,
 } from '../db/index.js';
+import { DockerApi } from '../docker/index.js';
+import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
@@ -30,8 +32,9 @@ import {
   remainingStories,
   selectNextStory,
 } from './loop.js';
+import { createBuildLogStore } from './log.js';
 import { agentCommand, agentPrompt, storyContext } from './prompts.js';
-import type { AgentInvocation, AgentResult, AgentRunner } from './runner.js';
+import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner } from './runner.js';
 import { type BuildCompletion, BuildError, createBuildService } from './service.js';
 
 const PRD = `# PRD: Demo
@@ -155,7 +158,17 @@ describe('iteration classification', () => {
 describe('the agent command', () => {
   it('runs claude headless with the prompt as a single argument', () => {
     const command = agentCommand('two words');
-    assert.deepEqual(command, ['claude', '--dangerously-skip-permissions', '-p', 'two words']);
+    assert.deepEqual(command, [
+      'claude',
+      '--dangerously-skip-permissions',
+      // What makes the live log possible: the default format prints nothing
+      // until the agent exits (US-016).
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '-p',
+      'two words',
+    ]);
   });
 
   it('records the agent pid before exec-ing it, so "stop" can signal it', () => {
@@ -331,7 +344,14 @@ class MockRunner implements AgentRunner {
 }
 
 function serviceFor(world: World, completion?: BuildCompletion) {
-  return createBuildService(world.config, world.db, world.containers, world.runner, completion);
+  return createBuildService(
+    world.config,
+    world.db,
+    world.containers,
+    world.runner,
+    completion,
+    createBuildLogStore(world.config, world.db),
+  );
 }
 
 describe('the build loop', () => {
@@ -622,11 +642,114 @@ describe('the build loop', () => {
     assert.equal(view.status, 'ready');
   });
 
+  it('starts a failed session again, resuming from the PRD', async () => {
+    const world = new World();
+    world.markDone('US-002');
+    world.sync();
+    updateSession(world.db, world.session.id, { status: 'failed', lastError: 'the agent stalled' });
+    world.runner.behaviour = (invocation): void => {
+      const id = /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '';
+      world.markDone(id);
+      world.runner.commit();
+    };
+
+    const service = serviceFor(world);
+    await service.start(world.session.id);
+    await service.whenIdle(world.session.id);
+
+    // Only the outstanding story is run, and the recorded failure is cleared.
+    assert.deepEqual(
+      world.runner.invocations.map((invocation) => /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1]),
+      ['US-001'],
+    );
+    assert.equal(world.status(), 'finished');
+    assert.equal(world.error(), null);
+  });
+
+  it('writes each iteration to the log file in the workspace', async () => {
+    const world = new World();
+    world.runner.behaviour = (invocation): void => {
+      const id = /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '';
+      invocation.onOutput?.(`working on ${id}\n`);
+      world.markDone(id);
+      world.runner.commit();
+    };
+
+    const service = serviceFor(world);
+    await service.start(world.session.id);
+    await service.whenIdle(world.session.id);
+
+    const log = fs.readFileSync(
+      path.join(world.repoDir, '.chief/prds/add-login/agent.log'),
+      'utf8',
+    );
+    assert.match(log, /=== chief-web iteration 1 \| US-002 \| \S+ ===/);
+    assert.ok(log.includes('working on US-002\n'));
+    assert.match(log, /=== chief-web iteration 1 ended \| exit 0 \| \S+ ===/);
+    assert.match(log, /=== chief-web iteration 2 \| US-001 \| \S+ ===/);
+    assert.ok(log.includes('working on US-001\n'));
+  });
+
   it('answers 404 for a session that does not exist', () => {
     const world = new World();
     assert.throws(
       () => serviceFor(world).status('nope'),
       (error: unknown) => error instanceof BuildError && error.status === 404,
     );
+  });
+});
+
+describe('the container agent runner', () => {
+  let daemon: FakeDockerDaemon;
+  let docker: DockerApi;
+
+  before(async () => {
+    daemon = await FakeDockerDaemon.start();
+    daemon.addContainer({ id: 'container-1', name: 'chief-web-add-login' });
+    docker = new DockerApi(daemon.socketPath);
+  });
+
+  after(async () => {
+    await daemon.close();
+  });
+
+  it("renders the agent's stream-json into the log as it arrives", async () => {
+    daemon.onExec = () => ({
+      stdout:
+        `${JSON.stringify({ type: 'system', subtype: 'init', model: 'opus', cwd: CONTAINER_REPO_DIR })}\n` +
+        `${JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] },
+        })}\n` +
+        `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 3 })}\n`,
+      stderr: 'a warning from the image\n',
+      exitCode: 0,
+    });
+    const streamed: string[] = [];
+
+    const result = await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      onOutput: (text) => streamed.push(text),
+    });
+
+    const log = streamed.join('');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+    // stderr is passed through untouched; stdout is the rendered events.
+    assert.ok(log.includes('a warning from the image\n'));
+    assert.ok(log.includes(`[claude] started with opus in ${CONTAINER_REPO_DIR}\n`));
+    assert.ok(log.includes('[tool] Bash: npm test\n'));
+    assert.ok(log.includes('[claude] finished (3 turns)\n'));
+    // What the session's error message would quote is what the log showed.
+    assert.equal(result.output, log);
+
+    const exec = daemon.execs().at(-1);
+    assert.ok(exec);
+    assert.equal(exec.cmd[3], 'chief-build');
+    assert.ok(exec.cmd.includes('stream-json'));
+    daemon.onExec = null;
   });
 });

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import type { Duplex } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 
 /**
  * The slice of the Docker Engine API chief-web needs, spoken directly over the
@@ -109,6 +110,29 @@ export interface ExecOutput {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+}
+
+/** One decoded piece of an exec's output, as it arrived. */
+export interface ExecChunk {
+  readonly stream: 'stdout' | 'stderr';
+  readonly text: string;
+}
+
+/** How {@link DockerApi.streamExec} runs a command. */
+export interface StreamExecOptions {
+  /** Cap on the whole command; see {@link DockerApi.runExec}. */
+  readonly timeoutMs?: number;
+  /**
+   * Called with each chunk the moment it arrives, so a caller can show output
+   * while the command is still running. It must not throw.
+   */
+  readonly onOutput?: (chunk: ExecChunk) => void;
+  /**
+   * How much of each stream is retained for the returned {@link ExecOutput};
+   * the *tail* is kept. `0` keeps nothing, which is what a caller that already
+   * consumed everything through `onOutput` wants. Unset keeps all of it.
+   */
+  readonly maxOutputChars?: number;
 }
 
 export interface ExecState {
@@ -304,22 +328,49 @@ export class DockerApi {
    * the container.
    */
   async runExec(container: string, spec: ExecSpec, timeoutMs?: number): Promise<ExecOutput> {
+    return this.streamExec(container, spec, timeoutMs === undefined ? {} : { timeoutMs });
+  }
+
+  /**
+   * The same run, with the output delivered as it is produced (US-016).
+   *
+   * A build iteration is an hour-long `claude -p`, so waiting for the process
+   * to exit before anyone can see a byte of it is not an option. The frames are
+   * decoded incrementally by a {@link FrameDecoder} — a payload can be split
+   * across two reads, and so can a UTF-8 sequence inside it — and handed to
+   * `onOutput` chunk by chunk. What is retained for the return value is capped
+   * separately, because the caller doing the streaming usually keeps its own.
+   */
+  async streamExec(
+    container: string,
+    spec: ExecSpec,
+    options: StreamExecOptions = {},
+  ): Promise<ExecOutput> {
     const execId = await this.createExec(container, { ...spec, tty: false, attachStdin: false });
     const stream = await this.startExec(execId, undefined, false);
 
-    const chunks: Buffer[] = [];
+    const decoder = new FrameDecoder();
+    const stdout = new TailBuffer(options.maxOutputChars);
+    const stderr = new TailBuffer(options.maxOutputChars);
+    const take = (chunks: readonly ExecChunk[]): void => {
+      for (const chunk of chunks) {
+        (chunk.stream === 'stderr' ? stderr : stdout).push(chunk.text);
+        options.onOutput?.(chunk);
+      }
+    };
+
     let timedOut = false;
     const timer =
-      timeoutMs === undefined
+      options.timeoutMs === undefined
         ? null
         : setTimeout(() => {
             timedOut = true;
             stream.destroy();
-          }, timeoutMs);
+          }, options.timeoutMs);
 
     try {
       await new Promise<void>((resolve, reject) => {
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        stream.on('data', (chunk: Buffer) => take(decoder.push(chunk)));
         stream.on('end', resolve);
         stream.on('close', resolve);
         // A destroyed stream reports the abort as an error; that is the
@@ -330,12 +381,13 @@ export class DockerApi {
       if (timer !== null) clearTimeout(timer);
       stream.destroy();
     }
+    take(decoder.flush());
 
-    const { stdout, stderr } = demultiplex(Buffer.concat(chunks));
-    if (timedOut) return { exitCode: null, stdout, stderr, timedOut: true };
-
+    if (timedOut) {
+      return { exitCode: null, stdout: stdout.text, stderr: stderr.text, timedOut: true };
+    }
     const state = await this.inspectExec(execId);
-    return { exitCode: state.exitCode, stdout, stderr, timedOut: false };
+    return { exitCode: state.exitCode, stdout: stdout.text, stderr: stderr.text, timedOut: false };
   }
 
   async resizeExec(execId: string, size: TerminalSize): Promise<void> {
@@ -572,4 +624,94 @@ function isFrameHeader(raw: Buffer, offset: number): boolean {
   const stream = raw.readUInt8(offset);
   if (stream < STREAM_STDIN || stream > STREAM_STDERR) return false;
   return raw.readUInt8(offset + 1) === 0 && raw.readUInt8(offset + 2) === 0 && raw.readUInt8(offset + 3) === 0;
+}
+
+/**
+ * Incremental version of {@link demultiplex} for a stream read chunk by chunk.
+ *
+ * Two things can be split across two reads and neither may be guessed at: a
+ * frame (its 8-byte header, or its payload) and a UTF-8 sequence *inside* a
+ * payload. So the bytes are held until a whole frame is there, and each stream
+ * gets its own {@link StringDecoder} that carries a half-finished character
+ * over to the next chunk.
+ *
+ * Anything that does not look like a header puts the decoder into raw mode for
+ * good and is reported as stdout — the same leniency as `demultiplex`, and what
+ * makes a TTY stream that reached it by mistake still readable.
+ */
+export class FrameDecoder {
+  private pending: Buffer = Buffer.alloc(0);
+  private raw = false;
+  private readonly decoders = {
+    stdout: new StringDecoder('utf8'),
+    stderr: new StringDecoder('utf8'),
+  };
+
+  /** Everything `chunk` completed, oldest first. */
+  push(chunk: Buffer): ExecChunk[] {
+    this.pending = this.pending.length === 0 ? chunk : Buffer.concat([this.pending, chunk]);
+    const out: ExecChunk[] = [];
+
+    for (;;) {
+      if (this.raw) {
+        this.emit(out, 'stdout', this.pending);
+        this.pending = Buffer.alloc(0);
+        return out;
+      }
+      if (this.pending.length < FRAME_HEADER_BYTES) return out;
+      if (!isFrameHeader(this.pending, 0)) {
+        this.raw = true;
+        continue;
+      }
+      const size = this.pending.readUInt32BE(4);
+      if (this.pending.length < FRAME_HEADER_BYTES + size) return out;
+      const stream = this.pending.readUInt8(0) === STREAM_STDERR ? 'stderr' : 'stdout';
+      this.emit(out, stream, this.pending.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + size));
+      this.pending = this.pending.subarray(FRAME_HEADER_BYTES + size);
+    }
+  }
+
+  /** Whatever is left when the stream ends: a truncated frame is not dropped. */
+  flush(): ExecChunk[] {
+    const out: ExecChunk[] = [];
+    if (this.pending.length > 0) {
+      const framed = !this.raw && this.pending.length >= FRAME_HEADER_BYTES && isFrameHeader(this.pending, 0);
+      const stream = framed && this.pending.readUInt8(0) === STREAM_STDERR ? 'stderr' : 'stdout';
+      this.emit(out, stream, framed ? this.pending.subarray(FRAME_HEADER_BYTES) : this.pending);
+      this.pending = Buffer.alloc(0);
+    }
+    for (const stream of ['stdout', 'stderr'] as const) {
+      const tail = this.decoders[stream].end();
+      if (tail !== '') out.push({ stream, text: tail });
+    }
+    return out;
+  }
+
+  private emit(out: ExecChunk[], stream: 'stdout' | 'stderr', payload: Buffer): void {
+    const text = this.decoders[stream].write(payload);
+    if (text !== '') out.push({ stream, text });
+  }
+}
+
+/**
+ * A string that only ever keeps its last `max` characters.
+ *
+ * The interesting end of a command that produced megabytes is the end of it,
+ * and an unbounded accumulator behind an hour-long agent run is a leak.
+ */
+class TailBuffer {
+  private value = '';
+
+  constructor(private readonly max?: number) {}
+
+  get text(): string {
+    return this.value;
+  }
+
+  push(chunk: string): void {
+    this.value += chunk;
+    if (this.max !== undefined && this.value.length > this.max) {
+      this.value = this.value.slice(this.value.length - this.max);
+    }
+  }
 }

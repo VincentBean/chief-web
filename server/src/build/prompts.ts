@@ -77,7 +77,19 @@ export function agentPrompt(input: AgentPromptInput): string {
  * isolation that makes skipping them safe, and what chief's own loop does.
  */
 export function agentCommand(prompt: string): string[] {
-  return ['claude', '--dangerously-skip-permissions', '-p', prompt];
+  // `stream-json` is what makes the live log possible: the default text format
+  // prints nothing until the agent exits, which for one iteration is up to an
+  // hour of silence. `--verbose` is required alongside it for `-p`, and chief
+  // passes exactly the same pair.
+  return [
+    'claude',
+    '--dangerously-skip-permissions',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '-p',
+    prompt,
+  ];
 }
 
 /**

@@ -279,8 +279,8 @@ the Ralph loop (`server/src/build/`). One iteration is:
 1. Re-read `prd.md`, sync the `stories` table, and pick the story with the
    lowest priority number that is not `done`.
 2. Write `**Status:** in-progress` for that story, into the file *and* the row.
-3. Exec `claude --dangerously-skip-permissions -p "<prompt>"` in
-   `/workspace/repo` inside the session container. The prompt is chief's
+3. Exec `claude --dangerously-skip-permissions --output-format stream-json --verbose -p "<prompt>"`
+   in `/workspace/repo` inside the session container. The prompt is chief's
    `embed/prompt.txt`, ported verbatim into `server/src/build/templates.ts`,
    with the story inlined as JSON plus a chief-web addendum carrying the PRD's
    own context, the current `progress.md`, and what the agent has to leave
@@ -305,6 +305,33 @@ The loop stops itself in four ways:
   writes inside the container) and the session goes back to **ready**.
   Everything already committed is kept, so a stopped build resumes rather than
   restarts.
+
+A **failed** session shows the stored reason at the top of its page and can be
+started again — that is what **Retry build** is. The loop resumes from `prd.md`,
+so every story already marked `done` is skipped and nothing is rebuilt.
+
+### The live log
+
+The agent is asked for `stream-json` rather than the default text format,
+because the default prints nothing until the process exits — which for one
+iteration is up to an hour. Each event is rendered into a readable line as it
+arrives and goes to two places at once:
+
+- **`.chief/prds/<session-name>/agent.log`** in the workspace, next to the PRD
+  and `progress.md`. The file is the log: it outlives the container, the server
+  and the browser tab, and it is what the per-iteration history is read back
+  from. Each iteration is delimited by
+  `=== chief-web iteration <n> | <story> | <timestamp> ===` markers, and the
+  clone's `.git/info/exclude` is told to ignore the file so no agent can commit
+  chief-web's own log alongside its work.
+- **`ws://…/api/sessions/<id>/build/log`**, the WebSocket the session page
+  attaches to. Attaching replays every section written so far and then follows,
+  so opening the page mid-build, reloading it, or coming back the next day all
+  show the same thing. The view auto-scrolls while you are at the bottom and
+  pauses as soon as you scroll up (or press **Pause scrolling**).
+
+Detaching a watcher never touches the loop, and a log file that cannot be
+written is a warning, not a failed build.
 
 Nothing about a run is stored in memory that matters: the statuses are in
 `prd.md` on the data volume, the work is in commits, and the learnings are in

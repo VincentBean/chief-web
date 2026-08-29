@@ -29,3 +29,15 @@ export function prdPathFor(sessionName: string): string {
 export function progressPathFor(sessionName: string): string {
   return `${prdDirFor(sessionName)}/progress.md`;
 }
+
+/**
+ * `.chief/prds/<session name>/agent.log`, relative to the repository root.
+ *
+ * Where the build loop appends everything its agents print (US-016). It sits
+ * next to the PRD and the progress file for the same reason they do: a session's
+ * whole record is one directory, so it travels with the clone and survives the
+ * container, the server and the browser tab that watched it being written.
+ */
+export function agentLogPathFor(sessionName: string): string {
+  return `${prdDirFor(sessionName)}/agent.log`;
+}

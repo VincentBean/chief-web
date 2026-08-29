@@ -30,6 +30,7 @@ import {
   sessionProgressFile,
   storyInputOf,
 } from '../sessions/index.js';
+import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
   iterationCap,
@@ -154,6 +155,7 @@ export class BuildService {
     private readonly containers: SessionContainers,
     private readonly runner: AgentRunner,
     private readonly completion: BuildCompletion,
+    private readonly logs: BuildLogs = new NullBuildLogs(),
   ) {}
 
   status(sessionId: string): BuildView {
@@ -169,11 +171,15 @@ export class BuildService {
     const session = this.requireSession(sessionId);
     if (this.runs.has(sessionId)) return this.toView(session);
 
-    if (session.status !== 'ready') {
+    // `failed` is startable too, and that is the "Retry" of the session page:
+    // a run that stopped because the agent stalled, the PRD broke or the
+    // delivery failed leaves everything it did commit in place, so starting
+    // again resumes from the PRD rather than redoing anything.
+    if (session.status !== 'ready' && session.status !== 'failed') {
       throw new BuildError(
         409,
         'session_not_ready',
-        `Only a ready session can be built; "${session.name}" is ${session.status}.`,
+        `Only a ready or failed session can be built; "${session.name}" is ${session.status}.`,
       );
     }
     if (!isCloned(this.config, session.id)) {
@@ -362,17 +368,29 @@ export class BuildService {
       attempt: state.attempts + 1,
     });
 
-    const result = await this.runner.run({
-      sessionId: session.id,
-      containerId: state.containerId,
-      prompt: agentPrompt({
-        sessionName: session.name,
-        story: promptStory(story, snapshot.parsed),
-        prd: snapshot.parsed,
-        progress: this.readProgress(session),
-      }),
-      timeoutMs: this.config.buildIterationTimeoutMs,
-    });
+    // Everything the agent prints goes to the log before it goes anywhere
+    // else: the file in the workspace is the record, and whoever is watching
+    // the session page is reading over its shoulder.
+    const log = this.logs.begin(session, state.iteration, story.storyId);
+    let result: AgentResult;
+    try {
+      result = await this.runner.run({
+        sessionId: session.id,
+        containerId: state.containerId,
+        prompt: agentPrompt({
+          sessionName: session.name,
+          story: promptStory(story, snapshot.parsed),
+          prd: snapshot.parsed,
+          progress: this.readProgress(session),
+        }),
+        timeoutMs: this.config.buildIterationTimeoutMs,
+        onOutput: (text) => log.write(text),
+      });
+    } catch (cause) {
+      log.end(null);
+      throw cause;
+    }
+    log.end(result.timedOut ? null : result.exitCode);
 
     // The bookkeeping happens even when the operator pressed "Stop build"
     // while this iteration was running: the agent may well have committed the
@@ -571,8 +589,9 @@ export function createBuildService(
   containers: SessionContainers,
   runner: AgentRunner,
   completion: BuildCompletion = new MarkSessionFinished(db),
+  logs: BuildLogs = new NullBuildLogs(),
 ): BuildService {
-  return new BuildService(config, db, containers, runner, completion);
+  return new BuildService(config, db, containers, runner, completion, logs);
 }
 
 /**

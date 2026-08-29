@@ -9,6 +9,7 @@ export {
   SessionService,
   type SessionSetupView,
   type SessionView,
+  sessionAgentLogFile,
   sessionPrdFile,
   sessionProgressFile,
   storyInputOf,

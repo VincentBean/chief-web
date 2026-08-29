@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 
 import { createApp } from './app.js';
 import { createAuthService } from './auth/index.js';
+import { createBuildLogSocketRoute, createBuildLogStore } from './build/index.js';
 import { loadConfig } from './config.js';
 import { closeDatabase, openDatabase } from './db/index.js';
 import { logger } from './lib/logger.js';
@@ -45,14 +46,20 @@ async function main(): Promise<void> {
     logger.error('could not reconcile session containers', { error: String(error) });
   }
 
+  // A build's output outlives the tab watching it — the file in the workspace
+  // is the record — so the store is owned here and shared by the loop that
+  // writes it and the gateway that streams it (US-016).
+  const buildLogs = createBuildLogStore(config, db);
+
   // The orchestrator is shared with the API: the same client that reconciled
   // at startup is the one that spawns a container for a new session (US-010).
-  const app = createApp(config, auth, db, { terminals, orchestrator });
+  const app = createApp(config, auth, db, { terminals, orchestrator, buildLogs });
 
-  // Terminals (US-007) and log streams (US-013) register their routes here;
+  // Terminals (US-007) and build logs (US-016) register their routes here;
   // the gateway enforces the same session cookie on every handshake.
   const gateway = new WebSocketGateway(auth);
   gateway.register(createTerminalSocketRoute(terminals));
+  gateway.register(createBuildLogSocketRoute(buildLogs));
 
   const server = app.listen(config.port, config.host, () => {
     logger.info('chief-web server listening', {

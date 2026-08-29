@@ -4,7 +4,13 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 
 import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.js';
-import { type BuildService, createAgentRunner, createBuildService } from './build/index.js';
+import {
+  type BuildLogStore,
+  type BuildService,
+  createAgentRunner,
+  createBuildLogStore,
+  createBuildService,
+} from './build/index.js';
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
@@ -70,6 +76,12 @@ export interface AppDependencies {
    */
   readonly builds?: BuildService;
   /**
+   * Where the build loop's output is written and watched from (US-016).
+   * `index.ts` passes the same store the WebSocket gateway serves, so the file
+   * on the data volume and the browser see one stream.
+   */
+  readonly buildLogs?: BuildLogStore;
+  /**
    * Push and pull request (US-014). Defaults to a service that pushes from the
    * session container and calls the GitHub REST API with the stored PAT.
    */
@@ -129,8 +141,10 @@ export function createApp(
   // request. It is both the loop's completion hand-off and its own endpoint, so
   // a delivery that failed can be retried without rerunning a story.
   const delivery = deps.delivery ?? createDeliveryService(config, db, orchestrator, exec);
+  const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
-    deps.builds ?? createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery);
+    deps.builds ??
+    createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given both.
   api.use(

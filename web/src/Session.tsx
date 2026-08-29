@@ -19,6 +19,7 @@ import {
   stopPlanning,
   type Story,
 } from './api.ts';
+import { BuildLog } from './BuildLog.tsx';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
 
@@ -271,6 +272,8 @@ export function Session() {
         </p>
       )}
 
+      {session.status === 'failed' && <FailureCard error={session.lastError} />}
+
       <section className="card">
         <div className="card__header">
           <h2 className="card__title">
@@ -297,7 +300,7 @@ export function Session() {
             </>
           )}
         </dl>
-        {session.lastError !== null && (
+        {session.lastError !== null && session.status !== 'failed' && (
           <p className="notice notice--error" role="status">
             {session.lastError}
           </p>
@@ -334,6 +337,10 @@ export function Session() {
         onStop={onStopBuild}
         onRetryDelivery={onRetryDelivery}
       />
+
+      {session.status !== 'pending' && (
+        <BuildLog sessionId={id} building={session.status === 'building'} />
+      )}
 
       <section className="card">
         <div className="card__header">
@@ -409,6 +416,37 @@ export function Session() {
         )}
       </section>
     </main>
+  );
+}
+
+/**
+ * Why a `failed` session failed (US-016).
+ *
+ * The stored message is the only account of it — the loop writes the retry
+ * count and the tail of the agent's own output into it — and it is multi-line,
+ * so it gets a card of its own at the top of the page rather than a line of
+ * body text further down that a reader has to go looking for.
+ */
+function FailureCard({ error }: { error: string | null }) {
+  return (
+    <section className="card card--failed" role="alert">
+      <div className="card__header">
+        <h2 className="card__title">
+          This session failed <span className="badge badge--failed">failed</span>
+        </h2>
+      </div>
+      {error === null ? (
+        <p className="field__hint">
+          No reason was recorded. The agent log below is the next place to look.
+        </p>
+      ) : (
+        <pre className="output output--wrap">{error}</pre>
+      )}
+      <p className="field__hint">
+        Nothing that was committed is lost. Starting the build again resumes from the PRD: every
+        story it already marked done is skipped.
+      </p>
+    </section>
   );
 }
 
@@ -580,6 +618,9 @@ function BuildCard({
   // push or the pull request — and that is retried on its own (US-014).
   const complete = build.stories.length > 0 && done === build.stories.length;
   const canRetryDelivery = complete && (status === 'failed' || (status === 'finished' && prUrl === null));
+  // A failed run with stories left is retried by starting the loop again; the
+  // server resumes from the PRD rather than redoing anything already done.
+  const canRetryBuild = status === 'failed' && !complete;
 
   return (
     <section className="card">
@@ -588,9 +629,9 @@ function BuildCard({
           Build <span className={`badge badge--${status}`}>{status}</span>
         </h2>
         <div className="field__actions">
-          {status === 'ready' && (
+          {(status === 'ready' || canRetryBuild) && (
             <button type="button" className="button" onClick={onStart} disabled={busy !== null}>
-              {busy === 'build' ? 'Starting…' : 'Start build'}
+              {busy === 'build' ? 'Starting…' : canRetryBuild ? 'Retry build' : 'Start build'}
             </button>
           )}
           {building && (
@@ -667,6 +708,13 @@ function BuildCard({
         </p>
       )}
 
+      {canRetryBuild && (
+        <p className="field__hint">
+          {done} of {build.stories.length} stories are done and stay done. &ldquo;Retry build&rdquo;
+          starts the loop again at the next story that is not.
+        </p>
+      )}
+
       {building && !build.running && (
         <p className="field__hint">
           This session is marked building but no loop is running here, which means the server was
@@ -677,9 +725,17 @@ function BuildCard({
       {build.stories.length > 0 && (
         <ul className="stories">
           {build.stories.map((story) => (
-            <li className="story" key={story.storyId}>
+            <li
+              className={story.storyId === build.currentStoryId && building ? 'story story--current' : 'story'}
+              key={story.storyId}
+            >
               <span className="mono">{story.storyId}</span>
-              <span>{story.title}</span>
+              <span>
+                {story.title}
+                {story.storyId === build.currentStoryId && building && (
+                  <span className="story__now"> · running now</span>
+                )}
+              </span>
               <span className="mono story__priority">
                 {story.commitSha === null ? '—' : story.commitSha.slice(0, 7)}
               </span>

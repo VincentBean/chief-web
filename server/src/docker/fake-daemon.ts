@@ -174,6 +174,17 @@ export class FakeDockerDaemon {
     this.execsById.get(execId)?.socket?.write(Buffer.from(data, 'utf8'));
   }
 
+  /**
+   * Pushes framed stdout into a live *collected* exec, as a command that keeps
+   * printing would. Use it with `{ hang: true }` to model output that arrives
+   * over time rather than all at once.
+   */
+  emitFramed(execId: string, data: string, stream: 'stdout' | 'stderr' = 'stdout'): void {
+    this.execsById
+      .get(execId)
+      ?.socket?.write(frame(stream === 'stderr' ? STREAM_STDERR : STREAM_STDOUT, data));
+  }
+
   /** Ends a live exec with `exitCode`, as the process inside exiting would. */
   finish(execId: string, exitCode = 0): void {
     const exec = this.execsById.get(execId);

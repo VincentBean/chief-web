@@ -481,6 +481,44 @@ export async function stopBuild(id: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'DELETE' });
 }
 
+/** One iteration's section of the build log (US-016). */
+export interface BuildLogIteration {
+  iteration: number;
+  storyId: string | null;
+  startedAt: string;
+  /** `null` while the iteration is still running. */
+  endedAt: string | null;
+  exitCode: number | null;
+  text: string;
+}
+
+/** Everything the server had when the socket attached. */
+export interface BuildLogHistory {
+  /** Where the file lives in the clone, as the UI names it. */
+  path: string;
+  iterations: BuildLogIteration[];
+  /** True when older output was dropped because the file is long. */
+  truncated: boolean;
+}
+
+/** What the server reports as the log grows. */
+export type BuildLogEvent =
+  | { type: 'begin'; iteration: number; storyId: string | null; startedAt: string }
+  | { type: 'append'; text: string }
+  | { type: 'end'; exitCode: number | null; endedAt: string };
+
+/** Mirrors the server's `BuildLogMessage`: replay first, then live events. */
+export type BuildLogMessage = { type: 'attached'; history: BuildLogHistory } | BuildLogEvent;
+
+/**
+ * WebSocket URL for a session's build log. Same origin as the page, so the
+ * session cookie rides along with the handshake (see {@link terminalSocketUrl}).
+ */
+export function buildLogSocketUrl(id: string): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${window.location.host}/api/sessions/${encodeURIComponent(id)}/build/log`;
+}
+
 /**
  * Mirrors the server's `DeliveryResult` (US-014): the outcome of pushing the
  * feature branch and opening the pull request.

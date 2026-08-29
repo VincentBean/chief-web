@@ -26,6 +26,7 @@ import { logger } from '../lib/logger.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { removeSessionWorkspace, sessionRepoDir } from '../orchestrator/index.js';
 import {
+  agentLogPathFor,
   type PrdStatus,
   type PrdStory,
   prdPathFor,
@@ -537,6 +538,14 @@ export function sessionProgressFile(
   session: Pick<Session, 'id' | 'name'>,
 ): string {
   return path.join(sessionRepoDir(config, session.id), progressPathFor(session.name));
+}
+
+/** Absolute path of the build loop's `agent.log`, next to the PRD (US-016). */
+export function sessionAgentLogFile(
+  config: Pick<Config, 'workspacesDir'>,
+  session: Pick<Session, 'id' | 'name'>,
+): string {
+  return path.join(sessionRepoDir(config, session.id), agentLogPathFor(session.name));
 }
 
 /** True once `/workspace/repo` on the data volume is a git working copy. */
