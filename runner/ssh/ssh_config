@@ -1,0 +1,15 @@
+# chief-web runner SSH client defaults (US-006).
+#
+# This file is prepended to the stock /etc/ssh/ssh_config at image build time:
+# ssh uses the FIRST value it finds for every option, so these win.
+#
+# `accept-new` keeps clones of non-GitHub remotes non-interactive while still
+# refusing a host whose key has *changed*. github.com never reaches that path:
+# its keys are pinned in /etc/ssh/ssh_known_hosts, which is baked into the image.
+Host *
+    GlobalKnownHostsFile /etc/ssh/ssh_known_hosts
+    StrictHostKeyChecking accept-new
+    BatchMode yes
+    ConnectTimeout 15
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

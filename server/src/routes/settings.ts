@@ -6,6 +6,8 @@ import { fetchGithubUser, GithubApiError } from '../lib/github.js';
 import {
   type AppSettingsUpdate,
   getGithubToken,
+  isValidGitAuthorEmail,
+  isValidGitAuthorName,
   MAX_CONCURRENT_SESSIONS,
   MIN_CONCURRENT_SESSIONS,
   readAppSettings,
@@ -84,7 +86,12 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     return { error: 'invalid_body', message: 'Expected a JSON object.' };
   }
   const input = body as Record<string, unknown>;
-  const update: { githubToken?: string | null; maxConcurrentSessions?: number } = {};
+  const update: {
+    githubToken?: string | null;
+    maxConcurrentSessions?: number;
+    gitAuthorName?: string | null;
+    gitAuthorEmail?: string | null;
+  } = {};
 
   if ('githubToken' in input && input['githubToken'] !== undefined) {
     const raw = input['githubToken'];
@@ -121,7 +128,49 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     update.maxConcurrentSessions = raw;
   }
 
+  const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {
+    error: 'invalid_git_author_name',
+    message:
+      'The commit author name must not be empty, must be at most 200 characters and must not contain <, > or a line break. Send null to restore the default.',
+  });
+  if ('error' in name) return name;
+  if (name.present) update.gitAuthorName = name.value;
+
+  const email = parseIdentityField(input, 'gitAuthorEmail', isValidGitAuthorEmail, {
+    error: 'invalid_git_author_email',
+    message:
+      'The commit author email must look like "name@host", with no spaces or angle brackets. Send null to restore the default.',
+  });
+  if ('error' in email) return email;
+  if (email.present) update.gitAuthorEmail = email.value;
+
   return update;
+}
+
+/** An absent field is not the same as one explicitly set to `null`. */
+type IdentityField =
+  | { readonly present: false }
+  | { readonly present: true; readonly value: string | null };
+
+const ABSENT: IdentityField = { present: false };
+
+/**
+ * The two git-identity fields behave alike: omitted leaves the stored value
+ * alone, `null` clears it back to the runner image's default, and a string is
+ * trimmed and validated first (US-006).
+ */
+function parseIdentityField(
+  input: Record<string, unknown>,
+  key: 'gitAuthorName' | 'gitAuthorEmail',
+  isValid: (value: string) => boolean,
+  invalid: Invalid,
+): IdentityField | Invalid {
+  if (!(key in input) || input[key] === undefined) return ABSENT;
+  const raw = input[key];
+  if (raw === null) return { present: true, value: null };
+  if (typeof raw !== 'string') return invalid;
+  const value = raw.trim();
+  return isValid(value) ? { present: true, value } : invalid;
 }
 
 /** `null` means "no token supplied — validate the stored one". */

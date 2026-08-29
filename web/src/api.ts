@@ -51,12 +51,18 @@ export async function logout(): Promise<void> {
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
   maxConcurrentSessions: number;
+  /** Commit identity used by agents inside session containers (US-006). */
+  gitAuthorName: string;
+  gitAuthorEmail: string;
 }
 
 export interface SettingsUpdate {
   /** Omit to leave the stored token untouched; `null` removes it. */
   githubToken?: string | null;
   maxConcurrentSessions?: number;
+  /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
+  gitAuthorName?: string | null;
+  gitAuthorEmail?: string | null;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {

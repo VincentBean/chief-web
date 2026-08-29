@@ -59,6 +59,8 @@ describe('settings api', () => {
   beforeEach(() => {
     deleteSetting(db, 'github_token');
     deleteSetting(db, 'max_concurrent_sessions');
+    deleteSetting(db, 'git_author_name');
+    deleteSetting(db, 'git_author_email');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
   });
@@ -80,6 +82,56 @@ describe('settings api', () => {
       body: JSON.stringify(body),
     });
 
+  it('reports the default commit identity when none is stored', async () => {
+    const response = await get();
+    const body = (await response.json()) as Record<string, unknown>;
+
+    assert.equal(body['gitAuthorName'], 'chief-web');
+    assert.equal(body['gitAuthorEmail'], 'chief-web@localhost');
+  });
+
+  it('saves a custom commit identity and restores the default with null', async () => {
+    const saved = (await (
+      await put({ gitAuthorName: '  Release Bot  ', gitAuthorEmail: 'bot@example.com' })
+    ).json()) as Record<string, unknown>;
+    assert.equal(saved['gitAuthorName'], 'Release Bot');
+    assert.equal(saved['gitAuthorEmail'], 'bot@example.com');
+
+    // A PUT without the fields leaves them alone …
+    const untouched = (await (await put({ maxConcurrentSessions: 5 })).json()) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(untouched['gitAuthorName'], 'Release Bot');
+
+    // … and an explicit null puts the built-in defaults back.
+    const cleared = (await (
+      await put({ gitAuthorName: null, gitAuthorEmail: null })
+    ).json()) as Record<string, unknown>;
+    assert.equal(cleared['gitAuthorName'], 'chief-web');
+    assert.equal(cleared['gitAuthorEmail'], 'chief-web@localhost');
+  });
+
+  it('rejects a commit identity git would refuse', async () => {
+    const badName = await put({ gitAuthorName: 'Bot <bot@example.com>' });
+    assert.equal(badName.status, 400);
+    assert.equal(((await badName.json()) as Record<string, unknown>)['error'], 'invalid_git_author_name');
+
+    const emptyName = await put({ gitAuthorName: '   ' });
+    assert.equal(emptyName.status, 400);
+
+    const badEmail = await put({ gitAuthorEmail: 'not-an-address' });
+    assert.equal(badEmail.status, 400);
+    assert.equal(
+      ((await badEmail.json()) as Record<string, unknown>)['error'],
+      'invalid_git_author_email',
+    );
+
+    // Nothing was stored by the rejected requests.
+    const current = (await (await get()).json()) as Record<string, unknown>;
+    assert.equal(current['gitAuthorName'], 'chief-web');
+  });
+
   it('requires authentication', async () => {
     const response = await fetch(`${baseUrl}/api/settings`);
 
@@ -93,6 +145,8 @@ describe('settings api', () => {
     assert.deepEqual(await response.json(), {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
+      gitAuthorName: 'chief-web',
+      gitAuthorEmail: 'chief-web@localhost',
     });
   });
 
@@ -103,6 +157,8 @@ describe('settings api', () => {
     assert.deepEqual(await saved.json(), {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 3,
+      gitAuthorName: 'chief-web',
+      gitAuthorEmail: 'chief-web@localhost',
     });
   });
 
@@ -130,6 +186,8 @@ describe('settings api', () => {
     assert.deepEqual(await response.json(), {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 7,
+      gitAuthorName: 'chief-web',
+      gitAuthorEmail: 'chief-web@localhost',
     });
   });
 
@@ -141,6 +199,8 @@ describe('settings api', () => {
     assert.deepEqual((await response.json()) as { githubToken: unknown }, {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
+      gitAuthorName: 'chief-web',
+      gitAuthorEmail: 'chief-web@localhost',
     });
   });
 

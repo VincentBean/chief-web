@@ -30,6 +30,20 @@ services:
       # WARNING: this grants root-equivalent control of the host. See README.
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # Image every session container (and the short-lived repository connection
+  # test) runs. It is never started by compose — the server spawns containers
+  # from it through the Docker socket — but it is part of the stack so that
+  # `docker compose build` produces it and tags it as RUNNER_IMAGE.
+  runner:
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+    image: ${RUNNER_IMAGE:-chief-web-runner:latest}
+    # Built, never run by compose: the server starts containers from this image
+    # itself, one per session.
+    deploy:
+      replicas: 0
+
 volumes:
   chief-data:
   claude-auth:

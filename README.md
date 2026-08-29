@@ -27,8 +27,10 @@ curl http://localhost:8080/api/health   # -> {"status":"ok"}
 ## Layout
 
 ```
-docker-compose.yml   the whole stack: one `server` service + two named volumes
-Dockerfile           multi-stage build producing the production image
+docker-compose.yml   the whole stack: the `server` service, the `runner` image
+                     and two named volumes
+Dockerfile           multi-stage build producing the production server image
+runner/              Dockerfile for the image every session container runs
 server/              Node.js + TypeScript backend (API, WebSockets, orchestrator)
 web/                 React + Vite frontend, served as static files by the server
 ```
@@ -85,6 +87,35 @@ runner image (`RUNNER_IMAGE`, built by the compose stack).
 Deleting a repository is refused while any session still references it; delete
 those sessions first. A successful delete also removes the private key file.
 
+## Runner image
+
+Sessions never run inside the server container. `docker compose build` also
+builds `runner/Dockerfile` and tags it `chief-web-runner:latest` (`RUNNER_IMAGE`);
+the server starts one container from it per session through the Docker socket,
+plus a short-lived one for each repository "Test connection".
+
+The image ships git, OpenSSH, Node.js 22 and the Claude Code CLI (`claude`), and:
+
+- runs as the unprivileged **`node`** user (uid 1000) — never root;
+- mounts the shared `claude-auth` volume at **`~/.claude`** (`/home/node/.claude`),
+  with `CLAUDE_CONFIG_DIR` pointing there so all agent state persists in it;
+- mounts the per-session workspace at **`/workspace`**, which is also the workdir;
+- idles as PID 1 (`tini` + `tail -f /dev/null`) because the server `docker exec`s
+  every agent, git and shell process into the running container;
+- configures the git commit identity from `CHIEF_GIT_AUTHOR_NAME` /
+  `CHIEF_GIT_AUTHOR_EMAIL` (defaulting to `chief-web <chief-web@localhost>`, and
+  overridable on the Settings page) so agent commits never fail on a missing
+  identity;
+- reads the repository's SSH key from `CHIEF_SSH_KEY_PATH` (default
+  `/keys/id_ed25519`, mounted read-only) and copies it to a private `0600` file
+  the runner user owns. **The mounted key must be readable by uid 1000.**
+- pins github.com's host keys in a baked-in `/etc/ssh/ssh_known_hosts` and uses
+  `StrictHostKeyChecking=accept-new` for every other host, so clones from
+  non-GitHub remotes are still non-interactive.
+
+`server/src/runner/image.ts` is the server-side mirror of these paths — change
+both together.
+
 ## Settings
 
 `/settings` holds the configuration that is not environment-specific, stored in
@@ -99,6 +130,10 @@ the `settings` table so it can be changed without a restart:
   authenticates as, or GitHub's error.
 - **Max concurrent building sessions** — the build concurrency cap.
   `MAX_CONCURRENT_SESSIONS` only supplies the default until a value is saved here.
+- **Commit author name and email** — the git identity agents commit with inside
+  session containers. Blank restores the defaults (`chief-web` /
+  `chief-web@localhost`), which are also baked into the runner image. Use an
+  address your GitHub account owns if you want the commits linked to it.
 
 ## Configuration
 

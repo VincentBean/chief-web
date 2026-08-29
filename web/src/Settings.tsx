@@ -24,6 +24,8 @@ export function Settings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [maxSessions, setMaxSessions] = useState('3');
+  const [authorName, setAuthorName] = useState('');
+  const [authorEmail, setAuthorEmail] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
 
@@ -47,6 +49,8 @@ export function Settings() {
   function applyLoaded(loaded: SettingsData): void {
     setSettings(loaded);
     setMaxSessions(String(loaded.maxConcurrentSessions));
+    setAuthorName(loaded.gitAuthorName);
+    setAuthorEmail(loaded.gitAuthorEmail);
   }
 
   const run = (kind: NonNullable<typeof busy>, action: () => Promise<Notice>): void => {
@@ -71,6 +75,10 @@ export function Settings() {
     // only sent when the operator actually typed something.
     const update: SettingsUpdate = { maxConcurrentSessions: parsed };
     if (token.trim() !== '') update.githubToken = token.trim();
+    // Blanking an identity field means "use the default again" (null), which is
+    // what the runner image falls back to anyway.
+    update.gitAuthorName = authorName.trim() === '' ? null : authorName.trim();
+    update.gitAuthorEmail = authorEmail.trim() === '' ? null : authorEmail.trim();
 
     run('save', async () => {
       applyLoaded(await saveSettings(update));
@@ -181,6 +189,48 @@ export function Settings() {
             value={maxSessions}
             onChange={(event) => setMaxSessions(event.target.value)}
             className="field__input field__input--narrow"
+          />
+        </section>
+
+        <section className="field">
+          <label className="field__label" htmlFor="git-author-name">
+            Commit author name
+          </label>
+          <p className="field__hint">
+            Identity agents commit with inside session containers. Leave blank to use the default
+            (<code>chief-web</code>).
+          </p>
+          <input
+            id="git-author-name"
+            name="git-author-name"
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="chief-web"
+            value={authorName}
+            onChange={(event) => setAuthorName(event.target.value)}
+            className="field__input"
+          />
+        </section>
+
+        <section className="field">
+          <label className="field__label" htmlFor="git-author-email">
+            Commit author email
+          </label>
+          <p className="field__hint">
+            Leave blank to use the default (<code>chief-web@localhost</code>). Use an address your
+            GitHub account owns if you want commits linked to it.
+          </p>
+          <input
+            id="git-author-email"
+            name="git-author-email"
+            type="email"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="chief-web@localhost"
+            value={authorEmail}
+            onChange={(event) => setAuthorEmail(event.target.value)}
+            className="field__input"
           />
         </section>
 
