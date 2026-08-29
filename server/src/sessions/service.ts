@@ -10,14 +10,19 @@ import {
   getSession,
   isValidSessionName,
   listSessions,
+  listStories,
   type PrTargetBranch,
   type Session,
   type SessionStatus,
+  type Story,
+  type StoryInput,
+  syncStories,
   updateSession,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
+import { type PrdStatus, type PrdStory, prdPathFor, readPrdDocument } from '../prd/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
 
@@ -73,6 +78,21 @@ export interface SessionView {
   readonly cloned: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * What "Mark ready" and "Back to planning" answer with (US-012).
+ *
+ * A PRD that does not parse is a *successful* request whose result the operator
+ * has to read — the line-numbered errors are in `prd.errors` — exactly like a
+ * failed clone. `ok` says whether the transition happened.
+ */
+export interface ReadyResult {
+  readonly ok: boolean;
+  readonly session: SessionView;
+  readonly prd: PrdStatus;
+  /** The session's stories as the database now holds them. */
+  readonly stories: readonly Story[];
 }
 
 /** What creating a session, or retrying its setup, answers with. */
@@ -197,11 +217,116 @@ export class SessionService {
     return run;
   }
 
-  private async performSetup(id: string): Promise<SessionSetupView> {
+  /** The parsed story list of a session, empty until it has been marked ready. */
+  stories(id: string): Story[] {
+    this.requireSession(id);
+    return listStories(this.db, id);
+  }
+
+  /**
+   * "Mark ready": the gate between planning and building.
+   *
+   * chief-web guarantees the PRD is usable before anything is built, so the
+   * file is parsed first and the session only becomes `ready` when it parses
+   * cleanly. On success the stories are synced into the `stories` table, which
+   * is what the build loop reads; on failure nothing changes and the errors
+   * come back with their line numbers.
+   */
+  markReady(id: string): ReadyResult {
+    const session = this.requireSession(id);
+    if (session.status !== 'pending') {
+      throw new SessionError(
+        409,
+        'session_not_pending',
+        `Only a pending session can be marked ready; "${session.name}" is ${session.status}.`,
+      );
+    }
+
+    const document = readPrdDocument(this.prdFile(session), prdPathFor(session.name));
+    if (!document.status.exists) {
+      return this.refusal(session, {
+        ...document.status,
+        errors: [
+          {
+            line: 0,
+            message: `${document.status.path} does not exist yet. Plan the feature first — Claude writes the PRD.`,
+          },
+        ],
+      });
+    }
+    if (document.parsed === null || !document.status.parses) {
+      return this.refusal(session, document.status);
+    }
+
+    const stories = syncStories(this.db, session.id, document.parsed.stories.map(toStoryInput));
+    const updated = updateSession(this.db, session.id, { status: 'ready', lastError: null }) ?? session;
+
+    logger.info('session marked ready', {
+      session: session.id,
+      name: session.name,
+      stories: stories.length,
+    });
+
+    return { ok: true, session: this.toView(updated), prd: document.status, stories };
+  }
+
+  /**
+   * "Back to planning": returns a ready session to `pending` so its PRD can be
+   * edited again. The stories stay in the database — the next "Mark ready"
+   * reconciles them with the file, and until then they are the last good list.
+   */
+  backToPlanning(id: string): ReadyResult {
+    const session = this.requireSession(id);
+    if (session.status !== 'ready') {
+      throw new SessionError(
+        409,
+        'session_not_ready',
+        `Only a ready session can go back to planning; "${session.name}" is ${session.status}.`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { status: 'pending' }) ?? session;
+    logger.info('session returned to planning', { session: session.id, name: session.name });
+
+    return {
+      ok: true,
+      session: this.toView(updated),
+      prd: this.prdStatus(updated),
+      stories: listStories(this.db, session.id),
+    };
+  }
+
+  private refusal(session: Session, prd: PrdStatus): ReadyResult {
+    logger.info('session not marked ready: the PRD does not parse', {
+      session: session.id,
+      errors: prd.errors.length,
+    });
+    return {
+      ok: false,
+      session: this.toView(session),
+      prd,
+      stories: listStories(this.db, session.id),
+    };
+  }
+
+  private requireSession(id: string): Session {
     const session = getSession(this.db, id);
     if (session === null) {
       throw new SessionError(404, 'session_not_found', 'This session no longer exists.');
     }
+    return session;
+  }
+
+  private prdFile(session: Session): string {
+    return sessionPrdFile(this.config, session);
+  }
+
+  private prdStatus(session: Session): PrdStatus {
+    return readPrdDocument(this.prdFile(session), prdPathFor(session.name)).status;
+  }
+
+  private async performSetup(id: string): Promise<SessionSetupView> {
+    const session = this.requireSession(id);
     if (session.status !== 'pending') {
       throw new SessionError(
         409,
@@ -303,6 +428,14 @@ export class SessionService {
   }
 }
 
+/** Absolute path of a session's `prd.md` on the data volume. */
+export function sessionPrdFile(
+  config: Pick<Config, 'workspacesDir'>,
+  session: Pick<Session, 'id' | 'name'>,
+): string {
+  return path.join(sessionRepoDir(config, session.id), prdPathFor(session.name));
+}
+
 /** True once `/workspace/repo` on the data volume is a git working copy. */
 export function isCloned(config: Pick<Config, 'workspacesDir'>, sessionId: string): boolean {
   return fs.existsSync(path.join(sessionRepoDir(config, sessionId), '.git'));
@@ -315,6 +448,15 @@ export function createSessionService(
   exec: SessionExecutor,
 ): SessionService {
   return new SessionService(config, db, containers, exec);
+}
+
+function toStoryInput(story: PrdStory): StoryInput {
+  return {
+    storyId: story.id,
+    title: story.title,
+    priority: story.priority,
+    status: story.status,
+  };
 }
 
 function isDuplicateName(cause: unknown): boolean {

@@ -389,3 +389,30 @@ textarea.field__input {
 select.field__input {
   appearance: auto;
 }
+
+/* Parsed story list of a ready session (US-012). */
+.stories {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.story {
+  align-items: baseline;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: 5rem 1fr auto auto;
+}
+
+.story__priority {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.badge--done {
+  border-color: var(--ok);
+  color: var(--ok);
+}

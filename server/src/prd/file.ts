@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-import { parsePrd, type PrdParseError } from './parse.js';
+import { type ParsedPrd, parsePrd, type PrdParseError } from './parse.js';
 
 /**
  * The state of a session's `prd.md` on the data volume (US-011).
@@ -22,6 +22,18 @@ export interface PrdStatus {
   readonly bytes: number;
 }
 
+/**
+ * The same read, plus what was in the file — which is what "Mark ready"
+ * (US-012) needs in order to sync the stories it just validated.
+ */
+export interface PrdDocument {
+  readonly status: PrdStatus;
+  /** `null` when the file is missing or could not be read. */
+  readonly content: string | null;
+  /** `null` when there was nothing to parse. */
+  readonly parsed: ParsedPrd | null;
+}
+
 /** A file bigger than this is not a PRD; reading it would only cost memory. */
 const MAX_PRD_BYTES = 2 * 1024 * 1024;
 
@@ -30,11 +42,16 @@ const MAX_PRD_BYTES = 2 * 1024 * 1024;
  * unreadable or malformed is a state the page shows, not a failed request.
  */
 export function readPrdStatus(absolutePath: string, displayPath: string): PrdStatus {
+  return readPrdDocument(absolutePath, displayPath).status;
+}
+
+/** {@link readPrdStatus} with the parsed document kept. Never throws either. */
+export function readPrdDocument(absolutePath: string, displayPath: string): PrdDocument {
   let stats: fs.Stats;
   try {
     stats = fs.statSync(absolutePath);
   } catch {
-    return {
+    return unreadable({
       path: displayPath,
       exists: false,
       parses: false,
@@ -42,12 +59,12 @@ export function readPrdStatus(absolutePath: string, displayPath: string): PrdSta
       errors: [],
       updatedAt: null,
       bytes: 0,
-    };
+    });
   }
 
   const updatedAt = stats.mtime.toISOString();
   if (stats.size > MAX_PRD_BYTES) {
-    return {
+    return unreadable({
       path: displayPath,
       exists: true,
       parses: false,
@@ -55,14 +72,14 @@ export function readPrdStatus(absolutePath: string, displayPath: string): PrdSta
       errors: [{ line: 0, message: `${displayPath} is larger than 2 MiB, which is not a PRD.` }],
       updatedAt,
       bytes: stats.size,
-    };
+    });
   }
 
   let content: string;
   try {
     content = fs.readFileSync(absolutePath, 'utf8');
   } catch (cause) {
-    return {
+    return unreadable({
       path: displayPath,
       exists: true,
       parses: false,
@@ -70,17 +87,25 @@ export function readPrdStatus(absolutePath: string, displayPath: string): PrdSta
       errors: [{ line: 0, message: `${displayPath} could not be read: ${String(cause)}` }],
       updatedAt,
       bytes: stats.size,
-    };
+    });
   }
 
   const parsed = parsePrd(content);
   return {
-    path: displayPath,
-    exists: true,
-    parses: parsed.errors.length === 0,
-    storyCount: parsed.stories.length,
-    errors: parsed.errors,
-    updatedAt,
-    bytes: stats.size,
+    status: {
+      path: displayPath,
+      exists: true,
+      parses: parsed.errors.length === 0,
+      storyCount: parsed.stories.length,
+      errors: parsed.errors,
+      updatedAt,
+      bytes: stats.size,
+    },
+    content,
+    parsed,
   };
+}
+
+function unreadable(status: PrdStatus): PrdDocument {
+  return { status, content: null, parsed: null };
 }

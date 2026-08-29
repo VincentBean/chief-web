@@ -1,11 +1,13 @@
-import path from 'node:path';
-
 import type { Config } from '../config.js';
 import { type Database, getRepository, getSession, type Session, type SessionStatus } from '../db/index.js';
 import { logger } from '../lib/logger.js';
-import { sessionRepoDir } from '../orchestrator/index.js';
-import { type PrdStatus, readPrdStatus } from '../prd/index.js';
-import { CONTAINER_REPO_DIR, isCloned, type SessionContainers } from '../sessions/index.js';
+import { type PrdStatus, prdPathFor, readPrdStatus } from '../prd/index.js';
+import {
+  CONTAINER_REPO_DIR,
+  isCloned,
+  type SessionContainers,
+  sessionPrdFile,
+} from '../sessions/index.js';
 import { TerminalError } from '../terminal/index.js';
 import type { CreateTerminalInput, TerminalView } from '../terminal/index.js';
 import {
@@ -13,7 +15,6 @@ import {
   type PlanningMode,
   planningCommand,
   planningPrompt,
-  prdPathFor,
 } from './prompts.js';
 
 /**
@@ -133,7 +134,7 @@ export class PlanningService {
 
   /** Where the PRD lives on the data volume, for anything that must read it. */
   prdFilePath(session: Pick<Session, 'id' | 'name'>): string {
-    return path.join(sessionRepoDir(this.config, session.id), prdPathFor(session.name));
+    return sessionPrdFile(this.config, session);
   }
 
   private async performStart(sessionId: string, input: StartPlanningInput): Promise<PlanningView> {

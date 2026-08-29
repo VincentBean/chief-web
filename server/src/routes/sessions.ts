@@ -69,6 +69,35 @@ export function createSessionsRouter(sessions: SessionService): Router {
       .catch((cause: unknown) => respondWithFailure(res, cause));
   });
 
+  // The parsed story list of a ready session (US-012).
+  router.get('/sessions/:id/stories', (req, res) => {
+    try {
+      res.status(200).json({ stories: sessions.stories(req.params.id) });
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  // "Mark ready". A PRD that does not parse answers 200 with `ok: false` and
+  // the line-numbered errors — a result to read, not a failed request — and
+  // leaves the session pending.
+  router.post('/sessions/:id/ready', (req, res) => {
+    try {
+      res.status(200).json(sessions.markReady(req.params.id));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  // "Back to planning": the same transition in reverse.
+  router.delete('/sessions/:id/ready', (req, res) => {
+    try {
+      res.status(200).json(sessions.backToPlanning(req.params.id));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   return router;
 }
 

@@ -17,6 +17,7 @@ import {
   updateSession,
 } from '../db/index.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
+import { prdPathFor } from '../prd/index.js';
 import type { SessionContainers } from '../sessions/index.js';
 import type { CreateTerminalInput, TerminalView } from '../terminal/index.js';
 import {
@@ -27,7 +28,6 @@ import {
   type PlanningTerminals,
   PlanningService,
   planningCommand,
-  prdPathFor,
 } from './index.js';
 
 const PROMPT_INPUT = {

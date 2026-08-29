@@ -2,13 +2,18 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 
 import {
   ApiError,
+  backToPlanning,
   fetchPlanning,
   fetchSession,
+  fetchStories,
+  markSessionReady,
   type Planning,
+  type PrdParseError,
   type PrdStatus,
   type Session as SessionData,
   startPlanning,
   stopPlanning,
+  type Story,
 } from './api.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
@@ -49,7 +54,10 @@ export function Session() {
   const [planning, setPlanning] = useState<Planning | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [busy, setBusy] = useState<'start' | 'stop' | null>(null);
+  const [busy, setBusy] = useState<'start' | 'stop' | 'ready' | 'planning' | null>(null);
+  const [stories, setStories] = useState<Story[]>([]);
+  /** Why the last "Mark ready" was refused; cleared by the next attempt. */
+  const [readyErrors, setReadyErrors] = useState<readonly PrdParseError[] | null>(null);
   const [context, setContext] = useState('');
   /** Kept apart from `planning.terminalId` so the pane survives an exit. */
   const [attached, setAttached] = useState<string | null>(null);
@@ -65,10 +73,15 @@ export function Session() {
     const controller = new AbortController();
 
     const load = (): void => {
-      Promise.all([fetchSession(id, controller.signal), fetchPlanning(id, controller.signal)])
-        .then(([loadedSession, loadedPlanning]) => {
+      Promise.all([
+        fetchSession(id, controller.signal),
+        fetchPlanning(id, controller.signal),
+        fetchStories(id, controller.signal),
+      ])
+        .then(([loadedSession, loadedPlanning, loadedStories]) => {
           setSession(loadedSession);
           setPlanning(loadedPlanning);
+          setStories(loadedStories);
           // A terminal the server still knows about (a reload, or another tab)
           // is attached to straight away.
           setAttached((current) =>
@@ -149,6 +162,44 @@ export function Session() {
       .finally(() => setBusy(null));
   };
 
+  const onMarkReady = (): void => {
+    setBusy('ready');
+    setNotice(null);
+    markSessionReady(id)
+      .then((result) => {
+        setSession(result.session);
+        setStories(result.stories);
+        setReadyErrors(result.ok ? null : result.prd.errors);
+        setNotice(
+          result.ok
+            ? {
+                kind: 'ok',
+                text: `Ready: ${String(result.stories.length)} ${result.stories.length === 1 ? 'story' : 'stories'} synced from ${result.prd.path}.`,
+              }
+            : {
+                kind: 'error',
+                text: `${result.prd.path} cannot be used yet, so this session stays pending.`,
+              },
+        );
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
+  const onBackToPlanning = (): void => {
+    setBusy('planning');
+    setNotice(null);
+    backToPlanning(id)
+      .then((result) => {
+        setSession(result.session);
+        setStories(result.stories);
+        setReadyErrors(null);
+        setNotice({ kind: 'ok', text: 'Back to planning — edit the PRD and mark it ready again.' });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
   const startLabel = resume ? 'Resume planning' : 'Start planning';
 
@@ -201,6 +252,16 @@ export function Session() {
       </section>
 
       <PrdCard prd={planning.prd} />
+
+      <ReadinessCard
+        status={session.status}
+        prd={planning.prd}
+        stories={stories}
+        errors={readyErrors}
+        busy={busy}
+        onMarkReady={onMarkReady}
+        onBackToPlanning={onBackToPlanning}
+      />
 
       <section className="card">
         <div className="card__header">
@@ -317,6 +378,94 @@ function PrdCard({ prd }: { prd: PrdStatus }) {
             <li className="notice notice--error" key={`${String(error.line)}-${error.message}`}>
               {error.line > 0 ? `Line ${String(error.line)}: ` : ''}
               {error.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The gate between planning and building (US-012).
+ *
+ * "Mark ready" is the only way a session leaves `pending`, and it parses
+ * `prd.md` first: nothing is built against a PRD chief-web cannot read. A
+ * refusal lists exactly what was wrong and where, so the fix goes back into the
+ * planning terminal; "Back to planning" reopens the same door.
+ */
+function ReadinessCard({
+  status,
+  prd,
+  stories,
+  errors,
+  busy,
+  onMarkReady,
+  onBackToPlanning,
+}: {
+  status: SessionData['status'];
+  prd: PrdStatus;
+  stories: Story[];
+  errors: readonly PrdParseError[] | null;
+  busy: string | null;
+  onMarkReady: () => void;
+  onBackToPlanning: () => void;
+}) {
+  const pending = status === 'pending';
+  const ready = status === 'ready';
+  if (!pending && !ready) return null;
+
+  return (
+    <section className="card">
+      <div className="card__header">
+        <h2 className="card__title">Stories</h2>
+        <div className="field__actions">
+          {pending && (
+            <button type="button" className="button" onClick={onMarkReady} disabled={busy !== null}>
+              {busy === 'ready' ? 'Checking the PRD…' : 'Mark ready'}
+            </button>
+          )}
+          {ready && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={onBackToPlanning}
+              disabled={busy !== null}
+            >
+              {busy === 'planning' ? 'Reopening…' : 'Back to planning'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {pending && (
+        <p className="field__hint">
+          Marking this session ready parses {prd.path} and stores its stories. It only succeeds if
+          the whole file is usable — nothing is built against a PRD chief-web cannot read.
+        </p>
+      )}
+
+      {errors !== null && errors.length > 0 && (
+        <ul className="cards">
+          {errors.map((error) => (
+            <li className="notice notice--error" key={`${String(error.line)}-${error.message}`}>
+              {error.line > 0 ? `Line ${String(error.line)}: ` : ''}
+              {error.message}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {stories.length === 0 ? (
+        ready && <p className="field__hint">This session has no stories.</p>
+      ) : (
+        <ul className="stories">
+          {stories.map((story) => (
+            <li className="story" key={story.storyId}>
+              <span className="mono">{story.storyId}</span>
+              <span>{story.title}</span>
+              <span className="story__priority">priority {story.priority}</span>
+              <span className={`badge badge--${story.status}`}>{story.status}</span>
             </li>
           ))}
         </ul>

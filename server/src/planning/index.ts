@@ -8,9 +8,6 @@ export {
   type PlanningPromptInput,
   planningCommand,
   planningPrompt,
-  PRD_ROOT,
-  prdDirFor,
-  prdPathFor,
 } from './prompts.js';
 export {
   createPlanningService,

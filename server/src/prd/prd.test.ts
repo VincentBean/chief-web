@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { parsePrd, readPrdStatus } from './index.js';
+import { parsePrd, prdPathFor, readPrdStatus, setStoryStatus, setStoryStatuses } from './index.js';
 
 const VALID_PRD = `# PRD: Login
 
@@ -131,6 +131,83 @@ describe('prd parser', () => {
 
     assert.equal(parsed.stories.length, 1);
     assert.equal(parsed.stories[0]?.acceptanceCriteria.length, 1);
+  });
+});
+
+describe('prd status writer', () => {
+  it('rewrites one status line and disturbs nothing else', () => {
+    const { content, changed, missing } = setStoryStatus(VALID_PRD, 'US-001', 'done');
+
+    assert.equal(changed, true);
+    assert.deepEqual(missing, []);
+    assert.equal(content.replace('**Status:** done', '**Status:** todo'), VALID_PRD);
+  });
+
+  it('round-trips: reparsing sees the new status and nothing else moved', () => {
+    const before = parsePrd(VALID_PRD);
+    const after = parsePrd(setStoryStatus(VALID_PRD, 'US-001', 'in-progress').content);
+
+    assert.deepEqual(after.errors, []);
+    assert.equal(after.stories[0]?.status, 'in-progress');
+    assert.deepEqual(
+      after.stories.map((story) => ({ ...story, status: 'todo' as const })),
+      before.stories.map((story) => ({ ...story, status: 'todo' as const })),
+    );
+  });
+
+  it('inserts a status line under the heading when the story has none', () => {
+    const source = `### US-001: First\n**Priority:** 1\n\n- [ ] Ships\n`;
+
+    const { content } = setStoryStatus(source, 'US-001', 'done');
+
+    assert.equal(content, `### US-001: First\n**Status:** done\n**Priority:** 1\n\n- [ ] Ships\n`);
+    assert.equal(parsePrd(content).stories[0]?.status, 'done');
+  });
+
+  it('writes several stories at once and reports ids the file does not have', () => {
+    const { content, missing } = setStoryStatuses(VALID_PRD, [
+      { storyId: 'US-001', status: 'done' },
+      { storyId: 'US-002', status: 'todo' },
+      { storyId: 'US-404', status: 'done' },
+    ]);
+
+    assert.deepEqual(
+      parsePrd(content).stories.map((story) => [story.id, story.status]),
+      [
+        ['US-001', 'done'],
+        ['US-002', 'todo'],
+      ],
+    );
+    assert.deepEqual(missing, ['US-404']);
+  });
+
+  it('leaves the file byte-for-byte alone when the status already matches', () => {
+    const result = setStoryStatus(VALID_PRD, 'US-001', 'todo');
+
+    assert.equal(result.changed, false);
+    assert.equal(result.content, VALID_PRD);
+  });
+
+  it('never touches a status line outside the story it was asked about', () => {
+    const { content } = setStoryStatus(VALID_PRD, 'US-002', 'in-progress');
+    const [first, second] = parsePrd(content).stories;
+
+    assert.equal(first?.status, 'todo');
+    assert.equal(second?.status, 'in-progress');
+  });
+
+  it('keeps CRLF line endings', () => {
+    const source = `### US-001: First\r\n**Status:** todo\r\n\r\n- [ ] Ships\r\n`;
+
+    const { content } = setStoryStatus(source, 'US-001', 'done');
+
+    assert.equal(content, `### US-001: First\r\n**Status:** done\r\n\r\n- [ ] Ships\r\n`);
+  });
+});
+
+describe('prd location', () => {
+  it('names chief\u2019s PRD path', () => {
+    assert.equal(prdPathFor('add-login'), '.chief/prds/add-login/prd.md');
   });
 });
 

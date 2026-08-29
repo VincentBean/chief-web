@@ -238,12 +238,38 @@ was last written, how many stories it holds, and — when it does not parse — 
 parse errors with their line numbers. It is polled from the workspace on the
 data volume (a `stat` plus a parse of a small markdown file), never through
 Docker. The parser lives in `server/src/prd/` and follows chief's
-`internal/prd/markdown.go`; US-012 turns "it parses" into the **Mark ready**
-transition.
+`internal/prd/markdown.go`.
 
 Planning is behind the same guard as session creation: Claude Code has to be
 signed in once (see [Claude authentication](#claude-authentication)) before an
 interactive `claude` can be started.
+
+## Marking a session ready
+
+**Mark ready** is the gate between planning and building: it parses
+`.chief/prds/<session-name>/prd.md` and only promotes the session from
+**pending** to **ready** if the whole file is usable. Nothing is ever built
+against a PRD chief-web cannot read.
+
+- On success the parsed stories are synced into the `stories` table — new ones
+  inserted, existing ones updated in place (their commit SHAs survive), and ones
+  the PRD no longer has removed — and the page lists them by id, title, priority
+  and status.
+- On failure the session **stays pending** and the specific parse errors are
+  shown with their line numbers and what was expected (an unknown status value,
+  a non-integer priority, a duplicated story id, a story with no acceptance
+  criteria, a file with no stories at all). This is a `200` with `ok: false`,
+  not an error response: it is a result to read, not a failed request.
+- **Back to planning** returns a ready session to `pending` so the PRD can be
+  edited again. The stories stay in the database until the next **Mark ready**
+  reconciles them with the file.
+
+The parser is a round trip. `setStoryStatus(content, id, status)` in
+`server/src/prd/write.ts` rewrites a single `**Status:**` line in place —
+inserting one under the heading when the story has none — and leaves every other
+byte of the file, including its prose, ordering and CRLF endings, untouched.
+The PRD is the agent's document; the status line is the only thing chief-web
+writes into it.
 
 ## Browser terminals
 

@@ -21,8 +21,8 @@ import {
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
-import type { SessionView, SetupResult } from '../sessions/index.js';
-import { setupScript } from '../sessions/index.js';
+import type { ReadyResult, SessionView, SetupResult } from '../sessions/index.js';
+import { sessionPrdFile, setupScript } from '../sessions/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -311,4 +311,85 @@ describe('sessions api', () => {
     assert.equal(((await found.json()) as SessionView).name, 'add-login');
     assert.equal(missing.status, 404);
   });
+
+  it('marks a session ready, lists its stories and sends it back to planning', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    writePrd(id, 'add-login', PRD);
+
+    const marked = await call('POST', `/api/sessions/${id}/ready`);
+    const readied = (await marked.json()) as ReadyResult;
+
+    assert.equal(marked.status, 200);
+    assert.equal(readied.ok, true);
+    assert.equal(readied.session.status, 'ready');
+    assert.deepEqual(
+      readied.stories.map((story) => [story.storyId, story.priority, story.status]),
+      [
+        ['US-001', 1, 'todo'],
+        ['US-002', 2, 'done'],
+      ],
+    );
+
+    const listed = (await (await call('GET', `/api/sessions/${id}/stories`)).json()) as {
+      stories: ReadyResult['stories'];
+    };
+    assert.equal(listed.stories.length, 2);
+    assert.equal(listed.stories[0]?.title, 'Add the form');
+
+    const back = await call('DELETE', `/api/sessions/${id}/ready`);
+    assert.equal(back.status, 200);
+    assert.equal(((await back.json()) as ReadyResult).session.status, 'pending');
+  });
+
+  it('answers 200 with the parse errors when the PRD is not usable', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    writePrd(id, 'add-login', '### US-001: First\n**Priority:** later\n\n- [ ] Ships\n');
+
+    const response = await call('POST', `/api/sessions/${id}/ready`);
+    const result = (await response.json()) as ReadyResult;
+
+    assert.equal(response.status, 200);
+    assert.equal(result.ok, false);
+    assert.equal(result.session.status, 'pending');
+    assert.equal(result.prd.errors[0]?.line, 2);
+    assert.match(result.prd.errors[0]?.message ?? '', /invalid priority "later"/);
+  });
+
+  it('refuses to send a pending session back to planning', async () => {
+    const { body } = await create();
+
+    const response = await call('DELETE', `/api/sessions/${body.session.id}/ready`);
+
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_not_ready');
+  });
+
+  it('answers 404 for the stories of an unknown session', async () => {
+    const response = await call('GET', '/api/sessions/nope/stories');
+
+    assert.equal(response.status, 404);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_not_found');
+  });
+
+  /** Puts a PRD where the session's clone keeps it. */
+  function writePrd(sessionId: string, name: string, content: string): void {
+    const file = sessionPrdFile(config, { id: sessionId, name });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  }
 });
+
+const PRD = `### US-001: Add the form
+**Status:** todo
+**Priority:** 1
+
+- [ ] The form has an email and a password field
+
+### US-002: Rate limit it
+**Status:** done
+**Priority:** 2
+
+- [x] Five attempts per minute
+`;

@@ -1,3 +1,4 @@
+import { prdDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import { EDIT_PROMPT_TEMPLATE, INIT_PROMPT_TEMPLATE } from './templates.js';
 
@@ -13,24 +14,11 @@ import { EDIT_PROMPT_TEMPLATE, INIT_PROMPT_TEMPLATE } from './templates.js';
 /** Which of chief's two prompts a planning terminal was started with. */
 export type PlanningMode = 'create' | 'edit';
 
-/** Directory holding every PRD of a repository, relative to the clone. */
-export const PRD_ROOT = '.chief/prds';
-
 /** chief's own wording when `chief new` is given no context argument. */
 export const DEFAULT_CONTEXT = 'No additional context provided. Ask the user what they want to build.';
 
 /** How much operator-supplied context is passed through to the agent. */
 export const MAX_CONTEXT_LENGTH = 4000;
-
-/** `.chief/prds/<session name>`, relative to the repository root. */
-export function prdDirFor(sessionName: string): string {
-  return `${PRD_ROOT}/${sessionName}`;
-}
-
-/** `.chief/prds/<session name>/prd.md`, relative to the repository root. */
-export function prdPathFor(sessionName: string): string {
-  return `${prdDirFor(sessionName)}/prd.md`;
-}
 
 /**
  * The absolute PRD directory *inside* the container, which is what the prompt

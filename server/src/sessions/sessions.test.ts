@@ -23,6 +23,7 @@ import {
   runSessionSetup,
   type SessionExecutor,
   SessionError,
+  sessionPrdFile,
   SessionService,
   setupExecSpec,
   setupScript,
@@ -361,6 +362,143 @@ describe('session service', () => {
       () => f.service.setup(created),
       (error: unknown) =>
         error instanceof SessionError && error.status === 409 && error.code === 'session_not_pending',
+    );
+  });
+});
+
+const READY_PRD = `# PRD: Login
+
+### US-001: Add the form
+**Status:** todo
+**Priority:** 1
+**Description:** As a user, I want a login form.
+
+- [ ] The form has an email and a password field
+
+### US-002: Rate limit it
+**Status:** done
+**Priority:** 2
+
+- [x] Five attempts per minute
+`;
+
+/** Writes a PRD where the session's clone keeps it, creating the directory. */
+function writePrd(f: Fixture, sessionId: string, name: string, content: string): void {
+  const file = sessionPrdFile(f.config, { id: sessionId, name });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+}
+
+describe('session readiness', () => {
+  it('marks a pending session ready and syncs its stories', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+
+    const result = f.service.markReady(created);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.session.status, 'ready');
+    assert.equal(getSession(f.db, created)?.status, 'ready');
+    assert.deepEqual(
+      result.stories.map((story) => [story.storyId, story.title, story.priority, story.status]),
+      [
+        ['US-001', 'Add the form', 1, 'todo'],
+        ['US-002', 'Rate limit it', 2, 'done'],
+      ],
+    );
+    assert.deepEqual(f.service.stories(created), [...result.stories]);
+  });
+
+  it('keeps a session pending and reports where the PRD is broken', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', '### US-001: First\n**Status:** nearly\n\n- [ ] Ships\n');
+
+    const result = f.service.markReady(created);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.session.status, 'pending');
+    assert.equal(getSession(f.db, created)?.status, 'pending');
+    assert.equal(result.stories.length, 0);
+    assert.equal(result.prd.errors.length, 1);
+    assert.equal(result.prd.errors[0]?.line, 2);
+    assert.match(result.prd.errors[0]?.message ?? '', /unknown status "nearly"/);
+  });
+
+  it('explains that there is no PRD to read yet', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    const result = f.service.markReady(created);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.prd.exists, false);
+    assert.equal(result.prd.path, '.chief/prds/add-login/prd.md');
+    assert.match(result.prd.errors[0]?.message ?? '', /does not exist yet/);
+  });
+
+  it('refuses to mark a session that is not pending', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+    f.service.markReady(created);
+
+    assert.throws(
+      () => f.service.markReady(created),
+      (error: unknown) =>
+        error instanceof SessionError && error.status === 409 && error.code === 'session_not_pending',
+    );
+  });
+
+  it('goes back to planning and re-syncs the stories on the way in again', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+    f.service.markReady(created);
+
+    const back = f.service.backToPlanning(created);
+    assert.equal(back.session.status, 'pending');
+    // The last good list survives the trip; nothing is lost by re-planning.
+    assert.equal(back.stories.length, 2);
+
+    // The agent drops a story and renames another, then it is marked ready again.
+    writePrd(
+      f,
+      created,
+      'add-login',
+      '### US-001: Add the login form\n**Status:** in-progress\n**Priority:** 1\n\n- [ ] Ships\n',
+    );
+    const again = f.service.markReady(created);
+
+    assert.equal(again.ok, true);
+    assert.deepEqual(
+      again.stories.map((story) => [story.storyId, story.title, story.status]),
+      [['US-001', 'Add the login form', 'in-progress']],
+    );
+  });
+
+  it('refuses to send a pending session back to planning', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    assert.throws(
+      () => f.service.backToPlanning(created),
+      (error: unknown) =>
+        error instanceof SessionError && error.status === 409 && error.code === 'session_not_ready',
+    );
+  });
+
+  it('reports an unknown session as a 404', async () => {
+    const f = await fixture();
+
+    assert.throws(
+      () => f.service.markReady('nope'),
+      (error: unknown) => error instanceof SessionError && error.status === 404,
+    );
+    assert.throws(
+      () => f.service.stories('nope'),
+      (error: unknown) => error instanceof SessionError && error.status === 404,
     );
   });
 });

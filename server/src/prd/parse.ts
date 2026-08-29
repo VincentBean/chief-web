@@ -55,9 +55,13 @@ export interface ParsedPrd {
   readonly errors: readonly PrdParseError[];
 }
 
-/** `### US-001: Title`, also accepting `####` like chief does. */
-const STORY_HEADING = /^#{3,4}\s+([A-Za-z]+-\d+):\s+(.+)$/;
-const STATUS_LINE = /^\*\*Status:\*\*\s*(.+)$/;
+/**
+ * `### US-001: Title`, also accepting `####` like chief does. Exported because
+ * the writer (`write.ts`) has to find the very same headings and status lines
+ * this parser reads — a second dialect would break the round trip.
+ */
+export const STORY_HEADING_PATTERN = /^#{3,4}\s+([A-Za-z]+-\d+):\s+(.+)$/;
+export const STATUS_LINE_PATTERN = /^\*\*Status:\*\*\s*(.*)$/;
 const PRIORITY_LINE = /^\*\*Priority:\*\*\s*(.+)$/;
 const DESCRIPTION_LINE = /^\*\*Description:\*\*\s*(.+)$/;
 const CHECKBOX = /^-\s+\[([ xX])\]\s+(.+)$/;
@@ -134,7 +138,7 @@ export function parsePrd(content: string): ParsedPrd {
 
     // A story heading first: `### US-001: …` also matches the generic `### `
     // section test below, and only one of them may win.
-    const heading = STORY_HEADING.exec(trimmed);
+    const heading = STORY_HEADING_PATTERN.exec(trimmed);
     if (heading !== null) {
       flush();
       introDone = true;
@@ -216,7 +220,7 @@ function readStoryLine(
   lineNumber: number,
   errors: PrdParseError[],
 ): void {
-  const status = STATUS_LINE.exec(trimmed);
+  const status = STATUS_LINE_PATTERN.exec(trimmed);
   if (status !== null) {
     const value = (status[1] ?? '').trim().toLowerCase();
     const parsed = parseStatus(value);
@@ -234,11 +238,13 @@ function readStoryLine(
   const priority = PRIORITY_LINE.exec(trimmed);
   if (priority !== null) {
     const value = (priority[1] ?? '').trim();
-    const parsed = Number.parseFloat(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
+    // The column is an integer and chief writes plain ordinals, so "1.5" is a
+    // mistake worth reporting rather than something to round silently.
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
       errors.push({
         line: lineNumber,
-        message: `${story.id} has an invalid priority "${value}"; expected a number greater than 0.`,
+        message: `${story.id} has an invalid priority "${value}"; expected a whole number greater than 0.`,
       });
       return;
     }

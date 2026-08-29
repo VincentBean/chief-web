@@ -390,6 +390,51 @@ export async function stopPlanning(id: string): Promise<Planning> {
   return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, { method: 'DELETE' });
 }
 
+/** One row of the `stories` table: a story from the PRD, as parsed (US-012). */
+export interface Story {
+  /** Surrogate row id; the PRD identifier is `storyId`. */
+  id: number;
+  sessionId: string;
+  /** Identifier from the PRD, e.g. `US-001`. */
+  storyId: string;
+  title: string;
+  priority: number;
+  status: 'todo' | 'in-progress' | 'done';
+  commitSha: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Mirrors the server's `ReadyResult` (US-012). A PRD that does not parse comes
+ * back with `ok: false` and the line-numbered errors in `prd.errors` — a result
+ * to show, not a failed request.
+ */
+export interface Readiness {
+  ok: boolean;
+  session: Session;
+  prd: PrdStatus;
+  stories: Story[];
+}
+
+export async function fetchStories(id: string, signal?: AbortSignal): Promise<Story[]> {
+  const body = await api<{ stories: Story[] }>(
+    `/api/sessions/${encodeURIComponent(id)}/stories`,
+    signal ? { signal } : {},
+  );
+  return body.stories;
+}
+
+/** "Mark ready": parses `prd.md` and, if it is usable, syncs and promotes. */
+export async function markSessionReady(id: string): Promise<Readiness> {
+  return api<Readiness>(`/api/sessions/${encodeURIComponent(id)}/ready`, { method: 'POST' });
+}
+
+/** "Back to planning": returns a ready session to pending so the PRD can change. */
+export async function backToPlanning(id: string): Promise<Readiness> {
+  return api<Readiness>(`/api/sessions/${encodeURIComponent(id)}/ready`, { method: 'DELETE' });
+}
+
 /** The session detail page, which is where planning happens. */
 export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;
