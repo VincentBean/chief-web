@@ -116,6 +116,41 @@ The image ships git, OpenSSH, Node.js 22 and the Claude Code CLI (`claude`), and
 `server/src/runner/image.ts` is the server-side mirror of these paths — change
 both together.
 
+## Browser terminals
+
+The `/terminal` page opens a real PTY inside a running container and streams it
+to an [xterm.js](https://xtermjs.org) terminal over a WebSocket. It is the
+interface used to drive Claude Code sessions and to complete interactive login
+flows.
+
+How it works:
+
+- `POST /api/terminals` creates a TTY-backed `exec` in the target container
+  through the **Docker Engine API on the unix socket** — not the CLI, because
+  `docker exec -it` requires a TTY on its own stdin, which a WebSocket bridge
+  does not have. The API version is negotiated with the daemon on first use.
+- The browser attaches at `ws://…/api/terminals/<id>/stream`. Binary frames are
+  raw PTY bytes in both directions; text frames are JSON control messages
+  (`resize` upstream, `attached` / `exit` / `error` downstream).
+- **The server owns the terminal, not the tab.** Output is appended to a
+  server-side scrollback buffer (2000 lines by default, at least 500 required),
+  so closing the tab, reloading, or losing the network only detaches a viewer.
+  Reconnecting to the same terminal id replays the buffer and resumes typing
+  into the same shell. The id is kept in the page URL (`/terminal?id=…`), so a
+  refresh rejoins automatically.
+- The process only ends when you close the terminal (`DELETE
+  /api/terminals/<id>`) or it exits by itself. Closing it sends **SIGHUP** to
+  the shell — an interactive shell ignores SIGTERM — and escalates to SIGKILL
+  after half a second. The pid is recorded by a wrapper inside the container,
+  because the pid Docker reports for an exec is a *host* pid and cannot be
+  signalled from within the container's PID namespace.
+- Copy with Ctrl+Shift+C (or Ctrl+Insert), paste with Ctrl+Shift+V or Ctrl+V.
+  The terminal refits to the window on every layout change and tells the PTY its
+  new size.
+
+`GET /api/containers` lists the running containers a terminal can target; once
+sessions exist (US-009) their containers show up there.
+
 ## Settings
 
 `/settings` holds the configuration that is not environment-specific, stored in
@@ -151,6 +186,10 @@ All environment variables are documented in [`.env.example`](.env.example).
   the `/login` page and the static frontend bundle (which serves that page).
   Unauthenticated page loads redirect to `/login`; API calls get `401`; WebSocket
   handshakes are closed with code `4401`.
+- A browser terminal is a shell inside a container with the same reach as the
+  container itself, and `GET /api/containers` lists every running container on
+  the host. Both are behind the shared password; the same single-operator
+  assumption as the Docker socket applies.
 - The `server` container mounts `/var/run/docker.sock` so it can spawn one
   container per session. **This grants the server root-equivalent control of the
   host.** This is accepted for a single-operator, self-hosted deployment; do not

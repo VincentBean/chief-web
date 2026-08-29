@@ -16,9 +16,18 @@ export const WS_CLOSE_UNAUTHORIZED = 4401;
 export const WS_CLOSE_UNKNOWN_ROUTE = 4404;
 
 export interface WebSocketRoute {
-  /** Exact pathname of the upgrade request, e.g. `/api/sessions/:id/terminal`. */
+  /**
+   * Pathname pattern of the upgrade request. Segments starting with `:` are
+   * captured, e.g. `/api/terminals/:id/stream`.
+   */
   readonly path: string;
-  handle(socket: WebSocket, req: IncomingMessage): void;
+  handle(socket: WebSocket, req: IncomingMessage, params: Readonly<Record<string, string>>): void;
+}
+
+/** A registered pattern, split once at registration time. */
+interface CompiledRoute {
+  readonly route: WebSocketRoute;
+  readonly segments: readonly string[];
 }
 
 /**
@@ -31,15 +40,51 @@ export interface WebSocketRoute {
  */
 export class WebSocketGateway {
   private readonly server = new WebSocketServer({ noServer: true });
-  private readonly routes = new Map<string, WebSocketRoute>();
+  private readonly exact = new Map<string, WebSocketRoute>();
+  private readonly patterns: CompiledRoute[] = [];
+  private readonly registered = new Set<string>();
 
   constructor(private readonly auth: AuthService) {}
 
   register(route: WebSocketRoute): void {
-    if (this.routes.has(route.path)) {
+    if (this.registered.has(route.path)) {
       throw new Error(`WebSocket route already registered: ${route.path}`);
     }
-    this.routes.set(route.path, route);
+    this.registered.add(route.path);
+    if (route.path.includes('/:')) {
+      this.patterns.push({ route, segments: route.path.split('/') });
+    } else {
+      this.exact.set(route.path, route);
+    }
+  }
+
+  /** The route handling `pathname`, with its captured parameters. */
+  private match(pathname: string): { route: WebSocketRoute; params: Record<string, string> } | null {
+    const exact = this.exact.get(pathname);
+    if (exact !== undefined) return { route: exact, params: {} };
+
+    const actual = pathname.split('/');
+    for (const { route, segments } of this.patterns) {
+      if (segments.length !== actual.length) continue;
+      const params: Record<string, string> = {};
+      let matched = true;
+      for (let i = 0; i < segments.length; i += 1) {
+        const expected = segments[i] as string;
+        const value = actual[i] as string;
+        if (expected.startsWith(':')) {
+          if (value === '') {
+            matched = false;
+            break;
+          }
+          params[expected.slice(1)] = decodeURIComponent(value);
+        } else if (expected !== value) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return { route, params };
+    }
+    return null;
   }
 
   /** Starts handling upgrades on `httpServer`. */
@@ -65,14 +110,14 @@ export class WebSocketGateway {
       return;
     }
 
-    const route = this.routes.get(pathnameOf(req));
-    if (!route) {
+    const matched = this.match(pathnameOf(req));
+    if (matched === null) {
       this.reject(req, socket, head, WS_CLOSE_UNKNOWN_ROUTE, 'unknown route');
       return;
     }
 
     this.server.handleUpgrade(req, socket, head, (ws) => {
-      route.handle(ws, req);
+      matched.route.handle(ws, req, matched.params);
     });
   }
 

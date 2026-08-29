@@ -5,6 +5,7 @@ import { createAuthService } from './auth/index.js';
 import { loadConfig } from './config.js';
 import { closeDatabase, openDatabase } from './db/index.js';
 import { logger } from './lib/logger.js';
+import { createTerminalManager, createTerminalSocketRoute } from './terminal/index.js';
 import { WebSocketGateway } from './ws/gateway.js';
 
 async function main(): Promise<void> {
@@ -26,11 +27,16 @@ async function main(): Promise<void> {
   // hash in settings — generating and logging one on first boot.
   const auth = createAuthService(config, db);
 
-  const app = createApp(config, auth, db);
+  // Terminals outlive the browser tabs attached to them, so the registry is
+  // owned here and shared by the REST routes and the WebSocket gateway.
+  const terminals = createTerminalManager(config);
+
+  const app = createApp(config, auth, db, { terminals });
 
   // Terminals (US-007) and log streams (US-013) register their routes here;
   // the gateway enforces the same session cookie on every handshake.
   const gateway = new WebSocketGateway(auth);
+  gateway.register(createTerminalSocketRoute(terminals));
 
   const server = app.listen(config.port, config.host, () => {
     logger.info('chief-web server listening', {
@@ -44,6 +50,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     logger.info('shutting down', { signal });
+    terminals.closeAll();
     gateway.close();
     server.close((err) => {
       closeDatabase(db);

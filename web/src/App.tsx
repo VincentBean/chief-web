@@ -44,6 +44,9 @@ export function App() {
           <a className="link" href="/repositories">
             Repositories
           </a>
+          <a className="link" href="/terminal">
+            Terminal
+          </a>
           <a className="link" href="/settings">
             Settings
           </a>

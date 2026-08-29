@@ -10,7 +10,9 @@ import { createAuthRouter } from './routes/auth.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createSettingsRouter } from './routes/settings.js';
+import { createTerminalsRouter } from './routes/terminals.js';
 import type { CommandRunner } from './ssh/index.js';
+import { createTerminalManager, type TerminalManager } from './terminal/index.js';
 
 /** Injected collaborators that tests replace; all optional in production. */
 export interface AppDependencies {
@@ -19,6 +21,12 @@ export interface AppDependencies {
    * to spawning the real Docker CLI.
    */
   readonly runCommand?: CommandRunner;
+  /**
+   * Live browser terminals (US-007). Passed in by `index.ts` so the same
+   * registry backs both the REST routes and the WebSocket gateway; tests point
+   * it at a fake Docker daemon.
+   */
+  readonly terminals?: TerminalManager;
 }
 
 /**
@@ -47,6 +55,7 @@ export function createApp(
   api.use(requireApiAuth(auth));
   api.use(createSettingsRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
+  api.use(createTerminalsRouter(deps.terminals ?? createTerminalManager(config)));
   app.use('/api', api);
 
   app.use('/api', (_req, res) => {

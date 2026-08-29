@@ -30,6 +30,12 @@ export interface Config {
   readonly runnerImage: string;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
+  /** Lines of terminal output replayed to a browser that (re)attaches. */
+  readonly terminalScrollbackLines: number;
+  /** Hard byte ceiling on that per-terminal replay buffer. */
+  readonly terminalScrollbackBytes: number;
+  /** Cap on simultaneously open browser terminals. */
+  readonly maxTerminals: number;
   /** Shared password protecting the UI (see US-003); empty when unset. */
   readonly password: string;
   /** Default max number of sessions building at the same time (see US-018). */
@@ -77,6 +83,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
+    terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
+    terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),
+    maxTerminals: int('MAX_TERMINALS', 20),
     password: str('CHIEF_WEB_PASSWORD', ''),
     maxConcurrentSessions: int('MAX_CONCURRENT_SESSIONS', 3),
     githubApiUrl: str('GITHUB_API_URL', 'https://api.github.com'),

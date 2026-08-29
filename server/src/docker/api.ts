@@ -1,0 +1,347 @@
+import http from 'node:http';
+import type { Duplex } from 'node:stream';
+
+/**
+ * The slice of the Docker Engine API chief-web needs, spoken directly over the
+ * unix socket.
+ *
+ * The CLI is not usable for terminals: `docker exec -it` insists on a real TTY
+ * on *its own* stdin, which a WebSocket bridge does not have. The Engine API
+ * has no such requirement — `POST /exec/{id}/start` hijacks the HTTP connection
+ * and hands back a raw, bidirectional stream to the PTY inside the container,
+ * with `POST /exec/{id}/resize` for window changes.
+ *
+ * The API version is negotiated with the daemon on first use rather than
+ * pinned: a version below the daemon's `MinAPIVersion` is refused outright
+ * (Docker 29 dropped everything under 1.44), and one above its `ApiVersion` is
+ * not understood, so neither end of the range is safe to hard-code.
+ */
+
+/** What we ask for when the daemon supports it; 1.44 ships with Docker 25. */
+export const PREFERRED_DOCKER_API_VERSION = '1.44';
+
+/** A non-2xx answer from the daemon, carrying the message it sent. */
+export class DockerApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+  ) {
+    super(detail === '' ? `Docker API responded with HTTP ${status}` : detail);
+    this.name = 'DockerApiError';
+  }
+}
+
+export interface ContainerSummary {
+  readonly id: string;
+  /** Primary name without Docker's leading slash. */
+  readonly name: string;
+  readonly image: string;
+  /** `running`, `exited`, … */
+  readonly state: string;
+  /** Human-readable status such as `Up 4 minutes`. */
+  readonly status: string;
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+export interface ExecSpec {
+  readonly cmd: readonly string[];
+  /** `KEY=value` entries added to the process environment. */
+  readonly env?: readonly string[];
+  readonly workingDir?: string;
+  readonly user?: string;
+}
+
+export interface ExecState {
+  readonly running: boolean;
+  /** `null` while the process is still running. */
+  readonly exitCode: number | null;
+  /**
+   * Pid in the **host** namespace; 0 once the process is gone. It cannot be
+   * signalled from inside the container — see `terminal/command.ts`.
+   */
+  readonly pid: number;
+}
+
+export interface TerminalSize {
+  readonly cols: number;
+  readonly rows: number;
+}
+
+interface RawResponse {
+  readonly status: number;
+  readonly body: string;
+}
+
+export class DockerApi {
+  /** Resolved once, then reused; `null` until the first request negotiates it. */
+  private negotiated: Promise<string> | null = null;
+
+  constructor(private readonly socketPath: string) {}
+
+  /**
+   * Highest version both ends understand: our preference when the daemon's
+   * window contains it, otherwise the nearest end of that window. Falls back to
+   * the preference when `/version` cannot be read, so the caller still gets a
+   * real error from the request it actually wanted to make.
+   */
+  apiVersion(): Promise<string> {
+    this.negotiated ??= (async () => {
+      try {
+        const response = await this.send('GET', '/version');
+        if (response.status < 200 || response.status >= 300) return PREFERRED_DOCKER_API_VERSION;
+        const body = JSON.parse(response.body) as { ApiVersion?: string; MinAPIVersion?: string };
+        return chooseApiVersion(body.ApiVersion, body.MinAPIVersion);
+      } catch {
+        return PREFERRED_DOCKER_API_VERSION;
+      }
+    })();
+    return this.negotiated;
+  }
+
+  /** `GET /_ping`; resolves false when the daemon is unreachable. */
+  async ping(): Promise<boolean> {
+    try {
+      const response = await this.send('GET', '/_ping');
+      return response.status >= 200 && response.status < 300;
+    } catch {
+      return false;
+    }
+  }
+
+  async listContainers(all = false): Promise<ContainerSummary[]> {
+    const raw = await this.json<RawContainer[]>('GET', `/containers/json?all=${all ? 1 : 0}`);
+    return raw.map(toContainerSummary);
+  }
+
+  /** Throws {@link DockerApiError} with status 404 when there is no such container. */
+  async inspectContainer(id: string): Promise<{ id: string; name: string; running: boolean }> {
+    const raw = await this.json<RawContainerInspect>('GET', `/containers/${encodeURIComponent(id)}/json`);
+    return {
+      id: raw.Id,
+      name: stripLeadingSlash(raw.Name ?? ''),
+      running: raw.State?.Running === true,
+    };
+  }
+
+  /** Creates a TTY-backed exec instance; returns its id. It is not started yet. */
+  async createExec(container: string, spec: ExecSpec): Promise<string> {
+    const body: Record<string, unknown> = {
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      Cmd: [...spec.cmd],
+    };
+    if (spec.env !== undefined) body['Env'] = [...spec.env];
+    if (spec.workingDir !== undefined) body['WorkingDir'] = spec.workingDir;
+    if (spec.user !== undefined) body['User'] = spec.user;
+
+    const created = await this.json<{ Id?: string }>(
+      'POST',
+      `/containers/${encodeURIComponent(container)}/exec`,
+      body,
+    );
+    if (typeof created.Id !== 'string' || created.Id === '') {
+      throw new DockerApiError(502, 'Docker did not return an exec id.');
+    }
+    return created.Id;
+  }
+
+  /**
+   * Starts the exec and hijacks the connection. With `Tty: true` the returned
+   * stream is the raw PTY: no stdout/stderr multiplexing header, so bytes can
+   * be forwarded to the browser untouched.
+   */
+  startExec(execId: string, size?: TerminalSize): Promise<Duplex> {
+    const body: Record<string, unknown> = { Detach: false, Tty: true };
+    if (size !== undefined) {
+      body['ConsoleSize'] = [size.rows, size.cols];
+    }
+    return this.hijack(`/exec/${encodeURIComponent(execId)}/start`, body);
+  }
+
+  async resizeExec(execId: string, size: TerminalSize): Promise<void> {
+    await this.json(
+      'POST',
+      `/exec/${encodeURIComponent(execId)}/resize?h=${size.rows}&w=${size.cols}`,
+    );
+  }
+
+  async inspectExec(execId: string): Promise<ExecState> {
+    const raw = await this.json<RawExecInspect>('GET', `/exec/${encodeURIComponent(execId)}/json`);
+    const running = raw.Running === true;
+    return {
+      running,
+      exitCode: running ? null : typeof raw.ExitCode === 'number' ? raw.ExitCode : null,
+      pid: typeof raw.Pid === 'number' ? raw.Pid : 0,
+    };
+  }
+
+  private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const response = await this.send(method, `/v${await this.apiVersion()}${path}`, body);
+    if (response.status < 200 || response.status >= 300) {
+      throw new DockerApiError(response.status, messageOf(response.body));
+    }
+    if (response.body === '') return undefined as T;
+    try {
+      return JSON.parse(response.body) as T;
+    } catch {
+      throw new DockerApiError(502, 'Docker returned a body that is not JSON.');
+    }
+  }
+
+  private send(method: string, path: string, body?: unknown): Promise<RawResponse> {
+    return new Promise((resolve, reject) => {
+      const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
+      const request = http.request(
+        {
+          socketPath: this.socketPath,
+          path,
+          method,
+          headers: {
+            host: 'docker',
+            ...(payload === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': payload.length }),
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer) => chunks.push(chunk));
+          response.on('end', () => {
+            resolve({
+              status: response.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        },
+      );
+
+      request.on('error', reject);
+      request.end(payload);
+    });
+  }
+
+  /**
+   * Issues a request that upgrades to a raw TCP stream. Any bytes the daemon
+   * already sent alongside the 101 arrive in `head` and are pushed back onto
+   * the stream so the caller sees a single ordered sequence.
+   */
+  private async hijack(path: string, body: unknown): Promise<Duplex> {
+    const versioned = `/v${await this.apiVersion()}${path}`;
+    return new Promise((resolve, reject) => {
+      const payload = Buffer.from(JSON.stringify(body), 'utf8');
+      const request = http.request({
+        socketPath: this.socketPath,
+        path: versioned,
+        method: 'POST',
+        // Pooling would hand this socket to a later request; it belongs to the
+        // PTY for as long as the process lives.
+        agent: false,
+        headers: {
+          host: 'docker',
+          'content-type': 'application/json',
+          'content-length': payload.length,
+          connection: 'Upgrade',
+          upgrade: 'tcp',
+        },
+      });
+
+      request.on('upgrade', (_response, socket: Duplex, head: Buffer) => {
+        if (head.length > 0) socket.unshift(head);
+        resolve(socket);
+      });
+
+      // The daemon answers normally (rather than upgrading) when it refuses.
+      request.on('response', (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => {
+          reject(
+            new DockerApiError(
+              response.statusCode ?? 0,
+              messageOf(Buffer.concat(chunks).toString('utf8')),
+            ),
+          );
+        });
+      });
+      request.on('error', reject);
+      request.end(payload);
+    });
+  }
+}
+
+interface RawContainer {
+  Id?: unknown;
+  Names?: unknown;
+  Image?: unknown;
+  State?: unknown;
+  Status?: unknown;
+  Labels?: unknown;
+}
+
+interface RawContainerInspect {
+  Id: string;
+  Name?: string;
+  State?: { Running?: boolean };
+}
+
+interface RawExecInspect {
+  Running?: boolean;
+  ExitCode?: number;
+  Pid?: number;
+}
+
+function toContainerSummary(raw: RawContainer): ContainerSummary {
+  const names = Array.isArray(raw.Names) ? raw.Names.filter((n) => typeof n === 'string') : [];
+  const id = typeof raw.Id === 'string' ? raw.Id : '';
+  return {
+    id,
+    name: stripLeadingSlash(names[0] ?? id.slice(0, 12)),
+    image: typeof raw.Image === 'string' ? raw.Image : '',
+    state: typeof raw.State === 'string' ? raw.State : 'unknown',
+    status: typeof raw.Status === 'string' ? raw.Status : '',
+    labels: isStringRecord(raw.Labels) ? raw.Labels : {},
+  };
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stripLeadingSlash(name: string): string {
+  return name.startsWith('/') ? name.slice(1) : name;
+}
+
+/** `1.44` → `[1, 44]`; anything unparseable sorts lowest. */
+function parseVersion(value: string): [number, number] {
+  const match = /^(\d+)\.(\d+)$/.exec(value.trim());
+  return match === null ? [0, 0] : [Number(match[1]), Number(match[2])];
+}
+
+function isAtLeast(value: string, floor: string): boolean {
+  const [major, minor] = parseVersion(value);
+  const [floorMajor, floorMinor] = parseVersion(floor);
+  return major > floorMajor || (major === floorMajor && minor >= floorMinor);
+}
+
+/** Clamps {@link PREFERRED_DOCKER_API_VERSION} into the daemon's window. */
+export function chooseApiVersion(highest?: string, lowest?: string): string {
+  if (highest !== undefined && !isAtLeast(highest, PREFERRED_DOCKER_API_VERSION)) return highest;
+  if (lowest !== undefined && !isAtLeast(PREFERRED_DOCKER_API_VERSION, lowest)) return lowest;
+  return PREFERRED_DOCKER_API_VERSION;
+}
+
+/** Docker error bodies are `{"message":"…"}`; fall back to the raw text. */
+function messageOf(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === 'object' && parsed !== null && 'message' in parsed) {
+      const message = (parsed as { message: unknown }).message;
+      if (typeof message === 'string') return message;
+    }
+  } catch {
+    // Not JSON.
+  }
+  return body.trim();
+}

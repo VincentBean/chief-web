@@ -146,3 +146,65 @@ export async function testRepositoryConnection(id: string): Promise<ConnectionTe
     { method: 'POST' },
   );
 }
+
+/** A container the operator can open a terminal in (US-007). */
+export interface Container {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+}
+
+/** Mirrors the server's `TerminalView`. */
+export interface Terminal {
+  id: string;
+  container: string;
+  containerName: string;
+  command: string[];
+  status: 'running' | 'exited';
+  exitCode: number | null;
+  cols: number;
+  rows: number;
+  clients: number;
+  scrollbackBytes: number;
+  createdAt: string;
+  lastActivityAt: string;
+}
+
+export interface TerminalInput {
+  container: string;
+  /** Omit to let the server start a login shell (bash, falling back to sh). */
+  command?: string[];
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+}
+
+export async function fetchContainers(signal?: AbortSignal): Promise<Container[]> {
+  const body = await api<{ containers: Container[] }>('/api/containers', signal ? { signal } : {});
+  return body.containers;
+}
+
+export async function fetchTerminals(signal?: AbortSignal): Promise<Terminal[]> {
+  const body = await api<{ terminals: Terminal[] }>('/api/terminals', signal ? { signal } : {});
+  return body.terminals;
+}
+
+export async function createTerminal(input: TerminalInput): Promise<Terminal> {
+  return api<Terminal>('/api/terminals', { method: 'POST', body: JSON.stringify(input) });
+}
+
+/** Kills the process inside the container and forgets the terminal. */
+export async function closeTerminal(id: string): Promise<void> {
+  await api<void>(`/api/terminals/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * WebSocket URL for a terminal's PTY. Same origin as the page, so the session
+ * cookie is sent with the handshake and the gateway can authenticate it.
+ */
+export function terminalSocketUrl(id: string): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/stream`;
+}
