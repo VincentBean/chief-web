@@ -48,6 +48,8 @@ export interface Config {
   readonly runnerImage: string;
   /** Grace period a session container gets to exit before it is killed. */
   readonly sessionStopTimeoutSeconds: number;
+  /** Cap on each git command of a session's clone/branch setup (US-010). */
+  readonly sessionSetupTimeoutMs: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -107,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
     sessionStopTimeoutSeconds: int('SESSION_STOP_TIMEOUT_SECONDS', 10),
+    sessionSetupTimeoutMs: int('SESSION_SETUP_TIMEOUT_MS', 600_000),
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),

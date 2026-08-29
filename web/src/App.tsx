@@ -50,6 +50,9 @@ export function App() {
       <header className="topbar">
         <h1>chief-web</h1>
         <nav className="topbar__nav">
+          <a className="link" href="/sessions">
+            Sessions
+          </a>
           <a className="link" href="/repositories">
             Repositories
           </a>

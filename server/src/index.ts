@@ -45,7 +45,9 @@ async function main(): Promise<void> {
     logger.error('could not reconcile session containers', { error: String(error) });
   }
 
-  const app = createApp(config, auth, db, { terminals });
+  // The orchestrator is shared with the API: the same client that reconciled
+  // at startup is the one that spawns a container for a new session (US-010).
+  const app = createApp(config, auth, db, { terminals, orchestrator });
 
   // Terminals (US-007) and log streams (US-013) register their routes here;
   // the gateway enforces the same session cookie on every handshake.

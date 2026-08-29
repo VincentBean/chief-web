@@ -49,6 +49,8 @@ export interface FakeExec {
   readonly workingDir: string | null;
   /** Terminal id when this exec is a wrapped terminal shell; else `null`. */
   readonly terminalId: string | null;
+  /** False for a collected `runExec`, whose output is framed rather than raw. */
+  readonly tty: boolean;
   readonly pid: number;
   running: boolean;
   exitCode: number;
@@ -57,6 +59,15 @@ export interface FakeExec {
   /** Bytes the client wrote to the PTY. */
   input: Buffer;
   socket: Socket | null;
+}
+
+/** What {@link FakeDockerDaemon.onExec} makes a collected command print. */
+export interface ExecScript {
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly exitCode?: number;
+  /** Model a command that never returns: print nothing and never exit. */
+  readonly hang?: boolean;
 }
 
 /** Byte that makes the fake shell exit cleanly, mimicking Ctrl-D. */
@@ -76,6 +87,11 @@ export class FakeDockerDaemon {
    * shell that only dies when it is killed outright.
    */
   readonly ignoredSignals = new Set<string>();
+  /**
+   * What a non-TTY exec (`DockerApi.runExec`) prints and exits with. Set it to
+   * model the commands a session container runs — git, mostly — without one.
+   */
+  onExec: ((exec: FakeExec) => ExecScript) | null = null;
 
   private readonly containers = new Map<string, FakeContainer>();
   private readonly execsById = new Map<string, FakeExec>();
@@ -334,6 +350,7 @@ export class FakeDockerDaemon {
           Cmd?: string[];
           Env?: string[];
           WorkingDir?: string;
+          Tty?: boolean;
         };
         const cmd = spec.Cmd ?? [];
         const id = `exec-${this.nextExec++}`;
@@ -344,6 +361,7 @@ export class FakeDockerDaemon {
           env: spec.Env ?? [],
           workingDir: spec.WorkingDir ?? null,
           terminalId: cmd.join(' ').includes('echo $$') ? pidFileOwner(cmd) : null,
+          tty: spec.Tty !== false,
           pid: this.nextPid++,
           running: false,
           exitCode: 0,
@@ -410,6 +428,21 @@ export class FakeDockerDaemon {
     exec.running = true;
     exec.socket = socket;
 
+    // A collected command (`runExec`) writes its output in the daemon's
+    // multiplexed framing and exits; nothing is ever typed into it.
+    if (!exec.tty) {
+      const script = this.onExec?.(exec) ?? {};
+      if (script.hang === true) return;
+      if (script.stdout !== undefined && script.stdout !== '') {
+        socket.write(frame(STREAM_STDOUT, script.stdout));
+      }
+      if (script.stderr !== undefined && script.stderr !== '') {
+        socket.write(frame(STREAM_STDERR, script.stderr));
+      }
+      this.finish(exec.id, script.exitCode ?? 0);
+      return;
+    }
+
     // Closing a terminal runs a second exec that signals the pid recorded in
     // the terminal's pid file; model that so the path is covered end to end.
     const signal = /kill -([A-Z]+)/.exec(exec.cmd.join(' '));
@@ -455,6 +488,19 @@ export class FakeDockerDaemon {
     });
     socket.on('error', () => socket.destroy());
   }
+}
+
+/** Stream ids of the daemon's multiplexed exec framing. */
+const STREAM_STDOUT = 1;
+const STREAM_STDERR = 2;
+
+/** `[stream, 0, 0, 0, size:uint32be]` followed by the payload. */
+function frame(stream: number, payload: string): Buffer {
+  const body = Buffer.from(payload, 'utf8');
+  const header = Buffer.alloc(8);
+  header.writeUInt8(stream, 0);
+  header.writeUInt32BE(body.length, 4);
+  return Buffer.concat([header, body]);
 }
 
 /** `{"label":["a","b=c"]}` → `['a', 'b=c']`. */

@@ -184,10 +184,10 @@ describe('claude api', () => {
 
     const response = await call('POST', '/api/sessions', { name: 'demo' });
 
-    // US-010 owns the route itself; all this story guarantees is that the
-    // guard no longer rejects it.
-    assert.equal(response.status, 404);
-    assert.equal(((await response.json()) as { error: string }).error, 'not_found');
+    // The guard is out of the way, so the sessions router (US-010) is what
+    // answers now — here by rejecting a body with no repository in it.
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: string }).error, 'invalid_repository_id');
   });
 
   it('opens a login terminal in a temporary container', async () => {

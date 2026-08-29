@@ -193,6 +193,77 @@ export async function testRepositoryConnection(id: string): Promise<ConnectionTe
   );
 }
 
+/** Mirrors the server's `SessionView` (US-010). */
+export interface Session {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  name: string;
+  status: 'pending' | 'ready' | 'building' | 'failed' | 'finished';
+  baseBranch: string;
+  featureBranch: string;
+  prTargetBranch: PrTargetBranch;
+  /** UTC ISO-8601, or null when the session is unscheduled. */
+  scheduledStartAt: string | null;
+  queuedAt: string | null;
+  containerId: string | null;
+  prUrl: string | null;
+  lastError: string | null;
+  /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
+  cloned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PrTargetBranch = 'develop' | 'main';
+
+export interface SessionInput {
+  repositoryId: string;
+  name: string;
+  /** Omit to use the repository's default base branch. */
+  baseBranch?: string;
+  prTargetBranch: PrTargetBranch;
+  /** UTC ISO-8601; omit or null for "start it by hand". */
+  scheduledStartAt?: string | null;
+}
+
+/** The clone's outcome; `ok: false` is an answer, not a failed request. */
+export interface SessionSetup {
+  ok: boolean;
+  code: string;
+  message: string;
+  /** git's own output, worth showing verbatim when something went wrong. */
+  stderr: string;
+}
+
+export interface SessionWithSetup {
+  session: Session;
+  setup: SessionSetup;
+}
+
+/** The feature branch a session name will produce; mirrors the server. */
+export function featureBranchFor(name: string): string {
+  return `chief/${name}`;
+}
+
+export async function fetchSessions(signal?: AbortSignal): Promise<Session[]> {
+  const body = await api<{ sessions: Session[] }>('/api/sessions', signal ? { signal } : {});
+  return body.sessions;
+}
+
+/**
+ * Creates the session and clones the repository into its container. Resolves
+ * even when the clone failed — read `setup.ok`.
+ */
+export async function createSession(input: SessionInput): Promise<SessionWithSetup> {
+  return api<SessionWithSetup>('/api/sessions', { method: 'POST', body: JSON.stringify(input) });
+}
+
+/** "Retry setup" on a pending session whose clone did not finish. */
+export async function retrySessionSetup(id: string): Promise<SessionWithSetup> {
+  return api<SessionWithSetup>(`/api/sessions/${encodeURIComponent(id)}/setup`, { method: 'POST' });
+}
+
 /** A container the operator can open a terminal in (US-007). */
 export interface Container {
   id: string;

@@ -175,6 +175,39 @@ and:
 If Docker cannot be reached the server still starts and changes nothing: an
 unanswerable daemon is not evidence that anything is gone.
 
+## Sessions
+
+A session is one feature: its own container, its own clone, its own branch. The
+`/sessions` page creates one from a repository, a name, a base branch, a PR
+target (`develop` or `main`) and an optional scheduled start. The name is a slug
+(letters, numbers, hyphens, underscores), unique per repository, and becomes both
+the feature branch **`chief/<session-name>`** and the workspace directory.
+
+Submitting the form does four things, in order:
+
+1. writes the session row as `pending`;
+2. starts its container (see [Session containers](#session-containers));
+3. asks `origin` whether `chief/<session-name>` already exists;
+4. clones the base branch into `/workspace/repo` and creates the feature branch
+   from `origin/<base branch>`.
+
+Each step runs as its own `docker exec` inside the container, so it uses the
+repository's deploy key and the runner's SSH configuration — nothing about the
+clone is special-cased on the server. Everything the shell needs arrives in the
+environment, so a repository URL or branch name is never parsed as shell syntax.
+
+**A feature branch that already exists on `origin` stops the setup.** The message
+says so and asks for a different session name (or for the remote branch to be
+deleted). chief-web never reuses or force-pushes a branch it did not create — a
+leftover branch from a deleted session is somebody's work until they say
+otherwise.
+
+Any other failure — an unreachable remote, a missing base branch, a rejected key
+— leaves the session **`pending`** with git's own stderr on screen, the reason
+stored on the session, and a **Retry setup** action. The container of a failed
+setup is removed; the workspace is not, so a retry reuses an existing clone
+instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
+
 ## Browser terminals
 
 The `/terminal` page opens a real PTY inside a running container and streams it

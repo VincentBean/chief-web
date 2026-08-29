@@ -352,3 +352,30 @@ h1 {
   min-height: 20rem;
   padding: 0.5rem;
 }
+
+/* Session status pill (US-010); one colour per state, muted by default. */
+.badge {
+  border: 1px solid #30363d;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+  padding: 0.0625rem 0.5rem;
+  text-transform: lowercase;
+  vertical-align: middle;
+}
+
+.badge--ready,
+.badge--finished {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.badge--failed {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+select.field__input {
+  appearance: auto;
+}

@@ -93,6 +93,22 @@ export interface ExecSpec {
   readonly env?: readonly string[];
   readonly workingDir?: string;
   readonly user?: string;
+  /**
+   * Allocate a PTY. Defaults to true, which is what a browser terminal needs;
+   * a *collected* command wants false, so stdout and stderr stay apart.
+   */
+  readonly tty?: boolean;
+  /** Attach stdin. Defaults to true; see {@link tty}. */
+  readonly attachStdin?: boolean;
+}
+
+/** The whole output of a command run to completion by {@link DockerApi.runExec}. */
+export interface ExecOutput {
+  /** `null` when the command was cut short by its timeout. */
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
 }
 
 export interface ExecState {
@@ -239,13 +255,13 @@ export class DockerApi {
     return { name: typeof raw.Name === 'string' ? raw.Name : name, mountpoint: raw.Mountpoint };
   }
 
-  /** Creates a TTY-backed exec instance; returns its id. It is not started yet. */
+  /** Creates an exec instance; returns its id. It is not started yet. */
   async createExec(container: string, spec: ExecSpec): Promise<string> {
     const body: Record<string, unknown> = {
-      AttachStdin: true,
+      AttachStdin: spec.attachStdin ?? true,
       AttachStdout: true,
       AttachStderr: true,
-      Tty: true,
+      Tty: spec.tty ?? true,
       Cmd: [...spec.cmd],
     };
     if (spec.env !== undefined) body['Env'] = [...spec.env];
@@ -268,12 +284,58 @@ export class DockerApi {
    * stream is the raw PTY: no stdout/stderr multiplexing header, so bytes can
    * be forwarded to the browser untouched.
    */
-  startExec(execId: string, size?: TerminalSize): Promise<Duplex> {
-    const body: Record<string, unknown> = { Detach: false, Tty: true };
+  startExec(execId: string, size?: TerminalSize, tty = true): Promise<Duplex> {
+    const body: Record<string, unknown> = { Detach: false, Tty: tty };
     if (size !== undefined) {
       body['ConsoleSize'] = [size.rows, size.cols];
     }
     return this.hijack(`/exec/${encodeURIComponent(execId)}/start`, body);
+  }
+
+  /**
+   * Runs a command inside a container and collects everything it printed.
+   *
+   * No PTY and no stdin: the process must not be able to block on input, and
+   * the daemon's multiplexed framing keeps stderr — the only thing a failing
+   * git command really says — separate from stdout.
+   *
+   * A timeout only drops *our* end of the stream; the process inside the
+   * container keeps running, so a caller that times out should also get rid of
+   * the container.
+   */
+  async runExec(container: string, spec: ExecSpec, timeoutMs?: number): Promise<ExecOutput> {
+    const execId = await this.createExec(container, { ...spec, tty: false, attachStdin: false });
+    const stream = await this.startExec(execId, undefined, false);
+
+    const chunks: Buffer[] = [];
+    let timedOut = false;
+    const timer =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            stream.destroy();
+          }, timeoutMs);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        stream.on('end', resolve);
+        stream.on('close', resolve);
+        // A destroyed stream reports the abort as an error; that is the
+        // timeout we caused, not a failure to report.
+        stream.on('error', (error: Error) => (timedOut ? resolve() : reject(error)));
+      });
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      stream.destroy();
+    }
+
+    const { stdout, stderr } = demultiplex(Buffer.concat(chunks));
+    if (timedOut) return { exitCode: null, stdout, stderr, timedOut: true };
+
+    const state = await this.inspectExec(execId);
+    return { exitCode: state.exitCode, stdout, stderr, timedOut: false };
   }
 
   async resizeExec(execId: string, size: TerminalSize): Promise<void> {
@@ -466,4 +528,48 @@ function messageOf(body: string): string {
     // Not JSON.
   }
   return body.trim();
+}
+
+/** Stream ids in the daemon's multiplexed exec framing. */
+const STREAM_STDIN = 0;
+const STREAM_STDERR = 2;
+/** `[stream, 0, 0, 0, size:uint32be]`. */
+const FRAME_HEADER_BYTES = 8;
+
+/**
+ * Splits a non-TTY exec stream into stdout and stderr.
+ *
+ * Docker prefixes every write with an 8-byte header naming the stream and the
+ * payload length. Anything that does not look like a header — a TTY stream that
+ * reached this function by mistake, or a truncated frame — is taken as stdout
+ * rather than dropped: output the caller can read beats a parse error.
+ */
+export function demultiplex(raw: Buffer): { stdout: string; stderr: string } {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let offset = 0;
+
+  while (offset < raw.length) {
+    if (offset + FRAME_HEADER_BYTES > raw.length || !isFrameHeader(raw, offset)) {
+      stdout.push(raw.subarray(offset));
+      break;
+    }
+    const stream = raw.readUInt8(offset);
+    const size = raw.readUInt32BE(offset + 4);
+    const start = offset + FRAME_HEADER_BYTES;
+    const end = Math.min(start + size, raw.length);
+    (stream === STREAM_STDERR ? stderr : stdout).push(raw.subarray(start, end));
+    offset = end;
+  }
+
+  return {
+    stdout: Buffer.concat(stdout).toString('utf8'),
+    stderr: Buffer.concat(stderr).toString('utf8'),
+  };
+}
+
+function isFrameHeader(raw: Buffer, offset: number): boolean {
+  const stream = raw.readUInt8(offset);
+  if (stream < STREAM_STDIN || stream > STREAM_STDERR) return false;
+  return raw.readUInt8(offset + 1) === 0 && raw.readUInt8(offset + 2) === 0 && raw.readUInt8(offset + 3) === 0;
 }

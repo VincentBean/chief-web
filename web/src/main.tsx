@@ -5,6 +5,7 @@ import { App } from './App.tsx';
 import './index.css';
 import { Login } from './Login.tsx';
 import { Repositories } from './Repositories.tsx';
+import { Sessions } from './Sessions.tsx';
 import { Settings } from './Settings.tsx';
 
 const container = document.getElementById('root');
@@ -22,6 +23,7 @@ const Terminals = lazy(() =>
 const PAGES: Record<string, ComponentType> = {
   '/login': Login,
   '/repositories': Repositories,
+  '/sessions': Sessions,
   '/settings': Settings,
   '/terminal': Terminals,
 };

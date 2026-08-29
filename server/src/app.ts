@@ -7,12 +7,20 @@ import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
+import { DockerApi } from './docker/index.js';
+import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createClaudeRouter } from './routes/claude.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
+import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createTerminalsRouter } from './routes/terminals.js';
+import {
+  createSessionService,
+  type SessionContainers,
+  type SessionExecutor,
+} from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
 
@@ -34,6 +42,17 @@ export interface AppDependencies {
    * shared credentials volume with a real container.
    */
   readonly claude?: ClaudeService;
+  /**
+   * Session containers (US-009). `index.ts` passes the same orchestrator it
+   * reconciles with at startup so both share one Docker client; tests pass a
+   * stub and never touch a daemon.
+   */
+  readonly orchestrator?: SessionContainers;
+  /**
+   * How commands are run inside a session container (US-010). Defaults to the
+   * Engine API client.
+   */
+  readonly exec?: SessionExecutor;
 }
 
 /**
@@ -66,9 +85,21 @@ export function createApp(
   api.use(createTerminalsRouter(terminals));
   const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
   api.use(createClaudeRouter(claude));
-  // Mounted ahead of the sessions router (US-010) so session creation is
-  // blocked, with a reason, until Claude Code has been signed in once.
-  api.post('/sessions', requireClaudeAuth(claude));
+
+  // Mounted ahead of the sessions router so creating a session — and retrying
+  // its setup, which spawns the same container — is blocked, with a reason,
+  // until Claude Code has been signed in once (US-008).
+  const guard = requireClaudeAuth(claude);
+  api.post('/sessions', guard);
+  api.post('/sessions/:id/setup', guard);
+
+  // The client is cheap to construct — nothing is dialled until the first
+  // request — so one instance serves both the orchestrator and the setup
+  // commands, and either can be replaced independently.
+  const docker = new DockerApi(config.dockerSocket);
+  const orchestrator = deps.orchestrator ?? createSessionOrchestrator(config, db, docker);
+  api.use(createSessionsRouter(createSessionService(config, db, orchestrator, deps.exec ?? docker)));
+
   app.use('/api', api);
 
   app.use('/api', (_req, res) => {
