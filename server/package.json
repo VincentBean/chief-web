@@ -6,9 +6,9 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "dev": "tsx watch --disable-warning=ExperimentalWarning src/index.ts",
+    "start": "node --disable-warning=ExperimentalWarning dist/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

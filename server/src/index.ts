@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { closeDatabase, openDatabase } from './db/index.js';
 import { logger } from './lib/logger.js';
 
 async function main(): Promise<void> {
@@ -14,6 +15,10 @@ async function main(): Promise<void> {
       fs.mkdir(dir, { recursive: true }),
     ),
   );
+
+  // Opening the database also runs any pending migrations; it must happen
+  // before the first request can touch application state.
+  const db = openDatabase(config.databasePath);
 
   const app = createApp(config);
   const server = app.listen(config.port, config.host, () => {
@@ -28,6 +33,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     logger.info('shutting down', { signal });
     server.close((err) => {
+      closeDatabase(db);
       if (err) {
         logger.error('error during shutdown', { error: String(err) });
         process.exitCode = 1;

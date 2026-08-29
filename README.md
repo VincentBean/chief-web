@@ -40,6 +40,24 @@ Persistent state lives in two named Docker volumes:
 | `chief-data` | `/data`        | SQLite database, SSH deploy keys, workspaces   |
 | `claude-auth`| `/claude-auth` | Claude Code credentials shared by all sessions |
 
+## Data layer
+
+State lives in a single SQLite database inside the data volume (`DATABASE_PATH`,
+default `/data/chief-web.db`), accessed through the typed data layer in
+`server/src/db`. It is built on Node's built-in `node:sqlite`, so the image needs
+no native modules.
+
+| Table          | Contents                                                           |
+| -------------- | ------------------------------------------------------------------ |
+| `repositories` | registered repos: name, SSH URL, GitHub slug, default base branch   |
+| `sessions`     | one row per session: status, branches, schedule, container, PR, error |
+| `stories`      | the stories parsed from a session's `prd.md`, with commit SHAs      |
+| `settings`     | key-value configuration (GitHub PAT, concurrency limit, …)          |
+
+Migrations in `server/src/db/migrations.ts` run automatically on server start.
+They are append-only and recorded in `schema_migrations`, so restarting the stack
+re-applies nothing and never touches existing data.
+
 ## Configuration
 
 All environment variables are documented in [`.env.example`](.env.example).
