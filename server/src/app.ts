@@ -28,6 +28,7 @@ import { createRepositoriesRouter } from './routes/repositories.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createTerminalsRouter } from './routes/terminals.js';
+import { createScheduler, type SessionScheduler } from './scheduler/index.js';
 import {
   createSessionService,
   type SessionContainers,
@@ -86,6 +87,12 @@ export interface AppDependencies {
    * session container and calls the GitHub REST API with the stored PAT.
    */
   readonly delivery?: DeliveryService;
+  /**
+   * Scheduled starts (US-017). Defaults to a service polling the database; it
+   * is started here, because a schedule has to be honoured whether or not
+   * anyone opens the UI. Tests pass one they drive by hand.
+   */
+  readonly scheduler?: SessionScheduler;
 }
 
 /**
@@ -145,11 +152,16 @@ export function createApp(
   const builds =
     deps.builds ??
     createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
+  // Scheduled starts (US-017). The schedules live in the database, so starting
+  // it here — before the first request — is also the catch-up on everything
+  // that came due while the stack was down.
+  const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
+  scheduler.start();
   // Deleting a session (US-015) has to unwind whatever is running in its
-  // container first, so the session service is built last and given both.
+  // container first, so the session service is built last and given all three.
   api.use(
     createSessionsRouter(
-      createSessionService(config, db, orchestrator, exec, { builds, planning }),
+      createSessionService(config, db, orchestrator, exec, { builds, planning, scheduler }),
     ),
   );
   api.use(createPlanningRouter(planning));

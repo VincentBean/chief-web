@@ -18,6 +18,7 @@ import {
   type SessionSetup,
   sessionPath,
 } from './api.ts';
+import { localTime, startsIn } from './schedule.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
 
@@ -38,11 +39,6 @@ const ALL = 'all';
 
 const describe = (error: unknown): string =>
   error instanceof ApiError ? error.message : String(error);
-
-/** A stored UTC instant, shown in the visitor's own timezone. */
-function localTime(iso: string): string {
-  return new Date(iso).toLocaleString();
-}
 
 /**
  * The dashboard (US-015): every session at a glance, and the home page.
@@ -443,7 +439,14 @@ function SessionCard({ session, busy, setup, onRetry, onDelete }: CardProps) {
         {session.scheduledStartAt !== null && (
           <>
             <dt>Scheduled</dt>
-            <dd>{localTime(session.scheduledStartAt)}</dd>
+            <dd>
+              {localTime(session.scheduledStartAt)}
+              <span className="story__priority">
+                {' '}
+                &middot;{' '}
+                {session.scheduleMissed ? 'missed' : startsIn(session.scheduledStartAt)}
+              </span>
+            </dd>
           </>
         )}
         {session.prUrl !== null && (
@@ -460,6 +463,16 @@ function SessionCard({ session, busy, setup, onRetry, onDelete }: CardProps) {
         <dd>{localTime(session.updatedAt)}</dd>
       </dl>
 
+      {session.scheduleMissed && (
+        <p className="notice notice--error" role="status">
+          Missed schedule — mark ready to start. This session was still being planned at{' '}
+          {localTime(session.scheduledStartAt ?? '')}, so nothing ran.{' '}
+          <a className="link" href={sessionPath(session.id)}>
+            Open it
+          </a>{' '}
+          and mark it ready; the build then starts immediately.
+        </p>
+      )}
       {session.lastError !== null && (
         <p className="notice notice--error" role="status">
           {session.lastError}

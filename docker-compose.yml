@@ -33,6 +33,8 @@ services:
       # generated pull request back to its session (US-014); optional.
       PUBLIC_URL: ${PUBLIC_URL:-}
       MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
+      # How often scheduled session starts are checked (US-017); capped at 30s.
+      SCHEDULER_INTERVAL_MS: ${SCHEDULER_INTERVAL_MS:-30000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # Application data: SQLite database, SSH deploy keys, session workspaces.

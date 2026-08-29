@@ -399,6 +399,67 @@ describe('sessions api', () => {
     assert.equal(((await response.json()) as ErrorBody).error, 'session_not_ready');
   });
 
+  it('sets, changes and clears a schedule while a session is pending', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+
+    const set = await call('PUT', `/api/sessions/${id}/schedule`, {
+      scheduledStartAt: '2026-09-01T10:30:00+02:00',
+    });
+    assert.equal(set.status, 200);
+    const scheduled = (await set.json()) as SessionView;
+    assert.equal(scheduled.scheduledStartAt, '2026-09-01T08:30:00.000Z');
+    assert.equal(scheduled.scheduleMissed, false);
+
+    const moved = await call('PUT', `/api/sessions/${id}/schedule`, {
+      scheduledStartAt: '2026-09-02T08:30:00.000Z',
+    });
+    assert.equal(
+      ((await moved.json()) as SessionView).scheduledStartAt,
+      '2026-09-02T08:30:00.000Z',
+    );
+
+    const cleared = await call('PUT', `/api/sessions/${id}/schedule`, { scheduledStartAt: null });
+    assert.equal(((await cleared.json()) as SessionView).scheduledStartAt, null);
+  });
+
+  it('reports a schedule that passed while the session was still pending as missed', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+
+    await call('PUT', `/api/sessions/${id}/schedule`, {
+      scheduledStartAt: '2020-01-01T00:00:00.000Z',
+    });
+
+    const response = await call('GET', `/api/sessions/${id}`);
+    const session = (await response.json()) as SessionView;
+    assert.equal(session.scheduleMissed, true);
+    assert.equal(session.status, 'pending');
+  });
+
+  it('rejects a schedule that is neither a timestamp nor null', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+
+    const bad = await call('PUT', `/api/sessions/${id}/schedule`, {
+      scheduledStartAt: 'next tuesday',
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as ErrorBody).error, 'invalid_scheduled_start');
+
+    // Omitting the field is a mistake, not "leave it alone".
+    const missing = await call('PUT', `/api/sessions/${id}/schedule`, {});
+    assert.equal(missing.status, 400);
+    assert.match(((await missing.json()) as ErrorBody).message ?? '', /send null to clear/);
+  });
+
+  it('answers 404 when scheduling an unknown session', async () => {
+    const response = await call('PUT', '/api/sessions/nope/schedule', { scheduledStartAt: null });
+
+    assert.equal(response.status, 404);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_not_found');
+  });
+
   it('answers 404 for the stories of an unknown session', async () => {
     const response = await call('GET', '/api/sessions/nope/stories');
 

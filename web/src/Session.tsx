@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { type FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 
 import {
   ApiError,
@@ -13,6 +13,7 @@ import {
   type PrdStatus,
   retryDelivery,
   type Session as SessionData,
+  setSessionSchedule,
   startBuild,
   startPlanning,
   stopBuild,
@@ -20,6 +21,7 @@ import {
   type Story,
 } from './api.ts';
 import { BuildLog } from './BuildLog.tsx';
+import { fromLocalInputValue, localTime, startsIn, toLocalInputValue } from './schedule.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
 
@@ -34,8 +36,6 @@ const TerminalPane = lazy(() =>
 
 const describe = (error: unknown): string =>
   error instanceof ApiError ? error.message : String(error);
-
-const localTime = (iso: string): string => new Date(iso).toLocaleString();
 
 /** The session id is the last path segment: `/sessions/<id>`. */
 export function sessionIdFromPath(pathname: string): string | null {
@@ -60,7 +60,7 @@ export function Session() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<
-    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | 'delivery' | null
+    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | 'delivery' | 'schedule' | null
   >(null);
   const [build, setBuild] = useState<Build | null>(null);
   /** Why the last "Mark ready" was refused; cleared by the next attempt. */
@@ -170,6 +170,9 @@ export function Session() {
   };
 
   const onMarkReady = (): void => {
+    // A schedule this session slept through is honoured the moment it becomes
+    // ready, so the operator is told before it happens rather than after.
+    if (session.scheduleMissed && !window.confirm(missedScheduleWarning(session))) return;
     setBusy('ready');
     setNotice(null);
     markSessionReady(id)
@@ -177,17 +180,38 @@ export function Session() {
         setSession(result.session);
         setBuild((current) => (current === null ? current : { ...current, stories: result.stories }));
         setReadyErrors(result.ok ? null : result.prd.errors);
+        const synced = `Ready: ${String(result.stories.length)} ${result.stories.length === 1 ? 'story' : 'stories'} synced from ${result.prd.path}.`;
         setNotice(
           result.ok
             ? {
                 kind: 'ok',
-                text: `Ready: ${String(result.stories.length)} ${result.stories.length === 1 ? 'story' : 'stories'} synced from ${result.prd.path}.`,
+                text: result.started
+                  ? `${synced} Its missed schedule was honoured, so the build has started.`
+                  : synced,
               }
             : {
                 kind: 'error',
                 text: `${result.prd.path} cannot be used yet, so this session stays pending.`,
               },
         );
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
+  const onSchedule = (at: string | null): void => {
+    setBusy('schedule');
+    setNotice(null);
+    setSessionSchedule(id, at)
+      .then((next) => {
+        setSession(next);
+        setNotice({
+          kind: 'ok',
+          text:
+            next.scheduledStartAt === null
+              ? 'Schedule cleared — this session only starts when you say so.'
+              : `Scheduled for ${localTime(next.scheduledStartAt)} (${startsIn(next.scheduledStartAt)}).`,
+        });
       })
       .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
       .finally(() => setBusy(null));
@@ -289,6 +313,19 @@ export function Session() {
           <dd className="mono">{session.baseBranch}</dd>
           <dt>Workspace</dt>
           <dd>{session.cloned ? 'cloned into /workspace/repo' : 'not cloned yet'}</dd>
+          {session.scheduledStartAt !== null && (
+            <>
+              <dt>Scheduled start</dt>
+              <dd>
+                {localTime(session.scheduledStartAt)}
+                <span className="story__priority">
+                  {' '}
+                  &middot;{' '}
+                  {session.scheduleMissed ? 'missed' : startsIn(session.scheduledStartAt)}
+                </span>
+              </dd>
+            </>
+          )}
           {session.prUrl !== null && (
             <>
               <dt>Pull request</dt>
@@ -315,6 +352,8 @@ export function Session() {
           </p>
         )}
       </section>
+
+      <ScheduleCard session={session} busy={busy} onSave={onSchedule} />
 
       <PrdCard prd={planning.prd} />
 
@@ -416,6 +455,141 @@ export function Session() {
         )}
       </section>
     </main>
+  );
+}
+
+/**
+ * What the operator confirms before a missed schedule is honoured: the build
+ * does not wait for another button, it starts as this request returns.
+ */
+function missedScheduleWarning(session: SessionData): string {
+  return [
+    `"${session.name}" missed its scheduled start at ${localTime(session.scheduledStartAt ?? '')}, because it was still being planned.`,
+    '',
+    'Marking it ready now parses its PRD and starts the build immediately.',
+    '',
+    'Cancel, and clear the schedule first, if you would rather start it by hand.',
+  ].join('\n');
+}
+
+/**
+ * The scheduled start (US-017).
+ *
+ * A schedule is one-shot and lives on the session, not in a timer: the server
+ * checks the database every half minute, so a stack that was down overnight
+ * still starts the session the moment it comes back. It can be set, moved or
+ * cleared for as long as the session has not started — after that there is
+ * nothing left to schedule.
+ */
+function ScheduleCard({
+  session,
+  busy,
+  onSave,
+}: {
+  session: SessionData;
+  busy: string | null;
+  onSave: (at: string | null) => void;
+}) {
+  const schedulable = session.status === 'pending' || session.status === 'ready';
+  const [value, setValue] = useState(
+    session.scheduledStartAt === null ? '' : toLocalInputValue(session.scheduledStartAt),
+  );
+  const [error, setError] = useState<string | null>(null);
+  /** The stored value the field was last synced with, so a poll cannot fight typing. */
+  const [known, setKnown] = useState(session.scheduledStartAt);
+
+  if (known !== session.scheduledStartAt) {
+    setKnown(session.scheduledStartAt);
+    setValue(session.scheduledStartAt === null ? '' : toLocalInputValue(session.scheduledStartAt));
+  }
+
+  if (!schedulable && session.scheduledStartAt === null) return null;
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault();
+    const at = fromLocalInputValue(value);
+    if (value !== '' && at === null) {
+      setError('That is not a valid date and time.');
+      return;
+    }
+    setError(null);
+    onSave(at);
+  };
+
+  return (
+    <section className="card">
+      <div className="card__header">
+        <h2 className="card__title">
+          Schedule{' '}
+          <span className={session.scheduleMissed ? 'badge badge--failed' : 'badge'}>
+            {session.scheduledStartAt === null
+              ? 'not scheduled'
+              : session.scheduleMissed
+                ? 'missed'
+                : startsIn(session.scheduledStartAt)}
+          </span>
+        </h2>
+      </div>
+
+      {session.scheduleMissed && (
+        <p className="notice notice--error" role="status">
+          Missed schedule — mark ready to start. This session was still being planned at{' '}
+          {localTime(session.scheduledStartAt ?? '')}, so nothing ran. Marking it ready starts the
+          build immediately; clear the schedule first if you would rather not.
+        </p>
+      )}
+
+      {schedulable ? (
+        <form className="form" onSubmit={submit}>
+          <section className="field">
+            <label className="field__label" htmlFor="session-schedule">
+              Start the build at
+            </label>
+            <p className="field__hint">
+              Read in this browser&rsquo;s timezone and stored as UTC. The session has to be ready
+              by then — a schedule that passes while it is still pending is missed, not queued.
+            </p>
+            <input
+              id="session-schedule"
+              className="field__input"
+              type="datetime-local"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          </section>
+
+          {error !== null && (
+            <p className="notice notice--error" role="alert">
+              {error}
+            </p>
+          )}
+
+          <div className="field__actions">
+            <button type="submit" className="button" disabled={busy !== null}>
+              {busy === 'schedule' ? 'Saving…' : 'Save schedule'}
+            </button>
+            {session.scheduledStartAt !== null && (
+              <button
+                type="button"
+                className="button button--quiet"
+                onClick={() => {
+                  setValue('');
+                  onSave(null);
+                }}
+                disabled={busy !== null}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </form>
+      ) : (
+        <p className="field__hint">
+          Scheduled for {localTime(session.scheduledStartAt ?? '')}. A schedule can only be changed
+          while a session is pending or ready; this one is {session.status}.
+        </p>
+      )}
+    </section>
   );
 }
 

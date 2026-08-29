@@ -1,0 +1,196 @@
+import assert from 'node:assert/strict';
+import { after, describe, it } from 'node:test';
+
+import { type Config, loadConfig } from '../config.js';
+import {
+  closeDatabase,
+  createRepository,
+  createSession,
+  type Database,
+  getSession,
+  IN_MEMORY,
+  isScheduleMissed,
+  openDatabase,
+  type Session,
+  type SessionStatus,
+  updateSession,
+} from '../db/index.js';
+import { type ScheduledBuilds, SchedulerService } from './service.js';
+
+const databases: Database[] = [];
+
+after(() => {
+  for (const db of databases) closeDatabase(db);
+});
+
+/**
+ * Stands in for `BuildService.start` (US-013), including the part this story
+ * relies on: a session that enters `building` has spent its schedule.
+ */
+class FakeBuilds implements ScheduledBuilds {
+  readonly started: string[] = [];
+  /** Session ids the build refuses to start, and why. */
+  readonly refuse = new Map<string, string>();
+
+  constructor(private readonly db: Database) {}
+
+  start(sessionId: string): Promise<unknown> {
+    const reason = this.refuse.get(sessionId);
+    if (reason !== undefined) return Promise.reject(new Error(reason));
+    this.started.push(sessionId);
+    updateSession(this.db, sessionId, {
+      status: 'building',
+      lastError: null,
+      scheduledStartAt: null,
+    });
+    return Promise.resolve({});
+  }
+}
+
+interface World {
+  readonly config: Config;
+  readonly db: Database;
+  readonly builds: FakeBuilds;
+  readonly scheduler: SchedulerService;
+  session(input: { status?: SessionStatus; at?: string | null; name?: string }): Session;
+}
+
+function world(env: Record<string, string> = {}): World {
+  const config = loadConfig(env);
+  const db = openDatabase(IN_MEMORY);
+  databases.push(db);
+  const repository = createRepository(db, {
+    name: 'demo',
+    sshUrl: 'git@github.com:acme/demo.git',
+    githubSlug: 'acme/demo',
+  });
+  const builds = new FakeBuilds(db);
+  let created = 0;
+
+  return {
+    config,
+    db,
+    builds,
+    scheduler: new SchedulerService(config, db, builds),
+    session({ status = 'ready', at = null, name }) {
+      created += 1;
+      return createSession(db, {
+        repositoryId: repository.id,
+        name: name ?? `session-${String(created)}`,
+        baseBranch: 'main',
+        prTargetBranch: 'main',
+        status,
+        scheduledStartAt: at,
+      });
+    },
+  };
+}
+
+const PAST = '2020-01-01T00:00:00.000Z';
+const FUTURE = '2999-01-01T00:00:00.000Z';
+
+describe('the session scheduler', () => {
+  it('starts a ready session whose scheduled time has passed', async () => {
+    const w = world();
+    const due = w.session({ at: PAST });
+    const later = w.session({ at: FUTURE });
+    const unscheduled = w.session({});
+
+    assert.equal(await w.scheduler.tick(), 1);
+
+    assert.deepEqual(w.builds.started, [due.id]);
+    assert.equal(getSession(w.db, due.id)?.status, 'building');
+    assert.equal(getSession(w.db, later.id)?.status, 'ready');
+    assert.equal(getSession(w.db, unscheduled.id)?.status, 'ready');
+  });
+
+  it('spends the schedule when the session starts building, so it never fires twice', async () => {
+    const w = world();
+    const due = w.session({ at: PAST });
+
+    await w.scheduler.tick();
+    assert.equal(getSession(w.db, due.id)?.scheduledStartAt, null);
+
+    // The build is stopped and the session goes back to ready. A stale
+    // timestamp would restart it here; there is none.
+    updateSession(w.db, due.id, { status: 'ready' });
+    assert.equal(await w.scheduler.tick(), 0);
+    assert.deepEqual(w.builds.started, [due.id]);
+  });
+
+  it('leaves a pending session alone: a missed schedule is not a start', async () => {
+    const w = world();
+    const missed = w.session({ status: 'pending', at: PAST });
+
+    assert.equal(await w.scheduler.tick(), 0);
+
+    const row = getSession(w.db, missed.id);
+    assert.equal(row?.status, 'pending');
+    // The timestamp stays: it is what the UI reads to say the schedule was missed.
+    assert.equal(row?.scheduledStartAt, PAST);
+    assert.equal(isScheduleMissed(row ?? missed), true);
+  });
+
+  it('catches up at startup on everything that came due while the stack was down', async () => {
+    const w = world();
+    const overnight = w.session({ at: PAST });
+
+    w.scheduler.start();
+    // `start()` fires the catch-up without waiting for the first interval.
+    await w.scheduler.tick();
+    w.scheduler.stop();
+
+    assert.deepEqual(w.builds.started, [overnight.id]);
+    assert.equal(getSession(w.db, overnight.id)?.status, 'building');
+  });
+
+  it('clears a schedule it could not honour, with the reason on the session', async () => {
+    const w = world();
+    const due = w.session({ at: PAST });
+    w.builds.refuse.set(due.id, 'The session container could not be started: no such image');
+
+    assert.equal(await w.scheduler.tick(), 0);
+
+    const row = getSession(w.db, due.id);
+    assert.equal(row?.status, 'ready');
+    // One-shot means one attempt: it must not be retried every 30 seconds.
+    assert.equal(row?.scheduledStartAt, null);
+    assert.match(row?.lastError ?? '', /could not be started, so the schedule was cleared/);
+    assert.match(row?.lastError ?? '', /no such image/);
+    assert.equal(await w.scheduler.tick(), 0);
+  });
+
+  it('fires one session on demand, and only while it is ready and due', async () => {
+    const w = world();
+    const due = w.session({ at: PAST });
+    const pending = w.session({ status: 'pending', at: PAST });
+    const later = w.session({ at: FUTURE });
+
+    assert.equal(await w.scheduler.fire(pending.id), false);
+    assert.equal(await w.scheduler.fire(later.id), false);
+    assert.equal(await w.scheduler.fire('no-such-session'), false);
+    assert.equal(await w.scheduler.fire(due.id), true);
+
+    assert.deepEqual(w.builds.started, [due.id]);
+  });
+
+  it('never runs two passes at once', async () => {
+    const w = world();
+    w.session({ at: PAST });
+
+    const [first, second] = await Promise.all([w.scheduler.tick(), w.scheduler.tick()]);
+    assert.equal(first, 1);
+    // The second caller joined the pass in flight rather than firing again.
+    assert.equal(second, 1);
+    assert.equal(w.builds.started.length, 1);
+  });
+
+  it('refuses an interval that would break the 30 second promise', () => {
+    assert.equal(loadConfig({}).schedulerIntervalMs, 30_000);
+    assert.equal(loadConfig({ SCHEDULER_INTERVAL_MS: '5000' }).schedulerIntervalMs, 5_000);
+    assert.throws(
+      () => loadConfig({ SCHEDULER_INTERVAL_MS: '60000' }),
+      /between 1000 and 30000/,
+    );
+  });
+});

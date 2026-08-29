@@ -10,9 +10,11 @@ import {
   featureBranchFor,
   getRepository,
   getSession,
+  isScheduleMissed,
   isValidSessionName,
   listSessions,
   listStories,
+  nowIso,
   type PrTargetBranch,
   type Session,
   type SessionStatus,
@@ -78,6 +80,12 @@ export interface SessionLifecycle {
   readonly builds?: { stop(sessionId: string): Promise<unknown> };
   /** The planning terminal (US-011): closed so no exec is left attached. */
   readonly planning?: { stop(sessionId: string): Promise<unknown> };
+  /**
+   * The scheduler (US-017), so a schedule missed while the session was still
+   * pending is honoured the instant "Mark ready" makes it startable, instead
+   * of waiting for the next poll.
+   */
+  readonly scheduler?: { fire(sessionId: string): Promise<boolean> };
 }
 
 /** A session as the API returns it. */
@@ -92,6 +100,12 @@ export interface SessionView {
   readonly featureBranch: string;
   readonly prTargetBranch: PrTargetBranch;
   readonly scheduledStartAt: string | null;
+  /**
+   * True when the scheduled moment passed while the session was still
+   * `pending`, so nothing started it. The UI says so, and marking the session
+   * ready starts it there and then.
+   */
+  readonly scheduleMissed: boolean;
   readonly queuedAt: string | null;
   readonly containerId: string | null;
   readonly prUrl: string | null;
@@ -120,6 +134,11 @@ export interface SessionView {
  */
 export interface ReadyResult {
   readonly ok: boolean;
+  /**
+   * Whether the build was started as part of this call, which happens when the
+   * session had a schedule it missed while it was still pending (US-017).
+   */
+  readonly started: boolean;
   readonly session: SessionView;
   readonly prd: PrdStatus;
   /** The session's stories as the database now holds them. */
@@ -264,7 +283,7 @@ export class SessionService {
    * is what the build loop reads; on failure nothing changes and the errors
    * come back with their line numbers.
    */
-  markReady(id: string): ReadyResult {
+  async markReady(id: string): Promise<ReadyResult> {
     const session = this.requireSession(id);
     if (session.status !== 'pending') {
       throw new SessionError(
@@ -299,7 +318,19 @@ export class SessionService {
       stories: stories.length,
     });
 
-    return { ok: true, session: this.toView(updated), prd: document.status, stories };
+    // A schedule the session slept through while it was still pending is
+    // honoured now rather than at the next poll: "mark ready to start" is the
+    // whole of what the UI promises, and the operator has just confirmed it
+    // (US-017). A schedule still in the future is left to the scheduler.
+    const started =
+      this.lifecycle.scheduler !== undefined &&
+      updated.scheduledStartAt !== null &&
+      updated.scheduledStartAt <= nowIso()
+        ? await this.lifecycle.scheduler.fire(updated.id)
+        : false;
+    const current = started ? (getSession(this.db, updated.id) ?? updated) : updated;
+
+    return { ok: true, started, session: this.toView(current), prd: document.status, stories };
   }
 
   /**
@@ -322,10 +353,37 @@ export class SessionService {
 
     return {
       ok: true,
+      started: false,
       session: this.toView(updated),
       prd: this.prdStatus(updated),
       stories: listStories(this.db, session.id),
     };
+  }
+
+  /**
+   * Sets, changes or clears the scheduled start (US-017).
+   *
+   * Only while the session is `pending` or `ready`: once it is building there
+   * is nothing left to schedule, and once it is finished or failed a timestamp
+   * would only be a trap the next time the loop is started by hand.
+   */
+  setSchedule(id: string, scheduledStartAt: string | null): SessionView {
+    const session = this.requireSession(id);
+    if (session.status !== 'pending' && session.status !== 'ready') {
+      throw new SessionError(
+        409,
+        'session_not_schedulable',
+        `Only a pending or ready session can be scheduled; "${session.name}" is ${session.status}.`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { scheduledStartAt }) ?? session;
+    logger.info(scheduledStartAt === null ? 'session schedule cleared' : 'session scheduled', {
+      session: session.id,
+      name: session.name,
+      scheduledStartAt,
+    });
+    return this.toView(updated);
   }
 
   /**
@@ -398,6 +456,7 @@ export class SessionService {
     });
     return {
       ok: false,
+      started: false,
       session: this.toView(session),
       prd,
       stories: listStories(this.db, session.id),
@@ -512,6 +571,7 @@ export class SessionService {
       featureBranch: session.featureBranch,
       prTargetBranch: session.prTargetBranch,
       scheduledStartAt: session.scheduledStartAt,
+      scheduleMissed: isScheduleMissed(session),
       queuedAt: session.queuedAt,
       containerId: session.containerId,
       prUrl: session.prUrl,

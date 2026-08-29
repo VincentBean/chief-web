@@ -372,11 +372,46 @@ story again. Like session setup, it answers `200 { ok: false, … }` for a remot
 failure and reserves `409` for the wrong state (still building, or a story left
 outstanding).
 
+## Scheduled starts
+
+A session can be given a **scheduled start**: a timestamp at which chief-web
+starts its build by itself, so a long run can happen overnight or off-hours. It
+is set when the session is created, and set, moved or cleared afterwards from
+the session page (`PUT /api/sessions/<id>/schedule`, `scheduledStartAt: null` to
+clear) for as long as the session is `pending` or `ready`.
+
+The schedule is a **column, not a timer**. `sessions.scheduled_start_at` is the
+whole of it; the scheduler is only the thing that keeps looking at it, every
+`SCHEDULER_INTERVAL_MS` (30 s by default, and capped there). Two things follow:
+
+- **it survives a restart.** The first tick after boot runs before the first
+  request is served and is the same query as every other tick, so anything that
+  came due while the stack was down is simply due now and starts immediately;
+- **nothing has to be told when a schedule changes.** The next tick reads it.
+
+Only a `ready` session is started. A session still being planned when its moment
+arrives **does not start** — chief-web never builds against a PRD it has not
+parsed. The dashboard and the session page say *missed schedule — mark ready to
+start*, and marking it ready then starts the build immediately, after a
+confirmation that says so.
+
+Schedules are **one-shot**. The timestamp is cleared the moment the session
+enters `building`, whether the scheduler fired it or someone pressed **Start
+build** early, so a session that is later stopped or fails can never restart
+itself from a timestamp that has long passed. A fire that could not be honoured
+(no container, say) clears it too and records the reason on the session, rather
+than retrying every half minute for the rest of the day.
+
+The dashboard and the session page both show the scheduled time in the visitor's
+own timezone with a `starts in …` countdown, refreshed by the same three-second
+poll as everything else.
+
 ## Dashboard
 
 The home page (and `/sessions`) is the dashboard: every session, most recently
 updated first, with its repository, status badge, story progress (`4/9 done`),
-feature branch, scheduled start and pull request link. Each row links to the
+feature branch, [scheduled start](#scheduled-starts) with its countdown, and
+pull request link. Each row links to the
 [session page](#planning), and the "New session" form lives here too, so the
 page an operator lands on is the one they work from.
 

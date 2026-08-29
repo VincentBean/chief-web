@@ -207,6 +207,22 @@ export function listDueScheduledSessions(db: Database, now: string = nowIso()): 
     .map(mapSession);
 }
 
+/**
+ * Whether a schedule was missed: its moment passed while the session was still
+ * `pending`, so nothing started it (US-017). The session has to be marked ready
+ * before it can build, and doing so starts it there and then.
+ */
+export function isScheduleMissed(
+  session: Pick<Session, 'status' | 'scheduledStartAt'>,
+  now: string = nowIso(),
+): boolean {
+  return (
+    session.status === 'pending' &&
+    session.scheduledStartAt !== null &&
+    session.scheduledStartAt <= now
+  );
+}
+
 export function countSessionsByStatus(db: Database, status: SessionStatus): number {
   const row = db.prepare('SELECT COUNT(*) AS count FROM sessions WHERE status = ?').get(status);
   return row ? integer(row, 'count') : 0;

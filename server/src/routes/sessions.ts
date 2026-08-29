@@ -78,12 +78,27 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
-  // "Mark ready". A PRD that does not parse answers 200 with `ok: false` and
-  // the line-numbered errors — a result to read, not a failed request — and
-  // leaves the session pending.
+  // "Mark ready". A PRD that does not parse answers 200 with `ok: false`; a
+  // session whose schedule passed while it was pending is started here and
+  // then, which is why this is the one transition that awaits (US-017).
   router.post('/sessions/:id/ready', (req, res) => {
+    sessions
+      .markReady(req.params.id)
+      .then((result) => res.status(200).json(result))
+      .catch((cause: unknown) => respondWithFailure(res, cause));
+  });
+
+  // Sets, changes or clears the scheduled start of a pending or ready session
+  // (US-017). `scheduledStartAt: null` is how a schedule is removed; omitting
+  // it is a mistake worth naming rather than a no-op.
+  router.put('/sessions/:id/schedule', (req, res) => {
+    const parsed = parseSchedule(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
     try {
-      res.status(200).json(sessions.markReady(req.params.id));
+      res.status(200).json(sessions.setSchedule(req.params.id, parsed.scheduledStartAt));
     } catch (cause: unknown) {
       respondWithFailure(res, cause);
     }
@@ -179,6 +194,32 @@ function parseScheduledStart(raw: string): string | Invalid {
     };
   }
   return parsed.toISOString();
+}
+
+/** The body of `PUT /sessions/:id/schedule`. */
+function parseSchedule(body: unknown): { scheduledStartAt: string | null } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return badBody;
+  const input = body as Record<string, unknown>;
+
+  if (!('scheduledStartAt' in input)) {
+    return {
+      error: 'invalid_scheduled_start',
+      message: 'scheduledStartAt is required; send null to clear the schedule.',
+    };
+  }
+
+  const raw = input['scheduledStartAt'];
+  if (raw === null || raw === '') return { scheduledStartAt: null };
+  if (typeof raw !== 'string') {
+    return {
+      error: 'invalid_scheduled_start',
+      message: 'scheduledStartAt must be an ISO-8601 timestamp, or null to clear the schedule.',
+    };
+  }
+
+  const parsed = parseScheduledStart(raw.trim());
+  return typeof parsed === 'object' ? parsed : { scheduledStartAt: parsed };
 }
 
 function parseCreate(body: unknown): CreateSessionRequest | Invalid {

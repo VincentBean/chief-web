@@ -212,7 +212,17 @@ export class BuildService {
       );
     }
 
-    const building = updateSession(this.db, session.id, { status: 'building', lastError: null }) ?? session;
+    // A schedule is spent the moment its session starts building, however that
+    // happened (US-017): the scheduler fired it, or someone pressed the button
+    // early. Clearing it here — the one place `building` is entered — is what
+    // stops a session that is later stopped or failed from starting itself
+    // again from a timestamp that has long passed.
+    const building =
+      updateSession(this.db, session.id, {
+        status: 'building',
+        lastError: null,
+        scheduledStartAt: null,
+      }) ?? session;
     const state: RunState = {
       containerId,
       iteration: 0,

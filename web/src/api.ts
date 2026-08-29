@@ -205,6 +205,11 @@ export interface Session {
   prTargetBranch: PrTargetBranch;
   /** UTC ISO-8601, or null when the session is unscheduled. */
   scheduledStartAt: string | null;
+  /**
+   * The scheduled moment passed while the session was still pending, so
+   * nothing started it. Marking it ready starts it there and then.
+   */
+  scheduleMissed: boolean;
   queuedAt: string | null;
   containerId: string | null;
   prUrl: string | null;
@@ -422,6 +427,8 @@ export interface Story {
  */
 export interface Readiness {
   ok: boolean;
+  /** True when a missed schedule was honoured as part of this call (US-017). */
+  started: boolean;
   session: Session;
   prd: PrdStatus;
   stories: Story[];
@@ -438,6 +445,20 @@ export async function fetchStories(id: string, signal?: AbortSignal): Promise<St
 /** "Mark ready": parses `prd.md` and, if it is usable, syncs and promotes. */
 export async function markSessionReady(id: string): Promise<Readiness> {
   return api<Readiness>(`/api/sessions/${encodeURIComponent(id)}/ready`, { method: 'POST' });
+}
+
+/**
+ * Sets, changes or clears the scheduled start (US-017). Allowed while the
+ * session is pending or ready; `null` removes the schedule.
+ */
+export async function setSessionSchedule(
+  id: string,
+  scheduledStartAt: string | null,
+): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/schedule`, {
+    method: 'PUT',
+    body: JSON.stringify({ scheduledStartAt }),
+  });
 }
 
 /** "Back to planning": returns a ready session to pending so the PRD can change. */

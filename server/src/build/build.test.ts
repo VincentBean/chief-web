@@ -383,6 +383,20 @@ describe('the build loop', () => {
     );
   });
 
+  it('spends the session schedule the moment the build starts (US-017)', async () => {
+    const world = new World();
+    updateSession(world.db, world.session.id, { scheduledStartAt: '2026-08-29T02:00:00.000Z' });
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+
+    // One-shot: whether the scheduler fired it or someone pressed the button
+    // early, nothing is left to restart the session from later on.
+    assert.equal(getSession(world.db, world.session.id)?.scheduledStartAt, null);
+    await builds.whenIdle(world.session.id);
+    assert.equal(getSession(world.db, world.session.id)?.scheduledStartAt, null);
+  });
+
   it('marks the story in progress in prd.md before the agent runs', async () => {
     const world = new World();
     const seen: string[] = [];

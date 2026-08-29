@@ -56,6 +56,11 @@ export interface Config {
   readonly buildStopTimeoutMs: number;
   /** Cap on one `git push` of the session's feature branch (US-014). */
   readonly pushTimeoutMs: number;
+  /**
+   * How often the scheduler looks for a `ready` session whose scheduled start
+   * has passed (US-017). Capped at 30 s, which is the promise the UI makes.
+   */
+  readonly schedulerIntervalMs: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -105,6 +110,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Environment variable PORT must be between 1 and 65535, got "${port}"`);
   }
 
+  // The upper bound is the story's own guarantee ("at least every 30 seconds"),
+  // so an operator cannot configure the scheduler into breaking it.
+  const schedulerIntervalMs = int('SCHEDULER_INTERVAL_MS', 30_000);
+  if (schedulerIntervalMs < 1_000 || schedulerIntervalMs > 30_000) {
+    throw new Error(
+      `Environment variable SCHEDULER_INTERVAL_MS must be between 1000 and 30000, got "${schedulerIntervalMs}"`,
+    );
+  }
+
   return {
     port,
     host: str('HOST', '0.0.0.0'),
@@ -125,6 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     buildIterationTimeoutMs: int('BUILD_ITERATION_TIMEOUT_MS', 3_600_000),
     buildStopTimeoutMs: int('BUILD_STOP_TIMEOUT_MS', 60_000),
     pushTimeoutMs: int('PUSH_TIMEOUT_MS', 300_000),
+    schedulerIntervalMs,
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),

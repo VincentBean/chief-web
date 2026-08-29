@@ -405,7 +405,7 @@ describe('session readiness', () => {
     const created = createSessionRow(f);
     writePrd(f, created, 'add-login', READY_PRD);
 
-    const result = f.service.markReady(created);
+    const result = await f.service.markReady(created);
 
     assert.equal(result.ok, true);
     assert.equal(result.session.status, 'ready');
@@ -425,7 +425,7 @@ describe('session readiness', () => {
     const created = createSessionRow(f);
     writePrd(f, created, 'add-login', '### US-001: First\n**Status:** nearly\n\n- [ ] Ships\n');
 
-    const result = f.service.markReady(created);
+    const result = await f.service.markReady(created);
 
     assert.equal(result.ok, false);
     assert.equal(result.session.status, 'pending');
@@ -440,7 +440,7 @@ describe('session readiness', () => {
     const f = await fixture();
     const created = createSessionRow(f);
 
-    const result = f.service.markReady(created);
+    const result = await f.service.markReady(created);
 
     assert.equal(result.ok, false);
     assert.equal(result.prd.exists, false);
@@ -452,9 +452,9 @@ describe('session readiness', () => {
     const f = await fixture();
     const created = createSessionRow(f);
     writePrd(f, created, 'add-login', READY_PRD);
-    f.service.markReady(created);
+    await f.service.markReady(created);
 
-    assert.throws(
+    await assert.rejects(
       () => f.service.markReady(created),
       (error: unknown) =>
         error instanceof SessionError && error.status === 409 && error.code === 'session_not_pending',
@@ -465,7 +465,7 @@ describe('session readiness', () => {
     const f = await fixture();
     const created = createSessionRow(f);
     writePrd(f, created, 'add-login', READY_PRD);
-    f.service.markReady(created);
+    await f.service.markReady(created);
 
     const back = f.service.backToPlanning(created);
     assert.equal(back.session.status, 'pending');
@@ -479,7 +479,7 @@ describe('session readiness', () => {
       'add-login',
       '### US-001: Add the login form\n**Status:** in-progress\n**Priority:** 1\n\n- [ ] Ships\n',
     );
-    const again = f.service.markReady(created);
+    const again = await f.service.markReady(created);
 
     assert.equal(again.ok, true);
     assert.deepEqual(
@@ -502,7 +502,7 @@ describe('session readiness', () => {
   it('reports an unknown session as a 404', async () => {
     const f = await fixture();
 
-    assert.throws(
+    await assert.rejects(
       () => f.service.markReady('nope'),
       (error: unknown) => error instanceof SessionError && error.status === 404,
     );
@@ -510,6 +510,106 @@ describe('session readiness', () => {
       () => f.service.stories('nope'),
       (error: unknown) => error instanceof SessionError && error.status === 404,
     );
+  });
+});
+
+describe('session scheduling', () => {
+  it('sets, changes and clears the schedule of a pending session', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    const scheduled = f.service.setSchedule(created, '2026-09-01T02:00:00.000Z');
+    assert.equal(scheduled.scheduledStartAt, '2026-09-01T02:00:00.000Z');
+    assert.equal(scheduled.scheduleMissed, false);
+
+    const moved = f.service.setSchedule(created, '2026-09-02T02:00:00.000Z');
+    assert.equal(moved.scheduledStartAt, '2026-09-02T02:00:00.000Z');
+
+    assert.equal(f.service.setSchedule(created, null).scheduledStartAt, null);
+    assert.equal(getSession(f.db, created)?.scheduledStartAt, null);
+  });
+
+  it('reports a schedule the session slept through as missed', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    const view = f.service.setSchedule(created, '2020-01-01T00:00:00.000Z');
+    assert.equal(view.scheduleMissed, true);
+    // Only a pending session can miss one: a ready session is the scheduler's.
+    writePrd(f, created, 'add-login', READY_PRD);
+    const ready = await f.service.markReady(created);
+    assert.equal(ready.session.scheduleMissed, false);
+  });
+
+  it('still schedules a ready session, but not a building one', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+    await f.service.markReady(created);
+
+    assert.equal(
+      f.service.setSchedule(created, '2026-09-01T02:00:00.000Z').scheduledStartAt,
+      '2026-09-01T02:00:00.000Z',
+    );
+
+    updateSession(f.db, created, { status: 'building' });
+    assert.throws(
+      () => f.service.setSchedule(created, '2026-09-01T02:00:00.000Z'),
+      (error: unknown) =>
+        error instanceof SessionError &&
+        error.status === 409 &&
+        error.code === 'session_not_schedulable',
+    );
+  });
+
+  it('starts a missed schedule the moment the session is marked ready', async () => {
+    const fired: string[] = [];
+    const f = await fixture({
+      lifecycle: {
+        scheduler: {
+          fire: (sessionId: string): Promise<boolean> => {
+            fired.push(sessionId);
+            updateSession(f.db, sessionId, { status: 'building', scheduledStartAt: null });
+            return Promise.resolve(true);
+          },
+        },
+      },
+    });
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+    f.service.setSchedule(created, '2020-01-01T00:00:00.000Z');
+
+    const result = await f.service.markReady(created);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.started, true);
+    assert.deepEqual(fired, [created]);
+    assert.equal(result.session.status, 'building');
+    assert.equal(result.stories.length, 2);
+  });
+
+  it('leaves a schedule that is still in the future to the scheduler', async () => {
+    const fired: string[] = [];
+    const f = await fixture({
+      lifecycle: {
+        scheduler: {
+          fire: (sessionId: string): Promise<boolean> => {
+            fired.push(sessionId);
+            return Promise.resolve(true);
+          },
+        },
+      },
+    });
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', READY_PRD);
+    f.service.setSchedule(created, '2999-01-01T00:00:00.000Z');
+
+    const result = await f.service.markReady(created);
+
+    assert.equal(result.started, false);
+    assert.deepEqual(fired, []);
+    assert.equal(result.session.status, 'ready');
+    assert.equal(result.session.scheduledStartAt, '2999-01-01T00:00:00.000Z');
   });
 });
 
@@ -631,7 +731,7 @@ describe('session story progress', () => {
 
     assert.deepEqual(f.service.get(created)?.stories, { total: 0, done: 0 });
 
-    f.service.markReady(created);
+    await f.service.markReady(created);
 
     // READY_PRD has US-001 todo and US-002 done.
     assert.deepEqual(f.service.get(created)?.stories, { total: 2, done: 1 });
