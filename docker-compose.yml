@@ -29,6 +29,9 @@ services:
       # repository connection test (built by US-006).
       RUNNER_IMAGE: ${RUNNER_IMAGE:-chief-web-runner:latest}
       CHIEF_WEB_PASSWORD: ${CHIEF_WEB_PASSWORD:-}
+      # Where this chief-web is reachable from a browser. Only used to link a
+      # generated pull request back to its session (US-014); optional.
+      PUBLIC_URL: ${PUBLIC_URL:-}
       MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:

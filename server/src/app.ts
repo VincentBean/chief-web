@@ -8,12 +8,14 @@ import { type BuildService, createAgentRunner, createBuildService } from './buil
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
+import { createDeliveryService, type DeliveryService } from './delivery/index.js';
 import { DockerApi } from './docker/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
+import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createPlanningRouter } from './routes/planning.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
@@ -67,6 +69,11 @@ export interface AppDependencies {
    * the session container; tests pass one built on a mocked agent runner.
    */
   readonly builds?: BuildService;
+  /**
+   * Push and pull request (US-014). Defaults to a service that pushes from the
+   * session container and calls the GitHub REST API with the stored PAT.
+   */
+  readonly delivery?: DeliveryService;
 }
 
 /**
@@ -123,9 +130,15 @@ export function createApp(
       deps.planning ?? createPlanningService(config, db, terminals, orchestrator),
     ),
   );
+  // What the build loop does with a finished session: push, then open the pull
+  // request. It is both the loop's completion hand-off and its own endpoint, so
+  // a delivery that failed can be retried without rerunning a story.
+  const delivery = deps.delivery ?? createDeliveryService(config, db, orchestrator, exec);
+  api.use(createDeliveryRouter(delivery));
   api.use(
     createBuildRouter(
-      deps.builds ?? createBuildService(config, db, orchestrator, createAgentRunner(exec)),
+      deps.builds ??
+        createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery),
     ),
   );
 

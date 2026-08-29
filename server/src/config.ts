@@ -54,6 +54,8 @@ export interface Config {
   readonly buildIterationTimeoutMs: number;
   /** How long "Stop build" waits for the loop to unwind before answering. */
   readonly buildStopTimeoutMs: number;
+  /** Cap on one `git push` of the session's feature branch (US-014). */
+  readonly pushTimeoutMs: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -68,6 +70,12 @@ export interface Config {
   readonly maxConcurrentSessions: number;
   /** Base URL of the GitHub REST API; overridable for self-hosted GitHub. */
   readonly githubApiUrl: string;
+  /**
+   * Where this chief-web is reachable, e.g. `https://chief.example.com`. Only
+   * used to link a generated pull request back to its session; empty when the
+   * operator has not said, in which case the link-back is plain text.
+   */
+  readonly publicUrl: string;
   /** Directory containing the built frontend assets. */
   readonly webRoot: string;
   readonly nodeEnv: string;
@@ -116,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionSetupTimeoutMs: int('SESSION_SETUP_TIMEOUT_MS', 600_000),
     buildIterationTimeoutMs: int('BUILD_ITERATION_TIMEOUT_MS', 3_600_000),
     buildStopTimeoutMs: int('BUILD_STOP_TIMEOUT_MS', 60_000),
+    pushTimeoutMs: int('PUSH_TIMEOUT_MS', 300_000),
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),
@@ -123,6 +132,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     password: str('CHIEF_WEB_PASSWORD', ''),
     maxConcurrentSessions: int('MAX_CONCURRENT_SESSIONS', 3),
     githubApiUrl: str('GITHUB_API_URL', 'https://api.github.com'),
+    publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),
     nodeEnv: env['NODE_ENV'] ?? 'development',
   };

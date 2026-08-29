@@ -90,20 +90,32 @@ export interface BuildView {
 }
 
 /**
- * What happens when every story is `done`.
+ * What the loop does with the work it produces (US-014).
  *
- * US-014 pushes the feature branch and opens a pull request; until it lands the
- * default simply marks the session `finished`, so the loop already has the
- * hand-off seam it will need and nothing here changes when the real one
- * arrives.
+ * Two moments: after every story it completes, so `origin` is never more than
+ * one story behind the container, and once at the end, when the branch is
+ * pushed again and turned into a pull request. Both are someone else's
+ * business — `DeliveryService` implements this — which keeps the loop about
+ * running stories and lets a failed delivery be retried on its own.
  */
 export interface BuildCompletion {
+  /**
+   * Pushes the feature branch after a completed story. Best-effort: it must
+   * never throw and never end the run, because the commits are safe locally
+   * and the next story pushes them again.
+   */
+  push(session: Session): Promise<void>;
+  /** Every story is done: deliver the branch and settle the session's state. */
   complete(session: Session, stories: readonly Story[]): Promise<void>;
 }
 
 /** The default hand-off: the session is finished, with nothing pushed. */
 export class MarkSessionFinished implements BuildCompletion {
   constructor(private readonly db: Database) {}
+
+  push(): Promise<void> {
+    return Promise.resolve();
+  }
 
   complete(session: Session): Promise<void> {
     updateSession(this.db, session.id, { status: 'finished', lastError: null });
@@ -373,6 +385,12 @@ export class BuildService {
     if (change.commitSha !== null && updated !== null) {
       updateStory(this.db, session.id, story.storyId, { commitSha: change.commitSha });
     }
+
+    // A story the agent finished is pushed straight away, so what `origin` has
+    // is never more than one story behind what the container has — including
+    // when the operator stops the build a moment later, which is why this comes
+    // before the stop check rather than after it.
+    if (updated?.status === 'done') await this.completion.push(session);
 
     if (state.stopping) {
       this.returnToReady(session);

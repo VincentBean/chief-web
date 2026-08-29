@@ -471,6 +471,31 @@ export async function stopBuild(id: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'DELETE' });
 }
 
+/**
+ * Mirrors the server's `DeliveryResult` (US-014): the outcome of pushing the
+ * feature branch and opening the pull request.
+ */
+export interface Delivery {
+  ok: boolean;
+  sessionId: string;
+  status: Session['status'];
+  prUrl: string | null;
+  /** True when an open pull request already existed and was adopted. */
+  adopted: boolean;
+  code: string;
+  message: string;
+  /** git's output when the push is what failed; empty otherwise. */
+  stderr: string;
+}
+
+/**
+ * "Retry push & PR": re-attempts only the delivery of a session whose stories
+ * are all done. Nothing is rebuilt, and no story is run again.
+ */
+export async function retryDelivery(id: string): Promise<Delivery> {
+  return api<Delivery>(`/api/sessions/${encodeURIComponent(id)}/delivery`, { method: 'POST' });
+}
+
 /** The session detail page, which is where planning happens. */
 export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;

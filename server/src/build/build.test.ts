@@ -510,6 +510,7 @@ describe('the build loop', () => {
     };
 
     const builds = serviceFor(world, {
+      push: (): Promise<void> => Promise.resolve(),
       complete: (_session, stories): Promise<void> => {
         handed.push(stories.map((s) => s.storyId));
         return Promise.resolve();
@@ -522,6 +523,52 @@ describe('the build loop', () => {
     // The default hand-off is what marks a session finished; a custom one owns
     // the transition itself, so the session is still building here.
     assert.equal(world.status(), 'building');
+  });
+
+  it('pushes after every completed story, and once more on completion', async () => {
+    const world = new World();
+    const events: string[] = [];
+    world.runner.behaviour = (invocation): void => {
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+
+    const builds = serviceFor(world, {
+      push: (): Promise<void> => {
+        events.push('push');
+        return Promise.resolve();
+      },
+      complete: (): Promise<void> => {
+        events.push('complete');
+        return Promise.resolve();
+      },
+    });
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // Two stories, so two pushes — the remote is never more than one story
+    // behind — and then the hand-off that pushes again and opens the PR.
+    assert.deepEqual(events, ['push', 'push', 'complete']);
+  });
+
+  it('does not push an iteration that finished nothing', async () => {
+    const world = new World();
+    const events: string[] = [];
+    // The agent commits but never marks the story done: a story is only pushed
+    // when prd.md says it is finished.
+    world.runner.behaviour = (): void => world.runner.commit();
+
+    const builds = serviceFor(world, {
+      push: (): Promise<void> => {
+        events.push('push');
+        return Promise.resolve();
+      },
+      complete: (): Promise<void> => Promise.resolve(),
+    });
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.deepEqual(events, []);
   });
 
   it('fails when the agent leaves prd.md unparseable', async () => {

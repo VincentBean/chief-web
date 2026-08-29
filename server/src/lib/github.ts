@@ -7,6 +7,8 @@
 export type GithubErrorCode =
   | 'github_unauthorized'
   | 'github_forbidden'
+  | 'github_not_found'
+  | 'github_rejected'
   | 'github_unreachable'
   | 'github_error';
 
@@ -27,7 +29,33 @@ export interface GithubUser {
   readonly login: string;
 }
 
-/** How long a validation call may take before it is treated as unreachable. */
+/** A pull request, reduced to what chief-web stores and shows. */
+export interface PullRequest {
+  readonly number: number;
+  /** The `html_url`: what the session page links to. */
+  readonly url: string;
+  readonly state: string;
+}
+
+/** Everything `POST /repos/{owner}/{repo}/pulls` needs. */
+export interface PullRequestInput {
+  /** `owner/repo`, as stored on the repository. */
+  readonly slug: string;
+  /** Branch the changes are on. Always a branch of the same repository. */
+  readonly head: string;
+  /** Branch the pull request targets, e.g. `develop` or `main`. */
+  readonly base: string;
+  readonly title: string;
+  readonly body: string;
+}
+
+export interface OpenedPullRequest {
+  readonly pullRequest: PullRequest;
+  /** True when an open pull request for that head/base already existed. */
+  readonly adopted: boolean;
+}
+
+/** How long a single GitHub call may take before it is treated as unreachable. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
@@ -35,12 +63,107 @@ const REQUEST_TIMEOUT_MS = 10_000;
  * it belongs to. Used by the Settings page's "Validate" action (US-004).
  */
 export async function fetchGithubUser(token: string, baseUrl: string): Promise<GithubUser> {
-  let response: Response;
+  const response = await call(token, url(baseUrl, '/user'), { method: 'GET' });
+  if (!response.ok) throw await failureOf(response);
+
+  const login = await readLogin(response);
+  if (login === null) {
+    throw new GithubApiError('github_error', 'GitHub returned an unexpected response body.');
+  }
+  return { login };
+}
+
+/**
+ * Opens the session's pull request, or adopts the one that is already there
+ * (US-014).
+ *
+ * A build that is retried — or one whose branch was pushed and turned into a
+ * pull request by hand — must not end in a duplicate or an error, so the
+ * existing pull request is looked up *first*. GitHub itself also refuses a
+ * duplicate, with a 422, and that answer is treated the same way: look again,
+ * and adopt what the race produced.
+ */
+export async function openPullRequest(
+  token: string,
+  baseUrl: string,
+  input: PullRequestInput,
+): Promise<OpenedPullRequest> {
+  const existing = await findPullRequest(token, baseUrl, input);
+  if (existing !== null) return { pullRequest: existing, adopted: true };
+
   try {
-    response = await fetch(`${baseUrl.replace(/\/+$/, '')}/user`, {
+    return { pullRequest: await createPullRequest(token, baseUrl, input), adopted: false };
+  } catch (cause) {
+    if (!(cause instanceof GithubApiError) || cause.status !== 422) throw cause;
+    const raced = await findPullRequest(token, baseUrl, input);
+    if (raced === null) throw cause;
+    return { pullRequest: raced, adopted: true };
+  }
+}
+
+/** The open pull request for `head` → `base`, or null when there is none. */
+export async function findPullRequest(
+  token: string,
+  baseUrl: string,
+  input: Pick<PullRequestInput, 'slug' | 'head' | 'base'>,
+): Promise<PullRequest | null> {
+  const owner = input.slug.split('/')[0] ?? '';
+  const query = new URLSearchParams({
+    state: 'open',
+    // Cross-repository pull requests are qualified `owner:branch`; chief-web
+    // only ever pushes to the repository itself, so the owner is our own.
+    head: `${owner}:${input.head}`,
+    base: input.base,
+    per_page: '1',
+  });
+
+  const response = await call(token, `${url(baseUrl, `/repos/${input.slug}/pulls`)}?${query.toString()}`, {
+    method: 'GET',
+  });
+  if (!response.ok) throw await failureOf(response);
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!Array.isArray(body) || body.length === 0) return null;
+  return toPullRequest(body[0]);
+}
+
+/** `POST /repos/{slug}/pulls`. Rejects with a 422 when one already exists. */
+export async function createPullRequest(
+  token: string,
+  baseUrl: string,
+  input: PullRequestInput,
+): Promise<PullRequest> {
+  const response = await call(token, url(baseUrl, `/repos/${input.slug}/pulls`), {
+    method: 'POST',
+    body: JSON.stringify({
+      title: input.title,
+      body: input.body,
+      head: input.head,
+      base: input.base,
+    }),
+  });
+  if (!response.ok) throw await failureOf(response);
+
+  const created = toPullRequest(await response.json().catch(() => null));
+  if (created === null) {
+    throw new GithubApiError('github_error', 'GitHub did not return the pull request it created.');
+  }
+  return created;
+}
+
+function url(baseUrl: string, path: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}${path}`;
+}
+
+/** One request, with a network failure turned into `github_unreachable`. */
+async function call(token: string, target: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(target, {
+      ...init,
       headers: {
         authorization: `Bearer ${token}`,
         accept: 'application/vnd.github+json',
+        'content-type': 'application/json',
         'x-github-api-version': '2022-11-28',
         'user-agent': 'chief-web',
       },
@@ -52,35 +175,54 @@ export async function fetchGithubUser(token: string, baseUrl: string): Promise<G
       `Could not reach the GitHub API: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
+}
 
-  if (response.ok) {
-    const login = await readLogin(response);
-    if (login === null) {
-      throw new GithubApiError('github_error', 'GitHub returned an unexpected response body.');
-    }
-    return { login };
-  }
-
+/** Turns a non-2xx answer into the error the operator is shown. */
+async function failureOf(response: Response): Promise<GithubApiError> {
   const detail = await readMessage(response);
-  if (response.status === 401) {
-    throw new GithubApiError(
-      'github_unauthorized',
-      `GitHub rejected the token: ${detail ?? 'it is invalid, revoked or expired.'}`,
-      401,
-    );
+  switch (response.status) {
+    case 401:
+      return new GithubApiError(
+        'github_unauthorized',
+        `GitHub rejected the token: ${detail ?? 'it is invalid, revoked or expired.'}`,
+        401,
+      );
+    case 403:
+      return new GithubApiError(
+        'github_forbidden',
+        `GitHub refused the request: ${detail ?? 'the token lacks the required permissions.'}`,
+        403,
+      );
+    case 404:
+      return new GithubApiError(
+        'github_not_found',
+        `GitHub found nothing there: ${detail ?? 'the repository does not exist, or the token cannot see it.'}`,
+        404,
+      );
+    case 422:
+      return new GithubApiError(
+        'github_rejected',
+        `GitHub rejected the request: ${detail ?? 'it was well-formed but could not be processed.'}`,
+        422,
+      );
+    default:
+      return new GithubApiError(
+        'github_error',
+        `GitHub returned HTTP ${response.status}${detail === null ? '' : `: ${detail}`}`,
+        response.status,
+      );
   }
-  if (response.status === 403) {
-    throw new GithubApiError(
-      'github_forbidden',
-      `GitHub refused the request: ${detail ?? 'the token lacks the required permissions.'}`,
-      403,
-    );
-  }
-  throw new GithubApiError(
-    'github_error',
-    `GitHub returned HTTP ${response.status}${detail === null ? '' : `: ${detail}`}`,
-    response.status,
-  );
+}
+
+function toPullRequest(value: unknown): PullRequest | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const body = value as { number?: unknown; html_url?: unknown; state?: unknown };
+  if (typeof body.number !== 'number' || typeof body.html_url !== 'string') return null;
+  return {
+    number: body.number,
+    url: body.html_url,
+    state: typeof body.state === 'string' ? body.state : 'open',
+  };
 }
 
 async function readLogin(response: Response): Promise<string | null> {
@@ -90,10 +232,31 @@ async function readLogin(response: Response): Promise<string | null> {
   return typeof login === 'string' && login !== '' ? login : null;
 }
 
-/** GitHub error bodies carry a `message`; fall back to nothing when absent. */
+/**
+ * GitHub error bodies carry a `message`, and a 422 additionally carries an
+ * `errors` array whose entries say what was actually wrong ("No commits
+ * between main and chief/x") — the useful half, so both are kept.
+ */
 async function readMessage(response: Response): Promise<string | null> {
   const body: unknown = await response.json().catch(() => null);
-  if (typeof body !== 'object' || body === null || !('message' in body)) return null;
-  const message = (body as { message: unknown }).message;
-  return typeof message === 'string' && message !== '' ? message : null;
+  if (typeof body !== 'object' || body === null) return null;
+
+  const message = (body as { message?: unknown }).message;
+  const head = typeof message === 'string' && message !== '' ? message : null;
+  const details = readErrorDetails((body as { errors?: unknown }).errors);
+  if (head === null) return details;
+  return details === null ? head : `${head} (${details})`;
+}
+
+function readErrorDetails(errors: unknown): string | null {
+  if (!Array.isArray(errors)) return null;
+  const messages = errors
+    .map((entry) => {
+      if (typeof entry === 'string') return entry;
+      if (typeof entry !== 'object' || entry === null) return null;
+      const detail = (entry as { message?: unknown }).message;
+      return typeof detail === 'string' && detail !== '' ? detail : null;
+    })
+    .filter((entry): entry is string => entry !== null);
+  return messages.length === 0 ? null : messages.join('; ');
 }

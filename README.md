@@ -293,8 +293,8 @@ the Ralph loop (`server/src/build/`). One iteration is:
 
 The loop stops itself in four ways:
 
-- **Completion.** Every story `done` hands off to push/PR (US-014); until that
-  lands, the session simply becomes **finished**.
+- **Completion.** Every story `done` hands off to the delivery step below,
+  which pushes the branch and opens the pull request.
 - **A stalled story.** An iteration that produces neither a status change nor a
   commit is retried twice; the third one marks the session **failed** with the
   agent's last output in `last_error`.
@@ -311,6 +311,39 @@ Nothing about a run is stored in memory that matters: the statuses are in
 `progress.md`. A server restart therefore loses at most the iteration that was
 in flight — startup reconciliation marks such a session `failed` with
 `container lost`.
+
+## Push and pull request
+
+The loop pushes the feature branch to `origin` **after every story it
+completes**, so what the remote has is never more than one story behind what the
+container has. Those pushes are best-effort: the commits are safe locally, so a
+remote that is briefly unavailable is logged and the build carries on.
+
+When the last story is done, `server/src/delivery/` takes over:
+
+1. `git push --set-upstream origin <feature-branch>` once more, from **inside**
+   the session container — that is where the repository's deploy key is. Never
+   a force push, and never a refspec chief-web invented.
+2. `POST /repos/<owner>/<repo>/pulls` with the global PAT from Settings. The
+   title is the **session name**; the body lists the completed stories by id and
+   title (with their short commit SHAs), names the branches, and ends with a note
+   saying chief-web generated it — a link back to the session page when
+   `PUBLIC_URL` is set.
+3. The session becomes **finished**, the pull request URL is stored on the row,
+   and the session page shows it as a link.
+
+**An existing pull request is adopted, never duplicated.** The open pull request
+for that head/base is looked up first, and GitHub's own 422 ("a pull request
+already exists") is handled the same way — look again, adopt what is there.
+
+**A failure at either step marks the session `failed`** with the underlying
+reason: git's stderr, or GitHub's own message (`No commits between develop and
+chief/x`, a token that cannot see the repository, …). Because every story is
+already committed, there is nothing to rebuild — **Retry push & PR**
+(`POST /api/sessions/<id>/delivery`) re-attempts only that step and never runs a
+story again. Like session setup, it answers `200 { ok: false, … }` for a remote
+failure and reserves `409` for the wrong state (still building, or a story left
+outstanding).
 
 ## Browser terminals
 

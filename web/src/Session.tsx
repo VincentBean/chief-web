@@ -11,6 +11,7 @@ import {
   type Planning,
   type PrdParseError,
   type PrdStatus,
+  retryDelivery,
   type Session as SessionData,
   startBuild,
   startPlanning,
@@ -58,7 +59,7 @@ export function Session() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<
-    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | null
+    'start' | 'stop' | 'ready' | 'planning' | 'build' | 'stop-build' | 'delivery' | null
   >(null);
   const [build, setBuild] = useState<Build | null>(null);
   /** Why the last "Mark ready" was refused; cleared by the next attempt. */
@@ -234,6 +235,23 @@ export function Session() {
       .finally(() => setBusy(null));
   };
 
+  const onRetryDelivery = (): void => {
+    setBusy('delivery');
+    setNotice(null);
+    retryDelivery(id)
+      .then((result) => {
+        setSession((current) =>
+          current === null
+            ? current
+            : { ...current, status: result.status, prUrl: result.prUrl ?? current.prUrl },
+        );
+        setBuild((current) => (current === null ? current : { ...current, status: result.status }));
+        setNotice({ kind: result.ok ? 'ok' : 'error', text: result.message });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
   const startLabel = resume ? 'Resume planning' : 'Start planning';
 
@@ -268,6 +286,16 @@ export function Session() {
           <dd className="mono">{session.baseBranch}</dd>
           <dt>Workspace</dt>
           <dd>{session.cloned ? 'cloned into /workspace/repo' : 'not cloned yet'}</dd>
+          {session.prUrl !== null && (
+            <>
+              <dt>Pull request</dt>
+              <dd>
+                <a className="link" href={session.prUrl} target="_blank" rel="noreferrer">
+                  {session.prUrl}
+                </a>
+              </dd>
+            </>
+          )}
         </dl>
         {session.lastError !== null && (
           <p className="notice notice--error" role="status">
@@ -300,9 +328,11 @@ export function Session() {
       <BuildCard
         status={session.status}
         build={build}
+        prUrl={session.prUrl}
         busy={busy}
         onStart={onStartBuild}
         onStop={onStopBuild}
+        onRetryDelivery={onRetryDelivery}
       />
 
       <section className="card">
@@ -527,21 +557,29 @@ function ReadinessCard({
 function BuildCard({
   status,
   build,
+  prUrl,
   busy,
   onStart,
   onStop,
+  onRetryDelivery,
 }: {
   status: SessionData['status'];
   build: Build | null;
+  prUrl: string | null;
   busy: string | null;
   onStart: () => void;
   onStop: () => void;
+  onRetryDelivery: () => void;
 }) {
   if (build === null || status === 'pending') return null;
 
   const building = status === 'building';
   const done = build.stories.filter((story) => story.status === 'done').length;
   const current = build.stories.find((story) => story.storyId === build.currentStoryId) ?? null;
+  // Everything is committed, so the only thing left that can have failed is the
+  // push or the pull request — and that is retried on its own (US-014).
+  const complete = build.stories.length > 0 && done === build.stories.length;
+  const canRetryDelivery = complete && (status === 'failed' || (status === 'finished' && prUrl === null));
 
   return (
     <section className="card">
@@ -563,6 +601,16 @@ function BuildCard({
               disabled={busy !== null}
             >
               {busy === 'stop-build' ? 'Stopping…' : 'Stop build'}
+            </button>
+          )}
+          {canRetryDelivery && (
+            <button
+              type="button"
+              className="button"
+              onClick={onRetryDelivery}
+              disabled={busy !== null}
+            >
+              {busy === 'delivery' ? 'Retrying…' : 'Retry push & PR'}
             </button>
           )}
         </div>
@@ -593,6 +641,23 @@ function BuildCard({
           </>
         )}
       </dl>
+
+      {prUrl !== null && (
+        <p className="field__hint">
+          <a className="link" href={prUrl} target="_blank" rel="noreferrer">
+            View the pull request
+          </a>{' '}
+          — opened automatically when the last story was done.
+        </p>
+      )}
+
+      {canRetryDelivery && (
+        <p className="field__hint">
+          Every story is done, so nothing has to be rebuilt. &ldquo;Retry push &amp; PR&rdquo;
+          re-attempts only the push and the pull request; an existing pull request for this branch is
+          adopted rather than duplicated.
+        </p>
+      )}
 
       {status === 'ready' && (
         <p className="field__hint">

@@ -123,6 +123,7 @@ describe('build api', () => {
         },
         runner,
         {
+          push: (): Promise<void> => Promise.resolve(),
           complete: (finished): Promise<void> => {
             updateSession(db, finished.id, { status: 'finished' });
             return Promise.resolve();
