@@ -75,6 +75,19 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    id: '0002_repository_ssh_keys',
+    sql: `
+      -- The public half of the repository's deploy key, its fingerprint, and
+      -- whether chief-web generated it or the operator pasted one. The private
+      -- key itself lives on the data volume at \`$SSH_KEYS_DIR/<id>.key\`,
+      -- never in the database (US-005).
+      ALTER TABLE repositories ADD COLUMN public_key TEXT;
+      ALTER TABLE repositories ADD COLUMN key_fingerprint TEXT;
+      ALTER TABLE repositories ADD COLUMN key_source TEXT
+        CHECK (key_source IS NULL OR key_source IN ('generated', 'imported'));
+    `,
+  },
 ];
 
 /**

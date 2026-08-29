@@ -49,7 +49,7 @@ no native modules.
 
 | Table          | Contents                                                           |
 | -------------- | ------------------------------------------------------------------ |
-| `repositories` | registered repos: name, SSH URL, GitHub slug, default base branch   |
+| `repositories` | registered repos: name, SSH URL, GitHub slug, base branch, deploy key |
 | `sessions`     | one row per session: status, branches, schedule, container, PR, error |
 | `stories`      | the stories parsed from a session's `prd.md`, with commit SHAs      |
 | `settings`     | key-value configuration (GitHub PAT, concurrency limit, …)          |
@@ -57,6 +57,33 @@ no native modules.
 Migrations in `server/src/db/migrations.ts` run automatically on server start.
 They are append-only and recorded in `schema_migrations`, so restarting the stack
 re-applies nothing and never touches existing data.
+
+## Repositories
+
+`/repositories` registers the git remotes sessions work on. Each repository has a
+name, an SSH URL (`git@github.com:owner/repo.git`), a GitHub `owner/repo` slug —
+derived from the URL, overridable — and a default base branch.
+
+Every repository gets **its own SSH key**:
+
+- On add, chief-web generates an **ed25519** keypair and shows you the public
+  half. Add it as a *deploy key* on `github.com/<owner>/<repo>/settings/keys` and
+  tick **Allow write access**, since sessions push their feature branch with it.
+- Alternatively, paste an existing **unencrypted** private key. A
+  passphrase-protected key is rejected: a session container has no way to unlock
+  it.
+- The private key is written to `SSH_KEYS_DIR/<repository id>.key` with mode
+  `0600` in a `0700` directory, and is never returned by the API or shown in the
+  UI after creation — only its `SHA256:…` fingerprint is.
+
+**Test connection** runs `git ls-remote` in a short-lived runner container with
+that key on stdin (never in argv or the environment) and reports either success
+or git's own stderr, so a missing deploy key shows up as
+`Permission denied (publickey)` rather than a generic failure. It needs the
+runner image (`RUNNER_IMAGE`, built by the compose stack).
+
+Deleting a repository is refused while any session still references it; delete
+those sessions first. A successful delete also removes the private key file.
 
 ## Settings
 
@@ -93,9 +120,11 @@ All environment variables are documented in [`.env.example`](.env.example).
   container per session. **This grants the server root-equivalent control of the
   host.** This is accepted for a single-operator, self-hosted deployment; do not
   expose chief-web to untrusted users.
-- The GitHub token is stored in plain text in the SQLite database (like the SSH
-  deploy keys on the data volume): the server must be able to use it
-  unattended, so protect the data volume rather than the value.
+- The GitHub token is stored in plain text in the SQLite database, and repository
+  SSH private keys in plain text on the data volume (`0600`): the server must be
+  able to use both unattended, so protect the data volume rather than the values.
+  Private keys never leave the server — no API response, log line or UI element
+  contains one.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.
 

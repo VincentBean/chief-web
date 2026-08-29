@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.tsx';
 import './index.css';
 import { Login } from './Login.tsx';
+import { Repositories } from './Repositories.tsx';
 import { Settings } from './Settings.tsx';
 
 const container = document.getElementById('root');
@@ -14,6 +15,7 @@ if (!container) throw new Error('Root element #root not found');
 // so a router library is still not warranted.
 const PAGES: Record<string, () => JSX.Element> = {
   '/login': Login,
+  '/repositories': Repositories,
   '/settings': Settings,
 };
 

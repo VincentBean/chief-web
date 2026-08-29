@@ -15,6 +15,9 @@ services:
       DATA_DIR: /data
       CLAUDE_AUTH_DIR: /claude-auth
       DOCKER_SOCKET: /var/run/docker.sock
+      # Image used for session containers and short-lived helpers such as the
+      # repository connection test (built by US-006).
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-chief-web-runner:latest}
       CHIEF_WEB_PASSWORD: ${CHIEF_WEB_PASSWORD:-}
       MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
       LOG_LEVEL: ${LOG_LEVEL:-info}

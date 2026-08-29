@@ -24,7 +24,8 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
 
-  if (response.ok) return (await response.json()) as T;
+  // 204 (e.g. DELETE) has no body to parse.
+  if (response.ok) return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
 
   let code = `http_${response.status}`;
   let detail: string | null = null;
@@ -75,4 +76,67 @@ export async function validateGithubToken(token?: string): Promise<{ login: stri
     method: 'POST',
     body: JSON.stringify(token === undefined ? {} : { token }),
   });
+}
+
+/** Mirrors the server's `RepositoryView`: the private key is never included. */
+export interface Repository {
+  id: string;
+  name: string;
+  sshUrl: string;
+  githubSlug: string;
+  defaultBaseBranch: string;
+  /** The deploy key line to paste into GitHub; null for imported PEM keys. */
+  publicKey: string | null;
+  keyFingerprint: string | null;
+  keySource: 'generated' | 'imported' | null;
+  keyConfigured: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryInput {
+  name?: string;
+  sshUrl?: string;
+  /** Omit to let the server derive it from the SSH URL. */
+  githubSlug?: string;
+  defaultBaseBranch?: string;
+  /** Omit on create to have the server generate an ed25519 keypair. */
+  privateKey?: string;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  stderr: string;
+}
+
+export async function fetchRepositories(signal?: AbortSignal): Promise<Repository[]> {
+  const body = await api<{ repositories: Repository[] }>(
+    '/api/repositories',
+    signal ? { signal } : {},
+  );
+  return body.repositories;
+}
+
+export async function createRepository(input: RepositoryInput): Promise<Repository> {
+  return api<Repository>('/api/repositories', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function updateRepository(id: string, input: RepositoryInput): Promise<Repository> {
+  return api<Repository>(`/api/repositories/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteRepository(id: string): Promise<void> {
+  await api<void>(`/api/repositories/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** Runs `git ls-remote` in a runner container; a failed remote still resolves. */
+export async function testRepositoryConnection(id: string): Promise<ConnectionTestResult> {
+  return api<ConnectionTestResult>(
+    `/api/repositories/${encodeURIComponent(id)}/test-connection`,
+    { method: 'POST' },
+  );
 }

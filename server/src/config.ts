@@ -24,6 +24,12 @@ export interface Config {
   readonly claudeAuthDir: string;
   /** Docker socket used to spawn session containers. */
   readonly dockerSocket: string;
+  /** Docker CLI binary used to spawn short-lived helper containers. */
+  readonly dockerBin: string;
+  /** Image sessions and one-off helper containers run (built by US-006). */
+  readonly runnerImage: string;
+  /** Cap on how long a repository "test connection" run may take. */
+  readonly connectionTestTimeoutMs: number;
   /** Shared password protecting the UI (see US-003); empty when unset. */
   readonly password: string;
   /** Default max number of sessions building at the same time (see US-018). */
@@ -68,6 +74,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workspacesDir: path.resolve(str('WORKSPACES_DIR', path.join(dataDir, 'workspaces'))),
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
+    dockerBin: str('DOCKER_BIN', 'docker'),
+    runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
+    connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     password: str('CHIEF_WEB_PASSWORD', ''),
     maxConcurrentSessions: int('MAX_CONCURRENT_SESSIONS', 3),
     githubApiUrl: str('GITHUB_API_URL', 'https://api.github.com'),

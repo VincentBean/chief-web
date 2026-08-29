@@ -8,7 +8,18 @@ import type { Config } from './config.js';
 import type { Database } from './db/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createHealthRouter } from './routes/health.js';
+import { createRepositoriesRouter } from './routes/repositories.js';
 import { createSettingsRouter } from './routes/settings.js';
+import type { CommandRunner } from './ssh/index.js';
+
+/** Injected collaborators that tests replace; all optional in production. */
+export interface AppDependencies {
+  /**
+   * How `docker run` is executed for the repository connection test. Defaults
+   * to spawning the real Docker CLI.
+   */
+  readonly runCommand?: CommandRunner;
+}
 
 /**
  * Builds the Express application: the JSON API under `/api`, and the built
@@ -17,7 +28,12 @@ import { createSettingsRouter } from './routes/settings.js';
  * Everything is behind the shared password (US-003) except `GET /api/health`,
  * `POST /api/auth/login` and the `/login` page.
  */
-export function createApp(config: Config, auth: AuthService, db: Database): Express {
+export function createApp(
+  config: Config,
+  auth: AuthService,
+  db: Database,
+  deps: AppDependencies = {},
+): Express {
   const app = express();
 
   app.disable('x-powered-by');
@@ -30,6 +46,7 @@ export function createApp(config: Config, auth: AuthService, db: Database): Expr
   // not reveal whether they exist).
   api.use(requireApiAuth(auth));
   api.use(createSettingsRouter(db, config));
+  api.use(createRepositoriesRouter(db, config, deps.runCommand));
   app.use('/api', api);
 
   app.use('/api', (_req, res) => {

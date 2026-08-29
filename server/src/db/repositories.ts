@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { changeCount, type Database, nowIso, type Row, text } from './sqlite.js';
+import { changeCount, type Database, nowIso, nullableText, type Row, text } from './sqlite.js';
+
+/** Whether chief-web generated the deploy key or the operator pasted one. */
+export const REPOSITORY_KEY_SOURCES = ['generated', 'imported'] as const;
+export type RepositoryKeySource = (typeof REPOSITORY_KEY_SOURCES)[number];
 
 export interface Repository {
   readonly id: string;
@@ -12,6 +16,14 @@ export interface Repository {
   readonly githubSlug: string;
   /** Branch new sessions branch from unless overridden. */
   readonly defaultBaseBranch: string;
+  /**
+   * The `authorized_keys` line for the repository's deploy key. Public by
+   * definition; the private half only ever lives on the data volume (US-005).
+   */
+  readonly publicKey: string | null;
+  /** `SHA256:…` fingerprint of `publicKey`, for matching against GitHub. */
+  readonly keyFingerprint: string | null;
+  readonly keySource: RepositoryKeySource | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -21,6 +33,9 @@ export interface CreateRepositoryInput {
   readonly sshUrl: string;
   readonly githubSlug: string;
   readonly defaultBaseBranch?: string;
+  readonly publicKey?: string | null;
+  readonly keyFingerprint?: string | null;
+  readonly keySource?: RepositoryKeySource | null;
 }
 
 export interface UpdateRepositoryInput {
@@ -28,6 +43,9 @@ export interface UpdateRepositoryInput {
   readonly sshUrl?: string;
   readonly githubSlug?: string;
   readonly defaultBaseBranch?: string;
+  readonly publicKey?: string | null;
+  readonly keyFingerprint?: string | null;
+  readonly keySource?: RepositoryKeySource | null;
 }
 
 const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
@@ -35,7 +53,19 @@ const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
   sshUrl: 'ssh_url',
   githubSlug: 'github_slug',
   defaultBaseBranch: 'default_base_branch',
+  publicKey: 'public_key',
+  keyFingerprint: 'key_fingerprint',
+  keySource: 'key_source',
 };
+
+function keySourceOf(row: Row): RepositoryKeySource | null {
+  const value = nullableText(row, 'key_source');
+  if (value === null) return null;
+  if (!(REPOSITORY_KEY_SOURCES as readonly string[]).includes(value)) {
+    throw new Error(`Unexpected value for column "key_source": ${JSON.stringify(value)}`);
+  }
+  return value as RepositoryKeySource;
+}
 
 export function mapRepository(row: Row): Repository {
   return {
@@ -44,6 +74,9 @@ export function mapRepository(row: Row): Repository {
     sshUrl: text(row, 'ssh_url'),
     githubSlug: text(row, 'github_slug'),
     defaultBaseBranch: text(row, 'default_base_branch'),
+    publicKey: nullableText(row, 'public_key'),
+    keyFingerprint: nullableText(row, 'key_fingerprint'),
+    keySource: keySourceOf(row),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -57,20 +90,27 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     sshUrl: input.sshUrl,
     githubSlug: input.githubSlug,
     defaultBaseBranch: input.defaultBaseBranch ?? 'main',
+    publicKey: input.publicKey ?? null,
+    keyFingerprint: input.keyFingerprint ?? null,
+    keySource: input.keySource ?? null,
     createdAt: now,
     updatedAt: now,
   };
 
   db.prepare(
     `INSERT INTO repositories
-       (id, name, ssh_url, github_slug, default_base_branch, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (id, name, ssh_url, github_slug, default_base_branch,
+        public_key, key_fingerprint, key_source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     repository.id,
     repository.name,
     repository.sshUrl,
     repository.githubSlug,
     repository.defaultBaseBranch,
+    repository.publicKey,
+    repository.keyFingerprint,
+    repository.keySource,
     repository.createdAt,
     repository.updatedAt,
   );
@@ -102,7 +142,7 @@ export function updateRepository(
   patch: UpdateRepositoryInput,
 ): Repository | null {
   const assignments: string[] = [];
-  const params: Record<string, string> = { ':id': id, ':updated_at': nowIso() };
+  const params: Record<string, string | null> = { ':id': id, ':updated_at': nowIso() };
 
   for (const [field, column] of Object.entries(COLUMNS)) {
     const value = patch[field as keyof UpdateRepositoryInput];
