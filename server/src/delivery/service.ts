@@ -2,6 +2,8 @@ import type { BuildCompletion } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   type Database,
+  failSession,
+  type FailureStage,
   getRepository,
   getSession,
   listStories,
@@ -84,6 +86,20 @@ export type DeliveryCode =
   | 'repository_missing'
   | 'invalid_github_slug'
   | 'pull_request_failed';
+
+/**
+ * Which of the two steps each failure belongs to (US-019). It is what a retry
+ * dispatches on: both stages re-run the delivery and nothing else, but the
+ * operator is told which half to go and fix — the remote, or GitHub.
+ */
+const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok'>, FailureStage> = {
+  container_unavailable: 'push',
+  push_failed: 'push',
+  github_token_missing: 'pull_request',
+  repository_missing: 'pull_request',
+  invalid_github_slug: 'pull_request',
+  pull_request_failed: 'pull_request',
+};
 
 export class DeliveryService implements BuildCompletion {
   constructor(
@@ -242,6 +258,7 @@ export class DeliveryService implements BuildCompletion {
       status: 'finished',
       prUrl: opened.pullRequest.url,
       lastError: null,
+      failureStage: null,
     });
 
     logger.info(opened.adopted ? 'pull request adopted' : 'pull request opened', {
@@ -279,16 +296,18 @@ export class DeliveryService implements BuildCompletion {
 
   private failed(
     session: Session,
-    code: DeliveryCode,
+    code: Exclude<DeliveryCode, 'ok'>,
     detail: { message: string; stderr: string },
   ): DeliveryResult {
     const stored = detail.stderr === '' ? detail.message : `${detail.message}\n\n${detail.stderr}`;
-    const updated = updateSession(this.db, session.id, { status: 'failed', lastError: stored });
+    const stage = FAILURE_STAGE_OF[code];
+    const updated = failSession(this.db, session.id, stage, stored);
 
     logger.warn('delivery failed', {
       session: session.id,
       name: session.name,
       code,
+      stage,
       error: detail.message,
     });
 

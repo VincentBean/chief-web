@@ -17,6 +17,48 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const PR_TARGET_BRANCHES = ['develop', 'main'] as const;
 export type PrTargetBranch = (typeof PR_TARGET_BRANCHES)[number];
 
+/**
+ * Where a `failed` session failed (US-019).
+ *
+ * Every path to `failed` records one of these next to the human-readable
+ * `last_error`, because the stage is what decides how a retry resumes: an
+ * `agent`, `prd` or `container_lost` failure is retried by starting the loop
+ * again at the first story that is not done, while `push` and `pull_request`
+ * re-run only the delivery of work that is already committed.
+ *
+ * A clone or setup failure is deliberately not in this list: it leaves the
+ * session `pending` with a "Retry setup" action (US-010), never `failed`.
+ */
+export const FAILURE_STAGES = [
+  /** One headless `claude -p` iteration: stalled, timed out, or would not run. */
+  'agent',
+  /** `prd.md` could no longer be read, so the loop cannot tell what is done. */
+  'prd',
+  /** `git push` of the feature branch. */
+  'push',
+  /** Opening the pull request at GitHub. */
+  'pull_request',
+  /** The session's container disappeared while it was building (US-009). */
+  'container_lost',
+] as const;
+export type FailureStage = (typeof FAILURE_STAGES)[number];
+
+/** What the UI calls a stage, in the operator's words. */
+export function failureStageLabel(stage: FailureStage): string {
+  switch (stage) {
+    case 'agent':
+      return 'the agent';
+    case 'prd':
+      return 'the PRD';
+    case 'push':
+      return 'the push';
+    case 'pull_request':
+      return 'the pull request';
+    case 'container_lost':
+      return 'the container';
+  }
+}
+
 /** Session names are slugs: letters, numbers, hyphens and underscores. */
 export const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -35,6 +77,8 @@ export interface Session {
   readonly containerId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
+  /** Which step failed, whenever the status is `failed` (US-019). */
+  readonly failureStage: FailureStage | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -61,6 +105,7 @@ export interface UpdateSessionInput {
   readonly containerId?: string | null;
   readonly prUrl?: string | null;
   readonly lastError?: string | null;
+  readonly failureStage?: FailureStage | null;
 }
 
 export interface ListSessionsFilter {
@@ -79,6 +124,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   containerId: 'container_id',
   prUrl: 'pr_url',
   lastError: 'last_error',
+  failureStage: 'failure_stage',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -97,6 +143,15 @@ export function featureBranchFor(name: string): string {
   return `chief/${name}`;
 }
 
+function failureStageOf(row: Row): FailureStage | null {
+  const value = nullableText(row, 'failure_stage');
+  if (value === null) return null;
+  if (!(FAILURE_STAGES as readonly string[]).includes(value)) {
+    throw new Error(`Unexpected value for column "failure_stage": ${JSON.stringify(value)}`);
+  }
+  return value as FailureStage;
+}
+
 export function mapSession(row: Row): Session {
   return {
     id: text(row, 'id'),
@@ -111,6 +166,7 @@ export function mapSession(row: Row): Session {
     containerId: nullableText(row, 'container_id'),
     prUrl: nullableText(row, 'pr_url'),
     lastError: nullableText(row, 'last_error'),
+    failureStage: failureStageOf(row),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -133,6 +189,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     containerId: null,
     prUrl: null,
     lastError: null,
+    failureStage: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -140,8 +197,9 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
   db.prepare(
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
-        scheduled_start_at, queued_at, container_id, pr_url, last_error, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -155,6 +213,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.containerId,
     session.prUrl,
     session.lastError,
+    session.failureStage,
     session.createdAt,
     session.updatedAt,
   );
@@ -285,6 +344,20 @@ export function updateSession(
   }
 
   return getSession(db, id);
+}
+
+/**
+ * Moves a session to `failed` with both halves of the diagnosis: the sentence
+ * the operator reads, and the stage a retry resumes from (US-019). Every path
+ * to `failed` goes through here, so neither half can be forgotten.
+ */
+export function failSession(
+  db: Database,
+  id: string,
+  stage: FailureStage,
+  message: string,
+): Session | null {
+  return updateSession(db, id, { status: 'failed', lastError: message, failureStage: stage });
 }
 
 /** Deletes a session and, by cascade, its stories. */

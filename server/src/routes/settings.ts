@@ -8,7 +8,9 @@ import {
   getGithubToken,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
+  MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
+  MIN_AGENT_TIMEOUT_MINUTES,
   MIN_CONCURRENT_SESSIONS,
   readAppSettings,
   updateAppSettings,
@@ -22,7 +24,8 @@ interface Invalid {
 
 /**
  * Global settings (US-004): the GitHub Personal Access Token used to open pull
- * requests, and the build concurrency cap.
+ * requests, the build concurrency cap, and the per-iteration agent timeout
+ * (US-019).
  *
  * The token is write-only over the API — `GET /api/settings` returns only its
  * last four characters, and no other response ever includes it.
@@ -89,6 +92,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   const update: {
     githubToken?: string | null;
     maxConcurrentSessions?: number;
+    agentTimeoutMinutes?: number;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   } = {};
@@ -126,6 +130,22 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.maxConcurrentSessions = raw;
+  }
+
+  if ('agentTimeoutMinutes' in input && input['agentTimeoutMinutes'] !== undefined) {
+    const raw = input['agentTimeoutMinutes'];
+    if (
+      typeof raw !== 'number' ||
+      !Number.isInteger(raw) ||
+      raw < MIN_AGENT_TIMEOUT_MINUTES ||
+      raw > MAX_AGENT_TIMEOUT_MINUTES
+    ) {
+      return {
+        error: 'invalid_agent_timeout_minutes',
+        message: `The agent timeout must be a whole number of minutes between ${MIN_AGENT_TIMEOUT_MINUTES} and ${MAX_AGENT_TIMEOUT_MINUTES}.`,
+      };
+    }
+    update.agentTimeoutMinutes = raw;
   }
 
   const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {

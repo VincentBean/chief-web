@@ -13,6 +13,17 @@ import {
 export const MIN_CONCURRENT_SESSIONS = 1;
 export const MAX_CONCURRENT_SESSIONS = 50;
 
+/**
+ * Bounds for the per-iteration agent timeout, in minutes (US-019). One minute
+ * is short enough to be a deliberate "fail fast" and long enough for a real
+ * `claude -p` to at least start; twelve hours is well past the point where a
+ * stuck agent should have been noticed.
+ */
+export const MIN_AGENT_TIMEOUT_MINUTES = 1;
+export const MAX_AGENT_TIMEOUT_MINUTES = 720;
+
+const MS_PER_MINUTE = 60_000;
+
 /** How many trailing characters of the GitHub token the UI may see. */
 const VISIBLE_TOKEN_CHARS = 4;
 
@@ -45,6 +56,8 @@ export interface GithubTokenView {
 export interface AppSettings {
   readonly githubToken: GithubTokenView;
   readonly maxConcurrentSessions: number;
+  /** Cap on one headless agent iteration of the build loop, in minutes. */
+  readonly agentTimeoutMinutes: number;
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
 }
@@ -53,6 +66,7 @@ export interface AppSettingsUpdate {
   /** A new token, or `null` to remove the stored one. Omitted leaves it alone. */
   readonly githubToken?: string | null;
   readonly maxConcurrentSessions?: number;
+  readonly agentTimeoutMinutes?: number;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
@@ -101,6 +115,29 @@ export function getMaxConcurrentSessions(
   return Math.min(MAX_CONCURRENT_SESSIONS, Math.max(MIN_CONCURRENT_SESSIONS, stored));
 }
 
+/**
+ * How long one headless `claude -p` iteration may run before it is cut short
+ * and counted as a failed attempt (US-019).
+ *
+ * Same shape as {@link getMaxConcurrentSessions}: `BUILD_ITERATION_TIMEOUT_MS`
+ * is only the default, the settings row wins once the operator has saved one,
+ * and it is read on every iteration so a change applies to the next one with no
+ * restart. Only a *stored* value is clamped — the environment is allowed to set
+ * anything, which is what lets a test run the loop with a millisecond timeout.
+ */
+export function getAgentTimeoutMs(
+  db: Database,
+  config: Pick<Config, 'buildIterationTimeoutMs'>,
+): number {
+  const stored = getSettingNumber(db, 'agent_timeout_minutes', 0);
+  if (stored <= 0) return config.buildIterationTimeoutMs;
+  return clampAgentTimeoutMinutes(stored) * MS_PER_MINUTE;
+}
+
+function clampAgentTimeoutMinutes(minutes: number): number {
+  return Math.min(MAX_AGENT_TIMEOUT_MINUTES, Math.max(MIN_AGENT_TIMEOUT_MINUTES, minutes));
+}
+
 /** The commit identity runner containers are started with (US-006). */
 export function getGitIdentity(db: Database): GitIdentity {
   return {
@@ -120,6 +157,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
       'max_concurrent_sessions',
       config.maxConcurrentSessions,
     ),
+    agentTimeoutMinutes: Math.round(getAgentTimeoutMs(db, config) / MS_PER_MINUTE),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
   };
@@ -136,6 +174,10 @@ export function updateAppSettings(
 
     if (update.maxConcurrentSessions !== undefined) {
       setSettingNumber(db, 'max_concurrent_sessions', update.maxConcurrentSessions);
+    }
+
+    if (update.agentTimeoutMinutes !== undefined) {
+      setSettingNumber(db, 'agent_timeout_minutes', update.agentTimeoutMinutes);
     }
 
     // `null` clears the row, which makes the built-in default apply again.

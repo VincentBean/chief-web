@@ -88,6 +88,21 @@ export const MIGRATIONS: readonly Migration[] = [
         CHECK (key_source IS NULL OR key_source IN ('generated', 'imported'));
     `,
   },
+  {
+    id: '0003_session_failure_stage',
+    sql: `
+      -- Which step a \`failed\` session failed at, next to the human-readable
+      -- \`last_error\` (US-019). It is what "Retry" dispatches on: an agent,
+      -- PRD or lost-container failure resumes the loop at the first story that
+      -- is not done, while a push or pull-request failure re-runs only the
+      -- delivery. NULL for every session that is not failed — and for rows
+      -- that failed before this column existed, where the story list is the
+      -- only evidence left.
+      ALTER TABLE sessions ADD COLUMN failure_stage TEXT
+        CHECK (failure_stage IS NULL OR failure_stage IN
+          ('agent', 'prd', 'push', 'pull_request', 'container_lost'));
+    `,
+  },
 ];
 
 /**

@@ -50,7 +50,11 @@ export interface Config {
   readonly sessionStopTimeoutSeconds: number;
   /** Cap on each git command of a session's clone/branch setup (US-010). */
   readonly sessionSetupTimeoutMs: number;
-  /** Cap on one headless agent iteration of the build loop (US-013). */
+  /**
+   * Default cap on one headless agent iteration of the build loop (US-013).
+   * Only the default: the settings page stores the value the loop actually
+   * uses, in minutes (US-019).
+   */
   readonly buildIterationTimeoutMs: number;
   /** How long "Stop build" waits for the loop to unwind before answering. */
   readonly buildStopTimeoutMs: number;
@@ -136,7 +140,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
     sessionStopTimeoutSeconds: int('SESSION_STOP_TIMEOUT_SECONDS', 10),
     sessionSetupTimeoutMs: int('SESSION_SETUP_TIMEOUT_MS', 600_000),
-    buildIterationTimeoutMs: int('BUILD_ITERATION_TIMEOUT_MS', 3_600_000),
+    buildIterationTimeoutMs: int('BUILD_ITERATION_TIMEOUT_MS', 1_800_000),
     buildStopTimeoutMs: int('BUILD_STOP_TIMEOUT_MS', 60_000),
     pushTimeoutMs: int('PUSH_TIMEOUT_MS', 300_000),
     schedulerIntervalMs,

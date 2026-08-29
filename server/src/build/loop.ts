@@ -57,8 +57,13 @@ export interface IterationChange {
   readonly committed: boolean;
   /** The new HEAD, when there is one; `null` otherwise. */
   readonly commitSha: string | null;
-  /** Neither of the above: the iteration produced nothing at all. */
+  /**
+   * The iteration counts as a failed attempt: it produced nothing at all, or
+   * it ran out of time without finishing its story (US-019).
+   */
   readonly stalled: boolean;
+  /** The iteration was cut short by the agent timeout. */
+  readonly timedOut: boolean;
 }
 
 /**
@@ -69,12 +74,20 @@ export interface IterationChange {
  * when it was picked — otherwise the loop would read its own write as progress.
  * A story that vanished from the PRD counts as a change: the file was edited,
  * which is something, and the next iteration will pick whatever is left.
+ *
+ * An iteration that ran out of time is a failed attempt whatever it left
+ * behind (US-019): the agent was cut off mid-thought, so its story is not
+ * finished, and a loop that kept going as if it were would spend the whole
+ * iteration budget on an agent that cannot finish. The one exception is a
+ * story the timed-out agent had already marked `done` — that is a finished
+ * story, and there is nothing left for a retry to do.
  */
 export function classifyIteration(
   before: StoryStatus,
   after: StoryStatus | null,
   headBefore: string | null,
   headAfter: string | null,
+  timedOut = false,
 ): IterationChange {
   const statusChanged = after === null || after !== before;
   const committed = headAfter !== null && headAfter !== headBefore;
@@ -82,6 +95,7 @@ export function classifyIteration(
     statusChanged,
     committed,
     commitSha: committed ? headAfter : null,
-    stalled: !statusChanged && !committed,
+    stalled: timedOut ? after !== 'done' : !statusChanged && !committed,
+    timedOut,
   };
 }

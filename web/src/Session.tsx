@@ -4,6 +4,8 @@ import {
   ApiError,
   backToPlanning,
   type Build,
+  type FailureStage,
+  failureStageLabel,
   fetchBuild,
   fetchPlanning,
   fetchSession,
@@ -13,6 +15,7 @@ import {
   type PrdParseError,
   type PrdStatus,
   retryDelivery,
+  retrySession,
   type Session as SessionData,
   setSessionSchedule,
   startBuild,
@@ -69,6 +72,7 @@ export function Session() {
     | 'stop-build'
     | 'leave-queue'
     | 'delivery'
+    | 'retry'
     | 'schedule'
     | null
   >(null);
@@ -311,6 +315,36 @@ export function Session() {
       .finally(() => setBusy(null));
   };
 
+  /**
+   * "Retry" on a failed session (US-019). Which recovery that is — restarting
+   * the loop, or re-running the push and the pull request — is the server's
+   * decision, taken from the stage the session failed at, so there is one
+   * button here rather than a guess.
+   */
+  const onRetry = (): void => {
+    setBusy('retry');
+    setNotice(null);
+    retrySession(id)
+      .then((result) => {
+        setSession((current) =>
+          current === null
+            ? current
+            : {
+                ...current,
+                status: result.status,
+                prUrl: result.prUrl ?? current.prUrl,
+                failureStage: result.ok ? null : current.failureStage,
+              },
+        );
+        setBuild((current) =>
+          result.build ?? (current === null ? current : { ...current, status: result.status }),
+        );
+        setNotice({ kind: result.ok ? 'ok' : 'error', text: result.message });
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusy(null));
+  };
+
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
   const startLabel = resume ? 'Resume planning' : 'Start planning';
 
@@ -330,7 +364,15 @@ export function Session() {
         </p>
       )}
 
-      {session.status === 'failed' && <FailureCard error={session.lastError} />}
+      {session.status === 'failed' && (
+        <FailureCard
+          error={session.lastError}
+          stage={session.failureStage}
+          stories={build?.stories ?? []}
+          busy={busy}
+          onRetry={onRetry}
+        />
+      )}
 
       <section className="card">
         <div className="card__header">
@@ -409,6 +451,7 @@ export function Session() {
         onStart={onStartBuild}
         onStop={onStopBuild}
         onLeaveQueue={onLeaveQueue}
+        onRetry={onRetry}
         onRetryDelivery={onRetryDelivery}
       />
 
@@ -631,20 +674,50 @@ function ScheduleCard({
 }
 
 /**
- * Why a `failed` session failed (US-016).
+ * Why a `failed` session failed, and the one button that recovers it (US-016,
+ * US-019).
  *
- * The stored message is the only account of it — the loop writes the retry
- * count and the tail of the agent's own output into it — and it is multi-line,
- * so it gets a card of its own at the top of the page rather than a line of
- * body text further down that a reader has to go looking for.
+ * The stored message is the only account of what happened — the loop writes the
+ * retry count and the tail of the agent's own output into it — and it is
+ * multi-line, so it gets a card of its own at the top of the page rather than a
+ * line of body text further down that a reader has to go looking for. Next to
+ * it is the stage: which step failed, and therefore where a retry resumes.
  */
-function FailureCard({ error }: { error: string | null }) {
+function FailureCard({
+  error,
+  stage,
+  stories,
+  busy,
+  onRetry,
+}: {
+  error: string | null;
+  stage: FailureStage | null;
+  stories: Story[];
+  busy: string | null;
+  onRetry: () => void;
+}) {
+  const outstanding = stories.filter((story) => story.status !== 'done').length;
+  // The same reading the server makes: the delivery stages, plus a session
+  // that failed before stages existed and has nothing left to build.
+  const delivery =
+    stage === 'push' ||
+    stage === 'pull_request' ||
+    (stage === null && stories.length > 0 && outstanding === 0);
+
   return (
     <section className="card card--failed" role="alert">
       <div className="card__header">
         <h2 className="card__title">
-          This session failed <span className="badge badge--failed">failed</span>
+          This session failed <span className="badge badge--failed">failed</span>{' '}
+          {stage !== null && (
+            <span className="badge badge--failed">{failureStageLabel(stage)}</span>
+          )}
         </h2>
+        <div className="field__actions">
+          <button type="button" className="button" onClick={onRetry} disabled={busy !== null}>
+            {busy === 'retry' ? 'Retrying…' : delivery ? 'Retry push & PR' : 'Retry build'}
+          </button>
+        </div>
       </div>
       {error === null ? (
         <p className="field__hint">
@@ -654,8 +727,11 @@ function FailureCard({ error }: { error: string | null }) {
         <pre className="output output--wrap">{error}</pre>
       )}
       <p className="field__hint">
-        Nothing that was committed is lost. Starting the build again resumes from the PRD: every
-        story it already marked done is skipped.
+        {delivery
+          ? 'Every story is committed, so nothing is rebuilt: the retry re-runs only the push and the pull request, and adopts an existing pull request for this branch rather than opening a second one.'
+          : stage === 'container_lost'
+            ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on that same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
+            : `Nothing that was committed is lost. The retry resumes from the PRD: every story it already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} are left to run.`}`}
       </p>
     </section>
   );
@@ -811,6 +887,7 @@ function BuildCard({
   onStart,
   onStop,
   onLeaveQueue,
+  onRetry,
   onRetryDelivery,
 }: {
   status: SessionData['status'];
@@ -820,6 +897,7 @@ function BuildCard({
   onStart: () => void;
   onStop: () => void;
   onLeaveQueue: () => void;
+  onRetry: () => void;
   onRetryDelivery: () => void;
 }) {
   if (build === null || status === 'pending') return null;
@@ -830,10 +908,17 @@ function BuildCard({
   // Everything is committed, so the only thing left that can have failed is the
   // push or the pull request — and that is retried on its own (US-014).
   const complete = build.stories.length > 0 && done === build.stories.length;
-  const canRetryDelivery = complete && (status === 'failed' || (status === 'finished' && prUrl === null));
-  // A failed run with stories left is retried by starting the loop again; the
-  // server resumes from the PRD rather than redoing anything already done.
-  const canRetryBuild = status === 'failed' && !complete;
+  // A failed session is retried through the one endpoint that knows where to
+  // resume (US-019); the stage says which of the two it will be. A *finished*
+  // session with no pull request is the other case — nothing failed, the
+  // operator closed the PR by hand — and that is still the delivery endpoint.
+  const failed = status === 'failed';
+  const retryIsDelivery =
+    build.failureStage === 'push' ||
+    build.failureStage === 'pull_request' ||
+    (build.failureStage === null && complete);
+  const canRetryDelivery = status === 'finished' && prUrl === null && complete;
+  const canRetryBuild = failed && !retryIsDelivery;
 
   return (
     <section className="card">
@@ -845,9 +930,18 @@ function BuildCard({
           )}
         </h2>
         <div className="field__actions">
-          {(status === 'ready' || canRetryBuild) && !build.queued && (
+          {status === 'ready' && !build.queued && (
             <button type="button" className="button" onClick={onStart} disabled={busy !== null}>
-              {busy === 'build' ? 'Starting…' : canRetryBuild ? 'Retry build' : 'Start build'}
+              {busy === 'build' ? 'Starting…' : 'Start build'}
+            </button>
+          )}
+          {failed && !build.queued && (
+            <button type="button" className="button" onClick={onRetry} disabled={busy !== null}>
+              {busy === 'retry'
+                ? 'Retrying…'
+                : retryIsDelivery
+                  ? 'Retry push & PR'
+                  : 'Retry build'}
             </button>
           )}
           {build.queued && (
@@ -906,6 +1000,10 @@ function BuildCard({
             <dd>
               {build.iteration} of at most {build.maxIterations}
               {build.attempts > 0 && ` (retry ${String(build.attempts)} of 2)`}
+              <span className="story__priority">
+                {' '}
+                &middot; {Math.round(build.agentTimeoutMs / 60000)} min limit each
+              </span>
             </dd>
             <dt>Current story</dt>
             <dd>
@@ -930,7 +1028,7 @@ function BuildCard({
         </p>
       )}
 
-      {canRetryDelivery && (
+      {(canRetryDelivery || (failed && retryIsDelivery)) && (
         <p className="field__hint">
           Every story is done, so nothing has to be rebuilt. &ldquo;Retry push &amp; PR&rdquo;
           re-attempts only the push and the pull request; an existing pull request for this branch is
@@ -961,7 +1059,9 @@ function BuildCard({
       {canRetryBuild && (
         <p className="field__hint">
           {done} of {build.stories.length} stories are done and stay done. &ldquo;Retry build&rdquo;
-          starts the loop again at the next story that is not.
+          starts the loop again at the next story that is not
+          {build.failureStage === 'container_lost' ? ', in a fresh container on the same workspace' : ''}
+          .
         </p>
       )}
 

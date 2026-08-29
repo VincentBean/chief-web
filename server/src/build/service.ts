@@ -4,6 +4,8 @@ import type { Config } from '../config.js';
 import {
   countSessionsByStatus,
   type Database,
+  failSession,
+  type FailureStage,
   getSession,
   listQueuedSessions,
   listStories,
@@ -33,7 +35,7 @@ import {
   sessionProgressFile,
   storyInputOf,
 } from '../sessions/index.js';
-import { getMaxConcurrentSessions } from '../settings/index.js';
+import { getAgentTimeoutMs, getMaxConcurrentSessions } from '../settings/index.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
@@ -91,6 +93,10 @@ export interface BuildView {
   readonly stories: readonly Story[];
   readonly prd: PrdStatus;
   readonly lastError: string | null;
+  /** Which step failed, when the session is `failed` (US-019). */
+  readonly failureStage: FailureStage | null;
+  /** The per-iteration agent timeout in force right now, in milliseconds. */
+  readonly agentTimeoutMs: number;
   readonly startedAt: string | null;
   /** Waiting for a build slot: a `ready` session with a `queued_at` (US-018). */
   readonly queued: boolean;
@@ -131,7 +137,11 @@ export class MarkSessionFinished implements BuildCompletion {
   }
 
   complete(session: Session): Promise<void> {
-    updateSession(this.db, session.id, { status: 'finished', lastError: null });
+    updateSession(this.db, session.id, {
+      status: 'finished',
+      lastError: null,
+      failureStage: null,
+    });
     return Promise.resolve();
   }
 }
@@ -330,6 +340,9 @@ export class BuildService {
         status: 'ready',
         queuedAt: session.queuedAt ?? nowIso(),
         scheduledStartAt: null,
+        // A retry that only got as far as the queue has still left `failed`
+        // behind, so the stage of that failure goes with it (US-019).
+        failureStage: null,
       }) ?? session;
     logger.info('build queued: the concurrency cap is reached', {
       session: session.id,
@@ -377,6 +390,10 @@ export class BuildService {
         updateSession(this.db, session.id, {
           status: 'building',
           lastError: null,
+          // Whatever the last run failed at is history the moment this one
+          // starts; leaving the stage behind would have the UI offering a
+          // retry for a failure that is being retried right now.
+          failureStage: null,
           scheduledStartAt: null,
           queuedAt: null,
         }) ?? session;
@@ -477,11 +494,11 @@ export class BuildService {
       try {
         snapshot = this.readPrd(session);
       } catch (cause) {
-        this.fail(session, `The PRD could not be read: ${describe(cause)}`);
+        this.fail(session, 'prd', `The PRD could not be read: ${describe(cause)}`);
         return;
       }
       if (!snapshot.synced) {
-        this.fail(session, prdBrokenMessage(snapshot));
+        this.fail(session, 'prd', prdBrokenMessage(snapshot));
         return;
       }
 
@@ -494,6 +511,7 @@ export class BuildService {
       if (state.iteration >= state.maxIterations) {
         this.fail(
           session,
+          'agent',
           `The build was stopped after ${String(state.maxIterations)} iterations with ` +
             `${String(remainingStories(snapshot.stories))} of ${String(snapshot.stories.length)} ` +
             `stories still outstanding (currently ${story.storyId}). That is more than one and a ` +
@@ -514,6 +532,7 @@ export class BuildService {
       } catch (cause) {
         this.fail(
           session,
+          'agent',
           `Iteration ${String(state.iteration)} (${story.storyId}) could not be run: ${describe(cause)}`,
         );
         return;
@@ -560,7 +579,9 @@ export class BuildService {
           prd: snapshot.parsed,
           progress: this.readProgress(session),
         }),
-        timeoutMs: this.config.buildIterationTimeoutMs,
+        // Read per iteration, so a timeout changed on the settings page
+        // applies to the next one without a restart (US-019).
+        timeoutMs: getAgentTimeoutMs(this.db, this.config),
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {
@@ -576,7 +597,13 @@ export class BuildService {
     const headAfter = await this.runner.headSha(state.containerId);
     const after = this.readPrd(session);
     const updated = after.stories.find((candidate) => candidate.storyId === story.storyId) ?? null;
-    const change = classifyIteration(before, updated?.status ?? null, headBefore, headAfter);
+    const change = classifyIteration(
+      before,
+      updated?.status ?? null,
+      headBefore,
+      headAfter,
+      result.timedOut,
+    );
     if (change.commitSha !== null && updated !== null) {
       updateStory(this.db, session.id, story.storyId, { commitSha: change.commitSha });
     }
@@ -594,7 +621,7 @@ export class BuildService {
     // A PRD chief-web can no longer read is the end of the run: it is the only
     // record of which stories are done, so continuing would be guesswork.
     if (!after.synced) {
-      this.fail(session, prdBrokenMessage(after));
+      this.fail(session, 'prd', prdBrokenMessage(after));
       return false;
     }
 
@@ -616,15 +643,20 @@ export class BuildService {
 
     state.attempts += 1;
     if (state.attempts > MAX_RETRIES) {
-      this.fail(session, stalledMessage(story, state.attempts, result));
+      this.fail(session, 'agent', stalledMessage(story, state.attempts, result));
       return false;
     }
-    logger.warn('build iteration produced nothing; retrying', {
-      session: session.id,
-      story: story.storyId,
-      attempt: state.attempts,
-      remainingRetries: MAX_RETRIES - state.attempts + 1,
-    });
+    logger.warn(
+      change.timedOut
+        ? 'build iteration ran out of time; retrying'
+        : 'build iteration produced nothing; retrying',
+      {
+        session: session.id,
+        story: story.storyId,
+        attempt: state.attempts,
+        remainingRetries: MAX_RETRIES - state.attempts + 1,
+      },
+    );
     return true;
   }
 
@@ -705,9 +737,19 @@ export class BuildService {
     }
   }
 
-  private fail(session: Session, message: string): Session {
-    logger.warn('build failed', { session: session.id, name: session.name, error: message });
-    return updateSession(this.db, session.id, { status: 'failed', lastError: message }) ?? session;
+  /**
+   * Every way this loop ends in `failed` goes through here, so the stage a
+   * retry dispatches on is recorded next to the sentence the operator reads
+   * (US-019).
+   */
+  private fail(session: Session, stage: FailureStage, message: string): Session {
+    logger.warn('build failed', {
+      session: session.id,
+      name: session.name,
+      stage,
+      error: message,
+    });
+    return failSession(this.db, session.id, stage, message) ?? session;
   }
 
   /**
@@ -726,7 +768,7 @@ export class BuildService {
         error: describe(cause),
       });
     }
-    return updateSession(this.db, session.id, { status: 'ready' }) ?? session;
+    return updateSession(this.db, session.id, { status: 'ready', failureStage: null }) ?? session;
   }
 
   private requireSession(sessionId: string): Session {
@@ -755,6 +797,8 @@ export class BuildService {
       stories: listStories(this.db, session.id),
       prd: document.status,
       lastError: session.lastError,
+      failureStage: session.failureStage,
+      agentTimeoutMs: getAgentTimeoutMs(this.db, this.config),
       startedAt: state?.startedAt ?? null,
       queued: session.queuedAt !== null,
       queuePosition: queuePosition(this.db, session),
@@ -807,7 +851,8 @@ function prdBrokenMessage(snapshot: PrdSnapshot): string {
 
 function stalledMessage(story: Story, attempts: number, result: AgentResult): string {
   const how = result.timedOut
-    ? `the agent was still running after its time limit`
+    ? 'the agent was still running after its time limit and was cut short (the limit is on the ' +
+      'settings page)'
     : `the agent exited with code ${String(result.exitCode ?? 'unknown')}`;
   const tail = result.output.trim();
   return (

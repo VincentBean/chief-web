@@ -18,6 +18,7 @@ import { createDeliveryService, type DeliveryService } from './delivery/index.js
 import { DockerApi } from './docker/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
+import { createRetryService } from './recovery/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
@@ -25,6 +26,7 @@ import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createPlanningRouter } from './routes/planning.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
+import { createRetryRouter } from './routes/retry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createTerminalsRouter } from './routes/terminals.js';
@@ -167,6 +169,25 @@ export function createApp(
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));
+  // "Retry" on a failed session (US-019): one endpoint over both recoveries,
+  // dispatching on the stage the session failed at.
+  const retries = createRetryService(db, builds, delivery);
+  // Only the half of it that runs an agent needs Claude Code. A session whose
+  // *push* or *pull request* failed has nothing left to build, so blocking its
+  // retry on credentials it does not use would strand finished work.
+  api.post('/sessions/:id/retry', (req, res, next) => {
+    let action: string;
+    try {
+      action = retries.plan(req.params.id).action;
+    } catch {
+      // Not retryable at all: let the router answer with the real reason.
+      next();
+      return;
+    }
+    if (action === 'build') guard(req, res, next);
+    else next();
+  });
+  api.use(createRetryRouter(retries));
 
   app.use('/api', api);
 

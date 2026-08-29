@@ -286,6 +286,10 @@ describe('session service', () => {
     assert.equal(session.status, 'pending');
     assert.equal(session.cloned, false);
     assert.match(session.lastError ?? '', /already exists on origin/);
+    // A setup failure is not a `failed` session and has no failure stage: the
+    // session stays pending with "Retry setup" (US-010, US-019).
+    assert.equal(session.failureStage, null);
+    assert.equal(getSession(f.db, created)?.failureStage, null);
     // The container of a failed setup is not left behind.
     assert.equal(f.daemon.listContainers().length, 0);
     assert.equal(getSession(f.db, created)?.containerId, null);

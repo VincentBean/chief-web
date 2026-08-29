@@ -299,6 +299,11 @@ The loop stops itself in four ways:
 - **A stalled story.** An iteration that produces neither a status change nor a
   commit is retried twice; the third one marks the session **failed** with the
   agent's last output in `last_error`.
+- **An iteration that runs out of time.** One headless `claude -p` may run for
+  **30 minutes** by default, configurable per iteration on the settings page
+  (1–720 minutes). An iteration cut short counts as a failed attempt exactly
+  like a stalled one — even if it committed something — so the same two retries
+  apply and the third failure ends the run.
 - **The iteration cap.** A run may take the outstanding stories plus 50%, never
   fewer than 10. A loop that is committing but never finishing anything hits it
   and fails, rather than churning forever.
@@ -307,15 +312,15 @@ The loop stops itself in four ways:
   Everything already committed is kept, so a stopped build resumes rather than
   restarts.
 
-A **failed** session shows the stored reason at the top of its page and can be
-started again — that is what **Retry build** is. The loop resumes from `prd.md`,
-so every story already marked `done` is skipped and nothing is rebuilt.
+A **failed** session shows the stored reason at the top of its page, along with
+the **stage** it failed at, and one **Retry** button. See
+[Failure and recovery](#failure-and-recovery).
 
 ### The live log
 
 The agent is asked for `stream-json` rather than the default text format,
 because the default prints nothing until the process exits — which for one
-iteration is up to an hour. Each event is rendered into a readable line as it
+iteration is up to half an hour by default. Each event is rendered into a readable line as it
 arrives and goes to two places at once:
 
 - **`.chief/prds/<session-name>/agent.log`** in the workspace, next to the PRD
@@ -337,8 +342,9 @@ written is a warning, not a failed build.
 Nothing about a run is stored in memory that matters: the statuses are in
 `prd.md` on the data volume, the work is in commits, and the learnings are in
 `progress.md`. A server restart therefore loses at most the iteration that was
-in flight — startup reconciliation marks such a session `failed` with
-`container lost`.
+in flight — startup reconciliation marks such a session `failed` at the
+`container_lost` stage, and retrying it starts a fresh container on the very
+same workspace.
 
 ## Push and pull request
 
@@ -366,12 +372,39 @@ already exists") is handled the same way — look again, adopt what is there.
 
 **A failure at either step marks the session `failed`** with the underlying
 reason: git's stderr, or GitHub's own message (`No commits between develop and
-chief/x`, a token that cannot see the repository, …). Because every story is
-already committed, there is nothing to rebuild — **Retry push & PR**
+chief/x`, a token that cannot see the repository, …) — at the `push` or
+`pull_request` stage respectively. Because every story is already committed,
+there is nothing to rebuild: **Retry push & PR**
 (`POST /api/sessions/<id>/delivery`) re-attempts only that step and never runs a
 story again. Like session setup, it answers `200 { ok: false, … }` for a remote
 failure and reserves `409` for the wrong state (still building, or a story left
 outstanding).
+
+## Failure and recovery
+
+Every path that ends in **failed** stores two things on the session: a
+human-readable `last_error`, and the **stage** it failed at.
+
+| Stage | What failed | What a retry does |
+| --- | --- | --- |
+| `agent` | An iteration stalled, ran out of time, or could not be run at all | Restarts the loop at the first story that is not `done` |
+| `prd` | `prd.md` can no longer be read, so nothing knows what is done | Same, once the file parses again |
+| `container_lost` | The session container disappeared mid-build (found by startup reconciliation) | Starts a **fresh container on the same workspace** and resumes |
+| `push` | `git push` of the feature branch | Re-runs the push and the pull request only |
+| `pull_request` | Opening the pull request at GitHub | Same — an open pull request is adopted, never duplicated |
+
+A **clone or setup failure is deliberately not one of these**: it leaves the
+session `pending` with the reason on it and a **Retry setup** action, because
+there is nothing to resume yet.
+
+`POST /api/sessions/<id>/retry` is the one endpoint over both recoveries — it
+reads the stage and dispatches, so the UI never has to guess — and
+`GET /api/sessions/<id>/retry` answers with what it *would* do, which is what
+labels the button. Only the half that runs an agent is behind the Claude Code
+guard: a session whose push failed has nothing left to build, so its recovery is
+not blocked on credentials it does not use. Neither path redoes work: everything
+already committed stays committed, and every story `prd.md` calls `done` is
+skipped.
 
 ## Scheduled starts
 
@@ -573,6 +606,11 @@ the `settings` table so it can be changed without a restart:
   authenticates as, or GitHub's error.
 - **Max concurrent building sessions** — the build concurrency cap.
   `MAX_CONCURRENT_SESSIONS` only supplies the default until a value is saved here.
+- **Agent timeout (minutes per iteration)** — how long one headless `claude -p`
+  may run on a single story, 1–720 minutes, default 30. It is read at the start
+  of every iteration, so a change applies to the next one with no restart, and
+  an iteration that runs out of time counts as a failed attempt toward the two
+  retries. `BUILD_ITERATION_TIMEOUT_MS` only supplies the default.
 - **Commit author name and email** — the git identity agents commit with inside
   session containers. Blank restores the defaults (`chief-web` /
   `chief-web@localhost`), which are also baked into the runner image. Use an

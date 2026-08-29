@@ -34,6 +34,7 @@ export function Settings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [maxSessions, setMaxSessions] = useState('3');
+  const [agentTimeout, setAgentTimeout] = useState('30');
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -142,6 +143,7 @@ export function Settings() {
   function applyLoaded(loaded: SettingsData): void {
     setSettings(loaded);
     setMaxSessions(String(loaded.maxConcurrentSessions));
+    setAgentTimeout(String(loaded.agentTimeoutMinutes));
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
   }
@@ -164,9 +166,21 @@ export function Settings() {
       return;
     }
 
+    const timeout = Number.parseInt(agentTimeout, 10);
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 720) {
+      setNotice({
+        kind: 'error',
+        text: 'The agent timeout must be a whole number of minutes between 1 and 720.',
+      });
+      return;
+    }
+
     // An untouched (empty) token field must not wipe the stored token, so it is
     // only sent when the operator actually typed something.
-    const update: SettingsUpdate = { maxConcurrentSessions: parsed };
+    const update: SettingsUpdate = {
+      maxConcurrentSessions: parsed,
+      agentTimeoutMinutes: timeout,
+    };
     if (token.trim() !== '') update.githubToken = token.trim();
     // Blanking an identity field means "use the default again" (null), which is
     // what the runner image falls back to anyway.
@@ -286,6 +300,29 @@ export function Settings() {
             step={1}
             value={maxSessions}
             onChange={(event) => setMaxSessions(event.target.value)}
+            className="field__input field__input--narrow"
+          />
+        </section>
+
+        <section className="field">
+          <label className="field__label" htmlFor="agent-timeout">
+            Agent timeout (minutes per iteration)
+          </label>
+          <p className="field__hint">
+            How long one headless Claude may run on a single story before it is cut short. An
+            iteration that runs out of time counts as a failed attempt: the loop retries the story
+            up to twice more and then fails the session with the reason. Applies to the next
+            iteration — nothing already running is interrupted.
+          </p>
+          <input
+            id="agent-timeout"
+            name="agent-timeout"
+            type="number"
+            min={1}
+            max={720}
+            step={1}
+            value={agentTimeout}
+            onChange={(event) => setAgentTimeout(event.target.value)}
             className="field__input field__input--narrow"
           />
         </section>

@@ -18,7 +18,9 @@ import {
   type Database,
   deleteSession,
   deleteSetting,
+  failSession,
   featureBranchFor,
+  getSession,
   IN_MEMORY,
   openDatabase,
   type Session,
@@ -224,6 +226,53 @@ describe('build api', () => {
 
     assert.equal(response.status, 409);
     assert.equal(body.error, 'session_not_building');
+  });
+
+  it('retries a failed session by restarting the loop (US-019)', async () => {
+    failSession(db, session.id, 'agent', 'US-001 made no progress in 3 attempts.');
+
+    const plan = (await (await call('GET', `/api/sessions/${session.id}/retry`)).json()) as {
+      action: string;
+      stage: string | null;
+      reason: string;
+    };
+    assert.equal(plan.action, 'build');
+    assert.equal(plan.stage, 'agent');
+
+    const response = await call('POST', `/api/sessions/${session.id}/retry`);
+    const body = (await response.json()) as { action: string; stage: string; status: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.action, 'build');
+    assert.equal(body.stage, 'agent');
+    assert.equal(body.status, 'building');
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const view = (await (
+        await call('GET', `/api/sessions/${session.id}/build`)
+      ).json()) as BuildView;
+      if (view.status !== 'building') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    // It resumed rather than restarted: the one story ran once, and the stage
+    // of the failure it recovered from is gone.
+    assert.equal(invocations.length, 1);
+    assert.equal(getSession(db, session.id)?.failureStage, null);
+  });
+
+  it('refuses to retry a session that has not failed', async () => {
+    const response = await call('POST', `/api/sessions/${session.id}/retry`);
+    const body = (await response.json()) as ErrorBody;
+
+    assert.equal(response.status, 409);
+    assert.equal(body.error, 'session_not_failed');
+  });
+
+  it('answers 404 when retrying a session that does not exist', async () => {
+    const response = await call('POST', '/api/sessions/nope/retry');
+
+    assert.equal(response.status, 404);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_not_found');
   });
 
   it('queues a start beyond the cap, and gives the place back on request', async () => {

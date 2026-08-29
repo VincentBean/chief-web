@@ -51,6 +51,8 @@ export async function logout(): Promise<void> {
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
   maxConcurrentSessions: number;
+  /** Cap on one headless agent iteration, in minutes (US-019). */
+  agentTimeoutMinutes: number;
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -60,6 +62,7 @@ export interface SettingsUpdate {
   /** Omit to leave the stored token untouched; `null` removes it. */
   githubToken?: string | null;
   maxConcurrentSessions?: number;
+  agentTimeoutMinutes?: number;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
@@ -216,6 +219,8 @@ export interface Session {
   containerId: string | null;
   prUrl: string | null;
   lastError: string | null;
+  /** Which step a failed session failed at (US-019); null when it has not. */
+  failureStage: FailureStage | null;
   /** Story progress for the dashboard; both 0 until the PRD has been parsed. */
   stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
@@ -225,6 +230,25 @@ export interface Session {
 }
 
 export type PrTargetBranch = 'develop' | 'main';
+
+/** Mirrors the server's `FailureStage` (US-019): where a session failed. */
+export type FailureStage = 'agent' | 'prd' | 'push' | 'pull_request' | 'container_lost';
+
+/** What each stage is called on screen. */
+export function failureStageLabel(stage: FailureStage): string {
+  switch (stage) {
+    case 'agent':
+      return 'the agent';
+    case 'prd':
+      return 'the PRD';
+    case 'push':
+      return 'the push';
+    case 'pull_request':
+      return 'the pull request';
+    case 'container_lost':
+      return 'the container';
+  }
+}
 
 export interface SessionInput {
   repositoryId: string;
@@ -486,6 +510,10 @@ export interface Build {
   stories: Story[];
   prd: PrdStatus;
   lastError: string | null;
+  /** Which step a failed session failed at (US-019). */
+  failureStage: FailureStage | null;
+  /** The per-iteration agent timeout in force, in milliseconds (US-019). */
+  agentTimeoutMs: number;
   startedAt: string | null;
   /** Waiting for a build slot: ready, in the queue, nothing spawned yet. */
   queued: boolean;
@@ -581,6 +609,37 @@ export interface Delivery {
  */
 export async function retryDelivery(id: string): Promise<Delivery> {
   return api<Delivery>(`/api/sessions/${encodeURIComponent(id)}/delivery`, { method: 'POST' });
+}
+
+/**
+ * Mirrors the server's `RetryPlan` (US-019): what "Retry" would do to a failed
+ * session, so the button can say so before it is pressed.
+ */
+export interface RetryPlan {
+  action: 'build' | 'delivery';
+  stage: FailureStage | null;
+  reason: string;
+}
+
+/** Mirrors the server's `RetryResult`: the plan, plus whichever view it ran. */
+export interface Retry extends RetryPlan {
+  ok: boolean;
+  sessionId: string;
+  status: Session['status'];
+  prUrl: string | null;
+  message: string;
+  build: Build | null;
+  delivery: Delivery | null;
+}
+
+/**
+ * "Retry" on a failed session. The server picks the resumption point from the
+ * stage the session failed at: the loop starts again at the first story that is
+ * not done, or the push and pull request re-run on their own. Neither redoes
+ * work that is already committed.
+ */
+export async function retrySession(id: string): Promise<Retry> {
+  return api<Retry>(`/api/sessions/${encodeURIComponent(id)}/retry`, { method: 'POST' });
 }
 
 /** The session detail page, which is where planning happens. */

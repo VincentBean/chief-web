@@ -10,6 +10,7 @@ import {
   createRepository,
   createSession,
   type Database,
+  failSession,
   getSession,
   IN_MEMORY,
   listQueuedSessions,
@@ -26,6 +27,7 @@ import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
+import { planRetry } from '../recovery/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
 import { agentPidFile, agentSignalSpec, wrapAgentCommand } from './agent.js';
 import {
@@ -156,6 +158,19 @@ describe('iteration classification', () => {
 
   it('treats a story that vanished from the PRD as a change', () => {
     assert.equal(classifyIteration('in-progress', null, 'sha1', 'sha1').stalled, false);
+  });
+
+  it('counts an iteration that ran out of time as a failed attempt (US-019)', () => {
+    // Even a commit does not save it: the agent was cut off mid-story, so the
+    // story is not finished and the attempt has to count against the limit.
+    const change = classifyIteration('in-progress', 'in-progress', 'sha1', 'sha2', true);
+    assert.equal(change.timedOut, true);
+    assert.equal(change.stalled, true);
+    assert.equal(change.commitSha, 'sha2');
+  });
+
+  it('does not punish a timed-out agent that had already finished its story', () => {
+    assert.equal(classifyIteration('in-progress', 'done', 'sha1', 'sha2', true).stalled, false);
   });
 });
 
@@ -500,6 +515,105 @@ describe('the build loop', () => {
 
     assert.equal(world.status(), 'finished');
     assert.equal(world.runner.invocations.length, 4);
+  });
+
+  it('spends a retry on every iteration that runs out of time (US-019)', async () => {
+    const world = new World();
+    // The agent commits something every time and is then cut short: real work,
+    // but never a finished story. Without the timeout counting as a failed
+    // attempt this would run until the iteration cap instead of failing fast.
+    world.runner.result = { exitCode: null, output: 'still thinking…', timedOut: true };
+    world.runner.behaviour = (): void => world.runner.commit();
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.length, MAX_RETRIES + 1);
+    assert.equal(world.status(), 'failed');
+    assert.equal(getSession(world.db, world.session.id)?.failureStage, 'agent');
+    assert.match(world.error() ?? '', /still running after its time limit/);
+    assert.match(world.error() ?? '', /settings page/);
+  });
+
+  it('takes the agent timeout from the settings, not from the environment (US-019)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // Nothing saved: the environment's default is what the iteration gets.
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+    assert.equal(world.runner.invocations[0]?.timeoutMs, world.config.buildIterationTimeoutMs);
+    assert.equal(world.config.buildIterationTimeoutMs, 1_800_000);
+
+    setSettingNumber(world.db, 'agent_timeout_minutes', 7);
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(builds.status(world.session.id).agentTimeoutMs, 420_000);
+    assert.equal(world.runner.invocations.at(-1)?.timeoutMs, 420_000);
+  });
+
+  it('records the stage a failure happened at, and clears it on the retry (US-019)', async () => {
+    const world = new World();
+    fs.writeFileSync(world.prdFile, '# PRD: Demo\n\n### Not a story at all\n');
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    const failed = getSession(world.db, world.session.id);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.failureStage, 'prd');
+    assert.match(failed?.lastError ?? '', /can no longer be read/);
+    assert.equal(builds.status(world.session.id).failureStage, 'prd');
+
+    // A readable PRD again, and the retry starts the loop from the first story
+    // that is not done — with the stage of the previous failure gone.
+    fs.writeFileSync(world.prdFile, PRD);
+    world.runner.behaviour = (invocation): void => {
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    const finished = getSession(world.db, world.session.id);
+    assert.equal(finished?.failureStage, null);
+    assert.equal(finished?.status, 'finished');
+  });
+
+  it('retries a lost container on a fresh one over the same workspace (US-019)', async () => {
+    const world = new World();
+    // The first story was built before the container died; reconciliation
+    // (US-009) is what left the session in this state.
+    world.markDone('US-002');
+    world.sync();
+    updateSession(world.db, world.session.id, { status: 'building', containerId: 'container-old' });
+    failSession(world.db, world.session.id, 'container_lost', 'The session container was lost.');
+
+    const failed = getSession(world.db, world.session.id) ?? (undefined as never);
+    assert.equal(planRetry(failed, world.stories()).action, 'build');
+
+    world.runner.behaviour = (invocation): void => {
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // A container was started again — the workspace, and the clone in it, is
+    // the same one the lost container had.
+    assert.ok(world.containerStarts.length > 0);
+    assert.ok(fs.existsSync(path.join(world.repoDir, '.git')));
+    // Only the outstanding story was run: the one that was done stays done.
+    assert.equal(world.runner.invocations.length, 1);
+    assert.match(world.runner.invocations[0]?.prompt ?? '', /"id": "US-001"/);
+    assert.equal(world.status(), 'finished');
+    assert.equal(getSession(world.db, world.session.id)?.failureStage, null);
   });
 
   it('aborts a loop that keeps working but never finishes anything', async () => {

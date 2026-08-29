@@ -5,6 +5,7 @@ import {
   type ClaudeState,
   createSession,
   deleteSession,
+  failureStageLabel,
   featureBranchFor,
   fetchClaudeState,
   fetchRepositories,
@@ -13,6 +14,7 @@ import {
   logout,
   type PrTargetBranch,
   type Repository,
+  retrySession,
   retrySessionSetup,
   type Session,
   type SessionInput,
@@ -146,6 +148,23 @@ export function Dashboard() {
             ? { kind: 'ok', text: `${session.name} is ready on ${result.session.featureBranch}.` }
             : { kind: 'error', text: result.setup.message },
         );
+      })
+      .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
+      .finally(() => setBusyId(null));
+  };
+
+  /**
+   * "Retry" on a failed session (US-019). The server picks the resumption
+   * point from the stage it failed at, so the dashboard can offer the action
+   * without knowing anything about what went wrong.
+   */
+  const onRetryFailed = (session: Session): void => {
+    setBusyId(session.id);
+    setNotice(null);
+    retrySession(session.id)
+      .then(async (result) => {
+        await reload();
+        setNotice({ kind: result.ok ? 'ok' : 'error', text: result.message });
       })
       .catch((error: unknown) => setNotice({ kind: 'error', text: describe(error) }))
       .finally(() => setBusyId(null));
@@ -299,6 +318,7 @@ export function Dashboard() {
               busy={busyId === session.id}
               setup={setups[session.id]}
               onRetry={() => onRetry(session)}
+              onRetryFailed={() => onRetryFailed(session)}
               onLeaveQueue={() => onLeaveQueue(session)}
               onDelete={() => onDelete(session)}
             />
@@ -400,11 +420,22 @@ interface CardProps {
   busy: boolean;
   setup: SessionSetup | undefined;
   onRetry: () => void;
+  onRetryFailed: () => void;
   onLeaveQueue: () => void;
   onDelete: () => void;
 }
 
-function SessionCard({ session, busy, setup, onRetry, onLeaveQueue, onDelete }: CardProps) {
+function SessionCard({
+  session,
+  busy,
+  setup,
+  onRetry,
+  onRetryFailed,
+  onLeaveQueue,
+  onDelete,
+}: CardProps) {
+  const deliveryFailure =
+    session.failureStage === 'push' || session.failureStage === 'pull_request';
   return (
     <li className="card">
       <div className="card__header">
@@ -413,6 +444,9 @@ function SessionCard({ session, busy, setup, onRetry, onLeaveQueue, onDelete }: 
             {session.name}
           </a>{' '}
           <span className={`badge badge--${session.status}`}>{session.status}</span>{' '}
+          {session.status === 'failed' && session.failureStage !== null && (
+            <span className="badge badge--failed">{failureStageLabel(session.failureStage)}</span>
+          )}{' '}
           {session.queuePosition !== null && (
             <span className="badge badge--queued">Queued (#{session.queuePosition})</span>
           )}
@@ -439,6 +473,16 @@ function SessionCard({ session, busy, setup, onRetry, onLeaveQueue, onDelete }: 
               disabled={busy}
             >
               {busy ? 'Working…' : 'Retry setup'}
+            </button>
+          )}
+          {session.status === 'failed' && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={onRetryFailed}
+              disabled={busy}
+            >
+              {busy ? 'Working…' : deliveryFailure ? 'Retry push & PR' : 'Retry build'}
             </button>
           )}
           <button

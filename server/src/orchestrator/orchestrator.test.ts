@@ -277,8 +277,13 @@ describe('reconciliation plan', () => {
     assert.deepEqual(plan.correct, [
       {
         sessionId: 's1',
-        patch: { status: 'failed', containerId: null, lastError: CONTAINER_LOST_ERROR },
-        reason: CONTAINER_LOST_ERROR,
+        patch: {
+          status: 'failed',
+          containerId: null,
+          lastError: CONTAINER_LOST_ERROR,
+          failureStage: 'container_lost',
+        },
+        reason: 'container lost',
       },
     ]);
   });
@@ -356,6 +361,8 @@ describe('reconciliation against a mocked Docker client', () => {
     );
     assert.equal(getSession(env.db, building.id)?.status, 'failed');
     assert.equal(getSession(env.db, building.id)?.lastError, CONTAINER_LOST_ERROR);
+    // The machine-readable half of the diagnosis: what a retry dispatches on.
+    assert.equal(getSession(env.db, building.id)?.failureStage, 'container_lost');
     assert.equal(getSession(env.db, building.id)?.containerId, null);
     assert.equal(getSession(env.db, alive.id)?.containerId, kept.id);
     assert.equal(getSession(env.db, finished.id)?.status, 'finished');

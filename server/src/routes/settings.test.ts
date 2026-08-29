@@ -153,6 +153,7 @@ describe('settings api', () => {
     assert.deepEqual(await response.json(), {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
+      agentTimeoutMinutes: 30,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -165,6 +166,7 @@ describe('settings api', () => {
     assert.deepEqual(await saved.json(), {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 3,
+      agentTimeoutMinutes: 30,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -194,6 +196,7 @@ describe('settings api', () => {
     assert.deepEqual(await response.json(), {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 7,
+      agentTimeoutMinutes: 30,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -207,6 +210,7 @@ describe('settings api', () => {
     assert.deepEqual((await response.json()) as { githubToken: unknown }, {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
+      agentTimeoutMinutes: 30,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -241,6 +245,30 @@ describe('settings api', () => {
         'invalid_max_concurrent_sessions',
       );
     }
+  });
+
+  it('persists the agent timeout and rejects out-of-range values (US-019)', async () => {
+    assert.equal((await put({ agentTimeoutMinutes: 45 })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { agentTimeoutMinutes: number }).agentTimeoutMinutes,
+      45,
+    );
+
+    for (const value of [0, -5, 721, 1.5, '30', null]) {
+      const response = await put({ agentTimeoutMinutes: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_agent_timeout_minutes',
+      );
+    }
+
+    // The saved value survives an unrelated update.
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(
+      ((await (await get()).json()) as { agentTimeoutMinutes: number }).agentTimeoutMinutes,
+      45,
+    );
   });
 
   it('validates the stored token and returns the login', async () => {

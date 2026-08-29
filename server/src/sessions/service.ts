@@ -7,6 +7,7 @@ import {
   createSession,
   type Database,
   deleteSession,
+  type FailureStage,
   featureBranchFor,
   getRepository,
   getSession,
@@ -116,6 +117,12 @@ export interface SessionView {
   readonly containerId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
+  /**
+   * Which step a `failed` session failed at (US-019), so the UI can name it and
+   * offer the retry that resumes from there. `null` for every session that is
+   * not failed — and for one that failed before chief-web recorded stages.
+   */
+  readonly failureStage: FailureStage | null;
   /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
@@ -316,7 +323,12 @@ export class SessionService {
     }
 
     const stories = syncStories(this.db, session.id, document.parsed.stories.map(storyInputOf));
-    const updated = updateSession(this.db, session.id, { status: 'ready', lastError: null }) ?? session;
+    const updated =
+      updateSession(this.db, session.id, {
+        status: 'ready',
+        lastError: null,
+        failureStage: null,
+      }) ?? session;
 
     logger.info('session marked ready', {
       session: session.id,
@@ -583,6 +595,7 @@ export class SessionService {
       containerId: session.containerId,
       prUrl: session.prUrl,
       lastError: session.lastError,
+      failureStage: session.failureStage,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

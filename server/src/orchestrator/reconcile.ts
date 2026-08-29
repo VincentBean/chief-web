@@ -10,8 +10,16 @@ import { sessionIdOf } from './container.js';
  * can be stopped mid-build, and a container can die while nobody is watching.
  */
 
-/** Stored on a session whose container disappeared. Exact wording per US-009. */
-export const CONTAINER_LOST_ERROR = 'container lost';
+/**
+ * Stored on a session whose container disappeared while it was building
+ * (US-009). It is the operator's whole account of what happened, so it says
+ * what a retry will do about it rather than only naming the fault (US-019);
+ * the machine-readable half is the `container_lost` failure stage.
+ */
+export const CONTAINER_LOST_ERROR =
+  'The session container was lost while the build was running, so the agent loop died with it. ' +
+  'Nothing that was committed is gone — the workspace is on the data volume. Retrying starts a ' +
+  'fresh container on that same workspace and resumes at the first story that is not done.';
 
 export interface ContainerRemoval {
   readonly containerId: string;
@@ -42,8 +50,8 @@ const TERMINAL_STATUSES = new Set(['finished', 'failed']);
  * - A container whose session is gone, `finished` or `failed` is removed.
  * - A container that is not running is removed; a stopped runner cannot be
  *   exec'd into, so it is indistinguishable from a missing one.
- * - A `building` session with no running container is `failed`, because its
- *   agent loop died with the container.
+ * - A `building` session with no running container is `failed` at the
+ *   `container_lost` stage, because its agent loop died with the container.
  * - Any other session's `container_id` is brought back in line with reality, so
  *   nothing later tries to exec into an id that no longer exists.
  */
@@ -102,8 +110,13 @@ export function planReconciliation(
     if (session.status === 'building') {
       correct.push({
         sessionId: session.id,
-        patch: { status: 'failed', containerId: null, lastError: CONTAINER_LOST_ERROR },
-        reason: CONTAINER_LOST_ERROR,
+        patch: {
+          status: 'failed',
+          containerId: null,
+          lastError: CONTAINER_LOST_ERROR,
+          failureStage: 'container_lost',
+        },
+        reason: 'container lost',
       });
     } else if (session.containerId !== null) {
       correct.push({

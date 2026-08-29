@@ -33,6 +33,9 @@ services:
       # generated pull request back to its session (US-014); optional.
       PUBLIC_URL: ${PUBLIC_URL:-}
       MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
+      # Default cap on one headless agent iteration (US-013/US-019). Only the
+      # default: the settings page stores the value the loop actually uses.
+      BUILD_ITERATION_TIMEOUT_MS: ${BUILD_ITERATION_TIMEOUT_MS:-1800000}
       # How often scheduled session starts are checked (US-017); capped at 30s.
       SCHEDULER_INTERVAL_MS: ${SCHEDULER_INTERVAL_MS:-30000}
       LOG_LEVEL: ${LOG_LEVEL:-info}

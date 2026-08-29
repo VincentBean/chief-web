@@ -12,6 +12,7 @@ import {
   type Database,
   deleteRepository,
   deleteSession,
+  failSession,
   getAllSettings,
   getRepository,
   getSetting,
@@ -268,11 +269,33 @@ describe('sessions', () => {
     assert.equal(building?.scheduledStartAt, null);
     assert.equal(building?.baseBranch, 'main');
 
-    const failed = updateSession(db, session.id, { status: 'failed', lastError: 'container lost' });
+    const failed = failSession(db, session.id, 'container_lost', 'container lost');
+    assert.equal(failed?.status, 'failed');
     assert.equal(failed?.lastError, 'container lost');
+    // Both halves of the diagnosis, always written together (US-019).
+    assert.equal(failed?.failureStage, 'container_lost');
     assert.equal(failed?.containerId, 'container-abc');
 
+    // Recovering clears the stage without touching anything else.
+    const retried = updateSession(db, session.id, { status: 'building', failureStage: null });
+    assert.equal(retried?.failureStage, null);
+    assert.equal(retried?.lastError, 'container lost');
+
     assert.equal(updateSession(db, 'missing', { status: 'ready' }), null);
+  });
+
+  it('refuses a failure stage the schema does not know', () => {
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'bad-stage',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+    });
+    assert.throws(() =>
+      db
+        .prepare('UPDATE sessions SET failure_stage = ? WHERE id = ?')
+        .run('whenever', session.id),
+    );
   });
 
   it('filters, counts and orders the build queue', () => {

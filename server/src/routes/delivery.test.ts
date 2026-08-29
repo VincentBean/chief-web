@@ -11,6 +11,7 @@ import {
   createRepository,
   createSession,
   type Database,
+  failSession,
   getSession,
   IN_MEMORY,
   openDatabase,
@@ -136,6 +137,7 @@ describe('delivery api', () => {
     openPulls = [];
     posted = [];
     updateSession(db, session.id, { status: 'failed', prUrl: null, lastError: 'push failed' });
+    failSession(db, session.id, 'push', 'push failed');
     syncStories(db, session.id, [
       { storyId: 'US-001', title: 'Only story', priority: 1, status: 'done' },
     ]);
@@ -202,6 +204,35 @@ describe('delivery api', () => {
     assert.equal(response.status, 409);
     const body = (await response.json()) as ErrorBody;
     assert.equal(body.error, 'session_not_complete');
+  });
+
+  it('retries only the delivery when that is the stage that failed (US-019)', async () => {
+    // Nothing here stands in for Claude Code: a delivery retry never runs an
+    // agent, so it must not be blocked on credentials it does not use.
+    const response = await fetch(`${baseUrl}/api/sessions/${session.id}/retry`, {
+      method: 'POST',
+      headers: { cookie },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      action: string;
+      stage: string;
+      ok: boolean;
+      prUrl: string | null;
+      delivery: DeliveryBody | null;
+      build: unknown;
+    };
+    assert.equal(body.action, 'delivery');
+    assert.equal(body.stage, 'push');
+    assert.equal(body.ok, true);
+    assert.equal(body.build, null);
+    assert.equal(body.delivery?.code, 'ok');
+    assert.equal(body.prUrl, 'https://github.com/acme/demo/pull/7');
+
+    const stored = getSession(db, session.id);
+    assert.equal(stored?.status, 'finished');
+    assert.equal(stored?.failureStage, null);
   });
 
   it('is 404 for a session that does not exist', async () => {
