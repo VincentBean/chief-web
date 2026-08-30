@@ -165,7 +165,7 @@ export function Repositories() {
         />
       ) : (
         <div className="field__actions field__actions--spaced">
-          <button type="button" className="button" onClick={() => setAdding(true)}>
+          <button type="button" className="button button--primary" onClick={() => setAdding(true)}>
             Add repository
           </button>
         </div>

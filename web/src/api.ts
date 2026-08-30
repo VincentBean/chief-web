@@ -47,12 +47,27 @@ export async function logout(): Promise<void> {
   await api('/api/auth/logout', { method: 'POST' });
 }
 
+/**
+ * Models an agent can be run on, mirroring the server's `AGENT_MODELS`.
+ *
+ * Claude Code's own `--model` aliases, so each keeps meaning the latest model
+ * of its family. The empty string is the form the `<select>` uses for "no
+ * choice" and is sent as `null`.
+ */
+export const AGENT_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+
+export type AgentModel = (typeof AGENT_MODELS)[number];
+
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
+  /** Model the planning terminal runs on; `null` lets Claude Code choose. */
+  planningModel: AgentModel | null;
+  /** Model each build iteration runs on; `null` lets Claude Code choose. */
+  buildModel: AgentModel | null;
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -63,6 +78,9 @@ export interface SettingsUpdate {
   githubToken?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
+  /** `null` hands the choice back to Claude Code's own default. */
+  planningModel?: AgentModel | null;
+  buildModel?: AgentModel | null;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
@@ -645,4 +663,247 @@ export async function retrySession(id: string): Promise<Retry> {
 /** The session detail page, which is where planning happens. */
 export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;
+}
+
+/* ------------------------------------------------------------ pull requests */
+
+/** Mirrors the server's `PullRequestView`: one open pull request. */
+export interface PullRequest {
+  number: number;
+  title: string;
+  /** The `html_url`, for the "GitHub" link. */
+  url: string;
+  headRef: string;
+  baseRef: string;
+  draft: boolean;
+  /**
+   * The head branch lives on another repository. chief-web pushes with this
+   * repository's deploy key, which cannot write there, so a fork cannot be
+   * processed (US-021).
+   */
+  fromFork: boolean;
+  authorLogin: string | null;
+  updatedAt: string;
+  /** The session that opened it, when chief-web did; null otherwise. */
+  sessionId: string | null;
+  /** The last feedback run against it, when there has been one. */
+  run: PrRun | null;
+}
+
+/**
+ * One repository's answer. Grouped rather than flat because each group is one
+ * GitHub call: a repository whose call failed carries its own error and the
+ * rest of the page still renders.
+ */
+export interface RepositoryPullRequests {
+  repositoryId: string;
+  repositoryName: string;
+  githubSlug: string;
+  pullRequests: PullRequest[];
+  error: string | null;
+  message: string | null;
+  /** More pages existed than were read; this is not all of them. */
+  truncated: boolean;
+}
+
+export interface PullRequestList {
+  repositories: RepositoryPullRequests[];
+  /** When GitHub was actually asked; a cached answer keeps its original time. */
+  fetchedAt: string;
+}
+
+/**
+ * Every open pull request across the configured repositories.
+ *
+ * Slow and rate limited — one GitHub call per repository — so this is never
+ * polled: the page loads it once, refreshes on demand, and revalidates when the
+ * tab becomes visible again.
+ */
+export async function fetchPullRequests(
+  options: { refresh?: boolean; signal?: AbortSignal } = {},
+): Promise<PullRequestList> {
+  const path = options.refresh === true ? '/api/pull-requests?refresh=1' : '/api/pull-requests';
+  return api<PullRequestList>(path, options.signal ? { signal: options.signal } : {});
+}
+
+/** One comment on a review thread. */
+export interface ReviewComment {
+  /** REST id; the only comment a reply may target is the thread's first. */
+  databaseId: number | null;
+  authorLogin: string | null;
+  /** `User`, `Bot`… Shown, never filtered on — bot reviews are the point. */
+  authorType: string | null;
+  body: string;
+  url: string;
+}
+
+export interface ReviewThread {
+  id: string;
+  isResolved: boolean;
+  /** Its lines have changed since it was written. */
+  isOutdated: boolean;
+  viewerCanReply: boolean;
+  viewerCanResolve: boolean;
+  path: string | null;
+  line: number | null;
+  comments: ReviewComment[];
+}
+
+/** The body of an approve / request-changes / comment review. */
+export interface ReviewSummary {
+  id: string;
+  authorLogin: string | null;
+  authorType: string | null;
+  state: string;
+  body: string;
+  url: string;
+  submittedAt: string | null;
+}
+
+/** Mirrors the server's `PullRequestFeedback`: what a run would be sent. */
+export interface PullRequestFeedback {
+  slug: string;
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  headRef: string;
+  headSha: string;
+  baseRef: string;
+  fromFork: boolean;
+  threads: ReviewThread[];
+  reviews: ReviewSummary[];
+  truncated: boolean;
+}
+
+/** Read only when a row is expanded: one GraphQL call per pull request. */
+export async function fetchPullRequestFeedback(
+  repositoryId: string,
+  number: number,
+  signal?: AbortSignal,
+): Promise<PullRequestFeedback> {
+  return api<PullRequestFeedback>(
+    `/api/pull-requests/${encodeURIComponent(repositoryId)}/${String(number)}/feedback`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Stable key for a pull request in React lists and per-row state. */
+export function pullRequestKey(repositoryId: string, number: number): string {
+  return `${repositoryId}#${String(number)}`;
+}
+
+/** Where a live feedback run is; null once it is over. */
+export type PrRunPhase =
+  | 'starting'
+  | 'fetching-feedback'
+  | 'checking-out'
+  | 'running-agent'
+  | 'pushing'
+  | 'replying';
+
+export type PrRunStatus = 'pending' | 'running' | 'finished' | 'failed';
+
+export type PrFailureStage =
+  | 'feedback'
+  | 'checkout'
+  | 'agent'
+  | 'outcome'
+  | 'push'
+  | 'reply'
+  | 'container_lost';
+
+export interface PrThread {
+  threadId: string;
+  key: string;
+  kind: 'thread' | 'review';
+  outcome: 'addressed' | 'skipped' | 'unreported' | null;
+  summary: string | null;
+  replied: boolean;
+  replyUrl: string | null;
+  resolved: boolean;
+  error: string | null;
+}
+
+/** Mirrors the server's `PrRunView`: one pass over a pull request's feedback. */
+export interface PrRun {
+  id: string;
+  repositoryId: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string;
+  headBranch: string;
+  status: PrRunStatus;
+  /** True while the server is driving it right now. */
+  running: boolean;
+  phase: PrRunPhase | null;
+  /** Passes made so far; quoted in the reply footer. */
+  attempt: number;
+  failureStage: PrFailureStage | null;
+  lastError: string | null;
+  /** The commit the last successful push delivered. */
+  headSha: string | null;
+  threads: PrThread[];
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** What the operator is told each phase means, while it is happening. */
+export function prPhaseLabel(phase: PrRunPhase): string {
+  switch (phase) {
+    case 'starting':
+      return 'starting';
+    case 'fetching-feedback':
+      return 'reading comments';
+    case 'checking-out':
+      return 'checking out';
+    case 'running-agent':
+      return 'agent running';
+    case 'pushing':
+      return 'pushing';
+    case 'replying':
+      return 'answering on GitHub';
+  }
+}
+
+/** What the UI calls a failure stage. */
+export function prFailureStageLabel(stage: PrFailureStage): string {
+  switch (stage) {
+    case 'feedback':
+      return 'reading the comments';
+    case 'checkout':
+      return 'the checkout';
+    case 'agent':
+      return 'the agent';
+    case 'outcome':
+      return 'the agent’s report';
+    case 'push':
+      return 'the push';
+    case 'reply':
+      return 'answering on GitHub';
+    case 'container_lost':
+      return 'the container';
+  }
+}
+
+/**
+ * "Process feedback comments".
+ *
+ * Pushes to the pull request's own branch and writes replies on GitHub under
+ * the token's account, so this is only ever called from the confirmation.
+ */
+export async function startPrRun(repositoryId: string, number: number): Promise<PrRun> {
+  return api<PrRun>(
+    `/api/pull-requests/${encodeURIComponent(repositoryId)}/${String(number)}/run`,
+    { method: 'POST' },
+  );
+}
+
+export async function fetchPrRun(runId: string, signal?: AbortSignal): Promise<PrRun> {
+  return api<PrRun>(`/api/pull-requests/runs/${encodeURIComponent(runId)}`, signal ? { signal } : {});
+}
+
+/** Signals the agent; anything already committed and pushed is kept. */
+export async function stopPrRun(runId: string): Promise<PrRun> {
+  return api<PrRun>(`/api/pull-requests/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' });
 }

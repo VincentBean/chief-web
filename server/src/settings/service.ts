@@ -22,6 +22,26 @@ export const MAX_CONCURRENT_SESSIONS = 50;
 export const MIN_AGENT_TIMEOUT_MINUTES = 1;
 export const MAX_AGENT_TIMEOUT_MINUTES = 720;
 
+/**
+ * Models an agent may be run on, as Claude Code's own `--model` values.
+ *
+ * These are the CLI's *aliases* rather than pinned ids (`claude-opus-5`), so
+ * they keep meaning the latest model of each family as the pinned CLI version
+ * in `runner/Dockerfile` moves. The CLI resolves an unknown name locally and
+ * only warns, so the allowlist is chief-web's own: a typo becomes a settings
+ * error instead of a whole build run on a model nobody chose.
+ *
+ * Adding a family — or a pinned id, which `--model` also takes — is this list
+ * plus nothing else.
+ */
+export const AGENT_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+
+export type AgentModel = (typeof AGENT_MODELS)[number];
+
+export function isAgentModel(value: string): value is AgentModel {
+  return (AGENT_MODELS as readonly string[]).includes(value);
+}
+
 const MS_PER_MINUTE = 60_000;
 
 /** How many trailing characters of the GitHub token the UI may see. */
@@ -58,6 +78,10 @@ export interface AppSettings {
   readonly maxConcurrentSessions: number;
   /** Cap on one headless agent iteration of the build loop, in minutes. */
   readonly agentTimeoutMinutes: number;
+  /** Model the planning terminal runs on; `null` leaves the CLI to choose. */
+  readonly planningModel: AgentModel | null;
+  /** Model each build iteration runs on; `null` leaves the CLI to choose. */
+  readonly buildModel: AgentModel | null;
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
 }
@@ -67,6 +91,9 @@ export interface AppSettingsUpdate {
   readonly githubToken?: string | null;
   readonly maxConcurrentSessions?: number;
   readonly agentTimeoutMinutes?: number;
+  /** `null` hands the choice back to the CLI; omitted leaves the stored value. */
+  readonly planningModel?: AgentModel | null;
+  readonly buildModel?: AgentModel | null;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
@@ -138,6 +165,29 @@ function clampAgentTimeoutMinutes(minutes: number): number {
   return Math.min(MAX_AGENT_TIMEOUT_MINUTES, Math.max(MIN_AGENT_TIMEOUT_MINUTES, minutes));
 }
 
+/**
+ * Which model the interactive planning `claude` runs on, or `null` to pass no
+ * `--model` at all and let the CLI apply its own default.
+ *
+ * A stored value that is no longer in {@link AGENT_MODELS} — a hand-edited row,
+ * or a family dropped from a later runner image — reads as `null` rather than
+ * being passed through. The same fail-safe reasoning as clamping the
+ * concurrency cap: the default always runs, an unknown name might not.
+ */
+export function getPlanningModel(db: Database): AgentModel | null {
+  return readModel(db, 'planning_model');
+}
+
+/** As above, for the headless `claude -p` of each build iteration. */
+export function getBuildModel(db: Database): AgentModel | null {
+  return readModel(db, 'build_model');
+}
+
+function readModel(db: Database, key: 'planning_model' | 'build_model'): AgentModel | null {
+  const stored = getSetting(db, key);
+  return stored !== null && isAgentModel(stored) ? stored : null;
+}
+
 /** The commit identity runner containers are started with (US-006). */
 export function getGitIdentity(db: Database): GitIdentity {
   return {
@@ -158,6 +208,8 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
       config.maxConcurrentSessions,
     ),
     agentTimeoutMinutes: Math.round(getAgentTimeoutMs(db, config) / MS_PER_MINUTE),
+    planningModel: getPlanningModel(db),
+    buildModel: getBuildModel(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
   };
@@ -179,6 +231,16 @@ export function updateAppSettings(
     if (update.agentTimeoutMinutes !== undefined) {
       setSettingNumber(db, 'agent_timeout_minutes', update.agentTimeoutMinutes);
     }
+
+    // For both models `null` clears the row, which is what "let the CLI
+    // choose" is stored as — there is no sentinel model name for it.
+    if (update.planningModel === null) deleteSetting(db, 'planning_model');
+    else if (update.planningModel !== undefined) {
+      setSetting(db, 'planning_model', update.planningModel);
+    }
+
+    if (update.buildModel === null) deleteSetting(db, 'build_model');
+    else if (update.buildModel !== undefined) setSetting(db, 'build_model', update.buildModel);
 
     // `null` clears the row, which makes the built-in default apply again.
     if (update.gitAuthorName === null) deleteSetting(db, 'git_author_name');

@@ -56,14 +56,14 @@ export interface OpenedPullRequest {
 }
 
 /** How long a single GitHub call may take before it is treated as unreachable. */
-const REQUEST_TIMEOUT_MS = 10_000;
+export const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * `GET /user` — the cheapest call that proves a token is live and tells us who
  * it belongs to. Used by the Settings page's "Validate" action (US-004).
  */
 export async function fetchGithubUser(token: string, baseUrl: string): Promise<GithubUser> {
-  const response = await call(token, url(baseUrl, '/user'), { method: 'GET' });
+  const response = await githubFetch(token, url(baseUrl, '/user'), { method: 'GET' });
   if (!response.ok) throw await failureOf(response);
 
   const login = await readLogin(response);
@@ -117,7 +117,7 @@ export async function findPullRequest(
     per_page: '1',
   });
 
-  const response = await call(token, `${url(baseUrl, `/repos/${input.slug}/pulls`)}?${query.toString()}`, {
+  const response = await githubFetch(token, `${url(baseUrl, `/repos/${input.slug}/pulls`)}?${query.toString()}`, {
     method: 'GET',
   });
   if (!response.ok) throw await failureOf(response);
@@ -133,7 +133,7 @@ export async function createPullRequest(
   baseUrl: string,
   input: PullRequestInput,
 ): Promise<PullRequest> {
-  const response = await call(token, url(baseUrl, `/repos/${input.slug}/pulls`), {
+  const response = await githubFetch(token, url(baseUrl, `/repos/${input.slug}/pulls`), {
     method: 'POST',
     body: JSON.stringify({
       title: input.title,
@@ -151,23 +151,41 @@ export async function createPullRequest(
   return created;
 }
 
-function url(baseUrl: string, path: string): string {
+/** Joins a path onto the API base, tolerating a trailing slash on the base. */
+export function url(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${path}`;
 }
 
-/** One request, with a network failure turned into `github_unreachable`. */
-async function call(token: string, target: string, init: RequestInit): Promise<Response> {
+/**
+ * One request, with a network failure turned into `github_unreachable`.
+ *
+ * The caller's headers are merged *over* these defaults rather than replacing
+ * them: the review-thread client (US-021) needs `accept: application/json` for
+ * GraphQL but must keep the authorization, version and user-agent headers.
+ * Spreading `init` and then assigning `headers` — which is what this did until
+ * that second caller arrived — silently discarded whatever the caller passed.
+ */
+export async function githubFetch(
+  token: string,
+  target: string,
+  init: Omit<RequestInit, 'headers' | 'signal'> & {
+    readonly headers?: Readonly<Record<string, string>>;
+  } = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const { headers, ...rest } = init;
   try {
     return await fetch(target, {
-      ...init,
+      ...rest,
       headers: {
         authorization: `Bearer ${token}`,
         accept: 'application/vnd.github+json',
         'content-type': 'application/json',
         'x-github-api-version': '2022-11-28',
         'user-agent': 'chief-web',
+        ...(headers ?? {}),
       },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (cause) {
     throw new GithubApiError(
@@ -178,7 +196,7 @@ async function call(token: string, target: string, init: RequestInit): Promise<R
 }
 
 /** Turns a non-2xx answer into the error the operator is shown. */
-async function failureOf(response: Response): Promise<GithubApiError> {
+export async function failureOf(response: Response): Promise<GithubApiError> {
   const detail = await readMessage(response);
   switch (response.status) {
     case 401:

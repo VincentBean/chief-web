@@ -3,7 +3,12 @@ import path from 'node:path';
 
 import express, { type Express } from 'express';
 
-import { type AuthService, requireApiAuth, requirePageAuth } from './auth/index.js';
+import {
+  type AuthService,
+  createLoginRateLimiter,
+  requireApiAuth,
+  requirePageAuth,
+} from './auth/index.js';
 import {
   type BuildLogStore,
   type BuildService,
@@ -25,6 +30,9 @@ import { createClaudeRouter } from './routes/claude.js';
 import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createPlanningRouter } from './routes/planning.js';
+import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
+import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
+import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
 import { createSessionsRouter } from './routes/sessions.js';
@@ -57,6 +65,18 @@ export interface AppDependencies {
    * shared credentials volume with a real container.
    */
   readonly claude?: ClaudeService;
+  /**
+   * Open pull requests and their review feedback (US-021). Defaults to a
+   * service that talks to GitHub; tests pass one built on a stub gateway so
+   * they never reach the network.
+   */
+  readonly pullRequests?: PullRequestService;
+  /**
+   * Runs that answer a pull request's review feedback (US-021). Defaults to a
+   * service driving the shared orchestrator and build cap; tests pass one built
+   * on stubs so they never reach Docker or GitHub.
+   */
+  readonly prFeedback?: PrFeedbackService;
   /**
    * Session containers (US-009). `index.ts` passes the same orchestrator it
    * reconciles with at startup so both share one Docker client; tests pass a
@@ -117,7 +137,15 @@ export function createApp(
 
   const api = express.Router();
   api.use(createHealthRouter());
-  api.use(createAuthRouter(auth));
+  api.use(
+    createAuthRouter(
+      auth,
+      createLoginRateLimiter({
+        maxAttempts: config.loginAttemptLimit,
+        windowMs: config.loginAttemptWindowMs,
+      }),
+    ),
+  );
   // Guard for every API route added below (and for unknown ones, which must
   // not reveal whether they exist).
   api.use(requireApiAuth(auth));
@@ -138,12 +166,21 @@ export function createApp(
   // so is a build, which is a headless one.
   api.post('/sessions/:id/planning', guard);
   api.post('/sessions/:id/build', guard);
+  // Answering review feedback is a headless `claude` too (US-021). Reading the
+  // list and stopping a run are not guarded: being unable to stop something you
+  // could not start is a trap.
+  api.post('/pull-requests/:repositoryId/:number/run', guard);
 
   // The client is cheap to construct — nothing is dialled until the first
   // request — so one instance serves both the orchestrator and the setup
   // commands, and either can be replaced independently.
   const docker = new DockerApi(config.dockerSocket);
-  const orchestrator = deps.orchestrator ?? createSessionOrchestrator(config, db, docker);
+  // Kept separately from `orchestrator` because `SessionContainers` is the
+  // narrow two-method view a test may stub, while starting a feedback-run
+  // container needs the real thing. A test that stubs the orchestrator and
+  // wants runs passes `deps.prFeedback` as well.
+  const sessionOrchestrator = createSessionOrchestrator(config, db, docker);
+  const orchestrator = deps.orchestrator ?? sessionOrchestrator;
   const exec = deps.exec ?? docker;
   const planning = deps.planning ?? createPlanningService(config, db, terminals, orchestrator);
   // What the build loop does with a finished session: push, then open the pull
@@ -159,6 +196,23 @@ export function createApp(
   // that came due while the stack was down.
   const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
   scheduler.start();
+  // Pull request feedback (US-021). It shares the build loop's slot cap rather
+  // than its queue: a five-minute pass should not wait behind an hour of
+  // stories, so a full server refuses the run instead of holding it.
+  api.use(
+    createPullRequestsRouter(
+      deps.pullRequests ?? createPullRequestService(config, db),
+      deps.prFeedback ??
+        createPrFeedbackService(
+          config,
+          db,
+          sessionOrchestrator,
+          exec,
+          createAgentRunner(exec),
+          builds,
+        ),
+    ),
+  );
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.
   api.use(

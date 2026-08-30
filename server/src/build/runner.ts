@@ -23,6 +23,8 @@ export interface AgentInvocation {
   readonly prompt: string;
   /** Cap on the whole iteration; a stuck agent must not hold the loop forever. */
   readonly timeoutMs: number;
+  /** `--model` for this iteration; `null`/absent leaves the choice to the CLI. */
+  readonly model?: string | null;
   /**
    * Called with the agent's output as it is produced, already rendered from
    * `stream-json` into the lines a person reads (US-016).
@@ -63,7 +65,7 @@ export class ContainerAgentRunner implements AgentRunner {
   constructor(private readonly exec: AgentExecutor) {}
 
   async run(invocation: AgentInvocation): Promise<AgentResult> {
-    const spec = agentExecSpec(invocation.sessionId, invocation.prompt);
+    const spec = agentExecSpec(invocation.sessionId, invocation.prompt, invocation.model);
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
       const collected = await this.exec.runExec(invocation.containerId, spec, invocation.timeoutMs);

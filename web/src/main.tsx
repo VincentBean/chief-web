@@ -20,12 +20,18 @@ const Terminals = lazy(() =>
 const Session = lazy(() =>
   import('./Session.tsx').then((module) => ({ default: module.Session })),
 );
+// The pull requests page pulls in the comment renderer and is not on the path
+// to anything else, so it loads only when someone goes there.
+const PullRequests = lazy(() =>
+  import('./PullRequests.tsx').then((module) => ({ default: module.PullRequests })),
+);
 
 // A handful of entry points, matched on the pathname; the server redirects
 // unauthenticated navigations to `/login` and serves index.html for the rest,
 // so a router library is still not warranted.
 const PAGES: Record<string, ComponentType> = {
   '/login': Login,
+  '/pull-requests': PullRequests,
   '/repositories': Repositories,
   '/sessions': Dashboard,
   '/settings': Settings,

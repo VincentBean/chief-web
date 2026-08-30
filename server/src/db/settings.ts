@@ -18,6 +18,13 @@ export const SETTING_KEYS = [
   'git_author_email',
   /** Per-iteration agent timeout in minutes (US-019). */
   'agent_timeout_minutes',
+  /**
+   * `--model` for the planning terminal and for each build iteration. An
+   * absent row means "no `--model` flag", which is how the CLI's own default
+   * is selected — so there is no value here standing for the default.
+   */
+  'planning_model',
+  'build_model',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];

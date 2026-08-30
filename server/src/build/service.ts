@@ -2,6 +2,7 @@ import fs from 'node:fs';
 
 import type { Config } from '../config.js';
 import {
+  countActivePrRuns,
   countSessionsByStatus,
   type Database,
   failSession,
@@ -35,7 +36,11 @@ import {
   sessionProgressFile,
   storyInputOf,
 } from '../sessions/index.js';
-import { getAgentTimeoutMs, getMaxConcurrentSessions } from '../settings/index.js';
+import {
+  getAgentTimeoutMs,
+  getBuildModel,
+  getMaxConcurrentSessions,
+} from '../settings/index.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
@@ -97,6 +102,8 @@ export interface BuildView {
   readonly failureStage: FailureStage | null;
   /** The per-iteration agent timeout in force right now, in milliseconds. */
   readonly agentTimeoutMs: number;
+  /** Model this session's iterations run on; `null` is the CLI's own default. */
+  readonly buildModel: string | null;
   readonly startedAt: string | null;
   /** Waiting for a build slot: a `ready` session with a `queued_at` (US-018). */
   readonly queued: boolean;
@@ -255,11 +262,19 @@ export class BuildService {
   }
 
   /** Free build slots right now; zero or negative when the cap is reached. */
-  private freeSlots(): number {
+  /**
+   * Slots free right now. Public because feedback runs (US-021) share the cap:
+   * they hold a slot each while they run, and a build must not think the last
+   * one is free because the run holding it is not a session.
+   */
+  freeSlots(): number {
     const max = getMaxConcurrentSessions(this.db, this.config);
     // A session whose container is still coming up is not `building` yet, but
     // its slot is already spoken for.
-    return max - (countSessionsByStatus(this.db, 'building') + this.launching.size);
+    return (
+      max -
+      (countSessionsByStatus(this.db, 'building') + this.launching.size + countActivePrRuns(this.db))
+    );
   }
 
   private async drain(): Promise<void> {
@@ -580,8 +595,12 @@ export class BuildService {
           progress: this.readProgress(session),
         }),
         // Read per iteration, so a timeout changed on the settings page
-        // applies to the next one without a restart (US-019).
+        // applies to the next one without a restart (US-019). The model is read
+        // the same way and for the same reason: a run switched to a cheaper
+        // model mid-build picks it up at the next story, not at the next
+        // restart, and stories already committed are untouched either way.
         timeoutMs: getAgentTimeoutMs(this.db, this.config),
+        model: getBuildModel(this.db),
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {
@@ -799,6 +818,7 @@ export class BuildService {
       lastError: session.lastError,
       failureStage: session.failureStage,
       agentTimeoutMs: getAgentTimeoutMs(this.db, this.config),
+      buildModel: getBuildModel(this.db),
       startedAt: state?.startedAt ?? null,
       queued: session.queuedAt !== null,
       queuePosition: queuePosition(this.db, session),

@@ -154,6 +154,8 @@ describe('settings api', () => {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      planningModel: null,
+      buildModel: null,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -167,6 +169,8 @@ describe('settings api', () => {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      planningModel: null,
+      buildModel: null,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -197,6 +201,8 @@ describe('settings api', () => {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 7,
       agentTimeoutMinutes: 30,
+      planningModel: null,
+      buildModel: null,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -211,6 +217,8 @@ describe('settings api', () => {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      planningModel: null,
+      buildModel: null,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -245,6 +253,41 @@ describe('settings api', () => {
         'invalid_max_concurrent_sessions',
       );
     }
+  });
+
+  it('persists the planning and build models and rejects unknown ones', async () => {
+    assert.equal((await put({ planningModel: 'opus', buildModel: 'sonnet' })).status, 200);
+    const saved = (await (await get()).json()) as {
+      planningModel: string | null;
+      buildModel: string | null;
+    };
+    assert.equal(saved.planningModel, 'opus');
+    assert.equal(saved.buildModel, 'sonnet');
+
+    // `--model` accepts anything and only warns on a name it does not know, so
+    // an unchecked value would run a whole build on the wrong model rather
+    // than failing here.
+    for (const value of ['claude-opus-5', 'Opus', 'gpt-5', '', 3, true]) {
+      const response = await put({ buildModel: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_build_model');
+    }
+
+    // The models survive an unrelated update, and null hands the choice back.
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(
+      ((await (await get()).json()) as { planningModel: string | null }).planningModel,
+      'opus',
+    );
+
+    assert.equal((await put({ planningModel: null })).status, 200);
+    const cleared = (await (await get()).json()) as {
+      planningModel: string | null;
+      buildModel: string | null;
+    };
+    assert.equal(cleared.planningModel, null);
+    // Clearing one must not disturb the other.
+    assert.equal(cleared.buildModel, 'sonnet');
   });
 
   it('persists the agent timeout and rejects out-of-range values (US-019)', async () => {

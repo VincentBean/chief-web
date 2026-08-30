@@ -107,8 +107,11 @@ export function planningPrompt(mode: PlanningMode, input: PlanningPromptInput): 
 }
 
 /** `claude "<prompt>"`: the prompt is one argv element, never shell-parsed. */
-export function planningCommand(prompt: string): string[] {
-  return ['claude', prompt];
+export function planningCommand(prompt: string, model?: string | null): string[] {
+  // No `--model` at all when none is configured: an absent flag is what lets
+  // Claude Code apply its own default, and there is no name that means that.
+  const selected = model == null ? [] : ['--model', model];
+  return ['claude', ...selected, prompt];
 }
 
 function planningContext(input: PlanningPromptInput): string {

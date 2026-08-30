@@ -4,7 +4,7 @@ import { createApp } from './app.js';
 import { createAuthService } from './auth/index.js';
 import { createBuildLogSocketRoute, createBuildLogStore } from './build/index.js';
 import { loadConfig } from './config.js';
-import { closeDatabase, openDatabase } from './db/index.js';
+import { closeDatabase, type Database, openDatabase, updatePrRun } from './db/index.js';
 import { logger } from './lib/logger.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createTerminalManager, createTerminalSocketRoute } from './terminal/index.js';
@@ -40,6 +40,11 @@ async function main(): Promise<void> {
   const orchestrator = createSessionOrchestrator(config, db);
   try {
     await orchestrator.reconcile();
+    // A feedback run (US-021) is one pass driven from memory, so no container
+    // of one can still be doing anything useful after a restart. There is
+    // nothing to plan: they all go.
+    await orchestrator.reconcilePrRuns();
+    failRunsLeftBehind(db);
   } catch (error) {
     // A daemon that cannot be reached is not evidence that anything is gone;
     // start anyway and let the next reconcile sort it out.
@@ -93,3 +98,29 @@ main().catch((error: unknown) => {
   logger.error('failed to start chief-web server', { error: String(error) });
   process.exitCode = 1;
 });
+
+/**
+ * Marks every run this process did not survive as failed.
+ *
+ * A `running` row after a restart means the pass was cut off mid-flight. It is
+ * safe to fail it: nothing was replied to unless the push had already landed,
+ * and the retry plan re-runs only what is outstanding.
+ */
+function failRunsLeftBehind(db: Database): void {
+  const abandoned = db
+    .prepare("SELECT id FROM pr_runs WHERE status = 'running'")
+    .all() as { id: string }[];
+  for (const row of abandoned) {
+    updatePrRun(db, row.id, {
+      status: 'failed',
+      failureStage: 'container_lost',
+      lastError: 'The server restarted while this run was in flight.',
+      finishedAt: new Date().toISOString(),
+    });
+  }
+  if (abandoned.length > 0) {
+    logger.info('failed pull request runs left by a previous process', {
+      runs: abandoned.length,
+    });
+  }
+}

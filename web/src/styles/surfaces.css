@@ -1,0 +1,270 @@
+/*
+ * Panels and the scrolling read-only surfaces: cards, logs, terminals.
+ */
+@layer components {
+  /*
+   * Card.
+   *
+   * Cards used to be transparent with a 1px border, so a page of them read as
+   * a stack of rectangles rather than as objects. The hairline does more of
+   * that work than the shadow does on a dark ground: it is what makes the top
+   * edge catch light and the surface read as a plane.
+   */
+  .card {
+    background-color: var(--color-surface-raised);
+    border: 1px solid var(--color-line-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--inset-shadow-hairline), var(--shadow-e1);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 0.875rem 1rem;
+  }
+
+  .card__header {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    justify-content: space-between;
+  }
+
+  /* Flex rather than inline text, so a title followed by its status pills does
+   * not need `{' '}` spacers between them. */
+  .card__title {
+    align-items: center;
+    color: var(--color-fg-emphasis);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: var(--text-lg);
+    font-weight: 600;
+    gap: 0.5rem;
+    margin: 0;
+  }
+
+  /* A failed session's reason, at the top of its page (US-016). Tinted as well
+   * as outlined, so it is findable while scrolling past. */
+  .card--failed {
+    background-color: --alpha(var(--color-status-danger) / 6%);
+    border-color: --alpha(var(--color-status-danger) / 45%);
+  }
+
+  .key {
+    border-top: 1px solid var(--color-line-subtle);
+    padding-top: 0.75rem;
+  }
+
+  .key__summary {
+    cursor: pointer;
+    font-size: var(--text-sm);
+  }
+
+  .test-result {
+    border-top: 1px solid var(--color-line-subtle);
+    padding-top: 0.75rem;
+  }
+
+  /* Sunken surfaces read as recessed: an inset shadow, and a subtler border
+   * than a raised surface gets. */
+  .output {
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sunken);
+    color: var(--color-fg-default);
+    font-family: var(--font-mono);
+    font-size: var(--text-code);
+    margin: 0.5rem 0;
+    max-height: 16rem;
+    overflow: auto;
+    padding: 0.75rem;
+  }
+
+  .output--wrap {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .terminal {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  /*
+   * xterm.js measures the element it is opened on, so the screen needs a real
+   * height of its own; the fit addon derives cols/rows from this box, and the
+   * PTY is resized to whatever it computes.
+   *
+   * That makes every declaration here load-bearing: height, padding, border
+   * width and the font metrics all move the grid. There is no test for it —
+   * a wrong value produces oddly wrapped output, or a blank black rectangle,
+   * with no error anywhere. Re-check by hand after changing any of them.
+   */
+  .terminal__screen {
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sunken);
+    height: 60vh;
+    min-height: 20rem;
+    padding: 0.5rem;
+  }
+
+  /*
+   * The planning terminal is the page's main content, not a panel beside other
+   * controls: it is a long Claude Code conversation the operator reads and
+   * types into for as long as the PRD takes. So it takes the viewport minus
+   * roughly what the header and the PRD panel above it occupy, and falls back
+   * to the plain height only on a window too short for that to be an
+   * improvement.
+   */
+  .terminal--tall .terminal__screen {
+    height: min(80vh, calc(100vh - 16rem));
+    min-height: 30rem;
+  }
+
+  /* Parsed story list of a ready session (US-012). */
+  .stories {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /*
+   * A story row carries four things: its id, its title, an aside (the priority
+   * before a build, the commit sha after one) and its status. Wide enough, they
+   * sit on one line; narrower, the title takes a line of its own rather than
+   * being crushed between three fixed columns, which is what it used to do at
+   * every width.
+   *
+   * `minmax(0, 1fr)` rather than a bare `1fr`: the keyword alone resolves to
+   * `minmax(auto, 1fr)`, which lets a long unbroken title push the badge off
+   * the row instead of wrapping.
+   */
+  .story {
+    align-items: center;
+    display: grid;
+    gap: 0.25rem 0.5rem;
+    grid-template-areas:
+      'id badge'
+      'title title'
+      'aside aside';
+    grid-template-columns: auto 1fr;
+
+    @variant md {
+      align-items: baseline;
+      gap: 0.75rem;
+      grid-template-areas: 'id title aside badge';
+      grid-template-columns: 5rem minmax(0, 1fr) auto auto;
+    }
+  }
+
+  .story__id {
+    grid-area: id;
+  }
+
+  .story__title {
+    grid-area: title;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .story .badge {
+    grid-area: badge;
+    justify-self: end;
+
+    @variant md {
+      justify-self: auto;
+    }
+  }
+
+  .story__priority {
+    color: var(--color-fg-muted);
+    font-size: var(--text-code);
+    grid-area: aside;
+  }
+
+  /* The story the loop is on right now. The negative margin bleeds the marker
+   * outside the content box so the text stays aligned with its neighbours. */
+  .story--current {
+    border-left: 2px solid var(--color-accent-fg);
+    margin-left: -0.75rem;
+    padding-left: 0.625rem;
+  }
+
+  .story__now {
+    color: var(--color-accent-fg);
+    font-size: var(--text-code);
+  }
+
+  /*
+   * Live build log (US-016). It scrolls on its own so the page around it stays
+   * still, and the sections inside it are one per iteration.
+   */
+  .log {
+    /* The sticky heading's offset is derived from this, so the two cannot
+     * drift apart — see .log__heading. */
+    --log-pad: 0.75rem;
+
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sunken);
+    max-height: 32rem;
+    min-height: 8rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: var(--log-pad);
+    scrollbar-color: var(--color-line-strong) transparent;
+    scrollbar-width: thin;
+  }
+
+  .log__empty {
+    color: var(--color-fg-muted);
+    margin: 0;
+  }
+
+  .log__section + .log__section {
+    border-top: 1px solid var(--color-line-subtle);
+    margin-top: var(--log-pad);
+    padding-top: var(--log-pad);
+  }
+
+  /*
+   * Sticky over scrolling text needs an opaque backdrop of its own, and a
+   * negative offset that cancels the scroller's padding exactly — otherwise a
+   * sliver of moving text shows above the heading while you scroll.
+   */
+  .log__heading {
+    background-color: var(--color-surface-sunken);
+    box-shadow: 0 1px 0 0 var(--color-line-subtle);
+    color: var(--color-accent-fg);
+    font-family: var(--font-mono);
+    font-size: var(--text-code);
+    font-weight: 600;
+    margin: 0 0 0.375rem;
+    padding: 0.375rem 0;
+    position: sticky;
+    top: calc(var(--log-pad) * -1);
+    z-index: 1;
+  }
+
+  .log__meta {
+    color: var(--color-fg-muted);
+    font-weight: 400;
+  }
+
+  .log__body {
+    color: var(--color-fg-default);
+    font-family: var(--font-mono);
+    font-size: var(--text-code);
+    line-height: 1.5;
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+}

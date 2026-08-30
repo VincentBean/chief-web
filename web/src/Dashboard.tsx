@@ -22,6 +22,7 @@ import {
   sessionPath,
 } from './api.ts';
 import { localTime, startsIn } from './schedule.ts';
+import { SESSION_BADGE } from './status.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
 
@@ -213,6 +214,9 @@ export function Dashboard() {
       <header className="topbar">
         <h1>Sessions</h1>
         <nav className="topbar__nav">
+          <a className="link" href="/pull-requests">
+            Pull requests
+          </a>
           <a className="link" href="/repositories">
             Repositories
           </a>
@@ -274,7 +278,7 @@ export function Dashboard() {
         <div className="field__actions field__actions--spaced">
           <button
             type="button"
-            className="button"
+            className="button button--primary"
             onClick={() => setAdding(true)}
             disabled={repositories === null || usable.length === 0}
           >
@@ -443,7 +447,7 @@ function SessionCard({
           <a className="link" href={sessionPath(session.id)}>
             {session.name}
           </a>{' '}
-          <span className={`badge badge--${session.status}`}>{session.status}</span>{' '}
+          <span className={SESSION_BADGE[session.status]}>{session.status}</span>{' '}
           {session.status === 'failed' && session.failureStage !== null && (
             <span className="badge badge--failed">{failureStageLabel(session.failureStage)}</span>
           )}{' '}
@@ -726,7 +730,7 @@ function SessionForm({ repositories, existing, busy, onSubmit, onCancel }: FormP
       )}
 
       <div className="field__actions">
-        <button type="submit" className="button" disabled={busy}>
+        <button type="submit" className="button button--primary" disabled={busy}>
           {busy ? 'Creating and cloning…' : 'Create session'}
         </button>
         <button type="button" className="button button--quiet" onClick={onCancel} disabled={busy}>

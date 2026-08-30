@@ -1,0 +1,171 @@
+/*
+ * Design tokens.
+ *
+ * Two tiers. The ramps below (`ink`, and the named hues) are the substrate and
+ * should not be referenced by component CSS; the semantic tokens under them —
+ * surface, line, fg, accent, status — are the vocabulary everything else uses.
+ * Changing what "failed" looks like is then one line here rather than a grep.
+ *
+ * The namespaces this app owns are *closed* with `--*: initial`, which deletes
+ * Tailwind's defaults. That is deliberate and load-bearing: with the colour
+ * namespace wiped there is no `bg-slate-800` to reach for, so "colour carries
+ * meaning only" is enforced by the build rather than by review.
+ *
+ * `@theme static` — not plain `@theme` — because TerminalPane reads several of
+ * these at runtime with getComputedStyle to configure xterm. Plain `@theme`
+ * tree-shakes variables that no generated utility references, and the terminal
+ * would silently fall back to its own palette. Do not "optimise" the `static`
+ * away; see web/src/TerminalPane.tsx.
+ */
+@theme static {
+  /* ------------------------------------------------------------------ colour
+   * Primer-dark values, which is where this app's palette already came from.
+   * The four marked NEW interpolate the elevation ramp it never had.
+   */
+  --color-*: initial;
+
+  --color-inherit: inherit;
+  --color-current: currentColor;
+  --color-transparent: transparent;
+  --color-white: #ffffff;
+
+  --color-ink-950: #010409;
+  --color-ink-900: #0d1117;
+  --color-ink-850: #11161d; /* NEW */
+  --color-ink-800: #161b22;
+  --color-ink-750: #1c2128; /* NEW */
+  --color-ink-700: #21262d;
+  --color-ink-650: #282e35; /* NEW */
+  --color-ink-600: #30363d;
+  --color-ink-500: #484f58;
+  --color-ink-400: #6e7681;
+  --color-ink-300: #8b949e;
+  --color-ink-200: #b1bac4;
+  --color-ink-100: #e6edf3;
+  --color-ink-50: #f0f6fc;
+
+  --color-blue-300: #79c0ff;
+  --color-blue-400: #58a6ff;
+  --color-blue-500: #388bfd;
+  --color-blue-600: #1f6feb;
+  --color-blue-700: #1158c7;
+  --color-teal-400: #39c5cf;
+  --color-green-400: #3fb950;
+  --color-amber-400: #d29922;
+  --color-red-400: #f85149;
+  --color-purple-400: #a371f7;
+
+  /* --------------------------------------------------------------- elevation
+   * The app had none of this: every card was transparent with a 1px border.
+   */
+  --color-surface-canvas: var(--color-ink-900);
+  --color-surface-sunken: var(--color-ink-950);
+  --color-surface-raised: var(--color-ink-850);
+  --color-surface-overlay: var(--color-ink-800);
+  --color-surface-control: var(--color-ink-700);
+  --color-surface-control-hover: var(--color-ink-650);
+  --color-surface-control-active: var(--color-ink-600);
+
+  /* ------------------------------------------------------------------- lines
+   * `line-subtle` and `line-default` share the two jobs that #21262d and
+   * #30363d used to do between them, but now under names that can diverge.
+   */
+  --color-line-subtle: var(--color-ink-700);
+  --color-line-default: var(--color-ink-600);
+  --color-line-strong: var(--color-ink-400);
+
+  /* -------------------------------------------------------------------- text */
+  --color-fg-default: var(--color-ink-100);
+  --color-fg-emphasis: var(--color-ink-50);
+  --color-fg-muted: var(--color-ink-300);
+  --color-fg-subtle: var(--color-ink-400);
+  --color-fg-on-accent: var(--color-white);
+
+  /* ------------------------------------------------------------------ accent
+   * Reserved for links and for the one primary action per view.
+   */
+  --color-accent-fg: var(--color-blue-400);
+  --color-accent-fg-hover: var(--color-blue-300);
+  --color-accent-solid: var(--color-blue-600);
+  --color-accent-hover: var(--color-blue-500);
+
+  /* ------------------------------------------------------------------ status
+   * Seven roles; every state string in the app maps to exactly one. This is
+   * what unpicks the old overloading, where one green meant `ready` *and*
+   * `done` *and* "active tab", and one amber meant `pending` *and* `queued`.
+   *
+   * `pending` is neutral rather than amber on purpose: it means nobody has
+   * started, which is not a warning. `queued` keeps the amber, because there
+   * something is actually holding you up.
+   */
+  --color-status-neutral: var(--color-ink-300); /* pending, todo, idle, not started */
+  --color-status-ready: var(--color-teal-400); /* ready, parses, armed             */
+  --color-status-active: var(--color-blue-400); /* building, in-progress, live      */
+  --color-status-wait: var(--color-amber-400); /* queued, connecting, scheduled    */
+  --color-status-done: var(--color-green-400); /* done, ok, connected              */
+  --color-status-final: var(--color-purple-400); /* finished: pushed and PR open     */
+  --color-status-danger: var(--color-red-400); /* failed, broken, disconnected     */
+
+  /* ------------------------------------------------------------------- focus */
+  --color-ring: var(--color-blue-400);
+  --color-selection: var(--color-blue-600);
+
+  /* ------------------------------------------------------------------- depth
+   * On a dark ground the 1px light hairline does more work than the shadow: it
+   * is what makes a surface read as a plane rather than a rectangle. Shadows
+   * are cast in the sunken colour, never in pure black.
+   */
+  --shadow-*: initial;
+  --shadow-e1: 0 1px 2px 0 rgb(1 4 9 / 0.32);
+  --shadow-e2:
+    0 2px 4px -1px rgb(1 4 9 / 0.4), 0 4px 12px -2px rgb(1 4 9 / 0.32);
+  --shadow-e3: 0 8px 24px -6px rgb(1 4 9 / 0.55);
+  --shadow-sunken: inset 0 1px 2px 0 rgb(1 4 9 / 0.5);
+  --inset-shadow-hairline: inset 0 1px 0 0 rgb(240 246 252 / 0.03);
+
+  /* -------------------------------------------------------------------- type */
+  --font-*: initial;
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  /* Read at runtime by TerminalPane so the terminal and the page agree on a
+   * font for the first time; keep the two in sync. */
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Cascadia Mono',
+    'Liberation Mono', monospace;
+
+  --text-*: initial;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-code: 0.8125rem; /* 13px, the size xterm is configured with */
+  --text-code--line-height: 1.25rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.375rem;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.375rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.75rem;
+  --text-2xl--line-height: 2.125rem;
+
+  --radius-*: initial;
+  --radius-sm: 0.375rem; /* controls: button, input, tab */
+  --radius-md: 0.5rem; /* cards, log, output, terminal  */
+  --radius-lg: 0.75rem; /* page-level panels             */
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* The only animation in the app. See feedback.css for why it earns its place. */
+  --animate-status-pulse: status-pulse 2s var(--ease-standard) infinite;
+  @keyframes status-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}

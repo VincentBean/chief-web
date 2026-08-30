@@ -19,6 +19,10 @@ import { claudeAuthSource } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
 import { getGitIdentity } from '../settings/index.js';
 import {
+  type PrRunIdentity,
+  prRunContainerName,
+  prRunContainerSpec,
+  prRunLabelFilter,
   sessionContainerName,
   sessionContainerSpec,
   sessionLabelFilter,
@@ -186,6 +190,95 @@ export class SessionOrchestrator {
       removed: containers.length,
       workspace: sessionWorkspaceDir(this.config, sessionId),
     });
+  }
+
+  /**
+   * Ensures a pull-request feedback run has a running container (US-021).
+   *
+   * The same image, mounts and git identity a session gets — the work is the
+   * same, only the branch and the brief differ — under its own label namespace
+   * so session reconciliation never sees it. The workspace is keyed by the run
+   * id and outlives the container, so a second pass on the same pull request
+   * reuses the clone.
+   */
+  async startPrRun(run: PrRunIdentity): Promise<SessionContainerView> {
+    const existing = await this.prRunContainersFor(run.id);
+    const running = existing.find((container) => container.state === 'running');
+    if (running !== undefined) return toView(running);
+
+    const workspaceDir = ensureSessionWorkspace(this.config, run.id);
+    const privateKey = readPrivateKey(this.config, run.repositoryId);
+    const keyPath =
+      privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
+
+    const spec = prRunContainerSpec({
+      run,
+      image: this.config.runnerImage,
+      identity: getGitIdentity(this.db),
+      mounts: {
+        claudeAuth: claudeAuthSource(this.config),
+        workspaceDir: await this.hostPaths.translate(workspaceDir),
+        ...(keyPath === undefined ? {} : { sshKeyPath: await this.hostPaths.translate(keyPath) }),
+      },
+    });
+
+    for (const stale of existing) await this.discard(stale.id, true);
+    const name = prRunContainerName(run);
+    await this.discard(name, true);
+
+    let containerId: string;
+    try {
+      containerId = await this.docker.createContainer(name, spec);
+      await this.docker.startContainer(containerId);
+    } catch (cause) {
+      throw dockerFailure('start the pull request container', cause);
+    }
+
+    logger.info('pull request container started', {
+      run: run.id,
+      pullRequest: run.prNumber,
+      container: containerId,
+      name,
+      workspace: workspaceDir,
+    });
+    return { id: containerId, name, running: true, state: 'running' };
+  }
+
+  /**
+   * Removes a feedback run's containers and its staged key. The workspace is
+   * deliberately left behind so the next pass reuses the clone.
+   */
+  async removePrRun(runId: string): Promise<void> {
+    const containers = await this.prRunContainersFor(runId);
+    for (const container of containers) await this.discard(container.id, true);
+    removeSessionKey(this.config, runId);
+    logger.info('pull request container removed', { run: runId, removed: containers.length });
+  }
+
+  /**
+   * Clears out feedback containers left by a previous process, run once at
+   * startup.
+   *
+   * Simpler than session reconciliation and needs no plan: a feedback run is
+   * one pass driven from memory, so no container of one can still be doing
+   * anything useful after a restart.
+   */
+  async reconcilePrRuns(): Promise<number> {
+    const containers = await this.docker.listContainers({
+      all: true,
+      labels: [prRunLabelFilter()],
+    });
+    for (const container of containers) await this.discard(container.id, true);
+    if (containers.length > 0) {
+      logger.info('removed pull request containers left by a previous run', {
+        containers: containers.length,
+      });
+    }
+    return containers.length;
+  }
+
+  private prRunContainersFor(runId: string): Promise<ContainerSummary[]> {
+    return this.docker.listContainers({ all: true, labels: [prRunLabelFilter(runId)] });
   }
 
   /**

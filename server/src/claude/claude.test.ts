@@ -3,8 +3,13 @@ import { describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import { claudeAuthSource, RUNNER_CLAUDE_DIR } from '../runner/index.js';
+import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
-import { claudeLoginContainerArgs, CLAUDE_LOGIN_CONTAINER_NAME } from './login.js';
+import {
+  claudeLoginContainerArgs,
+  CLAUDE_LOGIN_COMMAND,
+  CLAUDE_LOGIN_CONTAINER_NAME,
+} from './login.js';
 import { claudeProbeArgs, parseStatusJson, probeClaudeAuth } from './status.js';
 
 const LOGGED_OUT = JSON.stringify({ loggedIn: false, authMethod: 'none' });
@@ -111,5 +116,20 @@ describe('claude login container', () => {
     // No workspace and no repository key: signing in needs neither.
     assert.equal(args.filter((arg) => arg === '--volume').length, 1);
     assert.equal(args.at(-1), 'chief-web-runner:latest');
+  });
+
+  it('marks the first-run wizard complete, so planning does not ask to sign in again', () => {
+    const script = CLAUDE_LOGIN_COMMAND[2] ?? '';
+
+    // `claude auth login` authenticates without setting the flags the
+    // interactive wizard owns; leaving them unset sends an already signed-in
+    // operator back to "Select login method" in the planning terminal.
+    assert.match(script, /hasCompletedOnboarding = true/);
+    assert.match(script, /projects\[\$repo\]\.hasTrustDialogAccepted = true/);
+    assert.match(script, new RegExp(`--arg repo "${CONTAINER_REPO_DIR}"`));
+    // Only on success: a failed login must not leave the wizard marked done.
+    assert.ok(script.indexOf('if [ "$code" -eq 0 ]') < script.indexOf('hasCompletedOnboarding'));
+    // Written through a temporary file rather than in place.
+    assert.match(script, /jq [^\n]*> "\$tmp"/);
   });
 });

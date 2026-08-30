@@ -1,0 +1,98 @@
+[← chief-web](../README.md) · [All docs](../README.md#documentation)
+
+# Sessions
+
+A session is one feature: its own container, its own clone, its own branch. The
+[dashboard](interface.md#dashboard) creates one from a repository, a name, a base branch, a PR
+target (`develop` or `main`) and an optional scheduled start. The name is a slug
+(letters, numbers, hyphens, underscores), unique per repository, and becomes both
+the feature branch **`chief/<session-name>`** and the workspace directory.
+
+Submitting the form does four things, in order:
+
+1. writes the session row as `pending`;
+2. starts its container (see [Session containers](architecture.md#session-containers));
+3. asks `origin` whether `chief/<session-name>` already exists;
+4. clones the base branch into `/workspace/repo` and creates the feature branch
+   from `origin/<base branch>`.
+
+Each step runs as its own `docker exec` inside the container, so it uses the
+repository's deploy key and the runner's SSH configuration — nothing about the
+clone is special-cased on the server. Everything the shell needs arrives in the
+environment, so a repository URL or branch name is never parsed as shell syntax.
+
+**A feature branch that already exists on `origin` stops the setup.** The message
+says so and asks for a different session name (or for the remote branch to be
+deleted). chief-web never reuses or force-pushes a branch it did not create — a
+leftover branch from a deleted session is somebody's work until they say
+otherwise.
+
+Any other failure — an unreachable remote, a missing base branch, a rejected key
+— leaves the session **`pending`** with git's own stderr on screen, the reason
+stored on the session, and a **Retry setup** action. The container of a failed
+setup is removed; the workspace is not, so a retry reuses an existing clone
+instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
+
+## Planning
+
+Each session has a page of its own at `/sessions/<id>`, and while the session is
+**pending** that page is `chief new` in the browser: it opens a browser terminal
+inside the session's container running **`claude` interactively in
+`/workspace/repo`**, started with chief's PRD-generation prompt targeting
+`.chief/prds/<session-name>/prd.md`.
+
+The prompts are ported from chief's `embed/init_prompt.txt` and
+`embed/edit_prompt.txt` into `server/src/planning/templates.ts`, so the
+conversation is the one chief has: 3–5 clarifying questions with lettered
+options ("1A, 2C, 3B"), then a PRD written in chief's exact format —
+`### US-xxx: Title` headings with `**Status:**`, `**Priority:**`,
+`**Description:**` and `- [ ]` acceptance criteria. chief's own prompts leave
+the status line implicit (chief writes it itself), so chief-web appends the
+story format it parses to both prompts.
+
+- **Start planning** uses the init prompt, with the optional "what do you want
+  to build?" text filling chief's `{{CONTEXT}}` slot. `--model` is passed when a
+  planning model is set (**Settings → Planning model**), and omitted otherwise.
+- **Resume planning** uses the *edit* prompt whenever `prd.md` already exists,
+  exactly like `chief edit`: an existing PRD is changed, never rewritten.
+- The terminal is an ordinary [browser terminal](interface.md#browser-terminals), so the
+  server owns the process. Reloading the page or opening a second tab rejoins
+  the same conversation; only **Close terminal** ends it.
+
+The page also shows a live indicator for `prd.md`: whether it exists, when it
+was last written, how many stories it holds, and — when it does not parse — the
+parse errors with their line numbers. It is polled from the workspace on the
+data volume (a `stat` plus a parse of a small markdown file), never through
+Docker. The parser lives in `server/src/prd/` and follows chief's
+`internal/prd/markdown.go`.
+
+Planning is behind the same guard as session creation: Claude Code has to be
+signed in once (see [Claude authentication](claude-auth.md)) before an
+interactive `claude` can be started.
+
+## Marking a session ready
+
+**Mark ready** is the gate between planning and building: it parses
+`.chief/prds/<session-name>/prd.md` and only promotes the session from
+**pending** to **ready** if the whole file is usable. Nothing is ever built
+against a PRD chief-web cannot read.
+
+- On success the parsed stories are synced into the `stories` table — new ones
+  inserted, existing ones updated in place (their commit SHAs survive), and ones
+  the PRD no longer has removed — and the page lists them by id, title, priority
+  and status.
+- On failure the session **stays pending** and the specific parse errors are
+  shown with their line numbers and what was expected (an unknown status value,
+  a non-integer priority, a duplicated story id, a story with no acceptance
+  criteria, a file with no stories at all). This is a `200` with `ok: false`,
+  not an error response: it is a result to read, not a failed request.
+- **Back to planning** returns a ready session to `pending` so the PRD can be
+  edited again. The stories stay in the database until the next **Mark ready**
+  reconciles them with the file.
+
+The parser is a round trip. `setStoryStatus(content, id, status)` in
+`server/src/prd/write.ts` rewrites a single `**Status:**` line in place —
+inserting one under the heading when the story has none — and leaves every other
+byte of the file, including its prose, ordering and CRLF endings, untouched.
+The PRD is the agent's document; the status line is the only thing chief-web
+writes into it.

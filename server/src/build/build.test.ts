@@ -18,6 +18,7 @@ import {
   listStories,
   openDatabase,
   type Session,
+  setSetting,
   setSettingNumber,
   type Story,
   syncStories,
@@ -188,6 +189,16 @@ describe('the agent command', () => {
       '-p',
       'two words',
     ]);
+  });
+
+  it('passes the configured model, and no --model flag when there is none', () => {
+    assert.deepEqual(agentCommand('p', 'sonnet').slice(0, 3), ['claude', '--model', 'sonnet']);
+    // An absent flag is how the CLI's own default is selected — there is no
+    // model name that means "default".
+    assert.equal(agentCommand('p', null).includes('--model'), false);
+    assert.equal(agentCommand('p').includes('--model'), false);
+    // The prompt stays the single trailing argument either way.
+    assert.equal(agentCommand('p', 'opus').at(-1), 'p');
   });
 
   it('records the agent pid before exec-ing it, so "stop" can signal it', () => {
@@ -554,6 +565,35 @@ describe('the build loop', () => {
 
     assert.equal(builds.status(world.session.id).agentTimeoutMs, 420_000);
     assert.equal(world.runner.invocations.at(-1)?.timeoutMs, 420_000);
+  });
+
+  it('takes the build model from the settings, and passes none when unset', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // Nothing saved: no `--model` reaches the CLI, which is how its own
+    // default is selected.
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+    assert.equal(world.runner.invocations[0]?.model, null);
+
+    setSetting(world.db, 'build_model', 'haiku');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(builds.status(world.session.id).buildModel, 'haiku');
+    assert.equal(world.runner.invocations.at(-1)?.model, 'haiku');
+
+    // A value the allowlist no longer knows must not be handed to the CLI:
+    // the default always runs, an unrecognised name might not.
+    setSetting(world.db, 'build_model', 'no-such-model');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const after = serviceFor(world);
+    await after.start(world.session.id);
+    await after.whenIdle(world.session.id);
+    assert.equal(world.runner.invocations.at(-1)?.model, null);
   });
 
   it('records the stage a failure happened at, and clears it on the retry (US-019)', async () => {

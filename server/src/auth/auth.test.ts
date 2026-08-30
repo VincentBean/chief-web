@@ -9,6 +9,7 @@ import { createApp } from '../app.js';
 import { loadConfig } from '../config.js';
 import { closeDatabase, getSetting, IN_MEMORY, openDatabase } from '../db/index.js';
 import { parseCookieHeader, serializeCookie } from './cookies.js';
+import { createLoginRateLimiter, describeRetryAfter } from './ratelimit.js';
 import { generatePassword, hashPassword, secretsMatch, verifyPasswordHash } from './password.js';
 import { deriveSigningKey, issueSessionToken, verifySessionToken } from './session.js';
 import { createAuthService, SESSION_COOKIE } from './service.js';
@@ -139,6 +140,142 @@ describe('shared password resolution', () => {
     } finally {
       closeDatabase(db);
     }
+  });
+});
+
+describe('login rate limiting', () => {
+  const limiter = () => createLoginRateLimiter({ maxAttempts: 3, windowMs: 60_000 });
+
+  it('allows attempts up to the limit and refuses the next one', () => {
+    const logins = limiter();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assert.ok(logins.check('client', 1_000).allowed, `attempt ${attempt} should be allowed`);
+      logins.recordFailure('client', 1_000);
+    }
+
+    const verdict = logins.check('client', 1_000);
+    assert.equal(verdict.allowed, false);
+    assert.equal(verdict.retryAfterSeconds, 60);
+  });
+
+  it('counts each client separately', () => {
+    const logins = limiter();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) logins.recordFailure('noisy', 1_000);
+
+    assert.equal(logins.check('noisy', 1_000).allowed, false);
+    assert.ok(logins.check('quiet', 1_000).allowed);
+  });
+
+  it('lets the window slide off the oldest failure', () => {
+    const logins = limiter();
+
+    logins.recordFailure('client', 1_000);
+    logins.recordFailure('client', 2_000);
+    logins.recordFailure('client', 3_000);
+    assert.equal(logins.check('client', 4_000).allowed, false);
+
+    // The first failure has aged out, so one attempt is free again.
+    assert.ok(logins.check('client', 61_001).allowed);
+  });
+
+  it('counts down the wait as the window slides', () => {
+    const logins = limiter();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) logins.recordFailure('client', 1_000);
+
+    assert.equal(logins.check('client', 31_000).retryAfterSeconds, 30);
+  });
+
+  it('forgets a client that signs in successfully', () => {
+    const logins = limiter();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) logins.recordFailure('client', 1_000);
+    logins.clear('client');
+
+    assert.ok(logins.check('client', 1_000).allowed);
+  });
+
+  it('evicts the least recently seen client beyond the cap', () => {
+    const logins = createLoginRateLimiter({ maxAttempts: 1, windowMs: 60_000, maxKeys: 2 });
+
+    logins.recordFailure('first', 1_000);
+    logins.recordFailure('second', 1_100);
+    logins.recordFailure('third', 1_200);
+
+    // `first` was pushed out, so it starts over; the two newest are still held.
+    assert.ok(logins.check('first', 1_300).allowed);
+    assert.equal(logins.check('second', 1_300).allowed, false);
+    assert.equal(logins.check('third', 1_300).allowed, false);
+  });
+
+  it('describes the wait in whole seconds or minutes', () => {
+    assert.equal(describeRetryAfter(1), '1 second');
+    assert.equal(describeRetryAfter(45), '45 seconds');
+    assert.equal(describeRetryAfter(60), '1 minute');
+    assert.equal(describeRetryAfter(61), '2 minutes');
+  });
+});
+
+describe('login endpoint throttling', () => {
+  const db = openDatabase(IN_MEMORY);
+  let baseUrl: string;
+  let server: ReturnType<ReturnType<typeof createApp>['listen']>;
+
+  before(async () => {
+    const config = loadConfig({
+      CHIEF_WEB_PASSWORD: 'pw',
+      LOGIN_ATTEMPT_LIMIT: '2',
+      LOGIN_ATTEMPT_WINDOW_MS: '60000',
+    });
+
+    server = createApp(config, createAuthService(config, db), db).listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    closeDatabase(db);
+  });
+
+  const attempt = async (password: string): Promise<Response> =>
+    fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+
+  // Runs first: it proves a malformed body never uses up an attempt, which the
+  // throttling test below then relies on to still have its full limit.
+  it('does not count a malformed request against the limit', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      const response = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      assert.equal(response.status, 400);
+    }
+  });
+
+  it('refuses further attempts with 429 once the limit is spent', async () => {
+    assert.equal((await attempt('wrong')).status, 401);
+    assert.equal((await attempt('wrong')).status, 401);
+
+    const throttled = await attempt('wrong');
+    assert.equal(throttled.status, 429);
+    assert.equal(throttled.headers.get('retry-after'), '60');
+
+    const body = (await throttled.json()) as { error: string; message: string };
+    assert.equal(body.error, 'too_many_attempts');
+    assert.match(body.message, /Try again in 1 minute\./);
+
+    // The throttle holds even for the right password: the limit is on the door,
+    // not on the guess.
+    assert.equal((await attempt('pw')).status, 429);
   });
 });
 

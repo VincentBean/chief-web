@@ -27,6 +27,11 @@ export const SESSION_ROLE = 'session';
 export const REPOSITORY_LABEL = 'chief-web.repository';
 export const SESSION_NAME_LABEL = 'chief-web.session-name';
 
+/** Label carrying the pull-request feedback run's id (US-021). */
+export const PR_RUN_LABEL = 'chief-web.pr-run';
+export const PR_FEEDBACK_ROLE = 'pr-feedback';
+export const PR_NUMBER_LABEL = 'chief-web.pr-number';
+
 type SessionIdentity = Pick<Session, 'id' | 'name' | 'repositoryId'>;
 
 /**
@@ -55,6 +60,64 @@ export function sessionIdOf(container: { labels: Readonly<Record<string, string>
 /** Docker filter selecting every session container, or one session's. */
 export function sessionLabelFilter(sessionId?: string): string {
   return sessionId === undefined ? SESSION_LABEL : `${SESSION_LABEL}=${sessionId}`;
+}
+
+/** Enough of a run to name and label its container. */
+export interface PrRunIdentity {
+  readonly id: string;
+  readonly prNumber: number;
+  readonly repositoryId: string;
+}
+
+/** `chief-web-pr-61-<first 8 of the run id>`: readable in `docker ps`. */
+export function prRunContainerName(run: PrRunIdentity): string {
+  return `chief-web-pr-${String(run.prNumber)}-${run.id.slice(0, 8)}`;
+}
+
+export function prRunLabels(run: PrRunIdentity): Record<string, string> {
+  return {
+    [PR_RUN_LABEL]: run.id,
+    [ROLE_LABEL]: PR_FEEDBACK_ROLE,
+    [REPOSITORY_LABEL]: run.repositoryId,
+    [PR_NUMBER_LABEL]: String(run.prNumber),
+  };
+}
+
+/**
+ * Docker filter selecting every feedback-run container, or one run's.
+ *
+ * A separate label namespace from `chief-web.session` on purpose: session
+ * reconciliation removes any container carrying the session label whose row is
+ * gone, and a feedback run has no session row at all.
+ */
+export function prRunLabelFilter(runId?: string): string {
+  return runId === undefined ? PR_RUN_LABEL : `${PR_RUN_LABEL}=${runId}`;
+}
+
+export interface PrRunContainerInput {
+  readonly run: PrRunIdentity;
+  readonly image: string;
+  readonly identity: GitIdentity;
+  readonly mounts: RunnerMounts;
+}
+
+/** The `POST /containers/create` body for a feedback run. */
+export function prRunContainerSpec(input: PrRunContainerInput): ContainerSpec {
+  const env = Object.entries(runnerEnvironment(input.identity)).map(
+    ([key, value]) => `${key}=${value}`,
+  );
+  env.push(
+    `CHIEF_PR_RUN_ID=${input.run.id}`,
+    `CHIEF_PR_NUMBER=${String(input.run.prNumber)}`,
+  );
+
+  return {
+    image: input.image,
+    labels: prRunLabels(input.run),
+    env,
+    workingDir: RUNNER_WORKSPACE_DIR,
+    binds: runnerBinds(input.mounts),
+  };
 }
 
 export interface SessionContainerInput {

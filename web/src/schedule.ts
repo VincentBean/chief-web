@@ -52,6 +52,17 @@ export function startsIn(iso: string, now: number = Date.now()): string {
   return ms >= 0 ? `starts in ${formatDuration(ms)}` : `overdue by ${formatDuration(-ms)}`;
 }
 
+/**
+ * How long ago something happened, e.g. "2 h ago" — how stale a pull request
+ * is. Reuses the same buckets as the scheduling copy so the two never disagree
+ * about what "3 d" means.
+ */
+export function since(iso: string, now: number = Date.now()): string {
+  const ms = now - new Date(iso).getTime();
+  if (Number.isNaN(ms)) return 'unknown';
+  return ms < 60_000 ? 'just now' : `${formatDuration(ms)} ago`;
+}
+
 function formatDuration(ms: number): string {
   const total = Math.floor(ms / 1000);
   if (total < MINUTE) return `${String(total)} s`;

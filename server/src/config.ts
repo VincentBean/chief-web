@@ -1,5 +1,7 @@
 import path from 'node:path';
 
+import { graphqlUrlFor } from './lib/github-review.js';
+
 /**
  * Runtime configuration, resolved once from the environment.
  *
@@ -75,10 +77,26 @@ export interface Config {
   readonly maxTerminals: number;
   /** Shared password protecting the UI (see US-003); empty when unset. */
   readonly password: string;
+  /** Failed sign-in attempts one client may make within the window below. */
+  readonly loginAttemptLimit: number;
+  /** Sliding window those failed sign-in attempts are counted over. */
+  readonly loginAttemptWindowMs: number;
   /** Default max number of sessions building at the same time (see US-018). */
   readonly maxConcurrentSessions: number;
   /** Base URL of the GitHub REST API; overridable for self-hosted GitHub. */
   readonly githubApiUrl: string;
+  /**
+   * Base URL of the GitHub GraphQL API (US-021). Derived from
+   * {@link githubApiUrl} unless set, which is only needed for an install whose
+   * GraphQL endpoint is not where the REST base implies.
+   */
+  readonly githubGraphqlUrl: string;
+  /**
+   * How long a listing of open pull requests is reused before GitHub is asked
+   * again. Listing is one request per repository against a 5000/hour budget,
+   * so a page left open — or reloaded a few times — must not spend it.
+   */
+  readonly pullRequestCacheMs: number;
   /**
    * Where this chief-web is reachable, e.g. `https://chief.example.com`. Only
    * used to link a generated pull request back to its session; empty when the
@@ -123,6 +141,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // The login throttle is the only thing standing between an unauthenticated
+  // caller and unlimited password guessing, so it cannot be configured away:
+  // zero attempts would lock the operator out, and a zero-length window would
+  // be no limit at all.
+  const loginAttemptLimit = int('LOGIN_ATTEMPT_LIMIT', 5);
+  if (loginAttemptLimit < 1) {
+    throw new Error(
+      `Environment variable LOGIN_ATTEMPT_LIMIT must be at least 1, got "${loginAttemptLimit}"`,
+    );
+  }
+
+  const loginAttemptWindowMs = int('LOGIN_ATTEMPT_WINDOW_MS', 900_000);
+  if (loginAttemptWindowMs < 1_000) {
+    throw new Error(
+      `Environment variable LOGIN_ATTEMPT_WINDOW_MS must be at least 1000, got "${loginAttemptWindowMs}"`,
+    );
+  }
+
   return {
     port,
     host: str('HOST', '0.0.0.0'),
@@ -149,8 +185,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),
     maxTerminals: int('MAX_TERMINALS', 20),
     password: str('CHIEF_WEB_PASSWORD', ''),
+    loginAttemptLimit,
+    loginAttemptWindowMs,
     maxConcurrentSessions: int('MAX_CONCURRENT_SESSIONS', 3),
     githubApiUrl: str('GITHUB_API_URL', 'https://api.github.com'),
+    githubGraphqlUrl: str(
+      'GITHUB_GRAPHQL_URL',
+      graphqlUrlFor(str('GITHUB_API_URL', 'https://api.github.com')),
+    ),
+    pullRequestCacheMs: int('PULL_REQUEST_CACHE_MS', 30_000),
     publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),
     nodeEnv: env['NODE_ENV'] ?? 'development',

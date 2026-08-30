@@ -129,7 +129,10 @@ export function BuildLog({ sessionId, building }: Props) {
     <section className="card">
       <div className="card__header">
         <h2 className="card__title">
-          Agent log <span className={`badge badge--${badgeOf(connection, building)}`}>{label(connection, building)}</span>
+          Agent log{' '}
+          <span className={LOG_BADGE[label(connection, building)]}>
+            {label(connection, building)}
+          </span>
         </h2>
         <div className="field__actions">
           <button
@@ -229,13 +232,24 @@ function apply(current: BuildLogIteration[], message: BuildLogEvent): BuildLogIt
     : [...head, { ...last, endedAt: message.endedAt, exitCode: message.exitCode }];
 }
 
-function label(connection: Connection, building: boolean): string {
+/**
+ * The log's own state, which is not the session's: `live` means bytes are
+ * arriving, `idle` means the socket is up but the build has stopped. Both the
+ * pill's text and its colour come from this one value, so they cannot drift.
+ */
+function label(connection: Connection, building: boolean): LogState {
   if (connection === 'live') return building ? 'live' : 'idle';
-  if (connection === 'connecting') return 'connecting';
-  return connection === 'reconnecting' ? 'reconnecting' : 'disconnected';
+  // `closed` is the socket's word for it; `disconnected` is what an operator
+  // reading a pill needs to see.
+  return connection === 'closed' ? 'disconnected' : connection;
 }
 
-function badgeOf(connection: Connection, building: boolean): string {
-  if (connection !== 'live') return 'pending';
-  return building ? 'building' : 'ready';
-}
+type LogState = 'live' | 'idle' | 'connecting' | 'reconnecting' | 'disconnected';
+
+const LOG_BADGE: Record<LogState, string> = {
+  live: 'badge badge--live',
+  idle: 'badge badge--idle',
+  connecting: 'badge badge--connecting',
+  reconnecting: 'badge badge--reconnecting',
+  disconnected: 'badge badge--disconnected',
+};

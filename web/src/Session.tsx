@@ -26,6 +26,7 @@ import {
 } from './api.ts';
 import { BuildLog } from './BuildLog.tsx';
 import { fromLocalInputValue, localTime, startsIn, toLocalInputValue } from './schedule.ts';
+import { SESSION_BADGE, STORY_BADGE } from './status.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
 
@@ -377,7 +378,7 @@ export function Session() {
       <section className="card">
         <div className="card__header">
           <h2 className="card__title">
-            {session.name} <span className={`badge badge--${session.status}`}>{session.status}</span>
+            {session.name} <span className={SESSION_BADGE[session.status]}>{session.status}</span>
           </h2>
         </div>
         <dl className="meta">
@@ -528,7 +529,7 @@ export function Session() {
 
         {attached !== null && (
           <Suspense fallback={<p className="tagline">Loading terminal…</p>}>
-            <TerminalPane terminalId={attached} />
+            <TerminalPane terminalId={attached} size="tall" />
           </Suspense>
         )}
       </section>
@@ -818,7 +819,7 @@ function ReadinessCard({
         <h2 className="card__title">Stories</h2>
         <div className="field__actions">
           {pending && (
-            <button type="button" className="button" onClick={onMarkReady} disabled={busy !== null}>
+            <button type="button" className="button button--primary" onClick={onMarkReady} disabled={busy !== null}>
               {busy === 'ready' ? 'Checking the PRD…' : 'Mark ready'}
             </button>
           )}
@@ -859,10 +860,10 @@ function ReadinessCard({
         <ul className="stories">
           {stories.map((story) => (
             <li className="story" key={story.storyId}>
-              <span className="mono">{story.storyId}</span>
-              <span>{story.title}</span>
+              <span className="mono story__id">{story.storyId}</span>
+              <span className="story__title">{story.title}</span>
               <span className="story__priority">priority {story.priority}</span>
-              <span className={`badge badge--${story.status}`}>{story.status}</span>
+              <span className={STORY_BADGE[story.status]}>{story.status}</span>
             </li>
           ))}
         </ul>
@@ -924,14 +925,19 @@ function BuildCard({
     <section className="card">
       <div className="card__header">
         <h2 className="card__title">
-          Build <span className={`badge badge--${status}`}>{status}</span>{' '}
+          Build <span className={SESSION_BADGE[status]}>{status}</span>{' '}
           {build.queued && (
             <span className="badge badge--queued">Queued (#{build.queuePosition ?? 1})</span>
           )}
         </h2>
         <div className="field__actions">
           {status === 'ready' && !build.queued && (
-            <button type="button" className="button" onClick={onStart} disabled={busy !== null}>
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={onStart}
+              disabled={busy !== null}
+            >
               {busy === 'build' ? 'Starting…' : 'Start build'}
             </button>
           )}
@@ -1079,8 +1085,8 @@ function BuildCard({
               className={story.storyId === build.currentStoryId && building ? 'story story--current' : 'story'}
               key={story.storyId}
             >
-              <span className="mono">{story.storyId}</span>
-              <span>
+              <span className="mono story__id">{story.storyId}</span>
+              <span className="story__title">
                 {story.title}
                 {story.storyId === build.currentStoryId && building && (
                   <span className="story__now"> · running now</span>
@@ -1089,7 +1095,7 @@ function BuildCard({
               <span className="mono story__priority">
                 {story.commitSha === null ? '—' : story.commitSha.slice(0, 7)}
               </span>
-              <span className={`badge badge--${story.status}`}>{story.status}</span>
+              <span className={STORY_BADGE[story.status]}>{story.status}</span>
             </li>
           ))}
         </ul>

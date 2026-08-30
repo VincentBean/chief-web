@@ -76,13 +76,16 @@ export function agentPrompt(input: AgentPromptInput): string {
  * session's workspace and the shared credentials — which is exactly the
  * isolation that makes skipping them safe, and what chief's own loop does.
  */
-export function agentCommand(prompt: string): string[] {
+export function agentCommand(prompt: string, model?: string | null): string[] {
   // `stream-json` is what makes the live log possible: the default text format
   // prints nothing until the agent exits, which for one iteration is up to an
   // hour of silence. `--verbose` is required alongside it for `-p`, and chief
   // passes exactly the same pair.
+  // `--model` is omitted entirely when none is configured; that absence is how
+  // the CLI's own default is selected.
   return [
     'claude',
+    ...(model == null ? [] : ['--model', model]),
     '--dangerously-skip-permissions',
     '--output-format',
     'stream-json',

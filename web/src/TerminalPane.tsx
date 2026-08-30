@@ -11,6 +11,11 @@ export type PaneStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 interface Props {
   /** Terminal id from the server; changing it re-attaches to another PTY. */
   readonly terminalId: string;
+  /**
+   * `tall` gives the pane most of the viewport, for a terminal that *is* the
+   * page (planning). The default suits one sitting among other controls.
+   */
+  readonly size?: 'default' | 'tall';
   readonly onStatus?: (status: PaneStatus) => void;
   readonly onExit?: (exitCode: number | null) => void;
 }
@@ -33,7 +38,27 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
  * screen first — a reconnect re-sends the history, and drawing it twice would
  * show the same output stacked.
  */
-export function TerminalPane({ terminalId, onStatus, onExit }: Props) {
+/**
+ * Reads a design token off the document root.
+ *
+ * xterm is configured in JavaScript, so its palette used to be a second copy
+ * of the app's colours maintained by hand — and the two had already drifted
+ * apart (the font stack here listed 'Cascadia Mono'; the stylesheet did not).
+ * Reading the tokens instead means the terminal and the page cannot disagree.
+ *
+ * The fallback matters for more than a missing stylesheet: a token defined as
+ * an alias resolves through `var()` chains at computed-value time, and if a
+ * name is ever misspelled the browser hands back the empty string rather than
+ * an error. Anything that is not a literal colour is treated as absent, so a
+ * typo degrades to a readable terminal instead of an invisible one.
+ */
+function token(styles: CSSStyleDeclaration, name: string, fallback: string): string {
+  const value = styles.getPropertyValue(name).trim();
+  if (value === '') return fallback;
+  return /^(#|rgb|hsl|oklch|oklab|color\()/i.test(value) ? value : fallback;
+}
+
+export function TerminalPane({ terminalId, size = 'default', onStatus, onExit }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,15 +71,49 @@ export function TerminalPane({ terminalId, onStatus, onExit }: Props) {
     const host = hostRef.current;
     if (host === null) return;
 
+    // The stylesheet is imported by main.tsx before the first render, so the
+    // tokens are resolved by the time this effect runs.
+    const styles = getComputedStyle(document.documentElement);
+    const surface = token(styles, '--color-surface-sunken', '#010409');
+
     const term = new XTerm({
       convertEol: false,
       cursorBlink: true,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, 'Cascadia Mono', monospace",
+      fontFamily: token(
+        styles,
+        '--font-mono',
+        "ui-monospace, SFMono-Regular, Menlo, 'Cascadia Mono', monospace",
+      ),
+      // Matches --text-code, so terminal text lines up with the log beside it.
       fontSize: 13,
       // The browser keeps its own scrollback on top of the server's replay.
       scrollback: 5000,
       rightClickSelectsWord: true,
-      theme: { background: '#010409', foreground: '#e6edf3', cursor: '#e6edf3' },
+      theme: {
+        background: surface,
+        foreground: token(styles, '--color-fg-default', '#e6edf3'),
+        cursor: token(styles, '--color-accent-fg', '#58a6ff'),
+        cursorAccent: surface,
+        selectionBackground: 'rgba(31, 111, 235, 0.4)',
+        // The agent emits colour; without a palette xterm falls back to its
+        // own, which is louder than anything else on the page.
+        black: '#484f58',
+        red: '#ff7b72',
+        green: '#3fb950',
+        yellow: '#d29922',
+        blue: '#58a6ff',
+        magenta: '#bc8cff',
+        cyan: '#39c5cf',
+        white: '#b1bac4',
+        brightBlack: '#6e7681',
+        brightRed: '#ffa198',
+        brightGreen: '#56d364',
+        brightYellow: '#e3b341',
+        brightBlue: '#79c0ff',
+        brightMagenta: '#d2a8ff',
+        brightCyan: '#56d4dd',
+        brightWhite: '#f0f6fc',
+      },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -195,7 +254,7 @@ export function TerminalPane({ terminalId, onStatus, onExit }: Props) {
   }, [terminalId]);
 
   return (
-    <div className="terminal">
+    <div className={size === 'tall' ? 'terminal terminal--tall' : 'terminal'}>
       {error === null ? null : <p className="notice notice--error">{error}</p>}
       <div className="terminal__screen" ref={hostRef} />
     </div>

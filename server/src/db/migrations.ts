@@ -103,6 +103,90 @@ export const MIGRATIONS: readonly Migration[] = [
           ('agent', 'prd', 'push', 'pull_request', 'container_lost'));
     `,
   },
+  {
+    id: '0004_pr_feedback_runs',
+    sql: `
+      -- Processing a pull request's review feedback (US-021).
+      --
+      -- Deliberately not a \`sessions\` row. A session is a PRD built story by
+      -- story on a branch chief-web created; this is one pass over someone
+      -- else's branch, and the two disagree on the columns that matter:
+      -- \`pr_target_branch\` is CHECKed to develop/main while a real pull
+      -- request targets anything, and \`status\` has no way to say "replying".
+      -- Sharing the table would also put these rows in front of the build
+      -- loop's queue, which picks the head of every queued session and starts
+      -- the Ralph loop on it.
+      CREATE TABLE IF NOT EXISTS pr_runs (
+        id              TEXT PRIMARY KEY,
+        repository_id   TEXT NOT NULL
+                          REFERENCES repositories (id) ON DELETE CASCADE,
+        pr_number       INTEGER NOT NULL,
+        pr_url          TEXT NOT NULL,
+        pr_title        TEXT NOT NULL,
+        head_branch     TEXT NOT NULL,
+        base_branch     TEXT NOT NULL,
+        status          TEXT NOT NULL
+                          CHECK (status IN ('pending', 'running', 'finished', 'failed')),
+        -- Which step failed. \`reply\` sits after \`push\` on purpose: a run
+        -- that failed there has already delivered its fix, so retrying it must
+        -- not run the agent again.
+        failure_stage   TEXT
+                          CHECK (failure_stage IS NULL OR failure_stage IN
+                            ('feedback', 'checkout', 'agent', 'outcome', 'push',
+                             'reply', 'container_lost')),
+        -- Passes made so far, quoted in the reply footer so a second pass on
+        -- the same thread is distinguishable from the first.
+        attempt         INTEGER NOT NULL DEFAULT 0,
+        container_id    TEXT,
+        -- The commit the last successful push delivered; what replies quote.
+        head_sha        TEXT,
+        last_error      TEXT,
+        started_at      TEXT,
+        finished_at     TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        -- One row per pull request, reused across re-runs: the workspace, the
+        -- clone and the per-thread record all hang off it, which is what makes
+        -- a re-run after a partial success resume rather than start over.
+        UNIQUE (repository_id, pr_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_runs_repository ON pr_runs (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_pr_runs_status ON pr_runs (status);
+
+      -- What happened to each piece of feedback, across every run on this pull
+      -- request. This is the record that makes replying idempotent.
+      CREATE TABLE IF NOT EXISTS pr_feedback_threads (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id            TEXT NOT NULL REFERENCES pr_runs (id) ON DELETE CASCADE,
+        -- GraphQL node id: the only thing \`resolveReviewThread\` accepts.
+        thread_id         TEXT NOT NULL,
+        kind              TEXT NOT NULL CHECK (kind IN ('thread', 'review')),
+        -- REST id of the thread's *first* comment. GitHub refuses replies to
+        -- replies, so this is the only comment that can ever be answered;
+        -- NULL for a review summary, which has no thread to reply to at all.
+        first_comment_id  INTEGER,
+        -- The short key the agent echoes back (\`T1\`, \`R1\`) instead of a
+        -- forty-character node id it would mangle.
+        feedback_key      TEXT NOT NULL,
+        outcome           TEXT
+                            CHECK (outcome IS NULL OR outcome IN
+                              ('addressed', 'skipped', 'unreported')),
+        summary           TEXT,
+        replied_at        TEXT,
+        reply_url         TEXT,
+        -- Which commit the posted reply quoted. A re-run ending on the same
+        -- commit does not say the same sentence twice; a new one does.
+        replied_head_sha  TEXT,
+        resolved_at       TEXT,
+        -- Why a reply or a resolve did not happen; never silently swallowed.
+        error             TEXT,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        UNIQUE (run_id, thread_id)
+      );
+    `,
+  },
 ];
 
 /**

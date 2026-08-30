@@ -123,6 +123,12 @@ describe('planning prompts', () => {
     assert.deepEqual(command, ['claude', 'two words; rm -rf /']);
   });
 
+  it('passes the configured model, and no --model flag when there is none', () => {
+    assert.deepEqual(planningCommand('go', 'haiku'), ['claude', '--model', 'haiku', 'go']);
+    assert.deepEqual(planningCommand('go', null), ['claude', 'go']);
+    assert.deepEqual(planningCommand('go'), ['claude', 'go']);
+  });
+
   it('targets .chief/prds/<session name>/prd.md', () => {
     assert.equal(prdPathFor('add-login'), '.chief/prds/add-login/prd.md');
   });

@@ -1,6 +1,8 @@
 import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
 
 import {
+  AGENT_MODELS,
+  type AgentModel,
   ApiError,
   type ClaudeState,
   fetchClaudeState,
@@ -17,6 +19,22 @@ type Notice = { kind: 'ok' | 'error'; text: string };
 
 const describe = (error: unknown): string =>
   error instanceof ApiError ? error.message : String(error);
+
+/**
+ * What each model is worth choosing for. The `<select>` uses `''` for "no
+ * choice", which is sent to the server as `null` — Claude Code then picks, and
+ * on a subscription that means whatever the plan defaults to.
+ */
+const MODEL_LABELS: Record<AgentModel, string> = {
+  opus: 'Opus — most capable, heaviest on usage limits',
+  sonnet: 'Sonnet — balanced',
+  haiku: 'Haiku — fastest and cheapest',
+  fable: 'Fable — most capable of all, highest cost',
+};
+
+/** Turns the select's `''` back into the `null` the API expects. */
+const asModel = (value: string): AgentModel | null =>
+  value === '' ? null : (value as AgentModel);
 
 // xterm.js only matters once an operator actually signs Claude in, so it stays
 // in its own chunk rather than in the bundle every page load pays for.
@@ -35,6 +53,8 @@ export function Settings() {
   const [token, setToken] = useState('');
   const [maxSessions, setMaxSessions] = useState('3');
   const [agentTimeout, setAgentTimeout] = useState('30');
+  const [planningModel, setPlanningModel] = useState('');
+  const [buildModel, setBuildModel] = useState('');
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -144,6 +164,8 @@ export function Settings() {
     setSettings(loaded);
     setMaxSessions(String(loaded.maxConcurrentSessions));
     setAgentTimeout(String(loaded.agentTimeoutMinutes));
+    setPlanningModel(loaded.planningModel ?? '');
+    setBuildModel(loaded.buildModel ?? '');
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
   }
@@ -180,6 +202,8 @@ export function Settings() {
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
+      planningModel: asModel(planningModel),
+      buildModel: asModel(buildModel),
     };
     if (token.trim() !== '') update.githubToken = token.trim();
     // Blanking an identity field means "use the default again" (null), which is
@@ -328,6 +352,56 @@ export function Settings() {
         </section>
 
         <section className="field">
+          <label className="field__label" htmlFor="planning-model">
+            Planning model
+          </label>
+          <p className="field__hint">
+            Which model the interactive Claude Code in the planning terminal runs on. Applies to
+            the next planning terminal you open; one already running keeps the model it started
+            with.
+          </p>
+          <select
+            id="planning-model"
+            name="planning-model"
+            value={planningModel}
+            onChange={(event) => setPlanningModel(event.target.value)}
+            className="field__input field__input--narrow"
+          >
+            <option value="">Let Claude Code choose (default)</option>
+            {AGENT_MODELS.map((model) => (
+              <option key={model} value={model}>
+                {MODEL_LABELS[model]}
+              </option>
+            ))}
+          </select>
+        </section>
+
+        <section className="field">
+          <label className="field__label" htmlFor="build-model">
+            Build model
+          </label>
+          <p className="field__hint">
+            Which model each headless story iteration of the build loop runs on. Read at the start
+            of every iteration, so changing it mid-build applies from the next story — stories
+            already committed are not rebuilt.
+          </p>
+          <select
+            id="build-model"
+            name="build-model"
+            value={buildModel}
+            onChange={(event) => setBuildModel(event.target.value)}
+            className="field__input field__input--narrow"
+          >
+            <option value="">Let Claude Code choose (default)</option>
+            {AGENT_MODELS.map((model) => (
+              <option key={model} value={model}>
+                {MODEL_LABELS[model]}
+              </option>
+            ))}
+          </select>
+        </section>
+
+        <section className="field">
           <label className="field__label" htmlFor="git-author-name">
             Commit author name
           </label>
@@ -370,7 +444,7 @@ export function Settings() {
         </section>
 
         <div className="field__actions">
-          <button type="submit" className="button" disabled={busy !== null}>
+          <button type="submit" className="button button--primary" disabled={busy !== null}>
             {busy === 'save' ? 'Saving…' : 'Save'}
           </button>
         </div>

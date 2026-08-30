@@ -40,9 +40,13 @@ export function wrapAgentCommand(sessionId: string, command: readonly string[]):
 }
 
 /** One headless `claude -p` iteration, in the clone. */
-export function agentExecSpec(sessionId: string, prompt: string): ExecSpec {
+export function agentExecSpec(
+  sessionId: string,
+  prompt: string,
+  model?: string | null,
+): ExecSpec {
   return {
-    cmd: wrapAgentCommand(sessionId, agentCommand(prompt)),
+    cmd: wrapAgentCommand(sessionId, agentCommand(prompt, model)),
     workingDir: CONTAINER_REPO_DIR,
   };
 }

@@ -1,0 +1,203 @@
+/*
+ * The pull requests tab (US-021): a list of open pull requests grouped by
+ * repository, and the review feedback each one carries.
+ */
+@layer components {
+  /* One repository's heading row: its name, and how many are open. */
+  .pr-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 2rem;
+  }
+
+  .pr-group__head {
+    align-items: baseline;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    justify-content: space-between;
+  }
+
+  .pr-group__count {
+    color: var(--color-fg-muted);
+    font-size: var(--text-sm);
+  }
+
+  /*
+   * The muted fact line under a pull request's title. A wrapping row rather
+   * than a `.meta` grid: these are five short values that read as a sentence,
+   * and giving each its own labelled row would make a two-item page four
+   * screens tall.
+   */
+  .pr__facts {
+    color: var(--color-fg-muted);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: var(--text-sm);
+    gap: 0.25rem 0.5rem;
+  }
+
+  .pr__facts > * + *::before {
+    content: '·';
+    margin-right: 0.5rem;
+  }
+
+  /* The chevron turns to face the panel it controls. Held still under reduced
+   * motion by the kill switch in base.css. */
+  .pr__toggle .icon {
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+
+  .pr__toggle[aria-expanded='true'] .icon {
+    transform: rotate(180deg);
+  }
+
+  /* The expanded feedback panel, separated from the row it belongs to. */
+  .pr__panel {
+    border-top: 1px solid var(--color-line-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-top: 0.875rem;
+  }
+
+  .threads {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .thread {
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-subtle);
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .thread__head {
+    align-items: baseline;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    justify-content: space-between;
+  }
+
+  /*
+   * A path is split rather than truncated: it is the comment's identity, and
+   * `…/proposal-header-field.blade.php` cannot be told apart from another
+   * partial of the same name in a different directory.
+   */
+  .thread__path {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .thread__dir {
+    color: var(--color-fg-subtle);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    overflow-wrap: anywhere;
+  }
+
+  .thread__file {
+    color: var(--color-fg-default);
+    font-family: var(--font-mono);
+    font-size: var(--text-code);
+    overflow-wrap: anywhere;
+  }
+
+  .thread__author {
+    color: var(--color-fg-muted);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  .thread__body {
+    color: var(--color-fg-default);
+    display: flex;
+    flex-direction: column;
+    font-size: var(--text-sm);
+    gap: 0.5rem;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .thread__body p {
+    margin: 0;
+  }
+
+  /*
+   * The confirmation modal. Nothing modal existed before this; the redesign's
+   * later phases replace the app's four `window.confirm` calls with it.
+   */
+  .dialog {
+    background-color: var(--color-surface-raised);
+    border: 1px solid var(--color-line-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-e3);
+    color: var(--color-fg-default);
+    max-width: 34rem;
+    padding: 1.25rem;
+    width: calc(100% - 2rem);
+  }
+
+  .dialog::backdrop {
+    background-color: rgb(1 4 9 / 0.6);
+  }
+
+  .dialog__title {
+    margin-bottom: 0.75rem;
+  }
+
+  .dialog__body {
+    display: flex;
+    flex-direction: column;
+    font-size: var(--text-sm);
+    gap: 0.625rem;
+  }
+
+  .dialog__body p {
+    margin: 0;
+  }
+
+  .dialog__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 1.25rem;
+  }
+
+  /* The run's phase trail above the outcome. */
+  .pr__run {
+    border-top: 1px solid var(--color-line-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-top: 0.75rem;
+  }
+
+  /*
+   * Screen-reader-only text. Every row's disclosure button would otherwise
+   * announce identically as "Feedback"; this is what names the pull request it
+   * belongs to.
+   */
+  .visually-hidden {
+    border: 0;
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+}

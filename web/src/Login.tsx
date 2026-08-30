@@ -23,11 +23,7 @@ export function Login() {
       })
       .catch((cause: unknown) => {
         setSubmitting(false);
-        setError(
-          cause instanceof ApiError && cause.status === 401
-            ? 'Incorrect password.'
-            : `Could not sign in: ${String(cause)}`,
-        );
+        setError(describeFailure(cause));
       });
   };
 
@@ -36,29 +32,48 @@ export function Login() {
       <h1>chief-web</h1>
       <p className="tagline">Enter the shared password to continue.</p>
 
-      <form className="login" onSubmit={onSubmit}>
-        <label className="login__label" htmlFor="password">
-          Password
-        </label>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          autoFocus
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          className="login__input"
-        />
-        <button type="submit" className="button" disabled={submitting || password === ''}>
+      <form className="form" onSubmit={onSubmit}>
+        <section className="field">
+          <label className="field__label" htmlFor="password">
+            Password
+          </label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="field__input"
+          />
+        </section>
+        <button
+          type="submit"
+          className="button button--primary"
+          disabled={submitting || password === ''}
+        >
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
         {error !== null && (
-          <p className="login__error" role="alert">
+          <p className="notice notice--error" role="alert">
             {error}
           </p>
         )}
       </form>
     </main>
   );
+}
+
+/**
+ * The server answers `429` once too many sign-ins have failed, and its message
+ * carries the wait — show that rather than a generic failure, so a locked-out
+ * operator knows to wait instead of retrying harder.
+ */
+function describeFailure(cause: unknown): string {
+  if (cause instanceof ApiError && cause.status === 401) return 'Incorrect password.';
+  if (cause instanceof ApiError && cause.status === 429) {
+    return cause.detail ?? 'Too many failed sign-in attempts. Try again later.';
+  }
+  return `Could not sign in: ${String(cause)}`;
 }

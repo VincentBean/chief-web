@@ -1,0 +1,107 @@
+/*
+ * Element-level defaults: the things that should be true everywhere before any
+ * component says anything.
+ */
+@layer base {
+  :root {
+    /* Motion durations live here rather than in @theme because v4 has no
+     * `--duration-*` theme namespace to extend. */
+    --motion-instant: 80ms;
+    --motion-fast: 120ms;
+    --motion-slow: 200ms;
+
+    /* This app is dark-only, and saying so is what makes the *native* widgets
+     * agree: scrollbars, <select> popups, date pickers and form-control
+     * defaults all render dark even when the operating system is set to light.
+     * Without it a light-mode visitor gets white scrollbars on a #0d1117 page.
+     * Paired with <meta name="color-scheme" content="dark"> in index.html. */
+    color-scheme: dark;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  html {
+    background-color: var(--color-surface-canvas);
+  }
+
+  body {
+    background-color: var(--color-surface-canvas);
+    color: var(--color-fg-default);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: --alpha(var(--color-selection) / 40%);
+    color: var(--color-fg-emphasis);
+  }
+
+  /* Only h1 was ever styled; h2 and h3 fell through to UA defaults, margins
+   * included. Preflight removes those, so state all three here once. */
+  h1 {
+    color: var(--color-fg-emphasis);
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+
+  h2 {
+    color: var(--color-fg-emphasis);
+    font-size: var(--text-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+
+  h3 {
+    color: var(--color-fg-default);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    margin: 0;
+  }
+
+  /*
+   * One focus treatment for the whole app.
+   *
+   * What was here before was `outline: none` on the text inputs plus a 1px
+   * border hue shift — which is not a focus indicator: it adds no thickness,
+   * survives no contrast check, and disappears entirely against the border it
+   * replaces. `grep -rn outline web/src` should match this rule and nothing
+   * else (xterm ships its own, unlayered, in its own chunk).
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Preflight sets buttons to `cursor: default`. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-fg-subtle);
+  }
+
+  /*
+   * Reduced motion, as a kill switch rather than a per-rule opt-out.
+   *
+   * This belongs in `base` specifically: for `!important` declarations the
+   * cascade *reverses* layer order, so an important rule in the first layer
+   * outranks `components`, `utilities`, and unlayered CSS alike. In any later
+   * layer it would lose to the very rules it needs to override.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

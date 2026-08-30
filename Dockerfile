@@ -52,7 +52,7 @@ COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 
 # The server runs as root because it drives the host Docker socket, whose group
-# id is not knowable at build time. See README "Security model".
+# id is not knowable at build time. See docs/security.md.
 EXPOSE 8080
 VOLUME ["/data", "/claude-auth"]
 

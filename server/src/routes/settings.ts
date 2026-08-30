@@ -4,8 +4,11 @@ import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
 import { fetchGithubUser, GithubApiError } from '../lib/github.js';
 import {
+  AGENT_MODELS,
+  type AgentModel,
   type AppSettingsUpdate,
   getGithubToken,
+  isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
   MAX_AGENT_TIMEOUT_MINUTES,
@@ -93,6 +96,8 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     githubToken?: string | null;
     maxConcurrentSessions?: number;
     agentTimeoutMinutes?: number;
+    planningModel?: AgentModel | null;
+    buildModel?: AgentModel | null;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   } = {};
@@ -148,6 +153,14 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     update.agentTimeoutMinutes = raw;
   }
 
+  const planning = parseModelField(input, 'planningModel');
+  if ('error' in planning) return planning;
+  if (planning.present) update.planningModel = planning.value;
+
+  const build = parseModelField(input, 'buildModel');
+  if ('error' in build) return build;
+  if (build.present) update.buildModel = build.value;
+
   const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {
     error: 'invalid_git_author_name',
     message:
@@ -166,6 +179,36 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
 
   return update;
 }
+
+/** An absent model field is not the same as one explicitly set to `null`. */
+type ModelField =
+  | { readonly present: false }
+  | { readonly present: true; readonly value: AgentModel | null };
+
+/**
+ * The two model fields behave alike: omitted leaves the stored value alone,
+ * `null` hands the choice back to Claude Code's own default, and a string has
+ * to be one chief-web offers.
+ *
+ * The allowlist is the point. `--model` takes anything and only warns on a name
+ * it does not know, so an unchecked typo here would not fail — it would quietly
+ * run a whole build on whatever the CLI fell back to.
+ */
+function parseModelField(
+  input: Record<string, unknown>,
+  key: 'planningModel' | 'buildModel',
+): ModelField | Invalid {
+  if (!(key in input) || input[key] === undefined) return ABSENT_MODEL;
+  const raw = input[key];
+  if (raw === null) return { present: true, value: null };
+  if (typeof raw === 'string' && isAgentModel(raw)) return { present: true, value: raw };
+  return {
+    error: key === 'planningModel' ? 'invalid_planning_model' : 'invalid_build_model',
+    message: `The model must be one of ${AGENT_MODELS.join(', ')}. Send null to let Claude Code choose.`,
+  };
+}
+
+const ABSENT_MODEL: ModelField = { present: false };
 
 /** An absent field is not the same as one explicitly set to `null`. */
 type IdentityField =
