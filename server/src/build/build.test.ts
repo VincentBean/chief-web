@@ -217,7 +217,10 @@ describe('the agent command', () => {
     // One file per iteration: an agent that outlives its iteration stays
     // addressable instead of being overwritten by its successor's pid.
     assert.notEqual(agentPidFile('abc', 3), agentPidFile('abc', 4));
-    assert.ok(agentPidGlob('abc').endsWith('/abc-*.pid'));
+    // The glob also reaches the one-file-per-session name this used to write,
+    // because the container holding such a file outlives the server that wrote
+    // it and the first sweep after an upgrade is the only chance to reap it.
+    assert.ok(agentPidGlob('abc').endsWith('/abc*.pid'));
   });
 
   it('signals every recorded pid, its group and its children, and always exits 0', () => {

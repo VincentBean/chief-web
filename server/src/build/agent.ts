@@ -43,9 +43,18 @@ export function agentPidFile(sessionId: string, iteration: number): string {
  */
 export const AGENT_SIGNALLED = 'chief-signalled';
 
-/** Every iteration's pid file, for the sweep; a shell glob, not a path. */
+/**
+ * Every pid file this session has, for the sweep; a shell glob, not a path.
+ *
+ * Deliberately loose enough to match the one-file-per-session name this used
+ * to write (`<id>.pid`, no iteration): the containers that hold those files
+ * outlive the server that wrote them, so the first sweep after an upgrade is
+ * the only thing that will ever be in a position to reap what they left. Two
+ * session ids cannot be a prefix of one another — they are uuids, all of one
+ * length — so the wildcard cannot reach into another session.
+ */
 export function agentPidGlob(sessionId: string): string {
-  return `${AGENT_PID_DIR}/${sessionId}-*.pid`;
+  return `${AGENT_PID_DIR}/${sessionId}*.pid`;
 }
 
 /**
