@@ -57,6 +57,40 @@ export function toLocalInputValue(iso: string): string {
   );
 }
 
+/** The two fields the schedule form shows, from a stored instant. */
+export function toLocalInputParts(iso: string): { day: string; time: string } {
+  const [day = '', time = ''] = toLocalInputValue(iso).split('T');
+  return { day, time };
+}
+
+/**
+ * `7:30` typed into the time box, as `07:30`; `null` for anything that is not
+ * a time of day.
+ *
+ * The box is plain text rather than `<input type="time">` because a native
+ * time control renders on whatever clock the *browser's* locale uses, and no
+ * attribute a page can set overrides that — `lang` is honoured for it by some
+ * engines and ignored by Chromium. A field whose whole purpose is to say when
+ * an unattended build starts cannot be left to render as `7:30 PM` on one
+ * machine and `19:30` on another, so this one is parsed here instead.
+ */
+export function normaliseTime(value: string): string | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (match === null) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  const pad = (part: number): string => String(part).padStart(2, '0');
+  return `${pad(hours)}:${pad(minutes)}`;
+}
+
+/** The UTC instant the day and time boxes mean here; null if either cannot be read. */
+export function fromLocalParts(day: string, time: string): string | null {
+  const normalised = normaliseTime(time);
+  if (day === '' || normalised === null) return null;
+  return fromLocalInputValue(`${day}T${normalised}`);
+}
+
 /** The UTC instant a `datetime-local` value means here; null if unreadable. */
 export function fromLocalInputValue(value: string): string | null {
   if (value === '') return null;
