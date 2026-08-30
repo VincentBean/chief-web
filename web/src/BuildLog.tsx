@@ -7,6 +7,7 @@ import {
   type BuildLogMessage,
   buildLogSocketUrl,
 } from './api.ts';
+import { localClock } from './schedule.ts';
 
 /** How the pane's own connection is doing, shown next to the title. */
 type Connection = 'connecting' | 'live' | 'reconnecting' | 'closed';
@@ -179,7 +180,7 @@ export function BuildLog({ sessionId, building }: Props) {
                 {iteration.storyId === null ? '' : ` · ${iteration.storyId}`}
                 <span className="log__meta">
                   {' '}
-                  {new Date(iteration.startedAt).toLocaleTimeString()} ·{' '}
+                  {localClock(iteration.startedAt)} ·{' '}
                   {iteration.endedAt === null
                     ? 'running'
                     : iteration.exitCode === null

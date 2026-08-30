@@ -630,10 +630,19 @@ function ScheduleCard({
               nothing runs. If every build slot is taken at that moment, the session takes a place
               in the build queue instead and starts as soon as one frees.
             </p>
+            {/*
+              `lang` is the only lever a page has over a native date-time
+              picker: the widget's own format follows the browser's locale, and
+              nothing in HTML or CSS overrides it. Chromium and Firefox take
+              the attribute as the field's language, and `en-GB` is English on
+              a 24-hour clock — so the picker matches the times shown around
+              it, on a page about when an unattended build starts.
+            */}
             <input
               id="session-schedule"
               className="field__input"
               type="datetime-local"
+              lang="en-GB"
               value={value}
               onChange={(event) => setValue(event.target.value)}
             />
