@@ -65,10 +65,25 @@ export function feedbackCommitMessage(number: number): string {
 
 export interface PrFeedbackPromptInput {
   readonly slug: string;
+  /**
+   * How long the run has before it is cut short.
+   *
+   * Told to the agent for the same reason the build prompt tells it: chief-web
+   * can enforce a deadline but it cannot make one arrive early, and a run that
+   * spent its budget on the project's whole test suite is indistinguishable,
+   * from the outside, from one that did nothing at all.
+   */
+  readonly timeoutMs: number;
   readonly number: number;
   readonly title: string;
   readonly headBranch: string;
   readonly items: readonly FeedbackItem[];
+}
+
+/** The budget as the agent should read it: whole minutes, never "1800000ms". */
+function minutes(timeoutMs: number): string {
+  const whole = Math.max(1, Math.round(timeoutMs / 60_000));
+  return `${String(whole)} minute${whole === 1 ? '' : 's'}`;
 }
 
 /** The whole prompt: the brief, the feedback, and what to leave behind. */
@@ -83,6 +98,15 @@ reviewed. The pull request is "${input.title}" and its branch,
 
 Below is every unresolved comment on it. Work through them: read the code each
 one points at, decide whether it is right, and make the change if it is.
+
+You have **${minutes(input.timeoutMs)}**. When that runs out you are stopped
+where you stand — and because chief-web reads only the commit and the report
+below, a run stopped before it wrote them is a run that did nothing, however
+much of it was right. Budget accordingly: run the tests that cover what you
+changed rather than the project's whole suite, and if the clock gets short,
+stop working, commit what is finished and report the rest as \`skipped\` with
+"ran out of time" as the reason. A partial pass a person can read is worth more
+than a complete one nobody ever sees.
 
 ## The feedback
 
@@ -129,5 +153,9 @@ pushes. Nothing you say in your reply is read.
    something.
 8. If you address nothing at all, make no commit — an empty commit is worse than
    none — and still write the report with every key under \`skipped\`.
+9. The report is what says this run finished. Write it even when the pass went
+   badly, even when you ran short of time, and even when every key in it is
+   skipped — it is the difference between a run chief-web can report on and one
+   it can only mark failed.
 `;
 }

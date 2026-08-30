@@ -98,7 +98,9 @@ the `settings` table so it can be changed without a restart:
   may run on a single story, 1–720 minutes, default 30. It is read at the start
   of every iteration, so a change applies to the next one with no restart, and
   an iteration that runs out of time counts as a failed attempt toward the two
-  retries. `BUILD_ITERATION_TIMEOUT_MS` only supplies the default.
+  retries. The number is also written into the prompt, so the agent knows what
+  it is being held to and can decide against starting the whole test suite with
+  four minutes left. `BUILD_ITERATION_TIMEOUT_MS` only supplies the default.
 - **Planning model** and **Build model** — which model Claude Code runs on, set
   separately for the interactive planning terminal and for each headless story
   iteration of the build loop. The choices are Claude Code's own `--model`
