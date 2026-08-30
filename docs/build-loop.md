@@ -33,14 +33,24 @@ The loop stops itself in four ways:
   **30 minutes** by default, configurable per iteration on the settings page
   (1–720 minutes). An iteration cut short counts as a failed attempt exactly
   like a stalled one — even if it committed something — so the same two retries
-  apply and the third failure ends the run.
+  apply and the third failure ends the run. The agent it gave up on is *reaped*
+  first (`SIGTERM`, ten seconds, `SIGKILL`), because the timeout itself only
+  closes chief-web's end of the exec: the Docker Engine API cannot kill an
+  exec, so without this the agent — and every test run and database server it
+  started — would still be in the container, holding the clone, when the retry
+  started a second agent in the same working tree. Each iteration records its
+  pid under a file of its own, so an agent that outlives its iteration stays
+  addressable. A run sweeps the container once before its first iteration too,
+  for the case where the *server* was restarted mid-iteration.
 - **The iteration cap.** A run may take the outstanding stories plus 50%, never
   fewer than 10. A loop that is committing but never finishing anything hits it
   and fails, rather than churning forever.
 - **Stop build.** The running agent is signalled (`SIGTERM`, via a pid file it
   writes inside the container) and the session goes back to **ready**.
   Everything already committed is kept, so a stopped build resumes rather than
-  restarts.
+  restarts. An agent that has not gone by the time the loop stops waiting for
+  it is reaped, so the session is never made startable again while a previous
+  agent is still in its workspace.
 
 A **failed** session shows the stored reason at the top of its page, along with
 the **stage** it failed at, and one **Retry** button. See

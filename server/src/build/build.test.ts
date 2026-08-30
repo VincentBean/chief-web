@@ -30,7 +30,13 @@ import type { SessionContainerView } from '../orchestrator/index.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
 import { planRetry } from '../recovery/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
-import { agentPidFile, agentSignalSpec, wrapAgentCommand } from './agent.js';
+import {
+  AGENT_SIGNALLED,
+  agentPidFile,
+  agentPidGlob,
+  agentSignalSpec,
+  wrapAgentCommand,
+} from './agent.js';
 import {
   classifyIteration,
   iterationCap,
@@ -201,23 +207,42 @@ describe('the agent command', () => {
     assert.equal(agentCommand('p', 'opus').at(-1), 'p');
   });
 
-  it('records the agent pid before exec-ing it, so "stop" can signal it', () => {
-    const wrapped = wrapAgentCommand('abc', ['claude', '-p', 'hi']);
+  it('records the agent pid before exec-ing it, under a file of its own', () => {
+    const wrapped = wrapAgentCommand('abc', 3, ['claude', '-p', 'hi']);
     assert.deepEqual(wrapped.slice(0, 2), ['/bin/sh', '-c']);
-    assert.match(wrapped[2] ?? '', /echo \$\$ > \/tmp\/\.chief-build\/abc\.pid/);
+    assert.match(wrapped[2] ?? '', /echo \$\$ > \/tmp\/\.chief-build\/abc-3\.pid/);
     assert.match(wrapped[2] ?? '', /exec "\$@"$/);
     // The prompt is positional, so the shell never re-parses it.
     assert.deepEqual(wrapped.slice(3), ['chief-build', 'claude', '-p', 'hi']);
+    // One file per iteration: an agent that outlives its iteration stays
+    // addressable instead of being overwritten by its successor's pid.
+    assert.notEqual(agentPidFile('abc', 3), agentPidFile('abc', 4));
+    assert.ok(agentPidGlob('abc').endsWith('/abc-*.pid'));
   });
 
-  it('signals the recorded pid, its group and its children, and always exits 0', () => {
+  it('signals every recorded pid, its group and its children, and always exits 0', () => {
     const spec = agentSignalSpec('abc', 'TERM');
     const script = spec.cmd[2] ?? '';
+    assert.ok(script.includes(`for file in ${agentPidGlob('abc')}; do`));
     assert.match(script, /kill -TERM -"\$pid"/);
     assert.match(script, /kill -TERM "\$pid"/);
     assert.match(script, /pkill -TERM -P "\$pid"/);
-    assert.ok(script.includes(agentPidFile('abc')));
     assert.match(script, /exit 0$/);
+  });
+
+  it('only signals a pid /proc still shows running the agent', () => {
+    const script = agentSignalSpec('abc', 'TERM').cmd[2] ?? '';
+    // Pids are recycled: a leftover file whose number now belongs to something
+    // else is deleted rather than shot at.
+    assert.match(script, /grep -qa claude \/proc\/"\$pid"\/cmdline/);
+    assert.match(script, /else rm -f "\$file"; fi/);
+  });
+
+  it('keeps the pid records until the pass that kills, then removes them', () => {
+    // TERM leaves the file: the KILL pass after it has to have something left
+    // to aim at.
+    assert.equal((agentSignalSpec('abc', 'TERM').cmd[2] ?? '').includes('rm -f "$file"; else'), false);
+    assert.ok((agentSignalSpec('abc', 'KILL', { remove: true }).cmd[2] ?? '').includes('rm -f "$file"; else'));
   });
 });
 
@@ -379,6 +404,7 @@ class World {
 class MockRunner implements AgentRunner {
   readonly invocations: AgentInvocation[] = [];
   readonly stops: string[] = [];
+  readonly reaps: string[] = [];
   head: string | null = 'sha-0';
   /** Called for each iteration; whatever it does *is* what the agent did. */
   behaviour: (invocation: AgentInvocation, index: number) => void | Promise<void> = () => {};
@@ -392,6 +418,11 @@ class MockRunner implements AgentRunner {
 
   stop(sessionId: string): Promise<void> {
     this.stops.push(sessionId);
+    return Promise.resolve();
+  }
+
+  reap(sessionId: string): Promise<void> {
+    this.reaps.push(sessionId);
     return Promise.resolve();
   }
 
@@ -545,6 +576,47 @@ describe('the build loop', () => {
     assert.equal(getSession(world.db, world.session.id)?.failureStage, 'agent');
     assert.match(world.error() ?? '', /still running after its time limit/);
     assert.match(world.error() ?? '', /settings page/);
+  });
+
+  it('kills a timed-out agent before the next attempt starts (US-019)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: null, output: 'still thinking…', timedOut: true };
+    // How many agents had been reaped by the time each iteration started. A
+    // timeout only closes chief-web's end of the exec: the agent it gave up on
+    // is still in the container, still holding the clone, and an attempt that
+    // started next to it would be editing the same working tree as the agent
+    // it was meant to replace.
+    const reapedBefore: number[] = [];
+    world.runner.behaviour = (): void => {
+      reapedBefore.push(world.runner.reaps.length);
+    };
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // One sweep before the run, then one for every abandoned iteration.
+    assert.deepEqual(reapedBefore, [1, 2, 3]);
+    assert.equal(world.runner.reaps.length, MAX_RETRIES + 2);
+    assert.ok(world.runner.reaps.every((id) => id === world.session.id));
+  });
+
+  it('sweeps the container before the first iteration, and not after a clean one', async () => {
+    const world = new World();
+    world.runner.behaviour = (invocation): void => {
+      const id = /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '';
+      world.markDone(id);
+      world.runner.commit();
+    };
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    // The sweep at the start is for an agent a restarted server left running;
+    // an iteration that came back on its own is not reaped at all.
+    assert.deepEqual(world.runner.reaps, [world.session.id]);
   });
 
   it('takes the agent timeout from the settings, not from the environment (US-019)', async () => {
@@ -1243,6 +1315,7 @@ describe('the container agent runner', () => {
     const result = await createAgentRunner(docker).run({
       sessionId: 'session-1',
       containerId: 'container-1',
+      iteration: 1,
       prompt: 'do the thing',
       timeoutMs: 5000,
       onOutput: (text) => streamed.push(text),
@@ -1264,5 +1337,41 @@ describe('the container agent runner', () => {
     assert.equal(exec.cmd[3], 'chief-build');
     assert.ok(exec.cmd.includes('stream-json'));
     daemon.onExec = null;
+  });
+
+  it('reaps with SIGTERM, a grace period, and then SIGKILL', async () => {
+    // An agent was there and answered the sweep.
+    daemon.onExec = () => ({ stdout: `${AGENT_SIGNALLED}\n`, exitCode: 0 });
+    const before = daemon.execs().length;
+    // The grace is a constructor argument so this does not wait ten seconds
+    // for what it is asserting about.
+    await createAgentRunner(docker, 5).reap('session-1', 'container-1');
+    daemon.onExec = null;
+
+    const sent = daemon.execs().slice(before).map((exec) => exec.cmd[2] ?? '');
+    assert.equal(sent.length, 2);
+    assert.match(sent[0] ?? '', /kill -TERM/);
+    assert.match(sent[1] ?? '', /kill -KILL/);
+    // Only the pass that kills forgets the pid; the one before it has to leave
+    // the record behind or the kill has nothing to aim at.
+    assert.equal((sent[0] ?? '').includes('rm -f "$file"; else'), false);
+    assert.ok((sent[1] ?? '').includes('rm -f "$file"; else'));
+  });
+
+  it('stops at the sweep when there was no agent to signal', async () => {
+    const before = daemon.execs().length;
+    // The sweep printed nothing, so there is nothing to come back and kill —
+    // and no reason to make "Stop build" sit through the grace period.
+    await createAgentRunner(docker, 60_000).reap('session-1', 'container-1');
+
+    const sent = daemon.execs().slice(before);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.cmd[2] ?? '', /kill -TERM/);
+  });
+
+  it('never lets a failing daemon throw out of a reap', async () => {
+    // The loop calls this on a path that has already given up on the agent;
+    // a container that has gone away has no agent left in it either.
+    await createAgentRunner(docker, 5).reap('session-1', 'no-such-container');
   });
 });

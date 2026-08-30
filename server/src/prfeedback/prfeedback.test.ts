@@ -124,6 +124,7 @@ class StubGithub implements PrFeedbackGateway {
 /** Whatever the behaviour does *is* what the agent did. */
 class MockRunner implements AgentRunner {
   readonly invocations: AgentInvocation[] = [];
+  readonly reaps: string[] = [];
   head: string | null = 'sha-before';
   result: AgentResult = { exitCode: 0, output: '', timedOut: false };
   behaviour: () => void = () => {};
@@ -135,6 +136,11 @@ class MockRunner implements AgentRunner {
   }
 
   stop(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  reap(runId: string): Promise<void> {
+    this.reaps.push(runId);
     return Promise.resolve();
   }
 

@@ -482,6 +482,12 @@ export class BuildService {
       });
     }
     await settle(state.finished, this.config.buildStopTimeoutMs);
+    // SIGTERM is a request, and `settle` gives up on it after the stop timeout
+    // whether or not it was honoured. An agent that outlasted both is the same
+    // orphan a timed-out iteration leaves behind — the session is about to go
+    // back to `ready` and be startable again, so it cannot be left holding the
+    // workspace. Nothing to reap is the normal case, and costs one exec.
+    await this.runner.reap(sessionId, state.containerId);
 
     const stopped = getSession(this.db, sessionId) ?? session;
     logger.info('build stopped', { session: sessionId, iterations: state.iteration });
@@ -494,6 +500,14 @@ export class BuildService {
   }
 
   private async runLoop(sessionId: string, state: RunState): Promise<void> {
+    // A server that was restarted mid-iteration left its agent running: the
+    // container outlives the process that was watching it, and nothing on the
+    // way back up signals what it holds. Sweeping the session's pid files
+    // before the first iteration is what keeps that agent from meeting the one
+    // this run is about to start. It costs one exec per run, and on the usual
+    // path there is nothing to find.
+    await this.runner.reap(sessionId, state.containerId);
+
     for (;;) {
       const session = getSession(this.db, sessionId);
       // A session that was deleted, or moved out of `building` by something
@@ -588,6 +602,7 @@ export class BuildService {
       result = await this.runner.run({
         sessionId: session.id,
         containerId: state.containerId,
+        iteration: state.iteration,
         prompt: agentPrompt({
           sessionName: session.name,
           story: promptStory(story, snapshot.parsed),
@@ -608,6 +623,19 @@ export class BuildService {
       throw cause;
     }
     log.end(result.timedOut ? null : result.exitCode);
+
+    // A timed-out iteration is abandoned, not stopped: all a timeout can do is
+    // close chief-web's end of the exec stream, and the Engine API has no way
+    // to kill an exec — so the agent, and every test run, database server and
+    // stray process it started, is still going, in this container, with this
+    // workspace under it. Reaping it here is what stops the retry from exec-ing
+    // a second agent into a working tree the first one is still editing: two
+    // agents in one clone is a collision neither can win, and the loop reads
+    // the resulting standoff as three attempts that changed nothing.
+    //
+    // It happens before HEAD and the PRD are read back, so what the iteration
+    // is judged on is a workspace nothing is still writing to.
+    if (result.timedOut) await this.runner.reap(session.id, state.containerId);
 
     // The bookkeeping happens even when the operator pressed "Stop build"
     // while this iteration was running: the agent may well have committed the

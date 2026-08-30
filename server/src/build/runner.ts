@@ -1,6 +1,7 @@
 import type { ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
+import { logger } from '../lib/logger.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { agentExecSpec, agentSignalSpec, headShaSpec } from './agent.js';
+import { AGENT_SIGNALLED, agentExecSpec, agentSignalSpec, headShaSpec } from './agent.js';
 import { AgentOutputFormatter } from './stream.js';
 
 /**
@@ -20,6 +21,8 @@ const MAX_OUTPUT_CHARS = 8000;
 export interface AgentInvocation {
   readonly sessionId: string;
   readonly containerId: string;
+  /** Which iteration of the run this is; it names the agent's pid file. */
+  readonly iteration: number;
   readonly prompt: string;
   /** Cap on the whole iteration; a stuck agent must not hold the loop forever. */
   readonly timeoutMs: number;
@@ -56,16 +59,30 @@ export interface AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentResult>;
   /** Signals the running agent so it can shut down; never throws. */
   stop(sessionId: string, containerId: string): Promise<void>;
+  /**
+   * Leaves no agent of this session running, whatever it takes: signalled,
+   * given a moment, then killed. Never throws.
+   */
+  reap(sessionId: string, containerId: string): Promise<void>;
   /** HEAD of the clone, or `null` when there is no commit to read. */
   headSha(containerId: string): Promise<string | null>;
 }
 
 /** The {@link AgentRunner} that actually execs into the session container. */
 export class ContainerAgentRunner implements AgentRunner {
-  constructor(private readonly exec: AgentExecutor) {}
+  constructor(
+    private readonly exec: AgentExecutor,
+    /** How long a reaped agent is given to go quietly before it is killed. */
+    private readonly reapGraceMs: number = AGENT_REAP_GRACE_MS,
+  ) {}
 
   async run(invocation: AgentInvocation): Promise<AgentResult> {
-    const spec = agentExecSpec(invocation.sessionId, invocation.prompt, invocation.model);
+    const spec = agentExecSpec(
+      invocation.sessionId,
+      invocation.iteration,
+      invocation.prompt,
+      invocation.model,
+    );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
       const collected = await this.exec.runExec(invocation.containerId, spec, invocation.timeoutMs);
@@ -103,6 +120,50 @@ export class ContainerAgentRunner implements AgentRunner {
     await this.exec.runExec(containerId, agentSignalSpec(sessionId, 'TERM'), SIGNAL_TIMEOUT_MS);
   }
 
+  /**
+   * Everything `stop` does, and then makes sure of it.
+   *
+   * Used where nothing is going to come back and check: an iteration that ran
+   * out of time is abandoned, not stopped — destroying the exec stream closes
+   * chief-web's end of it and nothing else, because the Engine API cannot kill
+   * an exec — so without this the agent keeps running with the workspace under
+   * it and the next iteration execs a second one into the same working tree.
+   *
+   * SIGTERM first, for the same reason `stop` sends it: the agent is mid-edit
+   * in a real working copy. What is different here is that its answer is no
+   * longer wanted, so the grace period is short and SIGKILL is the end of it.
+   */
+  async reap(sessionId: string, containerId: string): Promise<void> {
+    try {
+      const termed = await this.exec.runExec(
+        containerId,
+        agentSignalSpec(sessionId, 'TERM'),
+        SIGNAL_TIMEOUT_MS,
+      );
+      // Nothing was running: the sweep before a run and the one after a stop
+      // that was honoured both land here, and neither should spend the grace
+      // period waiting for an agent that is not there.
+      if (!termed.stdout.includes(AGENT_SIGNALLED)) return;
+
+      await pause(this.reapGraceMs);
+      // The pid files go with this pass: anything still answering to them has
+      // now had both signals, and a record kept past that is one the next
+      // sweep would aim at a recycled pid.
+      await this.exec.runExec(
+        containerId,
+        agentSignalSpec(sessionId, 'KILL', { remove: true }),
+        SIGNAL_TIMEOUT_MS,
+      );
+    } catch (cause) {
+      // A container that has gone away has no agent left in it either, and a
+      // daemon that will not answer is not something the loop can act on.
+      logger.warn('could not reap the build agent', {
+        session: sessionId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
+
   async headSha(containerId: string): Promise<string | null> {
     const result = await this.exec.runExec(containerId, headShaSpec(), HEAD_TIMEOUT_MS);
     if (result.exitCode !== 0 || result.timedOut) return null;
@@ -115,8 +176,19 @@ export class ContainerAgentRunner implements AgentRunner {
 const HEAD_TIMEOUT_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 15_000;
 
-export function createAgentRunner(exec: AgentExecutor): AgentRunner {
-  return new ContainerAgentRunner(exec);
+/**
+ * The pause between a reap's SIGTERM and its SIGKILL. Long enough for the CLI
+ * to put its own tools down, short enough that the loop is not waiting on an
+ * iteration whose output it has already given up on.
+ */
+export const AGENT_REAP_GRACE_MS = 10_000;
+
+export function createAgentRunner(exec: AgentExecutor, reapGraceMs?: number): AgentRunner {
+  return new ContainerAgentRunner(exec, reapGraceMs);
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function truncate(text: string): string {

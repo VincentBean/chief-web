@@ -354,6 +354,9 @@ export class PrFeedbackService {
     const result = await this.runner.run({
       sessionId: run.id,
       containerId: container.id,
+      // A feedback run is one agent, not a loop; the number only has to name
+      // the pid file the reap below aims at.
+      iteration: 1,
       prompt: prFeedbackPrompt({
         slug,
         number: run.prNumber,
@@ -368,6 +371,11 @@ export class PrFeedbackService {
     });
     if (state.stopping) return this.stopped(run.id);
     if (result.timedOut) {
+      // The timeout closed chief-web's end of the exec and nothing else: the
+      // agent is still in the container with the checkout under it, and this
+      // run is about to be marked failed and made retryable. Left alone it
+      // would still be there when the retry checks the branch out again.
+      await this.runner.reap(run.id, container.id);
       this.fail(run.id, 'agent', `The agent ran out of time.\n${result.output}`.trim());
       return;
     }

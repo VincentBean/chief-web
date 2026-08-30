@@ -68,6 +68,7 @@ describe('scheduled starts, end to end', () => {
       return Promise.resolve({ exitCode: 0, output: '', timedOut: false });
     },
     stop: (): Promise<void> => Promise.resolve(),
+    reap: (): Promise<void> => Promise.resolve(),
     headSha: (): Promise<string | null> => Promise.resolve('sha-1'),
   };
 

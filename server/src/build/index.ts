@@ -1,7 +1,9 @@
 export {
   AGENT_PID_DIR,
+  AGENT_SIGNALLED,
   agentExecSpec,
   agentPidFile,
+  agentPidGlob,
   agentSignalSpec,
   headShaSpec,
   wrapAgentCommand,
@@ -42,6 +44,7 @@ export {
   storyContext,
 } from './prompts.js';
 export {
+  AGENT_REAP_GRACE_MS,
   type AgentExecutor,
   type AgentInvocation,
   type AgentResult,
