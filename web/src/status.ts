@@ -17,6 +17,7 @@ export const SESSION_BADGE: Record<Session['status'], string> = {
   pending: 'badge badge--pending',
   ready: 'badge badge--ready',
   building: 'badge badge--building',
+  waiting: 'badge badge--waiting',
   failed: 'badge badge--failed',
   finished: 'badge badge--finished',
 };

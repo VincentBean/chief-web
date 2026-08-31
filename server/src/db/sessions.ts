@@ -11,7 +11,15 @@ import {
   text,
 } from './sqlite.js';
 
-export const SESSION_STATUSES = ['pending', 'ready', 'building', 'failed', 'finished'] as const;
+export const SESSION_STATUSES = [
+  'pending',
+  'ready',
+  'building',
+  /** Held by Claude's usage limit: the container and the build slot are kept. */
+  'waiting',
+  'failed',
+  'finished',
+] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
 export const PR_TARGET_BRANCHES = ['develop', 'main'] as const;
@@ -79,6 +87,11 @@ export interface Session {
   readonly lastError: string | null;
   /** Which step failed, whenever the status is `failed` (US-019). */
   readonly failureStage: FailureStage | null;
+  /**
+   * UTC ISO timestamp a `waiting` session may resume at — the far end of the
+   * usage-limit hold (US-003) — and null for every other status.
+   */
+  readonly waitingUntil: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -106,6 +119,7 @@ export interface UpdateSessionInput {
   readonly prUrl?: string | null;
   readonly lastError?: string | null;
   readonly failureStage?: FailureStage | null;
+  readonly waitingUntil?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -125,6 +139,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   prUrl: 'pr_url',
   lastError: 'last_error',
   failureStage: 'failure_stage',
+  waitingUntil: 'waiting_until',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -167,6 +182,7 @@ export function mapSession(row: Row): Session {
     prUrl: nullableText(row, 'pr_url'),
     lastError: nullableText(row, 'last_error'),
     failureStage: failureStageOf(row),
+    waitingUntil: nullableText(row, 'waiting_until'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -190,6 +206,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     prUrl: null,
     lastError: null,
     failureStage: null,
+    waitingUntil: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -198,8 +215,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
-        created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -214,6 +231,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.prUrl,
     session.lastError,
     session.failureStage,
+    session.waitingUntil,
     session.createdAt,
     session.updatedAt,
   );

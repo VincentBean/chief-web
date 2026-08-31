@@ -220,7 +220,7 @@ export interface Session {
   repositoryId: string;
   repositoryName: string;
   name: string;
-  status: 'pending' | 'ready' | 'building' | 'failed' | 'finished';
+  status: 'pending' | 'ready' | 'building' | 'waiting' | 'failed' | 'finished';
   baseBranch: string;
   featureBranch: string;
   prTargetBranch: PrTargetBranch;

@@ -175,6 +175,19 @@ interface PrdSnapshot {
   readonly synced: boolean;
 }
 
+/**
+ * Sessions occupying a build slot right now.
+ *
+ * A `waiting` session (US-003) is held by Claude's usage limit rather than
+ * working, but it has not given anything back: its container is still up and
+ * its loop resumes in the same place once the hold lifts. Counting it as an
+ * active build is what stops a fourth session from starting into a limit that
+ * has already refused the other three.
+ */
+function countActiveBuilds(db: Database): number {
+  return countSessionsByStatus(db, 'building') + countSessionsByStatus(db, 'waiting');
+}
+
 export class BuildService {
   private readonly runs = new Map<string, RunState>();
   /**
@@ -273,7 +286,7 @@ export class BuildService {
     // its slot is already spoken for.
     return (
       max -
-      (countSessionsByStatus(this.db, 'building') + this.launching.size + countActivePrRuns(this.db))
+      (countActiveBuilds(this.db) + this.launching.size + countActivePrRuns(this.db))
     );
   }
 
@@ -850,7 +863,7 @@ export class BuildService {
       startedAt: state?.startedAt ?? null,
       queued: session.queuedAt !== null,
       queuePosition: queuePosition(this.db, session),
-      activeBuilds: countSessionsByStatus(this.db, 'building'),
+      activeBuilds: countActiveBuilds(this.db),
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     };
   }
