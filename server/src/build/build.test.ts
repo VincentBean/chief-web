@@ -26,6 +26,7 @@ import {
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
+import { USAGE_LIMIT_HOLD_MS, UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
 import { planRetry } from '../recovery/index.js';
@@ -940,6 +941,99 @@ describe('the build loop', () => {
     );
     assert.equal(world.status(), 'finished');
     assert.equal(world.error(), null);
+  });
+
+  it('holds the build instead of stalling when Claude refuses for the usage limit (US-004)', async () => {
+    const world = new World();
+    world.runner.result = {
+      exitCode: 1,
+      output: 'Claude AI usage limit reached|1756700000',
+      timedOut: false,
+    };
+
+    const builds = serviceFor(world);
+    const before = Date.now();
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // One refusal, and the loop walks away rather than trying twice more.
+    assert.equal(world.runner.invocations.length, 1);
+
+    const session = getSession(world.db, world.session.id);
+    assert.equal(session?.status, 'waiting');
+    assert.equal(session?.failureStage, null);
+    const until = Date.parse(session?.waitingUntil ?? '');
+    assert.ok(until >= before + USAGE_LIMIT_HOLD_MS);
+    assert.ok(until <= Date.now() + USAGE_LIMIT_HOLD_MS);
+    // The hold is global, not a timer this run keeps to itself.
+    assert.equal(new UsageLimitHold(world.db).until(), session?.waitingUntil);
+
+    // The story is left exactly where the loop put it before the agent ran:
+    // nothing is rolled back to todo, because nothing was attempted.
+    assert.match(
+      fs.readFileSync(world.prdFile, 'utf8'),
+      /### US-002: First story\n\*\*Status:\*\* in-progress/,
+    );
+    assert.equal(world.stories().find((s) => s.storyId === 'US-002')?.status, 'in-progress');
+
+    // The sweep before the run, then the exec the loop is walking away from.
+    assert.deepEqual(world.runner.reaps, [world.session.id, world.session.id]);
+
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(log, /usage limit was reached/i);
+    assert.ok(log.includes(session?.waitingUntil ?? 'no expiry'));
+    // Inside the iteration's markers, so the pause is part of its history.
+    assert.match(log, /=== chief-web iteration 1 ended \| exit 1 \| \S+ ===/);
+  });
+
+  it('keeps the attempts a story already spent when the limit hits (US-004)', async () => {
+    const world = new World();
+    const builds = serviceFor(world);
+    // What the story's retry counter stood at as each iteration started.
+    const attempts: number[] = [];
+    world.runner.behaviour = (): void => {
+      attempts.push(builds.status(world.session.id).attempts);
+      // Genuine stalls until the retries are used up, then the refusal.
+      world.runner.result =
+        world.runner.invocations.length > MAX_RETRIES
+          ? { exitCode: 1, output: 'Claude AI usage limit reached', timedOut: false }
+          : { exitCode: 1, output: 'claude: something went wrong', timedOut: false };
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.length, MAX_RETRIES + 1);
+    // The stalls counted, one each; the refused iteration started with them
+    // still on the story rather than with a counter the pause had reset.
+    assert.deepEqual(attempts, [0, 1, 2]);
+    // Had the refusal counted as a third attempt the session would be `failed`
+    // here — every retry is spent. It is held instead.
+    assert.equal(world.status(), 'waiting');
+    assert.notEqual(getSession(world.db, world.session.id)?.waitingUntil, null);
+    assert.match(world.error() ?? '', /usage limit was reached/i);
+  });
+
+  it('leaves a plain stall exactly as it was: no hold, no waiting (US-004)', async () => {
+    const world = new World();
+    // A rate-limit line an agent merely read is not a refusal, and a run that
+    // achieves nothing must fail the way it always did.
+    world.runner.result = {
+      exitCode: 1,
+      output: 'x-ratelimit-remaining: 4999\nnothing to do',
+      timedOut: false,
+    };
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.length, MAX_RETRIES + 1);
+    assert.equal(world.status(), 'failed');
+    assert.equal(getSession(world.db, world.session.id)?.failureStage, 'agent');
+    assert.equal(getSession(world.db, world.session.id)?.waitingUntil, null);
+    assert.equal(new UsageLimitHold(world.db).active(), false);
+    assert.match(world.error() ?? '', /no commit was made/);
   });
 
   it('writes each iteration to the log file in the workspace', async () => {

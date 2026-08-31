@@ -21,6 +21,7 @@ import {
   updateStory,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
 import {
   type ParsedPrd,
   type PrdStatus,
@@ -206,6 +207,12 @@ export class BuildService {
     private readonly runner: AgentRunner,
     private readonly completion: BuildCompletion,
     private readonly logs: BuildLogs = new NullBuildLogs(),
+    /**
+     * The global usage-limit hold (US-002). One per database, handed in rather
+     * than made per call site, so it is obvious that every part of the server
+     * is arming and reading the same hold.
+     */
+    private readonly hold: UsageLimitHold = new UsageLimitHold(db),
   ) {}
 
   status(sessionId: string): BuildView {
@@ -635,6 +642,35 @@ export class BuildService {
       log.end(null);
       throw cause;
     }
+
+    // Asked before anything is classified, because there is nothing to
+    // classify (US-004): the agent did not fail to do the work, it was never
+    // allowed to start it. `classifyIteration` would see no commit and no
+    // status change, call the iteration stalled and spend one of the story's
+    // two retries on a wall the session cannot climb — and two more iterations
+    // would hit it within seconds. So the run is parked on a global hold
+    // instead and picks the same story up again when the hold lifts.
+    if (isUsageLimitRefusal(result)) {
+      const until = this.hold.arm();
+      // Inside this iteration's own markers, so the per-iteration history
+      // explains the gap rather than showing a section that stops mid-air.
+      log.write(`\n${holdMessage(until)}\n`);
+      log.end(result.exitCode);
+
+      // The same reasoning as the timeout path: the loop is walking away from
+      // this exec, and whatever the CLI left behind in the container must not
+      // still be holding the workspace when the session resumes into it.
+      await this.runner.reap(session.id, state.containerId);
+
+      // "Stop build" pressed while the refused iteration was in flight still
+      // wins — the hold is armed either way, because the limit is on the
+      // account rather than on this session, but the session goes back to
+      // `ready` rather than waiting for an hour nobody asked it to wait.
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, until);
+      return false;
+    }
+
     log.end(result.timedOut ? null : result.exitCode);
 
     // A timed-out iteration is abandoned, not stopped: all a timeout can do is
@@ -813,6 +849,41 @@ export class BuildService {
   }
 
   /**
+   * Parks the run on the usage-limit hold: `waiting` until `until`, container
+   * and all (US-004).
+   *
+   * The refused iteration is given back to the cap — it produced nothing, and a
+   * limit the operator cannot control must not eat into the run's budget — and
+   * the story's attempt count is left exactly where it stood, so the session
+   * resumes on the same story with the same retries in hand. `prd.md` is not
+   * touched either: the story keeps the status it has, `in-progress` included.
+   *
+   * Nothing is torn down. The container stays up, which is what lets the resume
+   * continue rather than restart, and is why a `waiting` session goes on
+   * counting against the concurrency cap (US-003).
+   */
+  private park(session: Session, state: RunState, until: string): Session {
+    state.iteration -= 1;
+    logger.warn('build held: the agent was refused for Claude’s usage limit', {
+      session: session.id,
+      name: session.name,
+      story: state.storyId,
+      attempts: state.attempts,
+      until,
+    });
+    return (
+      updateSession(this.db, session.id, {
+        status: 'waiting',
+        waitingUntil: until,
+        // Not a failure, so no stage: this is a pause with a sentence on it,
+        // and the session page reads that sentence rather than an error.
+        lastError: holdMessage(until),
+        failureStage: null,
+      }) ?? session
+    );
+  }
+
+  /**
    * Ends the run without failing it. The PRD is re-read first: an agent that
    * was signalled mid-story may still have finished the previous one, and the
    * file — not the row the loop wrote before starting it — is the truth about
@@ -876,8 +947,9 @@ export function createBuildService(
   runner: AgentRunner,
   completion: BuildCompletion = new MarkSessionFinished(db),
   logs: BuildLogs = new NullBuildLogs(),
+  hold: UsageLimitHold = new UsageLimitHold(db),
 ): BuildService {
-  return new BuildService(config, db, containers, runner, completion, logs);
+  return new BuildService(config, db, containers, runner, completion, logs, hold);
 }
 
 /**
@@ -897,6 +969,19 @@ function promptStory(story: Story, parsed: ParsedPrd | null): PrdStory {
       acceptanceCriteria: [],
       line: 0,
     }
+  );
+}
+
+/**
+ * The one sentence the log, the session and the operator all read about a
+ * hold. It names the limit and the moment work resumes, because those are the
+ * two things someone looking at a paused build wants to know.
+ */
+function holdMessage(until: string): string {
+  return (
+    'Claude’s usage limit was reached, so this build is held until ' +
+    `${until}. No retry and no iteration were spent on it: the session resumes ` +
+    'on the same story by itself once the hold lifts.'
   );
 }
 
