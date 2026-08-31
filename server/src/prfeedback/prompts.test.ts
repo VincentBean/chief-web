@@ -35,6 +35,7 @@ const ITEMS: FeedbackItem[] = [
 
 const PROMPT = prFeedbackPrompt({
   slug: 'VincentBean/leo',
+  timeoutMs: 1_800_000,
   number: 61,
   title: 'booking-proposal-fields',
   headBranch: 'chief/booking-proposal-fields',
@@ -75,6 +76,25 @@ describe('the feedback prompt', () => {
     assert.match(PROMPT, /Do not invent a change/);
   });
 
+  it('tells the agent how long it has, and what being cut short costs', () => {
+    // The run before this was added spent its whole budget on the project's
+    // full suite and was stopped before it committed or reported anything,
+    // which chief-web can only read as a run that did nothing.
+    assert.match(PROMPT, /You have \*\*30 minutes\*\*/);
+    assert.match(PROMPT, /run the tests that cover what you\nchanged rather than the project's whole suite/);
+    assert.match(PROMPT, /commit what is finished and report the rest as `skipped`/);
+    // And the report is worth writing even when the pass went badly: it is the
+    // difference between a run that can be reported on and one that is failed.
+    assert.match(PROMPT, /The report is what says this run finished/);
+  });
+
+  it('states the budget in whole minutes', () => {
+    const of = (timeoutMs: number): string =>
+      prFeedbackPrompt({ slug: 'a/b', timeoutMs, number: 1, title: 't', headBranch: 'b', items: ITEMS });
+    assert.ok(of(420_000).includes('You have **7 minutes**'));
+    assert.ok(of(60_000).includes('You have **1 minute**'));
+  });
+
   it('carries a comment body through intact, whatever is in it', () => {
     // Bodies are written by reviewers and can hold backticks, quotes and shell
     // syntax. The prompt is one argv element and is never shell-parsed, so the
@@ -82,6 +102,7 @@ describe('the feedback prompt', () => {
     const nasty = 'Use `$(rm -rf /)` — "quoted", \\backslashed\\ and ```fenced```';
     const prompt = prFeedbackPrompt({
       slug: 'a/b',
+      timeoutMs: 1_800_000,
       number: 1,
       title: 't',
       headBranch: 'b',

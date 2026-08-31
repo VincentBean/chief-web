@@ -218,7 +218,10 @@ describe('the agent command', () => {
     // One file per iteration: an agent that outlives its iteration stays
     // addressable instead of being overwritten by its successor's pid.
     assert.notEqual(agentPidFile('abc', 3), agentPidFile('abc', 4));
-    assert.ok(agentPidGlob('abc').endsWith('/abc-*.pid'));
+    // The glob also reaches the one-file-per-session name this used to write,
+    // because the container holding such a file outlives the server that wrote
+    // it and the first sweep after an upgrade is the only chance to reap it.
+    assert.ok(agentPidGlob('abc').endsWith('/abc*.pid'));
   });
 
   it('signals every recorded pid, its group and its children, and always exits 0', () => {
@@ -264,6 +267,7 @@ describe('the iteration prompt', () => {
     const prompt = agentPrompt({
       sessionName: 'add-login',
       story: first,
+      timeoutMs: 1_800_000,
       prd: parsed,
       progress: '## Codebase Patterns\n- Use the logger.',
     });
@@ -284,8 +288,28 @@ describe('the iteration prompt', () => {
   });
 
   it('tells the first iteration that there is no progress file yet', () => {
-    const prompt = agentPrompt({ sessionName: 'add-login', story: first, prd: null, progress: null });
+    const prompt = agentPrompt({
+      sessionName: 'add-login',
+      story: first,
+      timeoutMs: 1_800_000,
+      prd: null,
+      progress: null,
+    });
     assert.ok(prompt.includes('This file does not exist yet'));
+  });
+
+  it('tells the agent how long it has, in minutes', () => {
+    const of = (timeoutMs: number): string =>
+      agentPrompt({ sessionName: 'add-login', story: first, timeoutMs, prd: null, progress: null });
+
+    // An agent that does not know it is on a clock spends it like there is no
+    // clock, and a full-suite run started too late costs the whole iteration.
+    assert.ok(of(1_800_000).includes('This iteration has **30 minutes**'));
+    assert.ok(of(420_000).includes('This iteration has **7 minutes**'));
+    assert.ok(of(60_000).includes('This iteration has **1 minute**'));
+    // What being stopped costs, so the trade-off it is being asked to make is
+    // one it can actually see.
+    assert.match(of(1_800_000), /counts as a failed attempt even if it committed/);
   });
 });
 

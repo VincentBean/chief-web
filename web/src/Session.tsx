@@ -33,6 +33,11 @@ import {
   localTime,
   startsIn,
   toLocalInputValue,
+  fromLocalParts,
+  localTime,
+  normaliseTime,
+  startsIn,
+  toLocalInputParts,
 } from './schedule.ts';
 import { SESSION_BADGE, STORY_BADGE } from './status.ts';
 
@@ -616,25 +621,38 @@ function ScheduleCard({
   onSave: (at: string | null) => void;
 }) {
   const schedulable = session.status === 'pending' || session.status === 'ready';
-  const [value, setValue] = useState(
-    session.scheduledStartAt === null ? '' : toLocalInputValue(session.scheduledStartAt),
-  );
+  const stored = (at: string | null): { day: string; time: string } =>
+    at === null ? { day: '', time: '' } : toLocalInputParts(at);
+  const [value, setValue] = useState(stored(session.scheduledStartAt));
   const [error, setError] = useState<string | null>(null);
   /** The stored value the field was last synced with, so a poll cannot fight typing. */
   const [known, setKnown] = useState(session.scheduledStartAt);
 
   if (known !== session.scheduledStartAt) {
     setKnown(session.scheduledStartAt);
-    setValue(session.scheduledStartAt === null ? '' : toLocalInputValue(session.scheduledStartAt));
+    setValue(stored(session.scheduledStartAt));
   }
 
   if (!schedulable && session.scheduledStartAt === null) return null;
 
+  const empty = value.day === '' && value.time === '';
+
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    const at = fromLocalInputValue(value);
-    if (value !== '' && at === null) {
-      setError('That is not a valid date and time.');
+    // Both boxes empty is "no schedule"; one of them empty is a half-written
+    // one, which is a mistake rather than an instruction.
+    if (empty) {
+      setError(null);
+      onSave(null);
+      return;
+    }
+    const at = fromLocalParts(value.day, value.time);
+    if (at === null) {
+      setError(
+        value.day === ''
+          ? 'Pick a day as well as a time.'
+          : 'That is not a time of day. Write it as HH:mm on a 24-hour clock, such as 07:30 or 19:00.',
+      );
       return;
     }
     setError(null);
@@ -671,18 +689,44 @@ function ScheduleCard({
               Start the build at
             </label>
             <p className="field__hint">
-              Read in this browser&rsquo;s timezone and stored as UTC. The session has to be ready
-              by then — a schedule that passes while it is still being planned is missed, and
-              nothing runs. If every build slot is taken at that moment, the session takes a place
-              in the build queue instead and starts as soon as one frees.
+              Read in this browser&rsquo;s timezone and stored as UTC. The time is a 24-hour clock:
+              19:00, not 7:00 pm. The session has to be ready by then — a schedule that passes
+              while it is still being planned is missed, and nothing runs. If every build slot is
+              taken at that moment, the session takes a place in the build queue instead and starts
+              as soon as one frees.
             </p>
-            <input
-              id="session-schedule"
-              className="field__input"
-              type="datetime-local"
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-            />
+            <div className="field__pair">
+              <input
+                id="session-schedule"
+                className="field__input"
+                type="date"
+                value={value.day}
+                onChange={(event) => setValue({ ...value, day: event.target.value })}
+                aria-label="Day the build starts"
+              />
+              {/*
+                Plain text, not `<input type="time">`: a native time control
+                renders on the browser locale's clock, and nothing a page can
+                set overrides that — `lang` is honoured by some engines and
+                ignored by Chromium. The day keeps its native picker, where the
+                only thing at stake is field order.
+              */}
+              <input
+                className="field__input field__input--narrow"
+                type="text"
+                inputMode="numeric"
+                placeholder="HH:mm"
+                maxLength={5}
+                value={value.time}
+                onChange={(event) => setValue({ ...value, time: event.target.value })}
+                onBlur={() => {
+                  const tidy = normaliseTime(value.time);
+                  if (tidy !== null) setValue({ ...value, time: tidy });
+                }}
+                aria-label="Time the build starts, 24-hour clock"
+                aria-invalid={value.time !== '' && normaliseTime(value.time) === null}
+              />
+            </div>
           </section>
 
           {error !== null && (
@@ -700,7 +744,7 @@ function ScheduleCard({
                 type="button"
                 className="button button--quiet"
                 onClick={() => {
-                  setValue('');
+                  setValue({ day: '', time: '' });
                   onSave(null);
                 }}
                 disabled={busy !== null}

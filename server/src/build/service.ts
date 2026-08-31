@@ -803,6 +803,11 @@ export class BuildService {
     // else: the file in the workspace is the record, and whoever is watching
     // the session page is reading over its shoulder.
     const log = this.logs.begin(session, state.iteration, story.storyId);
+    // Read per iteration, so a timeout changed on the settings page applies to
+    // the next one without a restart (US-019). The agent is told the same
+    // number it is held to: it is the only one of the two that can decide not
+    // to start a full-suite run with four minutes left.
+    const timeoutMs = getAgentTimeoutMs(this.db, this.config);
     let result: AgentResult;
     try {
       result = await this.runner.run({
@@ -812,15 +817,15 @@ export class BuildService {
         prompt: agentPrompt({
           sessionName: session.name,
           story: promptStory(story, snapshot.parsed),
+          timeoutMs,
           prd: snapshot.parsed,
           progress: this.readProgress(session),
         }),
-        // Read per iteration, so a timeout changed on the settings page
-        // applies to the next one without a restart (US-019). The model is read
-        // the same way and for the same reason: a run switched to a cheaper
-        // model mid-build picks it up at the next story, not at the next
-        // restart, and stories already committed are untouched either way.
-        timeoutMs: getAgentTimeoutMs(this.db, this.config),
+        // The model is read the same way and for the same reason: a run
+        // switched to a cheaper model mid-build picks it up at the next story,
+        // not at the next restart, and stories already committed are untouched
+        // either way.
+        timeoutMs,
         model: getBuildModel(this.db),
         onOutput: (text) => log.write(text),
       });

@@ -113,6 +113,13 @@
     gap: 0.5rem;
   }
 
+  /* A field made of more than one box: the schedule's day and time. */
+  .field__pair {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
   .field__actions--spaced {
     margin-top: 1.5rem;
   }

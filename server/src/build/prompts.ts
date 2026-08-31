@@ -32,6 +32,17 @@ export interface AgentPromptInput {
   readonly sessionName: string;
   /** The story this iteration must implement. */
   readonly story: PrdStory;
+  /**
+   * How long this iteration has before it is cut short.
+   *
+   * The agent is told, because it is the only one of the two who can do
+   * anything about it: chief-web can stop an iteration at the deadline but it
+   * cannot make one arrive early, and an agent that does not know it is on a
+   * clock spends it like there is no clock — a full-suite run started at the
+   * twenty-fifth minute is a whole iteration thrown away, and the loop reads
+   * the result as a story that made no progress.
+   */
+  readonly timeoutMs: number;
   /** The parsed PRD, for its project name and freeform description. */
   readonly prd: Pick<ParsedPrd, 'project' | 'description'> | null;
   /** Contents of `progress.md`, or `null` when the file does not exist yet. */
@@ -126,7 +137,20 @@ only evidence it has that anything happened. Before you finish, all four of thes
 
 If you cannot honestly complete the story, leave its \`**Status:**\` at \`in-progress\`, commit
 whatever partial work is worth keeping, and write down in \`progress.md\` what is blocking it —
-the next iteration continues from there.`,
+the next iteration continues from there.
+
+### You are on a clock
+
+This iteration has **${minutes(input.timeoutMs)}**. When that runs out you are stopped where you
+stand, and an iteration that had to be stopped counts as a failed attempt even if it committed
+something — three of those in a row end the whole run. So:
+
+- Run the tests that cover what you changed. A full-suite run late in the iteration is how the
+  budget gets spent on finding out that nothing you touched was broken.
+- Commit as soon as the story is actually done, rather than leaving the commit until after one
+  last sweep of the suite. The commit is the only part of your work that survives being stopped.
+- If the budget is nearly gone, spend what is left on points 2 to 4 above — a committed
+  half-story the next iteration can pick up is worth more than a finished one nobody recorded.`,
   ];
 
   const context = prdContext(input.prd);
@@ -163,6 +187,12 @@ function prdContext(prd: AgentPromptInput['prd']): string | null {
   if (prd.description !== null && prd.description !== '') parts.push(prd.description);
   if (parts.length === 0) return null;
   return truncate(parts.join('\n\n'), MAX_PRD_CONTEXT_CHARS);
+}
+
+/** The budget as the agent should read it: whole minutes, never "1800000ms". */
+function minutes(timeoutMs: number): string {
+  const whole = Math.max(1, Math.round(timeoutMs / 60_000));
+  return `${String(whole)} minute${whole === 1 ? '' : 's'}`;
 }
 
 /** Keeps the tail of the prompt bounded; the file itself is always readable. */

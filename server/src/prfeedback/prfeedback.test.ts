@@ -311,6 +311,51 @@ describe('answering pull request feedback', () => {
     assert.ok(!github.replies.some((reply) => reply.body.includes('overview')));
   });
 
+  it('keeps a run that was cut short after it had written its report', async () => {
+    const service = serviceWith();
+    runner.result = { exitCode: null, output: 'still thinking…', timedOut: true };
+    runner.behaviour = () => {
+      const run = findPrRun(db, repository.id, 61);
+      // The report is written last, after the commit: this agent finished the
+      // contract and lost only the tail of its own turn.
+      reportFrom(run?.id ?? '', {
+        addressed: [{ key: 'T1', summary: 'Compared minor units instead of floats.' }],
+        skipped: [
+          { key: 'T2', reason: 'That code is no longer on this branch.' },
+          { key: 'R1', reason: 'The overview needs no change.' },
+        ],
+      });
+      runner.head = 'sha-after';
+    };
+
+    const runId = await runOnce(service);
+    const view = service.status(runId);
+
+    // Judged on the same evidence as any other run — the cross-checks did not
+    // move — rather than thrown away for missing a deadline it had met.
+    assert.equal(view.status, 'finished');
+    assert.equal(github.replies.length, 2);
+    // And the agent it gave up on is not left in the container.
+    assert.deepEqual(runner.reaps, [runId]);
+  });
+
+  it('fails a run that was cut short before it wrote a report', async () => {
+    const service = serviceWith();
+    runner.result = { exitCode: null, output: 'still running the suite…', timedOut: true };
+    // No report, no commit: work in a tree nobody can describe.
+    runner.behaviour = () => {};
+
+    const runId = await runOnce(service);
+    const view = service.status(runId);
+
+    assert.equal(view.status, 'failed');
+    assert.equal(view.failureStage, 'agent');
+    assert.match(view.lastError ?? '', /ran out of time/);
+    assert.match(view.lastError ?? '', /still running the suite/);
+    assert.equal(github.replies.length, 0);
+    assert.deepEqual(runner.reaps, [runId]);
+  });
+
   it('says nothing on GitHub when the agent claimed work it did not commit', async () => {
     const service = serviceWith();
     runner.behaviour = () => {

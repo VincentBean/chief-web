@@ -371,6 +371,7 @@ export class PrFeedbackService {
 
     state.phase = 'running-agent';
     const headBefore = await this.runner.headSha(container.id);
+    const agentTimeoutMs = getAgentTimeoutMs(this.db, this.config);
     const result = await this.runner.run({
       sessionId: run.id,
       containerId: container.id,
@@ -379,14 +380,16 @@ export class PrFeedbackService {
       iteration: 1,
       prompt: prFeedbackPrompt({
         slug,
+        timeoutMs: agentTimeoutMs,
         number: run.prNumber,
         title: run.prTitle,
         headBranch: run.headBranch,
         items,
       }),
       // Read now rather than cached, so a timeout changed on the settings page
-      // applies to the next run without a restart.
-      timeoutMs: getAgentTimeoutMs(this.db, this.config),
+      // applies to the next run without a restart. The agent is told the same
+      // number, because it is the only one of the two that can spend it well.
+      timeoutMs: agentTimeoutMs,
       model: getBuildModel(this.db),
     });
     if (state.stopping) return this.stopped(run.id);
@@ -408,11 +411,10 @@ export class PrFeedbackService {
     if (result.timedOut) {
       // The timeout closed chief-web's end of the exec and nothing else: the
       // agent is still in the container with the checkout under it, and this
-      // run is about to be marked failed and made retryable. Left alone it
-      // would still be there when the retry checks the branch out again.
+      // run may be about to be marked failed and made retryable. Left alone it
+      // would still be there when the retry checks the branch out again — and
+      // it would still be writing to the working tree the checks below read.
       await this.runner.reap(run.id, container.id);
-      this.fail(run.id, 'agent', `The agent ran out of time.\n${result.output}`.trim());
-      return;
     }
 
     const headAfter = await this.runner.headSha(container.id);
@@ -420,6 +422,18 @@ export class PrFeedbackService {
 
     // (B) What the agent says it did, read off the volume rather than asked.
     const parsed = parseOutcome(this.readOutcome(run.id), items.map((item) => item.key));
+
+    // The report is written last, after the commit, so a complete one is the
+    // agent's own statement that it got to the end of the contract. A run that
+    // left one behind and was then cut short lost nothing but the tail of its
+    // own turn, and is judged below on exactly the same evidence as any other
+    // — every cross-check still applies. One that did not is the failure the
+    // timeout looks like: work in a tree nobody can describe.
+    if (result.timedOut && !parsed.ok) {
+      this.fail(run.id, 'agent', `The agent ran out of time.\n${result.output}`.trim());
+      return;
+    }
+
     if (!parsed.ok) {
       // A commit chief-web cannot describe, cannot attribute to a comment and
       // cannot reply about would sit on a human's pull request forever. An

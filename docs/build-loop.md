@@ -42,6 +42,13 @@ The loop stops itself in five ways:
   pid under a file of its own, so an agent that outlives its iteration stays
   addressable. A run sweeps the container once before its first iteration too,
   for the case where the *server* was restarted mid-iteration.
+
+  The agent is *told* its budget, in minutes, as part of the prompt: chief-web
+  can enforce a deadline but it cannot make one arrive early, and an agent that
+  does not know it is on a clock spends it like there is no clock. Along with
+  the number it is told what being stopped costs — the commit is the only part
+  of an iteration that survives it — and asked to prefer the tests that cover
+  its change over the project's whole suite.
 - **The iteration cap.** A run may take the outstanding stories plus 50%, never
   fewer than 10. A loop that is committing but never finishing anything hits it
   and fails, rather than churning forever.
