@@ -73,6 +73,7 @@
 
   /* Waiting on a resource: a build slot (US-018), or a socket coming back. */
   .badge--queued,
+  .badge--waiting,
   .badge--connecting,
   .badge--reconnecting {
     --badge-color: var(--color-status-wait);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, beforeEach, describe, it } from 'node:test';
 
 import {
@@ -15,6 +16,7 @@ import {
   failSession,
   getAllSettings,
   getRepository,
+  getSession,
   getSetting,
   getSettingNumber,
   IN_MEMORY,
@@ -35,6 +37,9 @@ import {
   updateSession,
   updateStory,
 } from './index.js';
+
+/** The migration under test in 'widens the session status check'. */
+const WAITING_MIGRATION = '0005_session_waiting_status';
 
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
@@ -81,6 +86,71 @@ describe('migrations', () => {
       rows.map((row) => row['id']),
       MIGRATIONS.map((migration) => migration.id),
     );
+    closeDatabase(db);
+  });
+
+  it('widens the session status check to `waiting`, stories intact', () => {
+    // The rebuild that widens the CHECK drops and recreates `sessions` while
+    // `stories` still references it, so this walks a database up to the
+    // migration before it, puts a session and a story in, and then applies it.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec(
+      'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);',
+    );
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === WAITING_MIGRATION);
+    assert.ok(index > 0, `${WAITING_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-08-30T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedRepository(db);
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES ('s1', ?, 'legacy', 'building', 'main', 'chief/legacy', 'main', ?, ?)`,
+    ).run(repository.id, '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+    syncStories(db, 's1', [{ storyId: 'US-001', title: 'First', priority: 1, status: 'done' }]);
+
+    assert.ok(runMigrations(db).includes(WAITING_MIGRATION));
+
+    // The old rows came across, and the cascade from `stories` never fired.
+    const session = getSession(db, 's1');
+    assert.equal(session?.status, 'building');
+    assert.equal(session?.featureBranch, 'chief/legacy');
+    // Nothing was waiting before the column existed.
+    assert.equal(session?.waitingUntil, null);
+    assert.equal(listStories(db, 's1').length, 1);
+
+    // The widened constraint takes the new status and still refuses the rest.
+    const waiting = updateSession(db, 's1', {
+      status: 'waiting',
+      waitingUntil: '2026-08-30T01:00:00.000Z',
+    });
+    assert.equal(waiting?.status, 'waiting');
+    assert.equal(waiting?.waitingUntil, '2026-08-30T01:00:00.000Z');
+    assert.throws(
+      () => db.prepare('UPDATE sessions SET status = ? WHERE id = ?').run('bogus', 's1'),
+      /CHECK/i,
+    );
+
+    // The indexes travelled with the table, and so did the cascade.
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of ['idx_sessions_repository', 'idx_sessions_status', 'idx_sessions_queued_at']) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
+    assert.ok(deleteSession(db, 's1'));
+    assert.equal(listStories(db, 's1').length, 0);
+
     closeDatabase(db);
   });
 });
@@ -393,6 +463,34 @@ describe('sessions', () => {
       listDueScheduledSessions(db, '2026-08-29T12:00:00.000Z').map((session) => session.id),
       [due.id],
     );
+  });
+
+it('holds a session at `waiting` with the time it may resume', () => {
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'held',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      status: 'building',
+    });
+    assert.equal(session.waitingUntil, null);
+
+    const held = updateSession(db, session.id, {
+      status: 'waiting',
+      waitingUntil: '2026-08-31T13:00:00.000Z',
+    });
+    assert.equal(held?.status, 'waiting');
+    assert.equal(held?.waitingUntil, '2026-08-31T13:00:00.000Z');
+    // It reads back the same way a fresh process would see it.
+    assert.equal(getSession(db, session.id)?.waitingUntil, '2026-08-31T13:00:00.000Z');
+    assert.equal(countSessionsByStatus(db, 'waiting'), 1);
+    assert.equal(countSessionsByStatus(db, 'building'), 0);
+
+    // Resuming puts the container back to work and drops the deadline.
+    const resumed = updateSession(db, session.id, { status: 'building', waitingUntil: null });
+    assert.equal(resumed?.status, 'building');
+    assert.equal(resumed?.waitingUntil, null);
+    assert.equal(listSessions(db, { status: 'waiting' }).length, 0);
   });
 
   it('deletes a session and cascades to its stories', () => {

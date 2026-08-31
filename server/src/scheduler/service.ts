@@ -8,6 +8,7 @@ import {
   updateSession,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { UsageLimitHold } from '../limits/index.js';
 
 /**
  * Scheduled session starts (US-017).
@@ -34,6 +35,12 @@ import { logger } from '../lib/logger.js';
 /** The slice of the build loop (US-013) the scheduler drives. */
 export interface ScheduledBuilds {
   start(sessionId: string): Promise<unknown>;
+  /**
+   * Resumes the sessions parked on Claude's usage limit whose hold has run out
+   * (US-006). The tick is already the thing watching the clock, so it is what
+   * notices the hour is up; the build service decides what fits under the cap.
+   */
+  resumeHeld(now?: string): Promise<unknown>;
   /**
    * Gives any free build slot to the head of the FIFO queue (US-018). The
    * queue is a column too, so the same tick that catches up on schedules is
@@ -62,6 +69,8 @@ export class SchedulerService implements SessionScheduler {
     private readonly config: Config,
     private readonly db: Database,
     private readonly builds: ScheduledBuilds,
+    /** The global usage-limit hold (US-002), read before anything is fired. */
+    private readonly hold: UsageLimitHold = new UsageLimitHold(db),
   ) {}
 
   start(): void {
@@ -102,6 +111,17 @@ export class SchedulerService implements SessionScheduler {
   }
 
   private async runTick(now: string): Promise<number> {
+    // Held sessions first (US-006). They are mid-story and never gave their
+    // build slots back, so resuming them cannot take a slot from a schedule —
+    // whereas a schedule fired first could take one from them.
+    try {
+      await this.builds.resumeHeld(now);
+    } catch (cause) {
+      logger.warn('could not resume the builds held by Claude’s usage limit', {
+        error: describe(cause),
+      });
+    }
+
     let due: Session[];
     try {
       due = listDueScheduledSessions(this.db, now);
@@ -130,6 +150,22 @@ export class SchedulerService implements SessionScheduler {
   }
 
   private async startSession(session: Session): Promise<boolean> {
+    // Claude's usage limit is on the account, so a start now would be refused
+    // within seconds and the schedule would be spent on that refusal (US-005).
+    // Left where it is, the timestamp is simply still due when the hold lifts,
+    // and the very next tick honours it — which is the same catch-up this
+    // service already does after a restart.
+    const until = this.hold.until();
+    if (until !== null) {
+      logger.info('scheduled start held by Claude’s usage limit', {
+        session: session.id,
+        name: session.name,
+        scheduledStartAt: session.scheduledStartAt,
+        until,
+      });
+      return false;
+    }
+
     logger.info('scheduled start firing', {
       session: session.id,
       name: session.name,
@@ -161,8 +197,9 @@ export function createScheduler(
   config: Config,
   db: Database,
   builds: ScheduledBuilds,
+  hold: UsageLimitHold = new UsageLimitHold(db),
 ): SchedulerService {
-  return new SchedulerService(config, db, builds);
+  return new SchedulerService(config, db, builds, hold);
 }
 
 function describe(cause: unknown): string {

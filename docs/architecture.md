@@ -197,8 +197,8 @@ and:
 - removes containers whose session is `finished`, `failed` or gone;
 - removes containers that are no longer running (a stopped runner cannot be
   exec'd into, so it is as good as missing);
-- marks a `building` session with no running container as `failed` with the error
-  **`container lost`**;
+- marks a `building` or `waiting` session with no running container as `failed`
+  with the error **`container lost`**;
 - adopts a running container onto its session, and clears a `container_id` that
   points at something that no longer exists.
 

@@ -52,6 +52,10 @@ const TERMINAL_STATUSES = new Set(['finished', 'failed']);
  *   exec'd into, so it is indistinguishable from a missing one.
  * - A `building` session with no running container is `failed` at the
  *   `container_lost` stage, because its agent loop died with the container.
+ *   A `waiting` one goes the same way (US-006): the hold is a pause of a run
+ *   that is still there, so a session whose container is gone has nothing left
+ *   to resume into. One whose container is still up simply stays `waiting`,
+ *   and the next scheduler tick resumes it when its hold is up.
  * - Any other session's `container_id` is brought back in line with reality, so
  *   nothing later tries to exec into an id that no longer exists.
  */
@@ -107,7 +111,7 @@ export function planReconciliation(
       continue;
     }
 
-    if (session.status === 'building') {
+    if (session.status === 'building' || session.status === 'waiting') {
       correct.push({
         sessionId: session.id,
         patch: {
@@ -115,6 +119,9 @@ export function planReconciliation(
           containerId: null,
           lastError: CONTAINER_LOST_ERROR,
           failureStage: 'container_lost',
+          // A failed session is not waiting for anything; the hold it was
+          // parked on outlived the container it would have resumed into.
+          waitingUntil: null,
         },
         reason: 'container lost',
       });

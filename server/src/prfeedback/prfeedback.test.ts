@@ -21,6 +21,7 @@ import {
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { GithubApiError } from '../lib/github.js';
 import type { PullRequestFeedback } from '../lib/github-review.js';
+import { UsageLimitHold } from '../limits/index.js';
 import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import { CONTAINER_OUTCOME_PATH } from './prompts.js';
@@ -159,6 +160,8 @@ describe('answering pull request feedback', () => {
   let execs: ExecSpec[];
   let pushOk: boolean;
   let containersStarted: string[];
+  let slots: StubSlots;
+  let hold: UsageLimitHold;
   let seq = 0;
 
   const exec: SessionExecutor = {
@@ -196,7 +199,24 @@ describe('answering pull request feedback', () => {
     removePrRun: () => Promise.resolve(),
   };
 
-  const slots: BuildSlots = { freeSlots: () => 1, pump: () => Promise.resolve() };
+  /** The build loop as a run sees it: the slot cap, the pump, and the hold. */
+  class StubSlots implements BuildSlots {
+    free = 1;
+    readonly heldUntil: string[] = [];
+
+    freeSlots(): number {
+      return this.free;
+    }
+
+    pump(): Promise<void> {
+      return Promise.resolve();
+    }
+
+    holdAll(until: string): Promise<void> {
+      this.heldUntil.push(until);
+      return Promise.resolve();
+    }
+  }
 
   before(() => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-prfeedback-'));
@@ -224,6 +244,11 @@ describe('answering pull request feedback', () => {
     execs = [];
     pushOk = true;
     containersStarted = [];
+    slots = new StubSlots();
+    // The hold lives in a settings row on the shared database, so it outlives
+    // the test that armed it unless it is lifted here.
+    hold = new UsageLimitHold(db);
+    hold.clear();
   });
 
   const serviceWith = (overrides: { slots?: BuildSlots } = {}): PrFeedbackService =>
@@ -236,6 +261,7 @@ describe('answering pull request feedback', () => {
       github,
       overrides.slots ?? slots,
       () => 'ghp_token',
+      hold,
     );
 
   /** Writes the agent's report where the service reads it: on the volume. */
@@ -475,7 +501,9 @@ describe('answering pull request feedback', () => {
   });
 
   it('refuses when every build slot is taken, rather than queueing behind them', async () => {
-    const service = serviceWith({ slots: { freeSlots: () => 0, pump: () => Promise.resolve() } });
+    const full = new StubSlots();
+    full.free = 0;
+    const service = serviceWith({ slots: full });
 
     await assert.rejects(
       () => service.start(repository.id, 61),
@@ -484,6 +512,52 @@ describe('answering pull request feedback', () => {
         return true;
       },
     );
+  });
+
+  it('refuses to start while Claude’s usage limit is held, and says until when', async () => {
+    const until = hold.arm();
+
+    await assert.rejects(
+      () => serviceWith().start(repository.id, 61),
+      (error: unknown) => {
+        const refusal = error as { status: number; code: string; message: string };
+        assert.equal(refusal.status, 409);
+        assert.equal(refusal.code, 'usage_limit_hold');
+        assert.match(refusal.message, /usage limit/i);
+        assert.ok(refusal.message.includes(until), 'the resume time is named');
+        return true;
+      },
+    );
+    assert.deepEqual(containersStarted, [], 'nothing may be spent on a held account');
+  });
+
+  it('arms the hold and fails the run when the agent is refused mid-pass', async () => {
+    const service = serviceWith();
+    runner.behaviour = () => {
+      // The CLI's refusal: nothing was done, and it exits non-zero.
+      runner.result = {
+        exitCode: 1,
+        output: 'Claude AI usage limit reached. Your limit will reset at 9pm.',
+        timedOut: false,
+      };
+    };
+
+    const runId = await runOnce(service);
+    const view = service.status(runId);
+    const until = hold.until();
+
+    assert.ok(until !== null, 'the global hold is armed');
+    assert.equal(view.status, 'failed');
+    assert.equal(view.failureStage, 'agent');
+    assert.match(view.lastError ?? '', /usage limit/i);
+    assert.ok((view.lastError ?? '').includes(until), 'the resume time is named');
+    // The builds are running into the same wall, so they are parked on the very
+    // same expiry rather than each discovering it for itself.
+    assert.deepEqual(slots.heldUntil, [until]);
+    // The refused agent's exec is walked away from, so it is reaped before a
+    // retry checks the same branch out under it.
+    assert.deepEqual(runner.reaps, [runId]);
+    assert.deepEqual(github.replies, [], 'nothing may be said on GitHub about a pass that stopped');
   });
 
   it('does not repeat the same reply for the same commit on a second pass', async () => {

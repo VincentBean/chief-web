@@ -25,6 +25,12 @@ export const SETTING_KEYS = [
    */
   'planning_model',
   'build_model',
+  /**
+   * ISO timestamp until which agent work is held after a Claude usage-limit
+   * refusal (US-002). Written and read through `limits/hold.ts`; a value in
+   * the past means no hold, so nothing has to sweep the row.
+   */
+  'claude_limit_until',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];

@@ -220,7 +220,7 @@ export interface Session {
   repositoryId: string;
   repositoryName: string;
   name: string;
-  status: 'pending' | 'ready' | 'building' | 'failed' | 'finished';
+  status: 'pending' | 'ready' | 'building' | 'waiting' | 'failed' | 'finished';
   baseBranch: string;
   featureBranch: string;
   prTargetBranch: PrTargetBranch;
@@ -239,6 +239,11 @@ export interface Session {
   lastError: string | null;
   /** Which step a failed session failed at (US-019); null when it has not. */
   failureStage: FailureStage | null;
+  /**
+   * When a session held by Claude's usage limit may resume (US-003); null when
+   * it is not held.
+   */
+  waitingUntil: string | null;
   /** Story progress for the dashboard; both 0 until the PRD has been parsed. */
   stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
@@ -556,6 +561,16 @@ export async function startBuild(id: string): Promise<Build> {
 /** "Stop build": signals the agent and returns the session to `ready`. */
 export async function stopBuild(id: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'DELETE' });
+}
+
+/**
+ * "Resume now": lifts Claude's usage-limit hold before its hour is up and puts
+ * every held session back to work (US-008), not only the one being looked at —
+ * the hold is on the account, so there is nothing narrower to lift. Answers
+ * with how many sessions were actually started; the rest are on the queue.
+ */
+export async function clearUsageLimitHold(): Promise<{ resumed: number }> {
+  return api<{ ok: true; resumed: number }>('/api/limits/hold/clear', { method: 'POST' });
 }
 
 /**

@@ -36,7 +36,20 @@ const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
  */
 const POLL_MS = 3000;
 
-const STATUSES: Session['status'][] = ['pending', 'ready', 'building', 'failed', 'finished'];
+/**
+ * The filter's options, in the order a session moves through them. `waiting`
+ * sits next to `building` because that is what it is: a build in progress that
+ * is holding its slot until Claude's usage limit lifts (US-009), not an idle
+ * session someone forgot about.
+ */
+const STATUSES: Session['status'][] = [
+  'pending',
+  'ready',
+  'building',
+  'waiting',
+  'failed',
+  'finished',
+];
 
 /** Filter values: a status, a repository id, or "everything". */
 const ALL = 'all';
@@ -351,6 +364,12 @@ function deletionWarning(session: Session): string {
       'This session is building: the loop will be stopped and its agent process ended gracefully first, which can take a moment.',
     );
   }
+  if (session.status === 'waiting') {
+    lines.push(
+      '',
+      'This session is mid-build and waiting on Claude’s usage limit. Deleting it now is deleting a build in progress: it will not be resumed when the limit lifts.',
+    );
+  }
   return lines.join('\n');
 }
 
@@ -523,6 +542,18 @@ function SessionCard({
             </dd>
           </>
         )}
+        {session.status === 'waiting' && session.waitingUntil !== null && (
+          <>
+            <dt>Resumes</dt>
+            <dd>
+              {localTime(session.waitingUntil)}
+              <span className="story__priority">
+                {' '}
+                &middot; {startsIn(session.waitingUntil)}
+              </span>
+            </dd>
+          </>
+        )}
         {session.scheduledStartAt !== null && (
           <>
             <dt>Scheduled</dt>
@@ -560,10 +591,26 @@ function SessionCard({
           and mark it ready; the build then starts immediately.
         </p>
       )}
-      {session.lastError !== null && (
-        <p className="notice notice--error" role="status">
-          {session.lastError}
+      {/* A held session is working, not broken: it holds its build slot and
+          its story and carries on by itself, so the hold reads as a wait (amber)
+          rather than as the failure (red) every other `lastError` is. */}
+      {session.status === 'waiting' ? (
+        <p className="notice notice--warn" role="status">
+          Claude&rsquo;s usage limit was reached, so this build is paused rather than stopped. It
+          keeps its build slot and carries on{' '}
+          {session.waitingUntil === null ? 'as soon as the hold lifts' : startsIn(session.waitingUntil)}
+          .{' '}
+          <a className="link" href={sessionPath(session.id)}>
+            Open it
+          </a>{' '}
+          to see the countdown, or to resume it now.
         </p>
+      ) : (
+        session.lastError !== null && (
+          <p className="notice notice--error" role="status">
+            {session.lastError}
+          </p>
+        )
       )}
       {setup?.stderr !== undefined && setup.stderr !== '' && (
         <pre className="output">{setup.stderr}</pre>

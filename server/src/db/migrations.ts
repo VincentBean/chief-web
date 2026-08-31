@@ -187,6 +187,77 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    id: '0005_session_waiting_status',
+    sql: `
+      -- The usage-limit hold gets a status of its own (US-003): a session that
+      -- Claude refused is neither building nor failed, and \`waiting_until\`
+      -- records the moment it may resume.
+      --
+      -- SQLite cannot widen a CHECK in place, so \`sessions\` is rebuilt. It
+      -- cannot be renamed out of the way first either: with foreign keys on,
+      -- SQLite rewrites \`stories.session_id\` to follow the rename, and
+      -- dropping the old table would then cascade every story away. So the
+      -- stories are set aside, the table is rebuilt under its own name, and
+      -- both sets of rows go back — all of it inside the one transaction the
+      -- migration runner already holds.
+      CREATE TABLE sessions_backup AS SELECT * FROM sessions;
+      CREATE TABLE stories_backup AS SELECT * FROM stories;
+
+      -- Takes the stories and the indexes with it; both are restored below.
+      DROP TABLE sessions;
+
+      CREATE TABLE sessions (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE RESTRICT,
+        -- Slug: letters, numbers, hyphens and underscores only.
+        name               TEXT NOT NULL
+                             CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        status             TEXT NOT NULL
+                             CHECK (status IN
+                               ('pending', 'ready', 'building', 'waiting', 'failed', 'finished')),
+        base_branch        TEXT NOT NULL,
+        feature_branch     TEXT NOT NULL,
+        pr_target_branch   TEXT NOT NULL CHECK (pr_target_branch IN ('develop', 'main')),
+        scheduled_start_at TEXT,
+        queued_at          TEXT,
+        container_id       TEXT,
+        pr_url             TEXT,
+        last_error         TEXT,
+        failure_stage      TEXT
+                             CHECK (failure_stage IS NULL OR failure_stage IN
+                               ('agent', 'prd', 'push', 'pull_request', 'container_lost')),
+        -- UTC ISO time a \`waiting\` session may resume; NULL for every other
+        -- status, and for every row that predates the hold.
+        waiting_until      TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      INSERT INTO sessions
+        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, created_at, updated_at)
+      SELECT
+         id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         NULL, created_at, updated_at
+      FROM sessions_backup;
+
+      INSERT INTO stories SELECT * FROM stories_backup;
+
+      DROP TABLE sessions_backup;
+      DROP TABLE stories_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_repository ON sessions (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
+      -- Backs the FIFO build queue (US-018); NULLs are not indexed by SQLite.
+      CREATE INDEX IF NOT EXISTS idx_sessions_queued_at ON sessions (queued_at)
+        WHERE queued_at IS NOT NULL;
+    `,
+  },
 ];
 
 /**
