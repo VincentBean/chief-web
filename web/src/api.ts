@@ -564,6 +564,16 @@ export async function stopBuild(id: string): Promise<Build> {
 }
 
 /**
+ * "Resume now": lifts Claude's usage-limit hold before its hour is up and puts
+ * every held session back to work (US-008), not only the one being looked at —
+ * the hold is on the account, so there is nothing narrower to lift. Answers
+ * with how many sessions were actually started; the rest are on the queue.
+ */
+export async function clearUsageLimitHold(): Promise<{ resumed: number }> {
+  return api<{ ok: true; resumed: number }>('/api/limits/hold/clear', { method: 'POST' });
+}
+
+/**
  * "Leave queue": takes a waiting session back to plain `ready` (US-018).
  * Nothing was spawned for it, so there is nothing to unwind.
  */

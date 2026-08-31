@@ -4,6 +4,7 @@ import {
   ApiError,
   backToPlanning,
   type Build,
+  clearUsageLimitHold,
   type FailureStage,
   failureStageLabel,
   fetchBuild,
@@ -25,7 +26,14 @@ import {
   type Story,
 } from './api.ts';
 import { BuildLog } from './BuildLog.tsx';
-import { fromLocalInputValue, localTime, startsIn, toLocalInputValue } from './schedule.ts';
+import { ConfirmDialog } from './ConfirmDialog.tsx';
+import {
+  countdown,
+  fromLocalInputValue,
+  localTime,
+  startsIn,
+  toLocalInputValue,
+} from './schedule.ts';
 import { SESSION_BADGE, STORY_BADGE } from './status.ts';
 
 type Notice = { kind: 'ok' | 'error'; text: string };
@@ -71,6 +79,7 @@ export function Session() {
     | 'planning'
     | 'build'
     | 'stop-build'
+    | 'resume-hold'
     | 'leave-queue'
     | 'delivery'
     | 'retry'
@@ -283,6 +292,31 @@ export function Session() {
       .finally(() => setBusy(null));
   };
 
+  /**
+   * "Resume now" (US-008): the hold is on the account, so the only thing there
+   * is to lift is the global one. The page keeps polling, so the session's own
+   * new state — building, or queued behind the ones that fitted — arrives from
+   * the server rather than being guessed at here.
+   */
+  const onResumeNow = (): Promise<void> => {
+    setBusy('resume-hold');
+    setNotice(null);
+    return clearUsageLimitHold()
+      .then(({ resumed }) => {
+        setNotice({
+          kind: 'ok',
+          text:
+            `Usage-limit hold lifted for every session. ${String(resumed)} ` +
+            `${resumed === 1 ? 'session is' : 'sessions are'} building again; any that did not ` +
+            'fit the build-slot cap are on the queue.',
+        });
+      })
+      .catch((error: unknown) => {
+        setNotice({ kind: 'error', text: describe(error) });
+      })
+      .finally(() => setBusy(null));
+  };
+
   const onLeaveQueue = (): void => {
     setBusy('leave-queue');
     setNotice(null);
@@ -365,6 +399,14 @@ export function Session() {
         </p>
       )}
 
+      {session.status === 'waiting' && (
+        <UsageLimitCard
+          until={session.waitingUntil}
+          busy={busy}
+          onResumeNow={onResumeNow}
+        />
+      )}
+
       {session.status === 'failed' && (
         <FailureCard
           error={session.lastError}
@@ -414,11 +456,15 @@ export function Session() {
             </>
           )}
         </dl>
-        {session.lastError !== null && session.status !== 'failed' && (
-          <p className="notice notice--error" role="status">
-            {session.lastError}
-          </p>
-        )}
+        {/* A held session's `lastError` is the hold's own sentence, which the
+            banner above says better and in the right colour. */}
+        {session.lastError !== null &&
+          session.status !== 'failed' &&
+          session.status !== 'waiting' && (
+            <p className="notice notice--error" role="status">
+              {session.lastError}
+            </p>
+          )}
         {!session.cloned && (
           <p className="field__hint">
             Planning needs the clone.{' '}
@@ -873,6 +919,118 @@ function ReadinessCard({
 }
 
 /**
+ * Claude's usage-limit hold, on the session it stopped (US-009).
+ *
+ * A held session looks exactly like a broken one from here: nothing is
+ * running, the log ends on an agent that gave up, and the badge is a word
+ * nobody has seen before. This card is the whole difference between that and
+ * "chief-web is waiting on purpose, and it carries on at half past" — the
+ * reason, the moment, and a clock that visibly moves, because a countdown that
+ * sits still is indistinguishable from a page that has stopped updating.
+ *
+ * The hour is a guess: Claude's refusal says nothing about where in the
+ * rolling window the account is, so the copy promises a retry at that time
+ * rather than a limit that lifts then, and "Resume now" is there for when the
+ * operator knows better than the guess.
+ */
+function UsageLimitCard({
+  until,
+  busy,
+  onResumeNow,
+}: {
+  until: string | null;
+  busy: string | null;
+  onResumeNow: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  // Its own timer rather than the page's three-second poll: this is the one
+  // number on the page whose whole job is to keep moving.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const due = until !== null && new Date(until).getTime() <= now;
+
+  return (
+    <section className="card">
+      <div className="card__header">
+        <h2 className="card__title">
+          Claude&rsquo;s usage limit was reached{' '}
+          <span className="badge badge--waiting">waiting</span>
+        </h2>
+        <div className="field__actions">
+          <button
+            type="button"
+            className="button"
+            onClick={() => setConfirming(true)}
+            disabled={busy !== null}
+          >
+            {busy === 'resume-hold' ? 'Resuming…' : 'Resume now'}
+          </button>
+        </div>
+      </div>
+
+      <p className="notice notice--warn" role="status">
+        {until === null ? (
+          <>
+            This session is held until Claude will take work again. It keeps its build slot and
+            starts itself as soon as the hold lifts — nothing has been lost.
+          </>
+        ) : due ? (
+          <>
+            The hold has expired: this session goes back to building at the next check, within a
+            minute. Everything it had committed is still committed.
+          </>
+        ) : (
+          <>
+            The build is paused, not stuck. chief-web carries this session on by itself at{' '}
+            <strong>{localTime(until)}</strong> — <strong className="mono">{countdown(until, now)}</strong>{' '}
+            from now — on the same story, in the same container, with everything it had already
+            committed.
+          </>
+        )}
+      </p>
+
+      <p className="field__hint">
+        The wait is an hour from the refusal, because the refusal does not say how much of the
+        rolling window is left. If you know the limit has already lifted — a plan changed, or the
+        window rolled over — &ldquo;Resume now&rdquo; puts the work back on it immediately.
+        &ldquo;Stop build&rdquo; below is the other way out: it returns this session to ready and
+        keeps every commit.
+      </p>
+
+      <ConfirmDialog
+        open={confirming}
+        title="Resume now?"
+        confirmLabel="Resume every waiting session"
+        busy={busy === 'resume-hold'}
+        onConfirm={() => {
+          void onResumeNow().finally(() => setConfirming(false));
+        }}
+        onCancel={() => setConfirming(false)}
+      >
+        <p>
+          <strong>This resumes every waiting session, not only this one.</strong> The usage limit is
+          on the Claude account the whole server shares, so there is one hold and lifting it starts
+          every session held by it — as many as the build-slot cap allows, with the rest going on
+          the build queue in the order they were held.
+        </p>
+        <p>
+          If the limit has in fact not lifted, the first agent to ask is refused again and a fresh
+          hour begins from that moment. Nothing is lost either way: a refused iteration commits
+          nothing and costs no story.
+        </p>
+      </ConfirmDialog>
+    </section>
+  );
+}
+
+/**
  * The Ralph loop (US-013).
  *
  * A build is the session running itself: one headless `claude -p` per story,
@@ -904,6 +1062,10 @@ function BuildCard({
   if (build === null || status === 'pending') return null;
 
   const building = status === 'building';
+  // Held on Claude's usage limit (US-009). No loop is running behind it, but
+  // the session is mid-build — it holds its slot and its story — so it is
+  // stopped through the same button, with the same outcome.
+  const waiting = status === 'waiting';
   const done = build.stories.filter((story) => story.status === 'done').length;
   const current = build.stories.find((story) => story.storyId === build.currentStoryId) ?? null;
   // Everything is committed, so the only thing left that can have failed is the
@@ -960,7 +1122,7 @@ function BuildCard({
               {busy === 'leave-queue' ? 'Leaving…' : 'Leave queue'}
             </button>
           )}
-          {building && (
+          {(building || waiting) && (
             <button
               type="button"
               className="button button--quiet"

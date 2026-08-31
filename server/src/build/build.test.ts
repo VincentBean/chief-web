@@ -1014,6 +1014,44 @@ describe('the build loop', () => {
     assert.match(world.error() ?? '', /usage limit was reached/i);
   });
 
+  it('stops a held session back to ready with its commits intact (US-009)', async () => {
+    const world = new World();
+    world.runner.behaviour = (): void => {
+      // The first story is finished and committed; the second meets the wall.
+      if (world.runner.invocations.length > 1) {
+        world.runner.result = {
+          exitCode: 1,
+          output: 'Claude AI usage limit reached',
+          timedOut: false,
+        };
+        return;
+      }
+      world.markDone('US-002');
+      world.runner.commit();
+    };
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+    assert.equal(world.status(), 'waiting');
+
+    const stopped = await builds.stop(world.session.id);
+
+    // Exactly what stopping a building session does: ready, and nothing that
+    // was committed is rolled back.
+    assert.equal(stopped.status, 'ready');
+    const session = getSession(world.db, world.session.id);
+    assert.equal(session?.status, 'ready');
+    assert.equal(session?.waitingUntil, null);
+    // The park's sentence was about a wait this session is no longer doing.
+    assert.equal(session?.lastError, null);
+    const byId = new Map(world.stories().map((story) => [story.storyId, story]));
+    assert.equal(byId.get('US-002')?.status, 'done');
+    assert.equal(byId.get('US-002')?.commitSha, 'sha-1');
+    // The hold itself stands: it is the account's, not this session's.
+    assert.equal(new UsageLimitHold(world.db).active(), true);
+  });
+
   it('leaves a plain stall exactly as it was: no hold, no waiting (US-004)', async () => {
     const world = new World();
     // A rate-limit line an agent merely read is not a refusal, and a run that

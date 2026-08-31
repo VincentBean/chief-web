@@ -53,6 +53,30 @@ export function startsIn(iso: string, now: number = Date.now()): string {
 }
 
 /**
+ * The time left as a ticking clock — `4:59` under an hour, `1:04:59` over one
+ * — for a countdown that is re-rendered every second, and `0:00` once the
+ * moment has passed.
+ *
+ * `startsIn` rounds to whole minutes, which is right for a schedule hours away
+ * and wrong for a usage-limit hold someone is sitting in front of watching
+ * drain (US-009): a number that does not move for a minute at a time reads as
+ * a page that has stopped updating, which is the very impression the hold
+ * banner exists to prevent.
+ */
+export function countdown(iso: string, now: number = Date.now()): string {
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms)) return 'unknown';
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const hours = Math.floor(total / HOUR);
+  const minutes = Math.floor((total % HOUR) / MINUTE);
+  const seconds = total % MINUTE;
+  return hours === 0
+    ? `${String(minutes)}:${pad(seconds)}`
+    : `${String(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+/**
  * How long ago something happened, e.g. "2 h ago" — how stale a pull request
  * is. Reuses the same buckets as the scheduling copy so the two never disagree
  * about what "3 d" means.

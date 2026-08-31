@@ -633,13 +633,18 @@ export class BuildService {
    * leaving the session `ready`. Everything already committed stays committed,
    * and the statuses in `prd.md` are whatever the last finished iteration
    * wrote — a stopped build resumes rather than restarts.
+   *
+   * A session parked on Claude's usage limit stops the same way (US-009). Its
+   * loop has already unwound, so there is nothing to signal: it is the row that
+   * is stopped, which is what the operator who does not want to wait out the
+   * hold on this particular session is asking for.
    */
   async stop(sessionId: string): Promise<BuildView> {
     const session = this.requireSession(sessionId);
     const state = this.runs.get(sessionId);
 
     if (state === undefined) {
-      if (session.status !== 'building') {
+      if (session.status !== 'building' && session.status !== 'waiting') {
         throw new BuildError(
           409,
           'session_not_building',
@@ -647,8 +652,9 @@ export class BuildService {
         );
       }
       // `building` with no loop behind it: this server was restarted while the
-      // session was running. Returning it to `ready` is the whole of "stop" —
-      // and it frees the slot it was counted against.
+      // session was running. `waiting` never has one — the loop unwound when
+      // the hold parked it. Returning either to `ready` is the whole of "stop"
+      // — and it frees the slot it was counted against.
       const idle = this.returnToReady(session);
       void this.pump();
       return this.toView(idle);
@@ -673,7 +679,11 @@ export class BuildService {
 
     const stopped = getSession(this.db, sessionId) ?? session;
     logger.info('build stopped', { session: sessionId, iterations: state.iteration });
-    return this.toView(stopped.status === 'building' ? this.returnToReady(stopped) : stopped);
+    return this.toView(
+      stopped.status === 'building' || stopped.status === 'waiting'
+        ? this.returnToReady(stopped)
+        : stopped,
+    );
   }
 
   /** Resolves when the session's loop has unwound; immediately if none runs. */
@@ -1163,9 +1173,15 @@ export class BuildService {
    * was signalled mid-story may still have finished the previous one, and the
    * file — not the row the loop wrote before starting it — is the truth about
    * what is done.
+   *
+   * A session parked on the usage-limit hold ends here too (US-009): stopping
+   * it is the operator saying they do not want it back when the hold lifts, so
+   * the expiry, the message the park wrote and the counters the resume would
+   * have continued from all go with it. What was committed stays committed,
+   * exactly as for a build stopped mid-iteration.
    */
   private returnToReady(session: Session): Session {
-    if (session.status !== 'building') return session;
+    if (session.status !== 'building' && session.status !== 'waiting') return session;
     try {
       this.readPrd(session);
     } catch (cause) {
@@ -1174,7 +1190,18 @@ export class BuildService {
         error: describe(cause),
       });
     }
-    return updateSession(this.db, session.id, { status: 'ready', failureStage: null }) ?? session;
+    this.parked.delete(session.id);
+    return (
+      updateSession(this.db, session.id, {
+        status: 'ready',
+        failureStage: null,
+        waitingUntil: null,
+        // The hold's sentence is the park's own bookkeeping and would read as a
+        // standing complaint on a session that is now plainly ready; anything a
+        // *building* session was carrying is left where it is.
+        ...(session.status === 'waiting' ? { lastError: null } : {}),
+      }) ?? session
+    );
   }
 
   private requireSession(sessionId: string): Session {
