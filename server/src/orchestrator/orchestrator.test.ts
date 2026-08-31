@@ -282,10 +282,42 @@ describe('reconciliation plan', () => {
           containerId: null,
           lastError: CONTAINER_LOST_ERROR,
           failureStage: 'container_lost',
+          waitingUntil: null,
         },
         reason: 'container lost',
       },
     ]);
+  });
+
+  it('fails a waiting session whose container is gone, exactly as a building one (US-006)', () => {
+    // Held by Claude's usage limit, but the thing it was going to resume into
+    // is not there any more: there is nothing left to hold.
+    const plan = planReconciliation(
+      [session({ status: 'waiting', containerId: 'c1' })],
+      [],
+    );
+    assert.deepEqual(plan.correct, [
+      {
+        sessionId: 's1',
+        patch: {
+          status: 'failed',
+          containerId: null,
+          lastError: CONTAINER_LOST_ERROR,
+          failureStage: 'container_lost',
+          waitingUntil: null,
+        },
+        reason: 'container lost',
+      },
+    ]);
+  });
+
+  it('leaves a waiting session with a running container waiting (US-006)', () => {
+    // Its hold outlived the restart, and so did its container: the next
+    // scheduler tick is what resumes it, not reconciliation.
+    const plan = planReconciliation([session({ status: 'waiting', containerId: 'c1' })], [
+      container({}),
+    ]);
+    assert.deepEqual(plan, { remove: [], correct: [] });
   });
 
   it('treats a stopped container as gone and fails the building session', () => {

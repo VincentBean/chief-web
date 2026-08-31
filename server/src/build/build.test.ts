@@ -1036,6 +1036,95 @@ describe('the build loop', () => {
     assert.match(world.error() ?? '', /no commit was made/);
   });
 
+  it('resumes the held session on the same story when the hour is up (US-006)', async () => {
+    const world = new World();
+    const builds = serviceFor(world);
+    // What the run's counters stood at as each iteration started.
+    const iterations: number[] = [];
+    const attempts: number[] = [];
+    world.runner.behaviour = (): void => {
+      const view = builds.status(world.session.id);
+      iterations.push(view.iteration);
+      attempts.push(view.attempts);
+      const nth = world.runner.invocations.length;
+      if (nth === 1) {
+        // A genuine stall first, so the story has a retry behind it when the
+        // wall arrives: what survives the pause has to be visible.
+        world.runner.result = { exitCode: 1, output: 'claude: nothing to do', timedOut: false };
+      } else if (nth === 2) {
+        world.runner.result = {
+          exitCode: 1,
+          output: 'Claude AI usage limit reached|1756700000',
+          timedOut: false,
+        };
+      } else {
+        world.markDone('US-002');
+        world.markDone('US-001');
+        world.runner.commit();
+        world.runner.result = { exitCode: 0, output: '', timedOut: false };
+      }
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+    assert.equal(world.status(), 'waiting');
+    const container = world.runner.invocations[1]?.containerId;
+
+    // The hour is not up: the tick finds it and leaves it exactly where it is.
+    assert.equal(await builds.resumeHeld(), 0);
+    assert.equal(world.status(), 'waiting');
+    assert.equal(world.runner.invocations.length, 2);
+
+    // …and now it is.
+    new UsageLimitHold(world.db).clear();
+    updateSession(world.db, world.session.id, { waitingUntil: '2026-08-29T09:00:00.000Z' });
+    assert.equal(await builds.resumeHeld(), 1);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.equal(getSession(world.db, world.session.id)?.waitingUntil, null);
+    // The loop continued: the same story, the iteration the pause gave back,
+    // and the retry the stall had already spent still on the counter.
+    assert.deepEqual(
+      world.runner.invocations.map((invocation) => /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1]),
+      ['US-002', 'US-002', 'US-002'],
+    );
+    assert.deepEqual(iterations, [1, 2, 2]);
+    assert.deepEqual(attempts, [0, 1, 1]);
+    // The same container it was parked in: a resume continues a run, it does
+    // not build a new environment for it.
+    assert.equal(world.runner.invocations[2]?.containerId, container);
+  });
+
+  it('leaves a hold that has not expired alone, and resumes one that has (US-006)', async () => {
+    const world = new World();
+    const builds = serviceFor(world);
+    // A session parked by an earlier run of the server: `waiting`, with an
+    // expiry, and no loop anywhere.
+    updateSession(world.db, world.session.id, {
+      status: 'waiting',
+      waitingUntil: '2099-01-01T00:00:00.000Z',
+    });
+
+    assert.equal(await builds.resumeHeld(), 0);
+    assert.equal(world.status(), 'waiting');
+    assert.equal(world.containerStarts.length, 0);
+
+    updateSession(world.db, world.session.id, { waitingUntil: '2026-08-29T09:00:00.000Z' });
+    world.runner.behaviour = (): void => {
+      world.markDone('US-002');
+      world.markDone('US-001');
+      world.runner.commit();
+    };
+    assert.equal(await builds.resumeHeld(), 1);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    // Its container was started, not created from nothing and not re-cloned:
+    // the orchestrator hands back the running one under the same name.
+    assert.deepEqual(world.containerStarts, [world.session.id, world.session.id]);
+  });
+
   it('writes each iteration to the log file in the workspace', async () => {
     const world = new World();
     world.runner.behaviour = (invocation): void => {
@@ -1411,6 +1500,41 @@ describe('concurrency and the build queue', () => {
     // Nobody discovered the wall for themselves: three iterations, one refusal.
     assert.equal(fleet.entered.length, 3);
     assert.equal(countSessionsByStatus(fleet.world.db, 'building'), 0);
+  });
+
+  it('queues the held sessions that do not fit when the hold lifts (US-006)', async () => {
+    // One slot, two sessions parked on the same hold — the cap was lowered
+    // while they waited, or a feedback run took the slot they were counted in.
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    updateSession(fleet.world.db, login.id, {
+      status: 'waiting',
+      waitingUntil: '2026-08-29T09:00:00.000Z',
+    });
+    updateSession(fleet.world.db, billing.id, {
+      status: 'waiting',
+      waitingUntil: '2026-08-29T09:00:01.000Z',
+    });
+
+    assert.equal(await fleet.builds.resumeHeld(), 1);
+
+    // The one that was held first got the slot; the other is on the queue in
+    // the order it was waiting in, rather than starting into a cap of one.
+    assert.deepEqual(fleet.building(), ['add-login']);
+    assert.deepEqual(fleet.queue(), ['add-billing']);
+    const queued = fleet.session(billing.id);
+    assert.equal(queued.status, 'ready');
+    assert.equal(queued.waitingUntil, null);
+    assert.match(queued.lastError ?? '', /build queue/);
+    await until('the resumed agent is running', () => fleet.entered.length === 1);
+    assert.deepEqual(fleet.entered, [login.id]);
+
+    // And the queue does the rest by itself, as it always has.
+    await fleet.finish(login);
+    await until('the queued session took the freed slot', () => fleet.building().length === 1);
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    await fleet.finish(billing);
   });
 
   it('refuses a start while the hold is on and queues the session instead (US-005)', async () => {

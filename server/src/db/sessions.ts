@@ -298,6 +298,28 @@ export function queuePosition(
   return row ? integer(row, 'count') : null;
 }
 
+/**
+ * Sessions held by Claude's usage limit whose hold has run out (US-006).
+ *
+ * Ordered the way they will be resumed, and tie-broken on the id exactly as
+ * {@link listQueuedSessions} is: a hold parks every session on the same
+ * expiry, so without the tie-break "their existing order" would be no order
+ * at all — and the sessions that do not fit under the concurrency cap go on
+ * that very queue, where the same comparison has to agree.
+ *
+ * A `waiting` row with no expiry is due immediately: nothing is holding it.
+ */
+export function listDueWaitingSessions(db: Database, now: string = nowIso()): Session[] {
+  return db
+    .prepare(
+      `SELECT * FROM sessions
+        WHERE status = 'waiting' AND (waiting_until IS NULL OR waiting_until <= ?)
+        ORDER BY waiting_until ASC, id ASC`,
+    )
+    .all(now)
+    .map(mapSession);
+}
+
 /** Ready sessions whose scheduled start time has passed (US-017). */
 export function listDueScheduledSessions(db: Database, now: string = nowIso()): Session[] {
   return db

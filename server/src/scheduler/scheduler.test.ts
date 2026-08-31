@@ -9,6 +9,7 @@ import {
   type Database,
   getSession,
   IN_MEMORY,
+  listDueWaitingSessions,
   isScheduleMissed,
   openDatabase,
   type Session,
@@ -34,6 +35,8 @@ class FakeBuilds implements ScheduledBuilds {
   pumps = 0;
   /** Session ids the build refuses to start, and why. */
   readonly refuse = new Map<string, string>();
+  /** The held sessions the tick resumed, in order (US-006). */
+  readonly resumed: string[] = [];
 
   constructor(private readonly db: Database) {}
 
@@ -46,6 +49,15 @@ class FakeBuilds implements ScheduledBuilds {
       lastError: null,
       scheduledStartAt: null,
     });
+    return Promise.resolve({});
+  }
+
+  /** Stands in for `BuildService.resumeHeld`: the hold is up, so it continues. */
+  resumeHeld(now?: string): Promise<unknown> {
+    for (const session of listDueWaitingSessions(this.db, now)) {
+      this.resumed.push(session.id);
+      updateSession(this.db, session.id, { status: 'building', waitingUntil: null });
+    }
     return Promise.resolve({});
   }
 
@@ -227,6 +239,25 @@ describe('the session scheduler', () => {
     w.session({ at: PAST });
     await w.scheduler.tick();
     assert.equal(w.builds.pumps, 2);
+  });
+
+  it('resumes the sessions whose usage-limit hold has run out (US-006)', async () => {
+    const w = world();
+    const held = w.session({ status: 'waiting' });
+    const stillHeld = w.session({ status: 'waiting' });
+    updateSession(w.db, held.id, { waitingUntil: '2026-08-29T09:00:00.000Z' });
+    updateSession(w.db, stillHeld.id, { waitingUntil: '2026-08-29T11:00:00.000Z' });
+
+    await w.scheduler.tick('2026-08-29T10:00:00.000Z');
+
+    // The hour was up for one of them and not for the other; the tick is the
+    // only thing looking at the clock, so it is what tells them apart.
+    assert.deepEqual(w.builds.resumed, [held.id]);
+    assert.equal(getSession(w.db, held.id)?.status, 'building');
+    assert.equal(getSession(w.db, held.id)?.waitingUntil, null);
+    assert.equal(getSession(w.db, stillHeld.id)?.status, 'waiting');
+    // And the tick still did everything else it does.
+    assert.equal(w.builds.pumps, 1);
   });
 
   it('refuses an interval that would break the 30 second promise', () => {

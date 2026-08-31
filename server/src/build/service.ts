@@ -8,6 +8,7 @@ import {
   failSession,
   type FailureStage,
   getSession,
+  listDueWaitingSessions,
   listQueuedSessions,
   listSessions,
   listStories,
@@ -177,6 +178,24 @@ interface RunState {
   finished: Promise<void>;
 }
 
+/**
+ * What a parked run left behind, so the resume is a continuation (US-006).
+ *
+ * The `RunState` itself dies with the loop, and everything durable about a
+ * session is in `prd.md` and the git history — but the counters are neither.
+ * They are this process's account of how far the run got and how many retries
+ * the current story has already spent, and a hold must cost the session an
+ * hour and nothing else. So they are kept here for exactly as long as the
+ * session is `waiting`, and a resume starts from them rather than from zero.
+ */
+interface ParkedRun {
+  readonly iteration: number;
+  readonly attempts: number;
+  readonly storyId: string | null;
+  readonly maxIterations: number;
+  readonly startedAt: string;
+}
+
 /** What one re-read of `prd.md` produced. */
 interface PrdSnapshot {
   readonly stories: readonly Story[];
@@ -207,6 +226,11 @@ export class BuildService {
    * here or two simultaneous starts would both see the same free slot.
    */
   private readonly launching = new Set<string>();
+  /**
+   * The counters of the runs parked on a usage-limit hold (US-006), by session
+   * id. Written by {@link park} and spent by the launch that resumes them.
+   */
+  private readonly parked = new Map<string, ParkedRun>();
   /** Serialises {@link pump}, so one freed slot is handed to one session. */
   private draining: Promise<void> = Promise.resolve();
 
@@ -320,6 +344,70 @@ export class BuildService {
     );
   }
 
+  /**
+   * Resumes the sessions whose usage-limit hold has run out (US-006). Returns
+   * how many were started; called from the scheduler's tick, which is the one
+   * thing already looking at the clock on a timer.
+   *
+   * A held session kept its slot, its container and its place in the story
+   * while it waited, so a resume is a continuation: the container is reused if
+   * it is still up, nothing about the workspace is touched, and the run picks
+   * its own counters back up. Whatever does not fit under the cap — the cap was
+   * lowered while the hold was on, or something else took the slots — goes on
+   * the FIFO queue in the order it was resumed in, rather than every session
+   * starting at once the moment the hour is up.
+   */
+  async resumeHeld(now: string = nowIso()): Promise<number> {
+    // A second refusal during the hold extends it (US-002) without re-parking
+    // the sessions that were already `waiting`, so their own expiry can be the
+    // stale one. The hold is what the resume is really waiting for.
+    if (this.hold.active()) return 0;
+
+    let resumed = 0;
+    for (const session of listDueWaitingSessions(this.db, now)) {
+      if (this.runs.has(session.id) || this.launching.has(session.id)) continue;
+
+      if (this.resumeSlots() <= 0) {
+        this.enqueue(session, queuedAfterHoldMessage(session));
+        continue;
+      }
+
+      try {
+        await this.launch(session);
+        resumed += 1;
+      } catch (cause) {
+        // Docker is not answering, or the container could not be brought back
+        // up. The session stays `waiting` with its counters intact and the next
+        // tick tries again — which is the same catch-up every other part of
+        // this service does, and far better than failing a build for an outage
+        // that is usually seconds long.
+        logger.warn('could not resume a held build', {
+          session: session.id,
+          name: session.name,
+          error: describe(cause),
+        });
+      }
+    }
+    return resumed;
+  }
+
+  /**
+   * Slots a held session may resume into.
+   *
+   * A `waiting` session is already counted against the cap (US-003) — it never
+   * gave its slot back — so the sessions being resumed must not be counted
+   * against a cap they are already inside. Only what is actually working is.
+   */
+  private resumeSlots(): number {
+    const max = getMaxConcurrentSessions(this.db, this.config);
+    return (
+      max -
+      (countSessionsByStatus(this.db, 'building') +
+        this.launching.size +
+        countActivePrRuns(this.db))
+    );
+  }
+
   private async drain(): Promise<void> {
     for (;;) {
       // A free slot is no use while the hold is on (US-005). The queue keeps
@@ -396,7 +484,7 @@ export class BuildService {
    * session *did* start, in the only sense the operator asked for, and a
    * timestamp left behind would fire it a second time.
    */
-  private enqueue(session: Session): Session {
+  private enqueue(session: Session, note?: string): Session {
     const queued =
       updateSession(this.db, session.id, {
         status: 'ready',
@@ -405,6 +493,10 @@ export class BuildService {
         // A retry that only got as far as the queue has still left `failed`
         // behind, so the stage of that failure goes with it (US-019).
         failureStage: null,
+        // A held session queued instead of resumed is no longer waiting on the
+        // clock, it is waiting for a slot (US-006).
+        waitingUntil: null,
+        ...(note === undefined ? {} : { lastError: note }),
       }) ?? session;
     logger.info('build queued: the concurrency cap is reached', {
       session: session.id,
@@ -427,6 +519,13 @@ export class BuildService {
 
   /** Brings the container up and puts the session into `building`. */
   private async launch(session: Session): Promise<Session> {
+    // A run parked on a usage-limit hold is continued rather than restarted
+    // (US-006): the counters it left behind are picked up here, whether the
+    // resume came straight from the scheduler's tick or by way of the queue.
+    // Taken before anything can throw, so a failed launch cannot leave a stale
+    // set of counters for the next one.
+    const parked = this.parked.get(session.id) ?? null;
+    this.parked.delete(session.id);
     this.launching.add(session.id);
     try {
       let containerId: string;
@@ -458,14 +557,17 @@ export class BuildService {
           failureStage: null,
           scheduledStartAt: null,
           queuedAt: null,
+          // Whether this is a resume or a fresh start, the session is working
+          // again and is not waiting for anything (US-006).
+          waitingUntil: null,
         }) ?? session;
       const state: RunState = {
         containerId,
-        iteration: 0,
-        attempts: 0,
-        storyId: null,
-        maxIterations: iterationCap(remainingStories(stories)),
-        startedAt: nowIso(),
+        iteration: parked?.iteration ?? 0,
+        attempts: parked?.attempts ?? 0,
+        storyId: parked?.storyId ?? null,
+        maxIterations: parked?.maxIterations ?? iterationCap(remainingStories(stories)),
+        startedAt: parked?.startedAt ?? nowIso(),
         stopping: false,
         holdUntil: null,
         finished: Promise.resolve(),
@@ -481,11 +583,14 @@ export class BuildService {
         void this.pump();
       });
 
-      logger.info('build started', {
+      logger.info(parked === null ? 'build started' : 'build resumed after the usage-limit hold', {
         session: session.id,
         name: session.name,
         container: containerId,
         stories: stories.length,
+        iteration: state.iteration,
+        story: state.storyId,
+        attempts: state.attempts,
         maxIterations: state.maxIterations,
       });
       return building;
@@ -980,7 +1085,19 @@ export class BuildService {
    * counting against the concurrency cap (US-003).
    */
   private park(session: Session, state: RunState | null, until: string): Session {
-    if (state !== null) state.iteration -= 1;
+    if (state !== null) {
+      state.iteration -= 1;
+      // Kept for the resume (US-006), which continues this run rather than
+      // starting a new one. The `RunState` is dropped the moment the loop
+      // unwinds, so this is the only thing that remembers where it got to.
+      this.parked.set(session.id, {
+        iteration: state.iteration,
+        attempts: state.attempts,
+        storyId: state.storyId,
+        maxIterations: state.maxIterations,
+        startedAt: state.startedAt,
+      });
+    }
     logger.warn('build held: the agent was refused for Claude’s usage limit', {
       session: session.id,
       name: session.name,
@@ -1113,6 +1230,18 @@ function queuedForHoldMessage(session: Session, until: string): string {
     'Claude’s usage limit was reached, so no build can be started until ' +
     `${until}. "${session.name}" has been put in the build queue instead and ` +
     'starts by itself once the hold lifts.'
+  );
+}
+
+/**
+ * What a held session is told when the hold lifts but there is no slot for it
+ * (US-006): it is not being held any more, it is queued, and it keeps its place.
+ */
+function queuedAfterHoldMessage(session: Session): string {
+  return (
+    'Claude’s usage limit has lifted, but every build slot is taken, so ' +
+    `"${session.name}" is in the build queue and resumes on the story it was on ` +
+    'as soon as a slot frees.'
   );
 }
 
