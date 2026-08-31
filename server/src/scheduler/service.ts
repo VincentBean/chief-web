@@ -8,6 +8,7 @@ import {
   updateSession,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { UsageLimitHold } from '../limits/index.js';
 
 /**
  * Scheduled session starts (US-017).
@@ -62,6 +63,8 @@ export class SchedulerService implements SessionScheduler {
     private readonly config: Config,
     private readonly db: Database,
     private readonly builds: ScheduledBuilds,
+    /** The global usage-limit hold (US-002), read before anything is fired. */
+    private readonly hold: UsageLimitHold = new UsageLimitHold(db),
   ) {}
 
   start(): void {
@@ -130,6 +133,22 @@ export class SchedulerService implements SessionScheduler {
   }
 
   private async startSession(session: Session): Promise<boolean> {
+    // Claude's usage limit is on the account, so a start now would be refused
+    // within seconds and the schedule would be spent on that refusal (US-005).
+    // Left where it is, the timestamp is simply still due when the hold lifts,
+    // and the very next tick honours it — which is the same catch-up this
+    // service already does after a restart.
+    const until = this.hold.until();
+    if (until !== null) {
+      logger.info('scheduled start held by Claude’s usage limit', {
+        session: session.id,
+        name: session.name,
+        scheduledStartAt: session.scheduledStartAt,
+        until,
+      });
+      return false;
+    }
+
     logger.info('scheduled start firing', {
       session: session.id,
       name: session.name,
@@ -161,8 +180,9 @@ export function createScheduler(
   config: Config,
   db: Database,
   builds: ScheduledBuilds,
+  hold: UsageLimitHold = new UsageLimitHold(db),
 ): SchedulerService {
-  return new SchedulerService(config, db, builds);
+  return new SchedulerService(config, db, builds, hold);
 }
 
 function describe(cause: unknown): string {

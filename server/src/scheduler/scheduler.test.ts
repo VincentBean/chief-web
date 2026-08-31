@@ -15,6 +15,7 @@ import {
   type SessionStatus,
   updateSession,
 } from '../db/index.js';
+import { UsageLimitHold } from '../limits/index.js';
 import { type ScheduledBuilds, SchedulerService } from './service.js';
 
 const databases: Database[] = [];
@@ -123,6 +124,29 @@ describe('the session scheduler', () => {
     updateSession(w.db, due.id, { status: 'ready' });
     assert.equal(await w.scheduler.tick(), 0);
     assert.deepEqual(w.builds.started, [due.id]);
+  });
+
+  it('keeps a due schedule for after Claude’s usage-limit hold (US-005)', async () => {
+    const w = world();
+    const due = w.session({ at: PAST });
+    const hold = new UsageLimitHold(w.db);
+    hold.arm();
+
+    // Nothing is started, and — the point of the story — nothing is spent: a
+    // start now would only be refused, and the schedule would be gone.
+    assert.equal(await w.scheduler.tick(), 0);
+    assert.deepEqual(w.builds.started, []);
+    const held = getSession(w.db, due.id);
+    assert.equal(held?.status, 'ready');
+    assert.equal(held?.scheduledStartAt, PAST);
+    assert.equal(held?.lastError, null);
+    assert.equal(await w.scheduler.fire(due.id), false);
+
+    // It is simply still due when the hold lifts.
+    hold.clear();
+    assert.equal(await w.scheduler.tick(), 1);
+    assert.deepEqual(w.builds.started, [due.id]);
+    assert.equal(getSession(w.db, due.id)?.status, 'building');
   });
 
   it('leaves a pending session alone: a missed schedule is not a start', async () => {

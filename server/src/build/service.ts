@@ -9,6 +9,7 @@ import {
   type FailureStage,
   getSession,
   listQueuedSessions,
+  listSessions,
   listStories,
   nowIso,
   queuePosition,
@@ -163,6 +164,15 @@ interface RunState {
   readonly maxIterations: number;
   readonly startedAt: string;
   stopping: boolean;
+  /**
+   * The expiry of the global hold this run must park on (US-005), or null.
+   *
+   * The limit is on the account, so one session being refused takes every
+   * other run off the agent too. Setting a field rather than tearing the run
+   * down from outside is what lets the loop park itself at a point where its
+   * own bookkeeping is finished, exactly as it does for "Stop build".
+   */
+  holdUntil: string | null;
   /** Resolves when the loop has finished; awaited by "Stop build". */
   finished: Promise<void>;
 }
@@ -234,6 +244,19 @@ export class BuildService {
     if (this.runs.has(sessionId)) return this.toView(session);
 
     this.assertStartable(session);
+
+    // Nothing may be launched while the hold is on (US-005): the limit is on
+    // the account, so a fresh session would be refused within seconds and
+    // spend an iteration finding out what the held sessions already know. The
+    // queue is exactly the right place to put it — it is already the answer to
+    // "there is no room for you yet", and the pump hands it a slot by itself
+    // once the hold lifts.
+    const until = this.hold.until();
+    if (until !== null) {
+      this.enqueue(session);
+      throw new BuildError(429, 'usage_limit_hold', queuedForHoldMessage(session, until));
+    }
+
     if (this.freeSlots() <= 0) return this.toView(this.enqueue(session));
     return this.toView(await this.launch(session));
   }
@@ -299,6 +322,10 @@ export class BuildService {
 
   private async drain(): Promise<void> {
     for (;;) {
+      // A free slot is no use while the hold is on (US-005). The queue keeps
+      // its order and its sessions; the pump that runs when the hold lifts is
+      // the one that empties it.
+      if (this.hold.active()) return;
       if (this.freeSlots() <= 0) return;
 
       const next = listQueuedSessions(this.db).find(
@@ -440,6 +467,7 @@ export class BuildService {
         maxIterations: iterationCap(remainingStories(stories)),
         startedAt: nowIso(),
         stopping: false,
+        holdUntil: null,
         finished: Promise.resolve(),
       };
       this.runs.set(session.id, state);
@@ -537,6 +565,13 @@ export class BuildService {
         this.returnToReady(session);
         return;
       }
+      // Another session was refused while this one was between iterations
+      // (US-005). Nothing is in flight, so there is nothing to reap: the run
+      // simply parks on the same expiry as the session that hit the wall.
+      if (state.holdUntil !== null) {
+        this.park(session, state, state.holdUntil);
+        return;
+      }
       if (session.status !== 'building') return;
 
       let snapshot: PrdSnapshot;
@@ -579,6 +614,13 @@ export class BuildService {
       try {
         keepGoing = await this.iterate(session, story, snapshot, state);
       } catch (cause) {
+        // The exec this run was in was killed to put the session on the hold
+        // (US-005), so whatever it threw on the way out describes our own
+        // signal rather than a broken build. Park it.
+        if (state.holdUntil !== null) {
+          this.park(session, state, state.holdUntil);
+          return;
+        }
         this.fail(
           session,
           'agent',
@@ -643,6 +685,22 @@ export class BuildService {
       throw cause;
     }
 
+    // The hold went up under this iteration because *another* session was
+    // refused (US-005), and the agent was signalled off the machine to make
+    // that true. Handled before the refusal check for the same reason it is
+    // handled before classification: the output belongs to an exec we killed,
+    // so it is not evidence of anything — least of all of a second limit hit,
+    // which would push the shared expiry another hour into the future.
+    if (state.holdUntil !== null) {
+      const held = state.holdUntil;
+      log.write(`\n${holdMessage(held)}\n`);
+      log.end(result.exitCode);
+      await this.runner.reap(session.id, state.containerId);
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, held);
+      return false;
+    }
+
     // Asked before anything is classified, because there is nothing to
     // classify (US-004): the agent did not fail to do the work, it was never
     // allowed to start it. `classifyIteration` would see no commit and no
@@ -668,6 +726,12 @@ export class BuildService {
       // `ready` rather than waiting for an hour nobody asked it to wait.
       if (state.stopping) this.returnToReady(session);
       else this.park(session, state, until);
+
+      // The limit belongs to the account, not to this session, so every other
+      // run is about to be refused for the same reason (US-005). They come off
+      // the agent now, on this expiry, rather than each discovering the wall
+      // for itself.
+      await this.holdOthers(session.id, until);
       return false;
     }
 
@@ -849,6 +913,59 @@ export class BuildService {
   }
 
   /**
+   * Puts every *other* building session on the same hold (US-005).
+   *
+   * One account, one limit: the moment one session is refused, the rest are
+   * running into the same wall a few seconds behind. Left alone they would each
+   * spend their own retries discovering it, and three sessions would produce
+   * three stalled stories out of one outage.
+   *
+   * Sessions are parked one at a time and each is fully unwound first — its
+   * agent signalled, its loop given the stop timeout to finish its own
+   * bookkeeping, and then reaped whether or not it took the hint — because a
+   * session that goes `waiting` is one the operator can resume, and resuming
+   * into a container where the last agent is still editing the workspace is the
+   * collision the reap exists to prevent.
+   *
+   * A `building` session with no loop behind it — this server was restarted
+   * under it — is parked too. There is no exec to reap, and leaving it
+   * `building` would have it counted as working while nothing is.
+   */
+  private async holdOthers(refusedId: string, until: string): Promise<void> {
+    for (const session of listSessions(this.db, { status: 'building' })) {
+      if (session.id === refusedId) continue;
+      const state = this.runs.get(session.id);
+      if (state === undefined) {
+        this.park(session, null, until);
+        continue;
+      }
+      await this.holdRun(session, state, until);
+    }
+  }
+
+  /** Takes one live run off the agent and parks it on `until` (US-005). */
+  private async holdRun(session: Session, state: RunState, until: string): Promise<void> {
+    state.holdUntil = until;
+    try {
+      await this.runner.stop(session.id, state.containerId);
+    } catch (cause) {
+      logger.warn('could not signal a build agent for the usage-limit hold', {
+        session: session.id,
+        error: describe(cause),
+      });
+    }
+    // The loop parks itself when it sees `holdUntil`; this is only how long we
+    // are prepared to wait for it to get there.
+    await settle(state.finished, this.config.buildStopTimeoutMs);
+    await this.runner.reap(session.id, state.containerId);
+
+    // Normally the loop has already parked it. A run that outlasted the stop
+    // timeout has not, and must not be left `building` on a held account.
+    const current = getSession(this.db, session.id) ?? session;
+    if (current.status === 'building') this.park(current, state, until);
+  }
+
+  /**
    * Parks the run on the usage-limit hold: `waiting` until `until`, container
    * and all (US-004).
    *
@@ -862,13 +979,13 @@ export class BuildService {
    * continue rather than restart, and is why a `waiting` session goes on
    * counting against the concurrency cap (US-003).
    */
-  private park(session: Session, state: RunState, until: string): Session {
-    state.iteration -= 1;
+  private park(session: Session, state: RunState | null, until: string): Session {
+    if (state !== null) state.iteration -= 1;
     logger.warn('build held: the agent was refused for Claude’s usage limit', {
       session: session.id,
       name: session.name,
-      story: state.storyId,
-      attempts: state.attempts,
+      story: state?.storyId ?? null,
+      attempts: state?.attempts ?? 0,
       until,
     });
     return (
@@ -982,6 +1099,20 @@ function holdMessage(until: string): string {
     'Claude’s usage limit was reached, so this build is held until ' +
     `${until}. No retry and no iteration were spent on it: the session resumes ` +
     'on the same story by itself once the hold lifts.'
+  );
+}
+
+/**
+ * What a session is told when it asks to build during a hold (US-005).
+ *
+ * It names the moment work resumes, because the session is not being refused
+ * so much as deferred: it is in the queue, and the pump starts it there.
+ */
+function queuedForHoldMessage(session: Session, until: string): string {
+  return (
+    'Claude’s usage limit was reached, so no build can be started until ' +
+    `${until}. "${session.name}" has been put in the build queue instead and ` +
+    'starts by itself once the hold lifts.'
   );
 }
 

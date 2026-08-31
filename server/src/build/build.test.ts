@@ -1354,6 +1354,101 @@ describe('concurrency and the build queue', () => {
     await fleet.finish(search);
   });
 
+  it('parks every building session when one of them is refused (US-005)', async () => {
+    const fleet = new Fleet(3, ['add-billing', 'add-payments']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const payments = fleet.named('add-payments');
+
+    // Two agents sit in an iteration until they are signalled; the third comes
+    // straight back with Claude's refusal.
+    fleet.world.runner.behaviour = async (invocation): Promise<void> => {
+      fleet.entered.push(invocation.sessionId);
+      if (invocation.sessionId === login.id) {
+        fleet.world.runner.result = {
+          exitCode: 1,
+          output: 'Claude AI usage limit reached|1756700000',
+          timedOut: false,
+        };
+        return;
+      }
+      await fleet.gate(invocation.sessionId).promise;
+      fleet.world.runner.result = { exitCode: 143, output: 'terminated', timedOut: false };
+    };
+    // Signalling the agent is what lets it return, as it is in the container.
+    fleet.world.runner.stop = (sessionId: string): Promise<void> => {
+      fleet.world.runner.stops.push(sessionId);
+      fleet.gate(sessionId).release();
+      return Promise.resolve();
+    };
+
+    await fleet.builds.start(billing.id);
+    await fleet.builds.start(payments.id);
+    await until('both other agents are running', () => fleet.entered.length === 2);
+    const before = Date.now();
+    await fleet.builds.start(login.id);
+    await fleet.builds.whenIdle(login.id);
+    await fleet.builds.whenIdle(billing.id);
+    await fleet.builds.whenIdle(payments.id);
+
+    // One session was refused; all three are held, on one expiry.
+    const held = [login, billing, payments].map((session) => fleet.session(session.id));
+    assert.deepEqual(
+      held.map((session) => session.status),
+      ['waiting', 'waiting', 'waiting'],
+    );
+    const shared = new UsageLimitHold(fleet.world.db).until();
+    assert.notEqual(shared, null);
+    for (const session of held) assert.equal(session.waitingUntil, shared);
+    assert.ok(Date.parse(shared ?? '') >= before + USAGE_LIMIT_HOLD_MS);
+
+    // The other two came off their agents rather than being abandoned there:
+    // signalled, then reaped, before they were parked.
+    assert.deepEqual(fleet.world.runner.stops.sort(), [billing.id, payments.id].sort());
+    for (const session of [billing, payments]) {
+      assert.ok(fleet.world.runner.reaps.filter((id) => id === session.id).length >= 2);
+    }
+    // Nobody discovered the wall for themselves: three iterations, one refusal.
+    assert.equal(fleet.entered.length, 3);
+    assert.equal(countSessionsByStatus(fleet.world.db, 'building'), 0);
+  });
+
+  it('refuses a start while the hold is on and queues the session instead (US-005)', async () => {
+    const fleet = new Fleet(3, []);
+    const login = fleet.named('add-login');
+    const hold = new UsageLimitHold(fleet.world.db);
+    const until_ = hold.arm();
+
+    await assert.rejects(
+      () => fleet.builds.start(login.id),
+      (cause: unknown) => {
+        assert.ok(cause instanceof BuildError);
+        assert.equal(cause.code, 'usage_limit_hold');
+        assert.equal(cause.status, 429);
+        // The operator is told when work resumes, not merely that it stopped.
+        assert.ok(cause.message.includes(until_));
+        return true;
+      },
+    );
+
+    // Refused, but not failed: it is simply next in line.
+    assert.deepEqual(fleet.queue(), ['add-login']);
+    assert.equal(fleet.session(login.id).status, 'ready');
+    assert.deepEqual(fleet.world.containerStarts, []);
+    assert.equal(fleet.entered.length, 0);
+
+    // And the pump leaves it there for as long as the hold is on.
+    await fleet.builds.pump();
+    assert.deepEqual(fleet.world.containerStarts, []);
+    assert.deepEqual(fleet.queue(), ['add-login']);
+
+    // Once the hold lifts, the queue it was put on is what starts it.
+    hold.clear();
+    await fleet.builds.pump();
+    assert.deepEqual(fleet.building(), ['add-login']);
+    await fleet.finish(login);
+  });
+
   it('never lets two sessions of one repository share a workspace or a branch', () => {
     const world = new World();
     const second = world.addSession('add-billing');
