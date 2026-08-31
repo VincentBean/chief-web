@@ -33,6 +33,23 @@ stored on the session, and a **Retry setup** action. The container of a failed
 setup is removed; the workspace is not, so a retry reuses an existing clone
 instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
 
+## Session states
+
+A session is in exactly one of six states, and the badge on the
+[dashboard](interface.md#dashboard) is that state:
+
+| Status | What it means | What moves it on |
+| --- | --- | --- |
+| `pending` | Being set up, or being planned: there is no PRD chief-web can build yet | **Mark ready**, once `prd.md` parses |
+| `ready` | The PRD is parsed and the stories are in the database | **Start build**, a [scheduled start](scheduling.md#scheduled-starts), or its turn in the [queue](scheduling.md#concurrency-and-the-build-queue) |
+| `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
+| `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires, **Resume now**, or **Stop build** |
+| `failed` | A stage gave up and stored why (see [Failure and recovery](build-loop.md#failure-and-recovery)) | **Retry**, which resumes at the stage that failed |
+| `finished` | Every story is `done` and the pull request is open | Nothing — the session's work is on `origin` |
+
+A queued session is `ready` with a `queued_at` timestamp, not a state of its
+own, so leaving the queue costs nothing.
+
 ## Planning
 
 Each session has a page of its own at `/sessions/<id>`, and while the session is

@@ -92,8 +92,8 @@ Notes that save time:
   clone.
 - **After a host reboot or `docker compose up` following a crash**, startup
   reconciliation compares the database with the daemon: containers whose session
-  is gone are removed, and a `building` session with no container is marked
-  failed at `container_lost`. If Docker is unreachable at boot the server starts
+  is gone are removed, and a `building` or `waiting` session with no container is
+  marked failed at `container_lost`. If Docker is unreachable at boot the server starts
   and changes nothing, on purpose — retry once the daemon is back.
 
 ## The stack itself
@@ -105,5 +105,6 @@ Notes that save time:
 | The login page says *too many failed sign-in attempts* | The throttle on `POST /api/auth/login`: 5 failures per 15 minutes per client. Wait it out — the message says how long — or restart the server, which clears the in-memory counters. Tune it with `LOGIN_ATTEMPT_LIMIT` / `LOGIN_ATTEMPT_WINDOW_MS`. |
 | Every request bounces to `/login` | The cookie is `HttpOnly` and 7 days; changing the password invalidates all of them. |
 | `permission denied … /var/run/docker.sock` in the logs | The host user running compose is not in the `docker` group. |
+| Every session says *Waiting*, nothing runs | Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold): the account is out of usage, so builds are paused for an hour rather than failed. They resume by themselves; **Resume now** on any held session ends the hold early. |
 | Sessions never start, all say *Queued* | The concurrency cap. Raise **Max concurrent building sessions** in Settings; it takes effect at the next free slot with no restart. |
 | Disk filling up | Each session keeps a full clone under the data volume. Delete finished sessions — the branch and PR on GitHub survive it. |

@@ -37,6 +37,23 @@ The dashboard and the session page both show the scheduled time in the visitor's
 own timezone with a `starts in …` countdown, refreshed by the same three-second
 poll as everything else.
 
+## The usage-limit hold
+
+While Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold) is on, the
+scheduler **starts nothing**. A due `scheduled_start_at` is left exactly where
+it is rather than fired and lost: it is simply still due at the first tick after
+the hold lifts, which is the same catch-up the scheduler already does after a
+restart. The queue is not pumped either, so its order is kept rather than spent
+on starts that would only be refused.
+
+What the tick does do during and after a hold is **resume waiting sessions**.
+Every tick asks for the sessions whose `waiting_until` has passed, oldest first,
+and puts them back to building — in the same container, on the same story, with
+the iteration and attempt counters they were paused with. That runs *before* the
+due schedules, because a held session never gave its build slot back and a
+schedule fired first could take one from it. Anything that no longer fits the
+cap goes onto the queue in the order it was resumed in.
+
 ## Concurrency and the build queue
 
 Several sessions build at the same time, each in its **own container, its own

@@ -244,8 +244,8 @@ The rest of the manual lives in [`docs/`](docs/):
 | [Your first session](docs/first-session.md) | one feature end to end: create, plan a PRD, mark ready, build, pull request, merge |
 | [Architecture](docs/architecture.md) | one container per session, the volumes, the Docker socket, the data layer, the runner image |
 | [Repositories](docs/repositories.md) | registering a remote, deploy keys, testing the connection |
-| [Sessions](docs/sessions.md) | what a session is, setup, planning the PRD, marking it ready |
-| [The build loop](docs/build-loop.md) | the Ralph loop, the live log, push and pull request, failure and recovery |
+| [Sessions](docs/sessions.md) | what a session is, setup, planning the PRD, marking it ready, the session states |
+| [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts and the FIFO build queue |
 | [Web interface](docs/interface.md) | the dashboard, browser terminals, the settings page |
 | [Claude authentication](docs/claude-auth.md) | the one-time login and the shared credentials volume |

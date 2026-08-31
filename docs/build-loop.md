@@ -22,7 +22,7 @@ the [FIFO queue](scheduling.md#concurrency-and-the-build-queue). One iteration i
    is done; a HEAD that moved is recorded as that story's commit SHA. Nothing is
    taken on the agent's word.
 
-The loop stops itself in four ways:
+The loop stops itself in five ways:
 
 - **Completion.** Every story `done` hands off to the delivery step below,
   which pushes the branch and opens the pull request.
@@ -51,6 +51,15 @@ The loop stops itself in four ways:
   restarts. An agent that has not gone by the time the loop stops waiting for
   it is reaped, so the session is never made startable again while a previous
   agent is still in its workspace.
+
+Not one of them: **a Claude usage limit.** An iteration refused because the
+account is out of usage has produced neither a status change nor a commit, so it
+looks exactly like a stalled story, and it was cut off part-way, so it looks
+something like an iteration that ran out of time. It is neither. Nothing is
+wrong with the build, nothing would be different if it were tried again
+immediately, and there is nothing for an operator to fix — so the session is
+**paused**, not failed, and the pause costs it neither a retry nor an iteration.
+See [The usage-limit hold](#the-usage-limit-hold).
 
 A **failed** session shows the stored reason at the top of its page, along with
 the **stage** it failed at, and one **Retry** button. See
@@ -85,6 +94,69 @@ Nothing about a run is stored in memory that matters: the statuses are in
 in flight — startup reconciliation marks such a session `failed` at the
 `container_lost` stage, and retrying it starts a fresh container on the very
 same workspace.
+
+## The usage-limit hold
+
+Claude's usage limit is on the **account**, not on a session. When it is
+reached, every agent chief-web could start is refused, and the only useful
+response is to stop asking for a while. That pause is the **hold**, and it is
+one thing for the whole server.
+
+**How a refusal is recognised.** The loop asks `isUsageLimitRefusal(result)`
+(`server/src/limits/detect.ts`) about the agent run before anything else looks
+at it — before the iteration is classified, so a limit can never be read as a
+stall. It is a pure function over the exit code and the output: the refusal
+wordings live in one `USAGE_LIMIT_PATTERNS` array and nowhere else, an agent
+that exited `0` is never a refusal (it did the work, whatever it may have
+quoted along the way), and a timed-out run is never one either — that keeps its
+own handling above. The list is deliberately broad, because the wording is the
+CLI's to change and the two mistakes do not cost the same: a false positive
+wastes an hour of waiting, a false negative fails a session and needs a human.
+
+**The wait is a fixed hour, and it is deliberately not parsed from the
+message.** The refusal usually names a reset time; chief-web ignores it.
+`USAGE_LIMIT_HOLD_MS` is one hour, and that is the whole rule. A timestamp
+scraped out of prose is a timezone bug, a wording change or an off-by-one
+waiting to happen, and being wrong in the optimistic direction means resuming
+straight back into the limit. An hour is simple, always safe, and at worst costs
+some idle time an operator can end with one click.
+
+**The hold is global.** It is a single `claude_limit_until` row in `settings`,
+not a field on the refused session, so:
+
+- the refused session is parked at **waiting**, with `waiting_until` carrying
+  the moment it may resume;
+- every *other* `building` session is unwound the same way — its loop is told to
+  stop, its agent is reaped, and it is parked on the same expiry — because they
+  are all spending the same account;
+- a PR-feedback run is refused up front with `409 usage_limit_hold`, before it
+  costs a container, a checkout or a GitHub call; one refused mid-run arms the
+  hold and parks the builds too;
+- **Start build** during a hold enqueues the session and answers
+  `429 usage_limit_hold`; the
+  [queue](scheduling.md#concurrency-and-the-build-queue) is not pumped while the
+  hold is on, so its order is kept rather than spent;
+- the row is on disk, so a server restarted mid-hold picks the hold back up
+  instead of resuming every session straight into the limit.
+
+**It costs no retry and no iteration.** The refused iteration is given back, the
+story's attempt count is left exactly where it was, and `prd.md` is untouched —
+the story keeps the `in-progress` the loop wrote before the agent ran. A session
+that had already stalled twice is still one attempt away from failing when it
+comes back, not zero. A held session also keeps its **build slot**: it counts
+against the concurrency cap for as long as it waits, so nothing starts into the
+limit in its place and the slot is still there when it resumes.
+
+**Coming back.** The scheduler resumes a waiting session by itself once
+`waiting_until` has passed (see
+[Scheduling](scheduling.md#the-usage-limit-hold)) — same container, same story,
+same counters, so the run continues rather than restarts. **Resume now** on the
+session page ends the hold early: `POST /api/limits/hold/clear` clears the row
+and puts *every* waiting session back to work at once, subject to the cap, with
+the overflow on the queue. `GET /api/limits/hold` answers `{ until }` for
+anything that needs to know whether there is a hold at all. **Stop build** works
+on a held session too, and takes it back to **ready** without waiting the hour
+out.
 
 ## Push and pull request
 
