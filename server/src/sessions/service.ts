@@ -124,6 +124,12 @@ export interface SessionView {
    */
   readonly failureStage: FailureStage | null;
   /**
+   * When a `waiting` session may resume: the expiry of the global hold Claude's
+   * usage limit armed (US-003), or `null` for every session that is not held.
+   * The UI counts down to it, and "Resume now" (US-008) is what ends it early.
+   */
+  readonly waitingUntil: string | null;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -596,6 +602,7 @@ export class SessionService {
       prUrl: session.prUrl,
       lastError: session.lastError,
       failureStage: session.failureStage,
+      waitingUntil: session.waitingUntil,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

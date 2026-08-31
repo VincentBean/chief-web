@@ -320,6 +320,27 @@ export function listDueWaitingSessions(db: Database, now: string = nowIso()): Se
     .map(mapSession);
 }
 
+/**
+ * Every session held by Claude's usage limit, whether or not its hold has run
+ * out (US-008).
+ *
+ * "Resume now" ends the hold before the hour is up, so the sessions it brings
+ * back are exactly the ones {@link listDueWaitingSessions} is still refusing.
+ * They come back in the same order, for the same reason: whatever does not fit
+ * under the concurrency cap goes on the build queue, where the comparison has
+ * to agree.
+ */
+export function listWaitingSessions(db: Database): Session[] {
+  return db
+    .prepare(
+      `SELECT * FROM sessions
+        WHERE status = 'waiting'
+        ORDER BY waiting_until ASC, id ASC`,
+    )
+    .all()
+    .map(mapSession);
+}
+
 /** Ready sessions whose scheduled start time has passed (US-017). */
 export function listDueScheduledSessions(db: Database, now: string = nowIso()): Session[] {
   return db

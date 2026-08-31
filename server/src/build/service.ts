@@ -12,6 +12,7 @@ import {
   listQueuedSessions,
   listSessions,
   listStories,
+  listWaitingSessions,
   nowIso,
   queuePosition,
   type Session,
@@ -363,8 +364,36 @@ export class BuildService {
     // stale one. The hold is what the resume is really waiting for.
     if (this.hold.active()) return 0;
 
+    return this.resume(listDueWaitingSessions(this.db, now));
+  }
+
+  /**
+   * Ends the hold early and resumes every held session (US-008): the operator
+   * has decided the limit was a false positive, or that it reset sooner than
+   * the hour chief-web waits. Returns how many sessions were started.
+   *
+   * Lifting the hold is part of the operation rather than something the caller
+   * does first, because a resume attempted while the hold is still on refuses
+   * itself — and because the sessions being brought back are precisely the ones
+   * whose own `waiting_until` has not been reached, so nothing else would let
+   * them through. Everything after that is the ordinary resume: the cap is
+   * respected and the overflow goes on the queue.
+   */
+  async resumeAllHeld(): Promise<number> {
+    this.hold.clear();
+    const resumed = await this.resume(listWaitingSessions(this.db));
+    // The hold turned `drain()` into a no-op (US-005), so anything queued while
+    // it was on is still sitting there. Held sessions were served their slots
+    // first, above; this hands whatever is left to the queue rather than making
+    // it wait for the next scheduler tick.
+    void this.pump();
+    return resumed;
+  }
+
+  /** The shared body of both resumes: cap first, queue for the overflow. */
+  private async resume(sessions: readonly Session[]): Promise<number> {
     let resumed = 0;
-    for (const session of listDueWaitingSessions(this.db, now)) {
+    for (const session of sessions) {
       if (this.runs.has(session.id) || this.launching.has(session.id)) continue;
 
       if (this.resumeSlots() <= 0) {

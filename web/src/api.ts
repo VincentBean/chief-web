@@ -239,6 +239,11 @@ export interface Session {
   lastError: string | null;
   /** Which step a failed session failed at (US-019); null when it has not. */
   failureStage: FailureStage | null;
+  /**
+   * When a session held by Claude's usage limit may resume (US-003); null when
+   * it is not held.
+   */
+  waitingUntil: string | null;
   /** Story progress for the dashboard; both 0 until the PRD has been parsed. */
   stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */

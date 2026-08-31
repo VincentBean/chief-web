@@ -21,6 +21,7 @@ import type { Config } from './config.js';
 import type { Database } from './db/index.js';
 import { createDeliveryService, type DeliveryService } from './delivery/index.js';
 import { DockerApi } from './docker/index.js';
+import { UsageLimitHold } from './limits/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
@@ -29,6 +30,7 @@ import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
 import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
+import { createLimitsRouter } from './routes/limits.js';
 import { createPlanningRouter } from './routes/planning.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
@@ -223,6 +225,10 @@ export function createApp(
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));
+  // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early
+  // (US-008). The hold is a row on the database, so a second instance reads the
+  // same one the build loop and the scheduler arm.
+  api.use(createLimitsRouter(new UsageLimitHold(db), builds));
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
   // dispatching on the stage the session failed at.
   const retries = createRetryService(db, builds, delivery);
