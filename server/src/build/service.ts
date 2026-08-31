@@ -1018,6 +1018,18 @@ export class BuildService {
   }
 
   /**
+   * Puts every building session on the hold because something that is not a
+   * build hit the limit (US-007).
+   *
+   * A PR-feedback pass runs the same agent against the same account, so its
+   * refusal is the same outage {@link holdOthers} exists for — the only
+   * difference is that there is no refused session of its own to skip.
+   */
+  async holdAll(until: string): Promise<void> {
+    await this.holdOthers(null, until);
+  }
+
+  /**
    * Puts every *other* building session on the same hold (US-005).
    *
    * One account, one limit: the moment one session is refused, the rest are
@@ -1036,7 +1048,7 @@ export class BuildService {
    * under it — is parked too. There is no exec to reap, and leaving it
    * `building` would have it counted as working while nothing is.
    */
-  private async holdOthers(refusedId: string, until: string): Promise<void> {
+  private async holdOthers(refusedId: string | null, until: string): Promise<void> {
     for (const session of listSessions(this.db, { status: 'building' })) {
       if (session.id === refusedId) continue;
       const state = this.runs.get(session.id);

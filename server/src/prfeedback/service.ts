@@ -29,6 +29,7 @@ import {
   type ReviewThread,
 } from '../lib/github-review.js';
 import { logger } from '../lib/logger.js';
+import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
@@ -69,10 +70,15 @@ export class PrFeedbackError extends Error {
   }
 }
 
-/** The slice of the build loop that owns the concurrency cap (US-018). */
+/**
+ * The slice of the build loop a PR run drives: the concurrency cap it shares
+ * (US-018) and the usage-limit hold it can trigger for it (US-007).
+ */
 export interface BuildSlots {
   freeSlots(): number;
   pump(): Promise<void>;
+  /** Parks every building session on `until` after this run was refused. */
+  holdAll(until: string): Promise<void>;
 }
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
@@ -155,6 +161,12 @@ export class PrFeedbackService {
     private readonly github: PrFeedbackGateway,
     private readonly slots: BuildSlots,
     private readonly token: () => string | null,
+    /**
+     * The global usage-limit hold (US-002), shared with the build loop through
+     * the `settings` row behind it: a pass refused here holds the builds too,
+     * and a build refused there keeps this run from starting into the wall.
+     */
+    private readonly hold: UsageLimitHold = new UsageLimitHold(db),
   ) {}
 
   status(runId: string): PrRunView {
@@ -211,6 +223,14 @@ export class PrFeedbackService {
         'no_free_slot',
         'Every build slot is in use. Wait for one to free, or raise the cap on the settings page.',
       );
+    }
+    // Starting a pass on a held account would spend a container, a checkout and
+    // a GitHub read on an agent that is going to be refused the moment it runs
+    // (US-007). A run has no queue to wait in, so it is refused outright — and
+    // named the moment it is worth asking again.
+    const held = this.hold.until();
+    if (held !== null) {
+      throw new PrFeedbackError(409, 'usage_limit_hold', heldStartMessage(prNumber, held));
     }
 
     const feedback = await this.readFeedback(token, repository.githubSlug, prNumber);
@@ -370,6 +390,21 @@ export class PrFeedbackService {
       model: getBuildModel(this.db),
     });
     if (state.stopping) return this.stopped(run.id);
+    if (isUsageLimitRefusal(result)) {
+      // The account is out of usage, not the pull request out of sense: this
+      // pass did nothing wrong and there is nothing to salvage from it (US-007).
+      // The hold goes up for the whole server, because the builds are running
+      // into the same wall a few seconds behind — and then the run is failed,
+      // because a feedback pass is single-shot and comes back through Retry
+      // rather than resuming by itself.
+      const until = this.hold.arm();
+      // The agent is still in the container with the checkout under it and this
+      // exec is being walked away from; the retry checks the same branch out.
+      await this.runner.reap(run.id, container.id);
+      this.fail(run.id, 'agent', heldRunMessage(until));
+      await this.slots.holdAll(until);
+      return;
+    }
     if (result.timedOut) {
       // The timeout closed chief-web's end of the exec and nothing else: the
       // agent is still in the container with the checkout under it, and this
@@ -697,6 +732,35 @@ export class PrFeedbackService {
   }
 }
 
+/**
+ * What a pass is told when it is asked for during a hold (US-007).
+ *
+ * Unlike a build there is no queue to be put in, so the sentence has to carry
+ * the whole answer: why nothing started, and when asking again will work.
+ */
+function heldStartMessage(prNumber: number, until: string): string {
+  return (
+    'Claude’s usage limit was reached, so no agent can be started until ' +
+    `${until}. Nothing was done to #${String(prNumber)}; start the pass again ` +
+    'after that time.'
+  );
+}
+
+/**
+ * What a pass that was refused mid-run leaves behind (US-007).
+ *
+ * It names the limit and the resume time for the same reason the build loop's
+ * does, and says the pass is retryable, because a PR run is single-shot: it is
+ * the operator, not the scheduler, that brings it back.
+ */
+function heldRunMessage(until: string): string {
+  return (
+    'Claude’s usage limit was reached, so this pass was stopped before it ' +
+    `could finish and agent work is held until ${until}. Nothing was pushed ` +
+    'and no comment was answered — retry the run once the hold lifts.'
+  );
+}
+
 /** Resolves when `promise` settles, or after `timeoutMs`, whichever is first. */
 async function settle(promise: Promise<void>, timeoutMs: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
@@ -723,9 +787,18 @@ export function createPrFeedbackService(
   runner: AgentRunner,
   slots: BuildSlots,
   github: PrFeedbackGateway = new GithubPrFeedback(config),
+  hold: UsageLimitHold = new UsageLimitHold(db),
 ): PrFeedbackService {
-  return new PrFeedbackService(config, db, containers, exec, runner, github, slots, () =>
-    getGithubToken(db),
+  return new PrFeedbackService(
+    config,
+    db,
+    containers,
+    exec,
+    runner,
+    github,
+    slots,
+    () => getGithubToken(db),
+    hold,
   );
 }
 
