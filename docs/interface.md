@@ -2,25 +2,87 @@
 
 # Web interface
 
-## Dashboard
+## Layout
 
-The home page (and `/sessions`) is the dashboard: every session, most recently
-updated first, with its repository, status badge, story progress (`4/9 done`),
-feature branch, [scheduled start](scheduling.md#scheduled-starts) with its countdown, its
-place in the [build queue](scheduling.md#concurrency-and-the-build-queue) if it is waiting
-for a slot, and pull request link. Each row links to the
-[session page](sessions.md#planning), and the "New session" form lives here too, so the
-page an operator lands on is the one they work from.
+Every authenticated page shares one frame: a sidebar with the six places the
+app has — **Overview**, **Sessions**, **Pull requests**, **Repositories**,
+**Terminals**, **Settings** — and, at the bottom, the two facts worth having on
+screen at all times: how many build slots are in use, and whether Claude Code is
+signed in. When Claude's usage limit is holding work, a countdown to the end of
+the hold sits there too. Below a laptop-width viewport the sidebar becomes a
+drawer behind the menu button.
+
+Navigation is client-side, so moving between pages does not reload the app.
+Keyboard shortcuts: press `g` then a letter to jump — `o` overview, `s`
+sessions, `p` pull requests, `r` repositories, `t` terminals, `,` settings, `n`
+new session. On the sessions page `n` opens the new-session form and `/`
+focuses the filter box.
+
+Outcomes of actions (a build started, a session deleted, a token validated) are
+shown as a short-lived toast in the corner; anything that has to stay readable
+— git's stderr, PRD parse errors, a failed session's reason — is rendered inline
+on the page that owns it.
+
+## Overview
+
+The home page (`/`) is what the server is doing right now and what it has done
+lately:
+
+- **Get set up** — shown until Claude Code is signed in, a repository with a
+  deploy key exists and a session has been created; each step links to where it
+  is done.
+- **Needs you** — failed sessions (with a one-click **Retry**), sessions held by
+  the usage limit, and sessions that slept through their scheduled start.
+- **Right now** — every session holding or waiting for a build slot, with its
+  story progress, and the slot meter.
+- **Up next** — scheduled starts, soonest first.
+- **Figures** — stories shipped, sessions finished and sessions started over the
+  last fourteen days, each with a bar per day, and the all-time finish rate.
+- **Repositories** — per repository: sessions, active builds, stories done,
+  finished and failed counts.
+- **Recently finished** — with a link to each pull request.
+
+The numbers come from `GET /api/stats`, an aggregate over the database (no
+Docker or GitHub calls), polled every five seconds while the tab is visible.
+`?days=` widens or narrows the activity window (1–90, default 14).
+
+## Sessions
+
+`/sessions` is a table of every session, most recently updated first: status,
+name and repository, story progress, feature branch and target, when it last
+changed, and the actions that make sense for its state (**Retry**, **Retry
+setup**, **Leave queue**, the pull request, **Open**, **Delete**). Rows that need
+attention are marked at their left edge.
+
+Filters live in the URL, so a bookmark to `/sessions?filter=attention` is a
+to-do list: `filter` is one of `active`, `attention`, `planning`, `ready`,
+`finished`; `repository` narrows to one repository; `q` matches the name,
+repository or branch. The sidebar's counts link to the matching filter.
 
 **The list is polled every 3 seconds, not pushed.** A session is moved along by
 the build loop, the planning terminal and the delivery step — all in other
 processes, none of them able to reach a browser tab — and the whole list is a
 handful of database rows plus one `stat` per session, so re-reading it is
-cheaper than a socket per browser would be. A status change is on screen within
-one poll.
+cheaper than a socket per browser would be. One poll feeds the sidebar, the
+overview and the list at once; a hidden tab polls nothing.
 
-The status and repository filters are applied in the browser over that same
-list, so filtering never costs a request and never reorders anything.
+**New session** (`/sessions/new`) is its own page: repository, name, base
+branch, pull request target and an optional scheduled start, with what happens
+next explained beside it. A successful create lands on the session page; a
+failed clone keeps the form and shows git's output under it.
+
+### The session page
+
+`/sessions/<id>` is built around the stage the session is in. Under the header
+— name, status, the one primary action for that state (**Mark ready**, **Start
+build**, **Stop build**, **Resume now**, **Retry**, **Open pull request**) — a
+four-step strip shows Plan → Ready → Build → Pull request, with the step that
+failed marked in red when a session has failed. The main column shows what that
+stage needs: the planning terminal while pending, the loop's iteration and
+attempt counters and the story list while building, the failure reason and what
+a retry will do when failed. The side column carries the facts (branches, pull
+request, timestamps), the PRD's parse state, and the schedule. The agent log
+runs full width underneath and follows live output while the loop runs.
 
 ### Deleting a session
 

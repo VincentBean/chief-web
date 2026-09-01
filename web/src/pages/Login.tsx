@@ -1,6 +1,8 @@
 import { type FormEvent, useState } from 'react';
 
-import { ApiError, login } from './api.ts';
+import { ApiError, login } from '../api.ts';
+import { Mark } from '../AppShell.tsx';
+import { Icon } from '../Icon.tsx';
 
 /**
  * The one unauthenticated page. There are no accounts — a single shared
@@ -11,11 +13,10 @@ export function Login() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const onSubmit = (event: FormEvent) => {
+  const onSubmit = (event: FormEvent): void => {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
-
     login(password)
       .then(() => {
         // A full navigation so the server re-serves the app with the cookie set.
@@ -28,12 +29,15 @@ export function Login() {
   };
 
   return (
-    <main className="shell shell--narrow">
-      <h1>chief-web</h1>
-      <p className="tagline">Enter the shared password to continue.</p>
-
-      <form className="form" onSubmit={onSubmit}>
-        <section className="field">
+    <main className="login">
+      <form className="login__card" onSubmit={onSubmit}>
+        <div className="login__brand">
+          <Mark />
+          <span className="login__name">chief</span>
+        </div>
+        <h1 className="login__title">Sign in</h1>
+        <p className="muted">The shared operator password.</p>
+        <div className="field">
           <label className="field__label" htmlFor="password">
             Password
           </label>
@@ -46,20 +50,19 @@ export function Login() {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             className="field__input"
+            aria-invalid={error !== null}
+            aria-describedby={error === null ? undefined : 'login-error'}
           />
-        </section>
-        <button
-          type="submit"
-          className="button button--primary"
-          disabled={submitting || password === ''}
-        >
-          {submitting ? 'Signing in…' : 'Sign in'}
-        </button>
+        </div>
         {error !== null && (
-          <p className="notice notice--error" role="alert">
+          <p className="login__error" id="login-error" role="alert">
+            <Icon name="x-circle" />
             {error}
           </p>
         )}
+        <button type="submit" className="button button--primary button--block" disabled={submitting || password === ''}>
+          {submitting ? 'Signing in…' : 'Sign in'}
+        </button>
       </form>
     </main>
   );
@@ -67,8 +70,7 @@ export function Login() {
 
 /**
  * The server answers `429` once too many sign-ins have failed, and its message
- * carries the wait — show that rather than a generic failure, so a locked-out
- * operator knows to wait instead of retrying harder.
+ * carries the wait — show that rather than a generic failure.
  */
 function describeFailure(cause: unknown): string {
   if (cause instanceof ApiError && cause.status === 401) return 'Incorrect password.';

@@ -16,7 +16,9 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel,
+  busyLabel = 'Working…',
   busy = false,
+  danger = false,
   onConfirm,
   onCancel,
 }: {
@@ -24,7 +26,10 @@ export function ConfirmDialog({
   readonly title: string;
   readonly children: ReactNode;
   readonly confirmLabel: string;
+  readonly busyLabel?: string;
   readonly busy?: boolean;
+  /** A destructive confirmation is red, so the eye checks before the hand. */
+  readonly danger?: boolean;
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 }) {
@@ -55,8 +60,13 @@ export function ConfirmDialog({
         <button type="button" className="button" onClick={onCancel} disabled={busy} autoFocus>
           Cancel
         </button>
-        <button type="button" className="button button--primary" onClick={onConfirm} disabled={busy}>
-          {busy ? 'Starting…' : confirmLabel}
+        <button
+          type="button"
+          className={danger ? 'button button--danger-solid' : 'button button--primary'}
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          {busy ? busyLabel : confirmLabel}
         </button>
       </div>
     </dialog>

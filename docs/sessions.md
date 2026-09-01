@@ -3,7 +3,7 @@
 # Sessions
 
 A session is one feature: its own container, its own clone, its own branch. The
-[dashboard](interface.md#dashboard) creates one from a repository, a name, a base branch, a PR
+[dashboard](interface.md#sessions) creates one from a repository, a name, a base branch, a PR
 target (`develop` or `main`) and an optional scheduled start. The name is a slug
 (letters, numbers, hyphens, underscores), unique per repository, and becomes both
 the feature branch **`chief/<session-name>`** and the workspace directory.
@@ -36,7 +36,7 @@ instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
 ## Session states
 
 A session is in exactly one of six states, and the badge on the
-[dashboard](interface.md#dashboard) is that state:
+[dashboard](interface.md#sessions) is that state:
 
 | Status | What it means | What moves it on |
 | --- | --- | --- |

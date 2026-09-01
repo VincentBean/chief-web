@@ -39,6 +39,7 @@ import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
+import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
 import {
@@ -228,7 +229,10 @@ export function createApp(
   // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early
   // (US-008). The hold is a row on the database, so a second instance reads the
   // same one the build loop and the scheduler arm.
-  api.use(createLimitsRouter(new UsageLimitHold(db), builds));
+  const hold = new UsageLimitHold(db);
+  api.use(createLimitsRouter(hold, builds));
+  // The overview page's numbers (US-022): aggregates over the database only.
+  api.use(createStatsRouter(db, config, hold));
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
   // dispatching on the stage the session failed at.
   const retries = createRetryService(db, builds, delivery);

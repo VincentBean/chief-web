@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
-import {
-  type BuildLogEvent,
-  type BuildLogHistory,
-  type BuildLogIteration,
-  type BuildLogMessage,
-  buildLogSocketUrl,
-} from './api.ts';
+import { type BuildLogEvent, type BuildLogHistory, type BuildLogIteration, type BuildLogMessage, buildLogSocketUrl } from './api.ts';
+import { Icon } from './Icon.tsx';
 import { localClock } from './schedule.ts';
+import { Badge, Notice, Panel, type Tone } from './ui.tsx';
 
 /** How the pane's own connection is doing, shown next to the title. */
 type Connection = 'connecting' | 'live' | 'reconnecting' | 'closed';
@@ -34,7 +30,7 @@ interface Props {
  *
  * Following is sticky rather than forced: new output scrolls the view only
  * while the reader is at the bottom, so scrolling up to read something is not
- * undone a second later. "Pause" is the same switch, made explicit.
+ * undone a second later.
  */
 export function BuildLog({ sessionId, building }: Props) {
   const [iterations, setIterations] = useState<BuildLogIteration[]>([]);
@@ -42,9 +38,9 @@ export function BuildLog({ sessionId, building }: Props) {
   const [connection, setConnection] = useState<Connection>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [following, setFollowing] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   const viewRef = useRef<HTMLDivElement>(null);
-  // Read inside the scroll handler, which must not be re-created per render.
   const followingRef = useRef(following);
   followingRef.current = following;
 
@@ -57,28 +53,22 @@ export function BuildLog({ sessionId, building }: Props) {
     const connect = (): void => {
       if (disposed) return;
       setConnection(attempt === 0 ? 'connecting' : 'reconnecting');
-
       const ws = new WebSocket(buildLogSocketUrl(sessionId));
       socket = ws;
-
       ws.onopen = () => {
         attempt = 0;
         setError(null);
         setConnection('live');
       };
-
       ws.onmessage = (event: MessageEvent<string>) => {
         const message = JSON.parse(event.data) as BuildLogMessage;
         if (message.type === 'attached') {
-          // Everything that follows is the authoritative history; a reconnect
-          // replays it, and keeping the old copy would show it twice.
           setMeta({ path: message.history.path, truncated: message.history.truncated });
           setIterations(message.history.iterations);
           return;
         }
         setIterations((current) => apply(current, message));
       };
-
       ws.onclose = (event: CloseEvent) => {
         if (disposed || socket !== ws) return;
         setConnection('closed');
@@ -119,73 +109,73 @@ export function BuildLog({ sessionId, building }: Props) {
   const onScroll = useCallback((): void => {
     const view = viewRef.current;
     if (view === null) return;
-    const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight <= STICK_THRESHOLD_PX;
-    setFollowing(atBottom);
+    setFollowing(view.scrollHeight - view.scrollTop - view.clientHeight <= STICK_THRESHOLD_PX);
   }, []);
 
-  const total = iterations.length;
-  const empty = total === 0;
+  const empty = iterations.length === 0;
+  const state = label(connection, building);
 
   return (
-    <section className="card">
-      <div className="card__header">
-        <h2 className="card__title">
-          Agent log{' '}
-          <span className={LOG_BADGE[label(connection, building)]}>
-            {label(connection, building)}
-          </span>
-        </h2>
-        <div className="field__actions">
+    <Panel
+      title="Agent log"
+      icon="terminal"
+      meta={
+        <>
+          <Badge tone={LOG_TONE[state]} pulse={state === 'live'}>
+            {state}
+          </Badge>
+          {!empty && (
+            <span className="panel__meta muted">
+              {iterations.length} {iterations.length === 1 ? 'iteration' : 'iterations'}
+            </span>
+          )}
+        </>
+      }
+      actions={
+        <>
           <button
             type="button"
-            className="button button--quiet"
+            className="button button--small button--quiet"
             onClick={() => {
               const view = viewRef.current;
               if (!following && view !== null) view.scrollTop = view.scrollHeight;
               setFollowing((current) => !current);
             }}
             disabled={empty}
+            aria-pressed={following}
           >
-            {following ? 'Pause scrolling' : 'Resume scrolling'}
+            <Icon name={following ? 'pulse' : 'chevron-down'} />
+            {following ? 'Following' : 'Jump to end'}
           </button>
-        </div>
-      </div>
+          <button type="button" className="button button--small button--quiet" onClick={() => setExpanded((current) => !current)} disabled={empty} aria-pressed={expanded}>
+            {expanded ? 'Shorter' : 'Taller'}
+          </button>
+        </>
+      }
+      className="panel--log"
+    >
+      {error !== null && <Notice kind="error">{error}</Notice>}
 
-      {error !== null && (
-        <p className="notice notice--error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {meta !== null && (
-        <p className="field__hint">
-          Everything the agents print is appended to <code className="mono">{meta.path}</code> in the
-          workspace, so this is a view of a file rather than of a process.
-          {meta.truncated && ' Older iterations have been dropped from this view; the file has them all.'}
-        </p>
-      )}
-
-      <div className="log" ref={viewRef} onScroll={onScroll}>
+      <div className={`log${expanded ? ' log--tall' : ''}`} ref={viewRef} onScroll={onScroll}>
         {empty ? (
-          <p className="log__empty">
-            {building
-              ? 'Waiting for the first output of this iteration…'
-              : 'No agent output yet. It appears here as soon as a build starts.'}
-          </p>
+          <p className="log__empty">{building ? 'Waiting for the first output of this iteration…' : 'No agent output yet. It appears here as soon as a build starts.'}</p>
         ) : (
           iterations.map((iteration, index) => (
             <section className="log__section" key={`${String(index)}-${iteration.startedAt}`}>
               <h3 className="log__heading">
-                Iteration {iteration.iteration}
-                {iteration.storyId === null ? '' : ` · ${iteration.storyId}`}
+                <span className="log__iteration">#{iteration.iteration}</span>
+                {iteration.storyId !== null && <span className="log__story">{iteration.storyId}</span>}
                 <span className="log__meta">
-                  {' '}
                   {localClock(iteration.startedAt)} ·{' '}
-                  {iteration.endedAt === null
-                    ? 'running'
-                    : iteration.exitCode === null
-                      ? 'ended without an exit code'
-                      : `exit ${String(iteration.exitCode)}`}
+                  {iteration.endedAt === null ? (
+                    <span className="text-active">running</span>
+                  ) : iteration.exitCode === null ? (
+                    'ended without an exit code'
+                  ) : iteration.exitCode === 0 ? (
+                    <span className="text-done">exit 0</span>
+                  ) : (
+                    <span className="text-danger">exit {iteration.exitCode}</span>
+                  )}
                 </span>
               </h3>
               <pre className="log__body">{iteration.text}</pre>
@@ -193,7 +183,14 @@ export function BuildLog({ sessionId, building }: Props) {
           ))
         )}
       </div>
-    </section>
+
+      {meta !== null && (
+        <p className="field__hint">
+          A view of <code className="mono">{meta.path}</code> in the workspace, not of a process: it survives reloads and restarts.
+          {meta.truncated && ' Older iterations were dropped from this view; the file has them all.'}
+        </p>
+      )}
+    </Panel>
   );
 }
 
@@ -202,22 +199,9 @@ function apply(current: BuildLogIteration[], message: BuildLogEvent): BuildLogIt
   if (message.type === 'begin') {
     return [
       ...current,
-      {
-        iteration: message.iteration,
-        storyId: message.storyId,
-        startedAt: message.startedAt,
-        endedAt: null,
-        exitCode: null,
-        text: '',
-      },
+      { iteration: message.iteration, storyId: message.storyId, startedAt: message.startedAt, endedAt: null, exitCode: null, text: '' },
     ];
   }
-
-  // `append` and `end` always belong to the newest section: the loop runs one
-  // iteration at a time, and the server opens a section before writing to it.
-  // There is one way to have none — a log file the server could not write, so
-  // the replayed history was empty — and dropping the output would be worse
-  // than showing it under a section with no header of its own.
   const last = current[current.length - 1] ?? {
     iteration: 0,
     storyId: null,
@@ -227,30 +211,22 @@ function apply(current: BuildLogIteration[], message: BuildLogEvent): BuildLogIt
     text: '',
   };
   const head = current.slice(0, -1);
-
   return message.type === 'append'
     ? [...head, { ...last, text: last.text + message.text }]
     : [...head, { ...last, endedAt: message.endedAt, exitCode: message.exitCode }];
 }
 
-/**
- * The log's own state, which is not the session's: `live` means bytes are
- * arriving, `idle` means the socket is up but the build has stopped. Both the
- * pill's text and its colour come from this one value, so they cannot drift.
- */
+type LogState = 'live' | 'idle' | 'connecting' | 'reconnecting' | 'disconnected';
+
 function label(connection: Connection, building: boolean): LogState {
   if (connection === 'live') return building ? 'live' : 'idle';
-  // `closed` is the socket's word for it; `disconnected` is what an operator
-  // reading a pill needs to see.
   return connection === 'closed' ? 'disconnected' : connection;
 }
 
-type LogState = 'live' | 'idle' | 'connecting' | 'reconnecting' | 'disconnected';
-
-const LOG_BADGE: Record<LogState, string> = {
-  live: 'badge badge--live',
-  idle: 'badge badge--idle',
-  connecting: 'badge badge--connecting',
-  reconnecting: 'badge badge--reconnecting',
-  disconnected: 'badge badge--disconnected',
+const LOG_TONE: Record<LogState, Tone> = {
+  live: 'active',
+  idle: 'neutral',
+  connecting: 'wait',
+  reconnecting: 'wait',
+  disconnected: 'danger',
 };

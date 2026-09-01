@@ -573,6 +573,52 @@ export async function clearUsageLimitHold(): Promise<{ resumed: number }> {
   return api<{ ok: true; resumed: number }>('/api/limits/hold/clear', { method: 'POST' });
 }
 
+/** The global usage-limit hold, if one is in force (US-002). */
+export async function fetchHold(signal?: AbortSignal): Promise<{ until: string | null }> {
+  return api<{ until: string | null }>('/api/limits/hold', signal ? { signal } : {});
+}
+
+/* -------------------------------------------------------------------- stats */
+
+/** One calendar day (UTC) of activity, from the server's `DayActivity`. */
+export interface DayActivity {
+  /** `YYYY-MM-DD`. */
+  day: string;
+  storiesDone: number;
+  sessionsFinished: number;
+  sessionsCreated: number;
+}
+
+export interface RepositoryStats {
+  repositoryId: string;
+  name: string;
+  sessions: number;
+  storiesDone: number;
+  storiesTotal: number;
+  finished: number;
+  failed: number;
+  active: number;
+}
+
+/** Mirrors the server's `StatsView`: everything the overview page shows. */
+export interface Stats {
+  generatedAt: string;
+  sessions: { total: number; byStatus: Record<Session['status'], number> };
+  stories: { total: number; done: number; inProgress: number; todo: number };
+  prRuns: { total: number; running: number; finished: number; failed: number };
+  pullRequestsOpened: number;
+  builds: { active: number; queued: number; max: number };
+  hold: { until: string | null };
+  /** Oldest first. */
+  activity: DayActivity[];
+  repositories: RepositoryStats[];
+}
+
+/** Polled by the overview and the app shell; aggregates over the database only. */
+export async function fetchStats(signal?: AbortSignal, days = 14): Promise<Stats> {
+  return api<Stats>(`/api/stats?days=${String(days)}`, signal ? { signal } : {});
+}
+
 /**
  * "Leave queue": takes a waiting session back to plain `ready` (US-018).
  * Nothing was spawned for it, so there is nothing to unwind.

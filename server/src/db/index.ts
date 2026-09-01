@@ -4,5 +4,6 @@ export * from './pr-runs.js';
 export * from './repositories.js';
 export * from './sessions.js';
 export * from './settings.js';
+export * from './stats.js';
 export { type Database, nowIso, withTransaction } from './sqlite.js';
 export * from './stories.js';

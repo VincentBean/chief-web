@@ -7,7 +7,7 @@ one pull request at the end. Here it is end to end.
 
 ## 1. Create the session
 
-On the dashboard, open **New session**:
+On the sessions page, open **New session**:
 
 | Field | Notes |
 | --- | --- |

@@ -3,16 +3,9 @@
  */
 @layer components {
   /*
-   * Button.
-   *
-   * Variants are four custom properties rather than four rule sets, because
-   * they have to *compose*: `button button--quiet button--danger` is a real
-   * combination in four places, and it used to work only by accident of
-   * declaration order.
-   *
-   * There was no primary variant at all before this — every action in the app
-   * rendered as the same neutral grey, so nothing on a page said "this is the
-   * thing you came here to do". One `.button--primary` per view.
+   * Button. Variants are custom properties rather than rule sets, because
+   * they have to compose: `button button--quiet button--danger` is a real
+   * combination in several places.
    */
   .button {
     --button-bg: var(--color-surface-control);
@@ -26,39 +19,47 @@
     background-color: var(--button-bg);
     border: 1px solid var(--button-border);
     border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-e1);
+    box-shadow: var(--inset-shadow-hairline), var(--shadow-e1);
     color: var(--button-fg);
     display: inline-flex;
     font: inherit;
+    font-size: var(--text-sm);
     font-weight: 500;
     gap: 0.375rem;
     justify-content: center;
     line-height: 1.25rem;
     min-height: 2rem;
-    padding: 0.375rem 0.875rem;
-    /* A link acting as an action — the "Plan" button on a session card. */
+    padding: 0.3125rem 0.75rem;
     text-decoration: none;
     transition:
       background-color var(--motion-fast) var(--ease-standard),
       border-color var(--motion-fast) var(--ease-standard),
-      color var(--motion-fast) var(--ease-standard);
+      color var(--motion-fast) var(--ease-standard),
+      transform var(--motion-instant) var(--ease-standard);
     white-space: nowrap;
   }
 
-  .button:hover:not(:disabled) {
+  .button .icon {
+    opacity: 0.85;
+  }
+
+  .button:hover:not(:disabled):not([aria-disabled='true']) {
     background-color: var(--button-bg-hover);
     border-color: var(--button-border-hover);
   }
 
   .button:active:not(:disabled) {
     background-color: var(--button-bg-active);
+    transform: translateY(1px);
     transition-duration: var(--motion-instant);
   }
 
-  .button:disabled {
+  .button:disabled,
+  .button[aria-disabled='true'] {
     box-shadow: none;
     cursor: not-allowed;
     opacity: 0.5;
+    pointer-events: none;
   }
 
   .button--primary {
@@ -72,6 +73,10 @@
     font-weight: 600;
   }
 
+  .button--primary .icon {
+    opacity: 1;
+  }
+
   .button--quiet {
     --button-bg: transparent;
     --button-bg-hover: var(--color-surface-overlay);
@@ -81,20 +86,13 @@
     --button-fg: var(--color-fg-muted);
 
     box-shadow: none;
-    font-size: var(--text-sm);
-    min-height: 1.75rem;
-    padding: 0.25rem 0.625rem;
   }
 
   .button--quiet:hover:not(:disabled) {
     --button-fg: var(--color-fg-default);
   }
 
-  /*
-   * Must stay after `--quiet`: both set `--button-fg` at the same specificity,
-   * so the later declaration is what makes a quiet danger button read as
-   * dangerous. Danger is now visible at rest, not only on hover.
-   */
+  /* Must stay after `--quiet`: both set `--button-fg` at the same specificity. */
   .button--danger {
     --button-bg-hover: --alpha(var(--color-status-danger) / 12%);
     --button-bg-active: --alpha(var(--color-status-danger) / 20%);
@@ -102,19 +100,111 @@
     --button-fg: var(--color-status-danger);
   }
 
-  /*
-   * Hit area is keyed to the pointer, not the viewport: a narrow desktop
-   * window does not need 44px targets, and a wide tablet does.
-   */
+  .button--danger-solid {
+    --button-bg: var(--color-red-600);
+    --button-bg-hover: var(--color-red-400);
+    --button-bg-active: var(--color-red-700);
+    --button-border: var(--color-red-400);
+    --button-border-hover: var(--color-red-400);
+    --button-fg: var(--color-fg-on-accent);
+
+    font-weight: 600;
+  }
+
+  .button--small {
+    font-size: var(--text-xs);
+    gap: 0.3125rem;
+    line-height: 1rem;
+    min-height: 1.75rem;
+    padding: 0.25rem 0.625rem;
+  }
+
+  .button--icon {
+    padding-inline: 0.375rem;
+  }
+
+  .button--small.button--icon {
+    padding-inline: 0.3125rem;
+  }
+
+  .button--block {
+    width: 100%;
+  }
+
   @media (pointer: coarse) {
     .button {
-      min-height: 2.75rem;
-      padding-inline: 1rem;
-    }
-
-    .button--quiet {
       min-height: 2.5rem;
     }
+
+    .button--small {
+      min-height: 2.25rem;
+    }
+  }
+
+  /* ----------------------------------------------------------------- forms */
+  .form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .form--tight {
+    gap: 0.75rem;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+
+  .field__row {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  }
+
+  .field__label {
+    color: var(--color-fg-default);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .field__hint {
+    color: var(--color-fg-muted);
+    font-size: var(--text-sm);
+    line-height: 1.25rem;
+    margin: 0;
+  }
+
+  .field__actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .field__pair {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .field__pair > .field__input {
+    flex: 1 1 12rem;
+    width: auto;
+  }
+
+  .field__pair > .field__input--narrow {
+    flex: 0 0 6rem;
+  }
+
+  .field__textarea {
+    font-family: var(--font-mono);
+    font-size: var(--text-code);
+    resize: vertical;
   }
 
   .field__input {
@@ -124,21 +214,22 @@
     box-shadow: var(--shadow-sunken);
     color: var(--color-fg-default);
     font: inherit;
-    min-height: 2.25rem;
-    padding: 0.4375rem 0.75rem;
+    font-size: var(--text-sm);
+    line-height: 1.25rem;
+    min-height: 2.125rem;
+    padding: 0.375rem 0.625rem;
     transition: border-color var(--motion-fast) var(--ease-standard);
     width: 100%;
+  }
+
+  .field__input.mono {
+    font-size: var(--text-code);
   }
 
   .field__input:hover:not(:disabled) {
     border-color: var(--color-line-strong);
   }
 
-  /*
-   * The border shift is a second cue, not the only one — the focus ring in
-   * base.css does the real work. Previously this rule set `outline: none` and
-   * left a 1px hue change as the entire focus indicator.
-   */
   .field__input:focus-visible {
     border-color: var(--color-accent-hover);
     outline-offset: 1px;
@@ -158,31 +249,31 @@
     max-width: 8rem;
   }
 
+  .field__input--inline {
+    width: auto;
+  }
+
   textarea.field__input {
-    min-height: 6rem;
+    min-height: 5rem;
     resize: vertical;
   }
 
   /*
-   * Our own chevron instead of `appearance: auto`. The popup list is still
-   * drawn by the OS, but `color-scheme: dark` in base.css is what makes it
-   * render dark rather than white-on-dark.
-   *
-   * The `%23` in the data URI is an escaped `#`: a background image cannot
-   * read `currentColor` or a custom property, so this one value is the only
-   * colour in the app that has to be written out by hand. It is
-   * --color-fg-muted; change both together.
+   * Our own chevron instead of `appearance: auto`. The `%23` in the data URI
+   * is an escaped `#`: a background image cannot read a custom property, so
+   * this is the one colour written by hand. It is --color-fg-muted.
    */
   select.field__input {
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%238b949e'%3E%3Cpath d='M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z'/%3E%3C/svg%3E");
-    background-position: right 0.625rem center;
+    background-position: right 0.5rem center;
     background-repeat: no-repeat;
     background-size: 0.875rem;
-    padding-right: 2rem;
+    padding-right: 1.75rem;
   }
 
-  .radio {
+  .radio,
+  .checkbox {
     align-items: center;
     color: var(--color-fg-default);
     display: flex;
@@ -190,94 +281,230 @@
     gap: 0.5rem;
   }
 
-  .radio input {
+  .radio input,
+  .checkbox input {
     accent-color: var(--color-accent-solid);
+    height: 1rem;
+    width: 1rem;
   }
 
-  .link {
-    /* Preflight drops the UA underline, so state it deliberately: quiet at
-     * rest, underlined on hover. */
+  /* ---------------------------------------------------------------- search */
+  .search {
+    align-items: center;
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-default);
     border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-sunken);
     color: var(--color-fg-muted);
-    font-size: var(--text-sm);
-    text-decoration: none;
-    transition: color var(--motion-fast) var(--ease-standard);
+    display: inline-flex;
+    gap: 0.5rem;
+    min-height: 2.125rem;
+    padding: 0 0.5rem 0 0.625rem;
+    transition: border-color var(--motion-fast) var(--ease-standard);
+    width: 16rem;
+    max-width: 100%;
   }
 
-  .link:hover {
+  .search:focus-within {
+    border-color: var(--color-accent-hover);
+  }
+
+  .search__input {
+    background: transparent;
+    border: 0;
     color: var(--color-fg-default);
-    text-decoration: underline;
-    text-underline-offset: 0.2em;
+    flex: 1;
+    font: inherit;
+    font-size: var(--text-sm);
+    min-width: 0;
   }
 
-  /* Inside prose a link has to be findable without hovering it — the pull
-   * request URLs in a .meta row, and the links inside field hints. */
-  .meta .link,
-  .field__hint .link {
-    color: var(--color-accent-fg);
-    font-size: inherit;
-    text-decoration: underline;
-    text-underline-offset: 0.2em;
+  .search__input:focus-visible {
+    outline: none;
   }
 
-  .meta .link:hover,
-  .field__hint .link:hover {
-    color: var(--color-accent-fg-hover);
+  .search__input::-webkit-search-cancel-button {
+    appearance: none;
   }
 
-  /* Terminal switcher: a segmented control on a sunken track. The active tab
-   * used to be signalled with a green border, borrowing the colour that means
-   * "done" everywhere else. */
-  .tabs {
+  /* ------------------------------------------------------------- segmented */
+  .segmented {
     background-color: var(--color-surface-sunken);
     border: 1px solid var(--color-line-subtle);
-    border-radius: var(--radius-md);
-    display: flex;
-    gap: 0.25rem;
-    list-style: none;
-    margin: 1.5rem 0 1rem;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    gap: 0.125rem;
+    max-width: 100%;
     overflow-x: auto;
-    padding: 0.25rem;
+    padding: 0.1875rem;
     scrollbar-width: none;
   }
 
-  .tab {
+  .segmented::-webkit-scrollbar {
+    display: none;
+  }
+
+  .segmented__option {
     align-items: center;
-    background-color: transparent;
+    background: transparent;
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-xs);
     color: var(--color-fg-muted);
-    display: flex;
-    font-family: var(--font-mono);
-    font-size: var(--text-code);
-    gap: 0.5rem;
-    min-height: 2rem;
-    padding: 0.375rem 0.75rem;
+    display: inline-flex;
+    font: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    gap: 0.375rem;
+    line-height: 1.25rem;
+    padding: 0.1875rem 0.625rem;
     transition:
       background-color var(--motion-fast) var(--ease-standard),
       color var(--motion-fast) var(--ease-standard);
     white-space: nowrap;
   }
 
-  .tab:hover {
-    background-color: var(--color-surface-overlay);
+  .segmented__option:hover {
     color: var(--color-fg-default);
   }
 
-  .tab--active {
+  .segmented__option--active {
     background-color: var(--color-surface-control);
     border-color: var(--color-line-default);
     box-shadow: var(--shadow-e1);
     color: var(--color-fg-emphasis);
   }
 
-  .tab__meta {
+  .segmented__count {
+    color: var(--color-fg-subtle);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .segmented__option--active .segmented__count {
     color: var(--color-fg-muted);
   }
 
-  @media (pointer: coarse) {
-    .tab {
-      min-height: 2.5rem;
-    }
+  /* ------------------------------------------------------------------ links */
+  .link {
+    border-radius: var(--radius-xs);
+    color: var(--color-accent-fg);
+    text-decoration: none;
+    text-underline-offset: 0.2em;
+    transition: color var(--motion-fast) var(--ease-standard);
+  }
+
+  .link:hover {
+    color: var(--color-accent-fg-hover);
+    text-decoration: underline;
+  }
+
+  .link .icon {
+    margin-left: 0.25rem;
+    vertical-align: -0.15em;
+  }
+
+  .link--strong {
+    color: var(--color-fg-emphasis);
+    font-weight: 600;
+  }
+
+  .link--strong:hover {
+    color: var(--color-accent-fg);
+  }
+
+  .link--button {
+    background: none;
+    border: 0;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+  }
+
+  .link--button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .kbd {
+    background: var(--color-surface-control);
+    border: 1px solid var(--color-line-default);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-xs);
+    color: var(--color-fg-muted);
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1;
+    min-width: 1.25rem;
+    padding: 0.125rem 0.3125rem;
+    text-align: center;
+  }
+
+  /* ------------------------------------------------------------ disclosure */
+  .disclosure__summary {
+    align-items: center;
+    color: var(--color-fg-muted);
+    display: flex;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    gap: 0.375rem;
+    list-style: none;
+    width: fit-content;
+  }
+
+  .disclosure__summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .disclosure__summary .icon {
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+
+  .disclosure[open] .disclosure__summary .icon {
+    transform: rotate(90deg);
+  }
+
+  .disclosure__summary:hover {
+    color: var(--color-fg-default);
+  }
+
+  .disclosure__body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    padding-top: 0.625rem;
+  }
+
+  /* --------------------------------------------------------------- savebar */
+  .savebar {
+    align-items: center;
+    background: var(--color-surface-overlay);
+    border: 1px solid var(--color-line-default);
+    border-radius: var(--radius-md);
+    bottom: 1rem;
+    box-shadow: var(--shadow-e3);
+    display: flex;
+    gap: 0.5rem;
+    opacity: 0;
+    padding: 0.625rem 0.75rem 0.625rem 1rem;
+    pointer-events: none;
+    position: sticky;
+    transform: translateY(0.5rem);
+    transition:
+      opacity var(--motion-slow) var(--ease-out-quart),
+      transform var(--motion-slow) var(--ease-out-quart);
+    z-index: var(--z-sticky);
+  }
+
+  .savebar--visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .savebar__text {
+    color: var(--color-fg-default);
+    flex: 1;
+    font-size: var(--text-sm);
   }
 }

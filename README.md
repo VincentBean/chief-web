@@ -141,10 +141,11 @@ Open <http://localhost:8080>. Every page redirects to `/login` until you are
 signed in; enter the password from step 1. There are no user accounts — the
 password *is* the operator — and the session cookie lasts 7 days.
 
-The home page is the [dashboard](docs/interface.md#dashboard), and it is the hub: links to
-**Repositories**, **Settings**, **Terminals** and **Log out** are in its header,
-and every other page links back to it. It also says what is still missing — no
-repository yet, Claude Code not authenticated — which is steps 4–6.
+The home page is the [overview](docs/interface.md#overview); the sidebar links
+to **Sessions**, **Pull requests**, **Repositories**, **Terminals** and
+**Settings**. Until setup is complete the overview shows a checklist of what is
+still missing — Claude Code not signed in, no repository yet — which is steps
+4–6.
 
 ### 4. Add a GitHub token
 
@@ -247,7 +248,7 @@ The rest of the manual lives in [`docs/`](docs/):
 | [Sessions](docs/sessions.md) | what a session is, setup, planning the PRD, marking it ready, the session states |
 | [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts and the FIFO build queue |
-| [Web interface](docs/interface.md) | the dashboard, browser terminals, the settings page |
+| [Web interface](docs/interface.md) | the layout and shortcuts, the overview, sessions, browser terminals, the settings page |
 | [Claude authentication](docs/claude-auth.md) | the one-time login and the shared credentials volume |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
 | [Troubleshooting](docs/troubleshooting.md) | SSH failures, auth failures, recovering a failed session |

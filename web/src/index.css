@@ -3,8 +3,7 @@
  *
  * Tailwind is used as the engine, not as a utility-first authoring style: it
  * supplies the token system (`@theme`), the breakpoint variants, Preflight and
- * the build. The component vocabulary below stays as ordinary BEM classes so
- * the JSX keeps its interpolated class names (`badge--${status}`) and so the
+ * the build. The component vocabulary stays as ordinary BEM classes so the
  * rules that are load-bearing — the xterm screen box, the sticky log heading —
  * can carry the comments that say why.
  *
@@ -18,10 +17,9 @@
 @import "./styles/theme.css";
 @import "./styles/base.css";
 
-@import "./styles/layout.css";
-@import "./styles/surfaces.css";
+@import "./styles/shell.css";
 @import "./styles/controls.css";
+@import "./styles/surfaces.css";
 @import "./styles/feedback.css";
-@import "./styles/pull-requests.css";
 
 @source not "../dist";
