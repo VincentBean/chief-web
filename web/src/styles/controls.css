@@ -236,6 +236,18 @@
     flex: 0 0 6rem;
   }
 
+  /*
+   * Narrow, the input takes a line of its own and the buttons beside it drop
+   * underneath. Sharing 22rem between a token field and two buttons leaves
+   * the field too short to read a `github_pat_…` in, and wraps only one of
+   * the buttons, which reads as a mistake.
+   */
+  @variant max-md {
+    .field__pair > .field__input {
+      flex: 1 1 100%;
+    }
+  }
+
   .field__textarea {
     font-family: var(--font-mono);
     font-size: var(--text-code);
@@ -321,6 +333,23 @@
     accent-color: var(--color-accent-solid);
     height: 1rem;
     width: 1rem;
+  }
+
+  /*
+   * The same 2.5rem a button gets, for the things you type into and tick.
+   * A 2.125rem input and a 1rem radio are comfortable with a mouse and
+   * marginal with a fingertip; the radio grows by its label, which is the
+   * target anyway since the input is inside the `<label>`.
+   */
+  @media (pointer: coarse) {
+    .field__input {
+      min-height: 2.5rem;
+    }
+
+    .radio,
+    .checkbox {
+      min-height: 2.5rem;
+    }
   }
 
   /* ---------------------------------------------------------------- search */
@@ -523,6 +552,13 @@
     padding-top: 0.625rem;
   }
 
+  /* A summary is a control: "Deploy key" is 1.25rem tall and gets tapped. */
+  @media (pointer: coarse) {
+    .disclosure__summary {
+      min-height: 2.5rem;
+    }
+  }
+
   /* --------------------------------------------------------------- savebar */
   .savebar {
     align-items: center;
@@ -554,5 +590,20 @@
     color: var(--color-fg-default);
     flex: 1;
     font-size: var(--text-sm);
+  }
+
+  /*
+   * On a phone the bar is two buttons. "You have unsaved changes." takes
+   * three lines of a 22rem overlay to say what a lit-up Save changes says on
+   * its own, and the taller the bar the more of the form it covers.
+   */
+  @variant max-md {
+    .savebar__text {
+      display: none;
+    }
+
+    .savebar > .button {
+      flex: 1 1 auto;
+    }
   }
 }

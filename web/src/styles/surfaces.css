@@ -557,6 +557,30 @@
     color: var(--color-fg-subtle);
   }
 
+  /*
+   * Narrow, one fact per line. Wrapped, a slug and a branch land on the same
+   * line while the SSH URL below them takes three of its own, and nothing
+   * says which icon belongs to which value. `nowrap` because a column flex
+   * container that is also allowed to wrap lays its children out in columns.
+   * The icon aligns to the first line rather than to the middle of a fact
+   * that wrapped.
+   */
+  @variant max-md {
+    .repo-facts {
+      flex-direction: column;
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+    }
+
+    .repo-fact {
+      align-items: flex-start;
+    }
+
+    .repo-fact .icon {
+      margin-top: 0.25rem;
+    }
+  }
+
   .build-facts {
     display: grid;
     gap: 0.75rem;

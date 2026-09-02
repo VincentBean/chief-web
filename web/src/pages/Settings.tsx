@@ -12,7 +12,7 @@ import {
   stopClaudeLogin,
   validateGithubToken,
 } from '../api.ts';
-import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
+import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
@@ -55,6 +55,10 @@ export function Settings() {
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
   const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
+  // Below `lg` the login terminal is not rendered at all: mounting it would
+  // open a WebSocket onto a PTY too narrow to read and impossible to paste
+  // a code into. The login itself keeps running on the server.
+  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -281,23 +285,34 @@ export function Settings() {
                 {claudeBusy === 'stop' ? 'Closing…' : 'Close login terminal'}
               </button>
             </div>
-            <Suspense fallback={<Skeleton lines={6} />}>
-              <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
-            </Suspense>
-            <ol className="steps steps--plain steps--compact">
-              <li className="step">
-                <span className="step__marker">1</span>
-                <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
-              </li>
-              <li className="step">
-                <span className="step__marker">2</span>
-                <span className="step__body">Approve the request and copy the code Claude gives back.</span>
-              </li>
-              <li className="step">
-                <span className="step__marker">3</span>
-                <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
-              </li>
-            </ol>
+            {desktop ? (
+              <>
+                <Suspense fallback={<Skeleton lines={6} />}>
+                  <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
+                </Suspense>
+                <ol className="steps steps--plain steps--compact">
+                  <li className="step">
+                    <span className="step__marker">1</span>
+                    <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
+                  </li>
+                  <li className="step">
+                    <span className="step__marker">2</span>
+                    <span className="step__body">Approve the request and copy the code Claude gives back.</span>
+                  </li>
+                  <li className="step">
+                    <span className="step__marker">3</span>
+                    <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
+                  </li>
+                </ol>
+              </>
+            ) : (
+              <Notice kind="info">
+                <strong>Finish this sign-in on a desktop.</strong> The login is an interactive terminal: it prints a URL to
+                open and waits for the code you get back, which needs a keyboard and a wider screen. The terminal is already
+                running on the server, so opening this page on a desktop picks it up where it is — or close it here and start
+                again there.
+              </Notice>
+            )}
           </div>
         )}
       </Panel>
