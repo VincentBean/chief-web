@@ -18,6 +18,7 @@ import {
   listSessions,
   openDatabase,
   type Repository,
+  updateSession,
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
@@ -178,8 +179,47 @@ describe('sessions api', () => {
     assert.equal(body.session.prTargetBranch, 'develop');
     assert.equal(body.session.repositoryName, 'demo');
     assert.equal(body.session.lastError, null);
+    assert.equal(body.session.codeReview, false);
     assert.deepEqual(started, [body.session.id]);
     assert.deepEqual(removed, []);
+  });
+
+  it('accepts the code review flag on create and toggles it afterwards', async () => {
+    const { body } = await create({ codeReview: true });
+    assert.equal(body.session.codeReview, true);
+
+    const off = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: false,
+    });
+    assert.equal(off.status, 200);
+    assert.equal(((await off.json()) as SessionView).codeReview, false);
+
+    // It is on every session payload, not just the one the write answered with.
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).codeReview, false);
+  });
+
+  it('rejects a code review flag that is not a boolean', async () => {
+    const { body } = await create();
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: 'yes',
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as ErrorBody).error, 'invalid_code_review');
+  });
+
+  it('refuses to change the code review flag of a finished session', async () => {
+    const { body } = await create();
+    updateSession(db, body.session.id, { status: 'finished' });
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: true,
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_finished');
   });
 
   it('stores a scheduled start as UTC', async () => {

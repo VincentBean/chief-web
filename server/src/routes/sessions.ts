@@ -104,6 +104,21 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // Turns the automatic code review on or off (US-003). Refused once the
+  // session is finished, when the pull request has already been delivered.
+  router.put('/sessions/:id/code-review', (req, res) => {
+    const parsed = parseCodeReview(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setCodeReview(req.params.id, parsed.codeReview));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   // "Back to planning": the same transition in reverse.
   router.delete('/sessions/:id/ready', (req, res) => {
     try {
@@ -222,6 +237,33 @@ function parseSchedule(body: unknown): { scheduledStartAt: string | null } | Inv
   return typeof parsed === 'object' ? parsed : { scheduledStartAt: parsed };
 }
 
+/** The body of `PUT /sessions/:id/code-review`. */
+function parseCodeReview(body: unknown): { codeReview: boolean } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return badBody;
+  const input = body as Record<string, unknown>;
+
+  const codeReview = optionalBoolean(input, 'codeReview');
+  if (typeof codeReview === 'object') return codeReview;
+  if (codeReview === undefined) {
+    return { error: 'invalid_code_review', message: 'codeReview is required.' };
+  }
+  return { codeReview };
+}
+
+/** `undefined` when the field is absent; an `Invalid` when it is not a boolean. */
+function optionalBoolean(
+  input: Record<string, unknown>,
+  field: string,
+): boolean | undefined | Invalid {
+  if (!(field in input) || input[field] === undefined || input[field] === null) return undefined;
+  const raw = input[field];
+  if (typeof raw !== 'boolean') {
+    return { error: 'invalid_code_review', message: `${field} must be a boolean.` };
+  }
+  return raw;
+}
+
 function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -268,11 +310,15 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     scheduledStartAt = parsed;
   }
 
+  const codeReview = optionalBoolean(input, 'codeReview');
+  if (typeof codeReview === 'object') return codeReview;
+
   return {
     repositoryId,
     name,
     prTargetBranch: target ?? 'main',
     scheduledStartAt,
+    codeReview: codeReview ?? false,
     ...(baseBranch === undefined ? {} : { baseBranch }),
   };
 }

@@ -254,6 +254,25 @@ describe('sessions', () => {
     assert.equal(session.containerId, null);
     assert.equal(session.prUrl, null);
     assert.equal(session.lastError, null);
+    assert.equal(session.codeReview, false);
+  });
+
+  it('round-trips the code review flag', () => {
+    const asked = createSession(db, {
+      repositoryId: repository.id,
+      name: 'reviewed',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+      codeReview: true,
+    });
+
+    assert.equal(asked.codeReview, true);
+    // Read back from SQLite, where the flag is a 0/1 integer, not a boolean.
+    assert.equal(getSession(db, asked.id)?.codeReview, true);
+
+    assert.equal(updateSession(db, asked.id, { codeReview: false })?.codeReview, false);
+    assert.equal(getSession(db, asked.id)?.codeReview, false);
+    assert.equal(updateSession(db, asked.id, { codeReview: true })?.codeReview, true);
   });
 
   it('rejects names that are not slugs', () => {

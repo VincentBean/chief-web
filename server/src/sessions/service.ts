@@ -130,6 +130,12 @@ export interface SessionView {
    */
   readonly waitingUntil: string | null;
   /**
+   * Whether the pull request this session opens should be reviewed
+   * automatically (US-003). Editable up to the moment the session finishes,
+   * which is when the review would have been requested.
+   */
+  readonly codeReview: boolean;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -178,6 +184,8 @@ export interface CreateSessionRequest {
   readonly prTargetBranch: PrTargetBranch;
   /** UTC ISO-8601, already converted from the browser's timezone. */
   readonly scheduledStartAt?: string | null;
+  /** Defaults to false. */
+  readonly codeReview?: boolean;
 }
 
 export class SessionService {
@@ -251,6 +259,7 @@ export class SessionService {
         featureBranch: featureBranchFor(request.name),
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
+        codeReview: request.codeReview ?? false,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -406,6 +415,32 @@ export class SessionService {
       session: session.id,
       name: session.name,
       scheduledStartAt,
+    });
+    return this.toView(updated);
+  }
+
+  /**
+   * Turns the automatic code review on or off (US-003).
+   *
+   * Allowed for every status but `finished`: that is the one that means the
+   * pull request has already been opened and delivered, so the moment the flag
+   * decides anything has passed and flipping it would only mislead.
+   */
+  setCodeReview(id: string, codeReview: boolean): SessionView {
+    const session = this.requireSession(id);
+    if (session.status === 'finished') {
+      throw new SessionError(
+        409,
+        'session_finished',
+        `"${session.name}" has finished, so its code review can no longer be changed.`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { codeReview }) ?? session;
+    logger.info('session code review updated', {
+      session: session.id,
+      name: session.name,
+      codeReview,
     });
     return this.toView(updated);
   }
@@ -603,6 +638,7 @@ export class SessionService {
       lastError: session.lastError,
       failureStage: session.failureStage,
       waitingUntil: session.waitingUntil,
+      codeReview: session.codeReview,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

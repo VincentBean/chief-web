@@ -258,6 +258,17 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE queued_at IS NOT NULL;
     `,
   },
+  {
+    id: '0006_session_code_review',
+    sql: `
+      -- Whether this session's pull request should be reviewed automatically
+      -- once it is opened (US-003). Stored as 0/1 because SQLite has no
+      -- boolean; existing sessions default to off, so turning the feature on
+      -- never surprises a session that was planned without it.
+      ALTER TABLE sessions ADD COLUMN code_review INTEGER NOT NULL DEFAULT 0
+        CHECK (code_review IN (0, 1));
+    `,
+  },
 ];
 
 /**

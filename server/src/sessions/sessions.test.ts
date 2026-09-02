@@ -617,6 +617,39 @@ describe('session scheduling', () => {
   });
 });
 
+describe('session code review', () => {
+  it('defaults to off and toggles for every status but finished', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    assert.equal(f.service.get(created)?.codeReview, false);
+    assert.equal(f.service.setCodeReview(created, true).codeReview, true);
+    assert.equal(getSession(f.db, created)?.codeReview, true);
+    assert.equal(f.service.setCodeReview(created, false).codeReview, false);
+
+    // The flag stays editable right up to the moment the session finishes.
+    for (const status of ['ready', 'building', 'waiting', 'failed'] as const) {
+      updateSession(f.db, created, { status });
+      assert.equal(f.service.setCodeReview(created, true).codeReview, true);
+      assert.equal(f.service.setCodeReview(created, false).codeReview, false);
+    }
+  });
+
+  it('refuses to change the flag once the session has finished', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    f.service.setCodeReview(created, true);
+    updateSession(f.db, created, { status: 'finished' });
+
+    assert.throws(
+      () => f.service.setCodeReview(created, false),
+      (error: unknown) =>
+        error instanceof SessionError && error.status === 409 && error.code === 'session_finished',
+    );
+    assert.equal(getSession(f.db, created)?.codeReview, true);
+  });
+});
+
 describe('session deletion', () => {
   it('removes the container, the workspace and the row, and leaves the remote alone', async () => {
     const f = await fixture();

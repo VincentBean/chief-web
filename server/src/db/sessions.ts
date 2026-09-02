@@ -92,6 +92,12 @@ export interface Session {
    * usage-limit hold (US-003) — and null for every other status.
    */
   readonly waitingUntil: string | null;
+  /**
+   * Whether the pull request this session opens should get an automatic code
+   * review (US-003). Stored as 0/1; false for every session created before the
+   * feature existed.
+   */
+  readonly codeReview: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -105,6 +111,8 @@ export interface CreateSessionInput {
   readonly featureBranch?: string;
   readonly status?: SessionStatus;
   readonly scheduledStartAt?: string | null;
+  /** Defaults to false: a session asks for a review only when it says so. */
+  readonly codeReview?: boolean;
 }
 
 export interface UpdateSessionInput {
@@ -120,6 +128,7 @@ export interface UpdateSessionInput {
   readonly lastError?: string | null;
   readonly failureStage?: FailureStage | null;
   readonly waitingUntil?: string | null;
+  readonly codeReview?: boolean;
 }
 
 export interface ListSessionsFilter {
@@ -140,6 +149,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   lastError: 'last_error',
   failureStage: 'failure_stage',
   waitingUntil: 'waiting_until',
+  codeReview: 'code_review',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -152,6 +162,11 @@ function assertValidSessionName(name: string): void {
       `Invalid session name "${name}": use letters, numbers, hyphens and underscores only`,
     );
   }
+}
+
+/** SQLite has no boolean type; flags are stored as 0/1 integers. */
+function sqlBoolean(value: boolean): number {
+  return value ? 1 : 0;
 }
 
 export function featureBranchFor(name: string): string {
@@ -183,6 +198,7 @@ export function mapSession(row: Row): Session {
     lastError: nullableText(row, 'last_error'),
     failureStage: failureStageOf(row),
     waitingUntil: nullableText(row, 'waiting_until'),
+    codeReview: integer(row, 'code_review') === 1,
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -207,6 +223,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     lastError: null,
     failureStage: null,
     waitingUntil: null,
+    codeReview: input.codeReview ?? false,
     createdAt: now,
     updatedAt: now,
   };
@@ -215,8 +232,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
-        waiting_until, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, code_review, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -232,6 +249,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.lastError,
     session.failureStage,
     session.waitingUntil,
+    sqlBoolean(session.codeReview),
     session.createdAt,
     session.updatedAt,
   );
@@ -390,13 +408,13 @@ export function updateSession(
   if (patch.name !== undefined) assertValidSessionName(patch.name);
 
   const assignments: string[] = [];
-  const params: Record<string, string | null> = { ':id': id, ':updated_at': nowIso() };
+  const params: Record<string, string | number | null> = { ':id': id, ':updated_at': nowIso() };
 
   for (const [field, column] of Object.entries(COLUMNS)) {
     const value = patch[field as keyof UpdateSessionInput];
     if (value === undefined) continue;
     assignments.push(`${column} = :${column}`);
-    params[`:${column}`] = value;
+    params[`:${column}`] = typeof value === 'boolean' ? sqlBoolean(value) : value;
   }
 
   if (assignments.length > 0) {
