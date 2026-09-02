@@ -150,13 +150,13 @@ describe('delivery api', () => {
     assert.equal(response.status, 401);
   });
 
-  it('pushes, opens the pull request and finishes the session', async () => {
+  it('pushes, opens the pull request and leaves the session pr-open', async () => {
     const response = await retry();
     assert.equal(response.status, 200);
 
     const body = (await response.json()) as DeliveryBody;
     assert.equal(body.ok, true);
-    assert.equal(body.status, 'finished');
+    assert.equal(body.status, 'pr-open');
     assert.equal(body.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(body.adopted, false);
     assert.deepEqual(posted, [
@@ -169,7 +169,7 @@ describe('delivery api', () => {
     ]);
 
     const stored = getSession(db, session.id);
-    assert.equal(stored?.status, 'finished');
+    assert.equal(stored?.status, 'pr-open');
     assert.equal(stored?.prUrl, 'https://github.com/acme/demo/pull/7');
   });
 
@@ -231,7 +231,7 @@ describe('delivery api', () => {
     assert.equal(body.prUrl, 'https://github.com/acme/demo/pull/7');
 
     const stored = getSession(db, session.id);
-    assert.equal(stored?.status, 'finished');
+    assert.equal(stored?.status, 'pr-open');
     assert.equal(stored?.failureStage, null);
   });
 

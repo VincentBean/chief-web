@@ -357,7 +357,7 @@ class FakeOpener implements PullRequestOpener {
 }
 
 describe('delivering a finished session', () => {
-  it('pushes, opens the pull request, and finishes the session', async () => {
+  it('pushes, opens the pull request, and leaves the session pr-open', async () => {
     const world = new World({ publicUrl: 'https://chief.example.com/' });
     const opener = new FakeOpener();
     const delivery = createDeliveryService(
@@ -382,10 +382,12 @@ describe('delivering a finished session', () => {
     assert.match(call?.input.body ?? '', /\*\*US-001\*\* — US-001/);
     assert.match(call?.input.body ?? '', /https:\/\/chief\.example\.com\/sessions\//);
 
-    const finished = world.reload();
-    assert.equal(finished.status, 'finished');
-    assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
-    assert.equal(finished.lastError, null);
+    // The pull request is open, so the session is `pr-open` and not `finished`
+    // (US-002); only the sync moves it on from there.
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.lastError, null);
   });
 
   it('adopts an existing pull request without failing', async () => {
@@ -401,7 +403,7 @@ describe('delivering a finished session', () => {
 
     await delivery.complete(world.session, world.stories());
     assert.equal(world.reload().prUrl, 'https://github.com/acme/demo/pull/4');
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 
   it('fails the session with git stderr when the push is rejected', async () => {
@@ -551,8 +553,34 @@ describe('retrying a delivery', () => {
     assert.equal(result.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(world.execs.length, 1, 'exactly one command ran: the push');
     assert.equal(opener.calls.length, 1);
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
     assert.equal(world.reload().lastError, null);
+  });
+
+  it('ends a retried pull_request failure in pr-open, not finished', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.failure = new GithubApiError('github_rejected', 'GitHub is having a moment', 500);
+    const delivery = serviceFor(world, opener);
+
+    await delivery.complete(world.session, world.stories());
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+
+    // The same session, retried once GitHub answers: the delivery that opens
+    // the pull request lands in `pr-open` whether it is the first attempt or
+    // the fifth.
+    opener.failure = null;
+    const result = await delivery.retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 'pr-open');
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.failureStage, null);
+    assert.equal(delivered.lastError, null);
   });
 
   it('reports a failure as an answer, not as a failed request', async () => {

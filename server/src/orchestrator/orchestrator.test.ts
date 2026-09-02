@@ -264,8 +264,10 @@ describe('reconciliation plan', () => {
     assert.match(plan.remove[0]?.reason ?? '', /no longer exists/);
   });
 
-  it('removes containers of finished and failed sessions', () => {
-    for (const status of ['finished', 'failed'] as const) {
+  it('removes containers of delivered and failed sessions', () => {
+    // Every state a session's life can end in, including the two a delivered
+    // session now passes through (US-002).
+    for (const status of ['finished', 'pr-open', 'merged', 'failed'] as const) {
       const plan = planReconciliation([session({ status })], [container({})]);
       assert.equal(plan.remove.length, 1, status);
       assert.match(plan.remove[0]?.reason ?? '', new RegExp(status));
