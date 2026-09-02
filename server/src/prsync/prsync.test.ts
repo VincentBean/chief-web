@@ -16,7 +16,12 @@ import {
 } from '../db/index.js';
 import { GithubApiError, type PullRequestState } from '../lib/github.js';
 import { setSetting } from '../db/settings.js';
-import { PrSyncService, pullRequestNumberOf, type PullRequestStateGateway } from './service.js';
+import {
+  PrSyncService,
+  pullRequestNumberOf,
+  type PullRequestStateGateway,
+  type SessionContainerCleanup,
+} from './service.js';
 
 const databases: Database[] = [];
 
@@ -55,13 +60,35 @@ class FakeGithub implements PullRequestStateGateway {
   }
 }
 
+/**
+ * Stands in for the orchestrator (US-009). It deliberately does *not* clear
+ * `container_id` itself, the way the real one happens to, so the tests prove
+ * the sync states that outcome rather than inheriting it.
+ */
+class FakeContainers implements SessionContainerCleanup {
+  readonly removed: string[] = [];
+  /** Thrown instead of removing, to play a daemon that is down or busy. */
+  failure: Error | null = null;
+
+  remove(sessionId: string): Promise<void> {
+    this.removed.push(sessionId);
+    return this.failure === null ? Promise.resolve() : Promise.reject(this.failure);
+  }
+}
+
 interface World {
   readonly config: Config;
   readonly db: Database;
   readonly github: FakeGithub;
+  readonly containers: FakeContainers;
   readonly sync: PrSyncService;
   readonly repositoryId: string;
-  session(input: { name: string; status?: SessionStatus; prUrl?: string | null }): Session;
+  session(input: {
+    name: string;
+    status?: SessionStatus;
+    prUrl?: string | null;
+    containerId?: string;
+  }): Session;
 }
 
 function world(options: { token?: string | null; slug?: string } = {}): World {
@@ -77,11 +104,13 @@ function world(options: { token?: string | null; slug?: string } = {}): World {
   if (options.token !== null) setSetting(db, 'github_token', options.token ?? 'ghp_token');
 
   const github = new FakeGithub();
+  const containers = new FakeContainers();
   return {
     config,
     db,
     github,
-    sync: new PrSyncService(config, db, github),
+    containers,
+    sync: new PrSyncService(config, db, containers, github),
     repositoryId: repository.id,
     session: (input) => {
       const created = createSession(db, {
@@ -96,7 +125,11 @@ function world(options: { token?: string | null; slug?: string } = {}): World {
           ? `https://github.com/acme/demo/pull/${String(created.name.length)}`
           : input.prUrl;
       return (
-        updateSession(db, created.id, { status: input.status ?? 'pr-open', prUrl }) ?? created
+        updateSession(db, created.id, {
+          status: input.status ?? 'pr-open',
+          prUrl,
+          ...(input.containerId === undefined ? {} : { containerId: input.containerId }),
+        }) ?? created
       );
     },
   };
@@ -299,6 +332,104 @@ describe('the configurable sync interval', () => {
     sync.stop();
     await advance(t, 60_000 * 10);
     assert.equal(github.calls.length, 4);
+  });
+});
+
+describe('cleaning up the container of a merged session (US-005)', () => {
+  it('removes the container when a session becomes merged and clears the id', async () => {
+    const { db, github, containers, sync, session } = world();
+    const shipped = session({
+      name: 'shipped',
+      prUrl: 'https://github.com/acme/demo/pull/7',
+      containerId: 'container-7',
+    });
+    github.merged('acme/demo', 7);
+
+    assert.equal(await sync.tick(), 1);
+
+    const row = getSession(db, shipped.id);
+    assert.equal(row?.status, 'merged');
+    assert.equal(row?.containerId, null);
+    assert.deepEqual(containers.removed, [shipped.id]);
+  });
+
+  it('keeps the container id when the removal fails, and still merges the session', async () => {
+    const { db, github, containers, sync, session } = world();
+    const shipped = session({
+      name: 'shipped',
+      prUrl: 'https://github.com/acme/demo/pull/8',
+      containerId: 'container-8',
+    });
+    github.merged('acme/demo', 8);
+    containers.failure = new Error('the docker daemon is not responding');
+
+    assert.equal(await sync.tick(), 1);
+
+    // GitHub's state is the truth: the merge is recorded whatever Docker did.
+    const row = getSession(db, shipped.id);
+    assert.equal(row?.status, 'merged');
+    // Kept on purpose — it is both honest (the container may well still be
+    // there) and the record of what is still owed.
+    assert.equal(row?.containerId, 'container-8');
+    assert.equal(row?.lastError, null);
+    assert.deepEqual(containers.removed, [shipped.id]);
+  });
+
+  it('retries the removal on a later tick, without asking GitHub again', async () => {
+    const { db, github, containers, sync, session } = world();
+    const shipped = session({
+      name: 'shipped',
+      prUrl: 'https://github.com/acme/demo/pull/9',
+      containerId: 'container-9',
+    });
+    github.merged('acme/demo', 9);
+    containers.failure = new Error('the docker daemon is not responding');
+
+    await sync.tick();
+    assert.equal(getSession(db, shipped.id)?.containerId, 'container-9');
+
+    containers.failure = null;
+    assert.equal(await sync.tick(), 0, 'nothing changes status the second time round');
+
+    assert.equal(getSession(db, shipped.id)?.containerId, null);
+    assert.deepEqual(containers.removed, [shipped.id, shipped.id]);
+    // The pull request was read once, on the tick that did the merging.
+    assert.equal(github.calls.length, 1);
+  });
+
+  it('asks Docker for nothing when a merged session has no container', async () => {
+    const { db, github, containers, sync, session } = world();
+    const shipped = session({ name: 'shipped', prUrl: 'https://github.com/acme/demo/pull/10' });
+    session({ name: 'long-done', status: 'merged', prUrl: 'https://github.com/acme/demo/pull/1' });
+    github.merged('acme/demo', 10);
+
+    assert.equal(await sync.tick(), 1);
+
+    assert.equal(getSession(db, shipped.id)?.status, 'merged');
+    assert.deepEqual(containers.removed, []);
+  });
+
+  it('leaves the container of a session whose pull request is open or closed unmerged', async () => {
+    const { db, github, containers, sync, session } = world();
+    const open = session({
+      name: 'in-review',
+      prUrl: 'https://github.com/acme/demo/pull/3',
+      containerId: 'container-3',
+    });
+    const abandoned = session({
+      name: 'dropped',
+      prUrl: 'https://github.com/acme/demo/pull/4',
+      containerId: 'container-4',
+    });
+    github.closed('acme/demo', 4);
+
+    assert.equal(await sync.tick(), 1);
+
+    // Neither is merged, so both keep an environment something may still use.
+    assert.equal(getSession(db, open.id)?.containerId, 'container-3');
+    assert.equal(getSession(db, abandoned.id)?.status, 'finished');
+    assert.equal(getSession(db, abandoned.id)?.containerId, 'container-4');
+    assert.deepEqual(containers.removed, []);
   });
 });
 

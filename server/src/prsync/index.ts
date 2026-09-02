@@ -5,4 +5,5 @@ export {
   pullRequestNumberOf,
   type PullRequestStateGateway,
   type PullRequestSync,
+  type SessionContainerCleanup,
 } from './service.js';

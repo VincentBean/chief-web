@@ -210,7 +210,9 @@ export function createApp(
   // happens overnight has to be noticed whether or not anyone opens the UI,
   // and the first tick is the catch-up on everything that was merged while the
   // stack was down.
-  const prSync = deps.prSync ?? createPrSync(config, db);
+  // The orchestrator comes along so a merge can throw the session's container
+  // away (US-005); merged work never needs one again.
+  const prSync = deps.prSync ?? createPrSync(config, db, orchestrator);
   prSync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of

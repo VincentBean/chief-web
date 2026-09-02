@@ -42,6 +42,14 @@ import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
  * The interval is the operator's dial on that budget (US-004): 15 minutes by
  * default, settable per installation on the settings page, and re-read before
  * every wait so a change needs no restart.
+ *
+ * ## Cleanup
+ *
+ * A session that reaches `merged` also loses its container (US-005): the work
+ * is on `origin` and merged, so nothing will ever want that container again,
+ * and leaving it idling costs memory and a disk layer for as long as the
+ * installation runs. The workspace is deliberately *not* touched — that is
+ * only ever the session-deletion path (US-012).
  */
 
 /** The slice of the GitHub API this service needs; tests pass a stub. */
@@ -56,6 +64,15 @@ export class GithubPullRequestStates implements PullRequestStateGateway {
   state(token: string, slug: string, number: number): Promise<PullRequestState> {
     return fetchPullRequestState(token, this.config.githubApiUrl, slug, number);
   }
+}
+
+/**
+ * The slice of the orchestrator (US-009) the merge cleanup drives: remove the
+ * session's container, keep its workspace. `SessionOrchestrator` satisfies it
+ * structurally, and a test passes a stub.
+ */
+export interface SessionContainerCleanup {
+  remove(sessionId: string): Promise<void>;
 }
 
 /** What a sync offers its callers; {@link PrSyncService} is the real one. */
@@ -77,6 +94,7 @@ export class PrSyncService implements PullRequestSync {
   constructor(
     private readonly config: Config,
     private readonly db: Database,
+    private readonly containers: SessionContainerCleanup,
     private readonly github: PullRequestStateGateway,
   ) {}
 
@@ -134,6 +152,12 @@ export class PrSyncService implements PullRequestSync {
   }
 
   private async runTick(): Promise<number> {
+    // Before anything is asked of GitHub: the containers of sessions that are
+    // already `merged` but whose cleanup did not get through last time. This
+    // costs one local query when there is nothing to do, and it is what makes
+    // a failed removal a delay rather than a leak.
+    await this.cleanUpMerged();
+
     let open: Session[];
     try {
       open = listSessions(this.db, { status: 'pr-open' });
@@ -193,12 +217,16 @@ export class PrSyncService implements PullRequestSync {
     }
 
     if (state.merged) {
-      updateSession(this.db, session.id, { status: 'merged' });
+      // The status is written first and stands whatever happens next: GitHub's
+      // state is the truth, and a container that could not be removed is a
+      // resource to reclaim later, not a reason to call the session unmerged.
+      const merged = updateSession(this.db, session.id, { status: 'merged' }) ?? session;
       logger.info('pull request merged', {
         session: session.id,
         name: session.name,
         prUrl: session.prUrl,
       });
+      await this.cleanUp(merged);
       return true;
     }
 
@@ -217,6 +245,62 @@ export class PrSyncService implements PullRequestSync {
     }
 
     return false;
+  }
+
+  /**
+   * Every `merged` session that still owns a container (US-005).
+   *
+   * A removal can fail — the daemon can be down, or busy — and the session is
+   * `merged` by then, so the sync would never look at it again: the `pr-open`
+   * pass only lists sessions it has not moved yet. Sweeping the leftovers at
+   * the top of every tick is the retry, and `container_id` is the record of
+   * what is still owed. Startup reconciliation (US-009) reaps the same
+   * containers, so this only shortens the wait on a running stack.
+   */
+  private async cleanUpMerged(): Promise<void> {
+    let merged: Session[];
+    try {
+      merged = listSessions(this.db, { status: 'merged' });
+    } catch (cause) {
+      logger.warn('could not read the merged sessions to clean up', { error: describe(cause) });
+      return;
+    }
+    for (const session of merged) await this.cleanUp(session);
+  }
+
+  /**
+   * Throws away the build container of a merged session, keeping its workspace
+   * — the clone and the `.chief/` state stay on the data volume, because only
+   * deleting the session is allowed to take those.
+   *
+   * A session with no container is a no-op, so nothing is asked of Docker for
+   * the sessions this has already cleaned. A failure is logged and swallowed
+   * with `container_id` left as it was, which is both the honest record — the
+   * container may well still be there — and what brings the next tick back.
+   */
+  private async cleanUp(session: Session): Promise<void> {
+    if (session.containerId === null) return;
+
+    try {
+      await this.containers.remove(session.id);
+    } catch (cause) {
+      logger.warn('could not remove the container of a merged session', {
+        session: session.id,
+        name: session.name,
+        container: session.containerId,
+        error: describe(cause),
+      });
+      return;
+    }
+
+    // The orchestrator clears the column itself, but the sync states the
+    // outcome it promised rather than relying on how the removal was done.
+    updateSession(this.db, session.id, { containerId: null });
+    logger.info('removed the container of a merged session', {
+      session: session.id,
+      name: session.name,
+      container: session.containerId,
+    });
   }
 
   /**
@@ -274,9 +358,10 @@ export function pullRequestNumberOf(prUrl: string): number | null {
 export function createPrSync(
   config: Config,
   db: Database,
+  containers: SessionContainerCleanup,
   github: PullRequestStateGateway = new GithubPullRequestStates(config),
 ): PrSyncService {
-  return new PrSyncService(config, db, github);
+  return new PrSyncService(config, db, containers, github);
 }
 
 function describe(cause: unknown): string {
