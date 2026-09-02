@@ -1268,4 +1268,82 @@
     margin: 0;
     overflow-wrap: anywhere;
   }
+
+  /*
+   * Narrow, a pull request is read one thing at a time. The title and its meta
+   * line take the width; the actions drop underneath into a strip of their own
+   * rather than squeezing the title into a column of broken words. The feedback
+   * that opens below gives up the indent it borrows from the icon column, so a
+   * review comment has the whole screen to itself.
+   */
+  @variant max-md {
+    /*
+     * .row wraps below this width, which a column flex container reads as
+     * permission to lay its children out in several horizontal lines: an
+     * expanded feedback panel would sit beside the row rather than under it,
+     * and take the page width with it.
+     */
+    .pr__row {
+      flex-wrap: nowrap;
+    }
+
+    .pr__row > .row__line {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .pr__row > .row__line > .row__main {
+      flex: 1 1 12rem;
+    }
+
+    .pr__row > .row__line > .row__actions {
+      flex: 1 0 100%;
+      justify-content: flex-start;
+      padding-left: 1.75rem;
+    }
+
+    .pr__row .pr__panel,
+    .pr__row .pr__run {
+      padding-left: 0;
+    }
+
+    /* A file path and an author login are each one unbreakable token; side by
+     * side at this width they push one another off the line. */
+    .thread__head {
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .thread__author {
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    /*
+     * A fenced snippet keeps its shape and scrolls inside its own box, the way
+     * it does on GitHub. Re-wrapping code at 390px throws away the indentation
+     * that is half of what the comment is pointing at, and the scroller is
+     * already there — .output is overflow: auto.
+     */
+    .thread__body .output {
+      overflow-wrap: normal;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* The respond control: two actions that both deserve a fingertip. */
+    .dialog {
+      padding: 1rem 1.125rem 1.25rem;
+    }
+
+    .dialog__title,
+    .dialog__body {
+      overflow-wrap: anywhere;
+    }
+
+    .dialog__actions > .button {
+      flex: 1 1 8rem;
+      justify-content: center;
+    }
+  }
 }
