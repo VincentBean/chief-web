@@ -61,6 +61,19 @@
     text-decoration: none;
   }
 
+  /*
+   * Below `lg` the topbar's brand is the way back to the overview, and it is
+   * only as tall as its own type. The topbar is `display: none` at `lg`, so
+   * this cannot reach a desktop (US-008).
+   */
+  @media (pointer: coarse) {
+    .topbar .brand {
+      align-items: center;
+      display: inline-flex;
+      min-height: 2.5rem;
+    }
+  }
+
   .mark {
     flex: none;
   }
@@ -95,6 +108,26 @@
   .shell--drawer-open .sidebar {
     box-shadow: var(--shadow-e4);
     transform: none;
+  }
+
+  /*
+   * With the drawer open, the sidebar (fixed, `--z-drawer`) covers the
+   * top-left corner of the topbar — including the button that closes it.
+   * Tapping the X landed on the drawer's own brand and navigated to the
+   * overview instead of closing the menu (US-008). The topbar goes above the
+   * drawer, and the drawer's brand — a second copy of the one the topbar
+   * already shows — keeps its space so the nav clears the bar, without being
+   * drawn or focusable. Both are capped at `max-lg`: at `lg` the topbar is
+   * `display: none` and the sidebar is the page's own column.
+   */
+  @variant max-lg {
+    .shell--drawer-open .topbar {
+      z-index: calc(var(--z-drawer) + 1);
+    }
+
+    .sidebar__brand {
+      visibility: hidden;
+    }
   }
 
   .scrim {
@@ -145,6 +178,19 @@
       background-color var(--motion-fast) var(--ease-standard),
       color var(--motion-fast) var(--ease-standard);
     width: 100%;
+  }
+
+  /*
+   * In the drawer every nav entry is a tap target, and 1.9rem of one. Capped
+   * at `max-lg` so the desktop sidebar — which is never reached by touch
+   * without the drawer — keeps its density (US-008).
+   */
+  @variant max-lg {
+    @media (pointer: coarse) {
+      .nav__item {
+        min-height: 2.5rem;
+      }
+    }
   }
 
   .nav__item .icon {
@@ -328,6 +374,16 @@
     margin-bottom: 0.25rem;
     text-decoration: none;
     width: fit-content;
+  }
+
+  /*
+   * "← Sessions" is the only way out of a detail page on a phone, and at
+   * 1.5rem tall it asked for a precise tap (US-008).
+   */
+  @media (pointer: coarse) {
+    .page__back {
+      min-height: 2.5rem;
+    }
   }
 
   .page__back:hover {

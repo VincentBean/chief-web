@@ -142,11 +142,17 @@
   }
 
   /*
-   * Below `md` the page is a stack of cards and rows, so "small" is only
+   * Below `lg` the page is a stack of cards and rows, so "small" is only
    * about type size — there is width to spare and no reason to hand a
    * fingertip anything under the 2.5rem a coarse pointer wants.
+   *
+   * `lg` rather than `md` because that is where the shell stops being a
+   * desktop: down there the sidebar is a drawer and the topbar's own icon
+   * button is the way into it. A tablet held in portrait is 768px wide, has a
+   * coarse pointer, and was getting 2.25rem buttons and 1.75rem-wide icon
+   * buttons — including that drawer toggle (US-008).
    */
-  @variant max-md {
+  @variant max-lg {
     @media (pointer: coarse) {
       .button--small {
         min-height: 2.5rem;
@@ -387,6 +393,21 @@
     outline: none;
   }
 
+  /*
+   * The whole bar is a `<label>`, so the bar is the tap target — 2.125rem of
+   * it, which is under what a fingertip wants. The input stretches with it so
+   * the caret still lands where the finger did (US-008).
+   */
+  @media (pointer: coarse) {
+    .search {
+      min-height: 2.5rem;
+    }
+
+    .search__input {
+      align-self: stretch;
+    }
+  }
+
   .search__input::-webkit-search-cancel-button {
     appearance: none;
   }
@@ -438,6 +459,19 @@
       background-color var(--motion-fast) var(--ease-standard),
       color var(--motion-fast) var(--ease-standard);
     white-space: nowrap;
+  }
+
+  /*
+   * The filters are the Sessions page's main triage control and each option
+   * was 1.75rem tall. Sized like the buttons beside them, width-unscoped for
+   * the same reason `.button` is (US-008).
+   */
+  @media (pointer: coarse) {
+    .segmented__option {
+      min-height: 2.5rem;
+      min-width: 2.5rem;
+      justify-content: center;
+    }
   }
 
   .segmented__option:hover {
