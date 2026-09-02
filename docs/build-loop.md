@@ -211,6 +211,7 @@ human-readable `last_error`, and the **stage** it failed at.
 | `container_lost` | The session container disappeared mid-build (found by startup reconciliation) | Starts a **fresh container on the same workspace** and resumes |
 | `push` | `git push` of the feature branch | Re-runs the push and the pull request only |
 | `pull_request` | Opening the pull request at GitHub | Same — an open pull request is adopted, never duplicated |
+| `review` | The automatic code review of the pull request | Re-runs the review only — nothing is built or pushed again |
 
 A **clone or setup failure is deliberately not one of these**: it leaves the
 session `pending` with the reason on it and a **Retry setup** action, because

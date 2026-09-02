@@ -31,8 +31,8 @@ export type PrTargetBranch = (typeof PR_TARGET_BRANCHES)[number];
  * Every path to `failed` records one of these next to the human-readable
  * `last_error`, because the stage is what decides how a retry resumes: an
  * `agent`, `prd` or `container_lost` failure is retried by starting the loop
- * again at the first story that is not done, while `push` and `pull_request`
- * re-run only the delivery of work that is already committed.
+ * again at the first story that is not done, while `push`, `pull_request`
+ * and `review` re-run only the delivery of work that is already committed.
  *
  * A clone or setup failure is deliberately not in this list: it leaves the
  * session `pending` with a "Retry setup" action (US-010), never `failed`.
@@ -46,6 +46,12 @@ export const FAILURE_STAGES = [
   'push',
   /** Opening the pull request at GitHub. */
   'pull_request',
+  /**
+   * The automatic code review of the pull request (US-006). The branch is
+   * pushed and the pull request is open by the time it runs, so it is a
+   * delivery stage: a retry re-runs the review and nothing else.
+   */
+  'review',
   /** The session's container disappeared while it was building (US-009). */
   'container_lost',
 ] as const;
@@ -62,9 +68,21 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the push';
     case 'pull_request':
       return 'the pull request';
+    case 'review':
+      return 'the code review';
     case 'container_lost':
       return 'the container';
   }
+}
+
+/**
+ * The stages that come after the build (US-006): the work is committed, so a
+ * retry re-runs delivery from the step that failed and never the story loop.
+ */
+export function isDeliveryStage(
+  stage: FailureStage | null,
+): stage is 'push' | 'pull_request' | 'review' {
+  return stage === 'push' || stage === 'pull_request' || stage === 'review';
 }
 
 /** Session names are slugs: letters, numbers, hyphens and underscores. */

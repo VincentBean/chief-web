@@ -7,6 +7,7 @@ import {
   deleteSession,
   type FailureStage,
   failureStageLabel,
+  isDeliveryStage,
   fetchBuild,
   fetchPlanning,
   fetchSession,
@@ -288,8 +289,7 @@ export function Session() {
   const stories = build.stories;
   const done = stories.filter((story) => story.status === 'done').length;
   const complete = stories.length > 0 && done === stories.length;
-  const retryIsDelivery =
-    build.failureStage === 'push' || build.failureStage === 'pull_request' || (build.failureStage === null && complete);
+  const retryIsDelivery = isDeliveryStage(build.failureStage) || (build.failureStage === null && complete);
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -579,11 +579,7 @@ type StageKey = 'plan' | 'ready' | 'build' | 'deliver';
 function Stages({ session, build, prd }: { readonly session: SessionData; readonly build: Build; readonly prd: PrdStatus }) {
   const status = session.status;
   const failedAt: StageKey | null =
-    status !== 'failed'
-      ? null
-      : session.failureStage === 'push' || session.failureStage === 'pull_request'
-        ? 'deliver'
-        : 'build';
+    status !== 'failed' ? null : isDeliveryStage(session.failureStage) ? 'deliver' : 'build';
   const current: StageKey =
     status === 'pending' ? 'plan' : status === 'ready' ? 'ready' : status === 'finished' ? 'deliver' : (failedAt ?? 'build');
   const order: StageKey[] = ['plan', 'ready', 'build', 'deliver'];
@@ -844,11 +840,13 @@ function FailurePanel({
         <pre className="output output--wrap">{error}</pre>
       )}
       <p className="field__hint">
-        {retryIsDelivery
-          ? 'Every story is committed, so nothing is rebuilt: the retry re-runs only the push and the pull request, and adopts an existing pull request for this branch rather than opening a second one.'
-          : stage === 'container_lost'
-            ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on the same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
-            : `Nothing committed is lost. The retry resumes from the PRD: every story already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} ${outstanding === 1 ? 'is' : 'are'} left to run.`}`}
+        {stage === 'review'
+          ? 'Every story is committed and the pull request is open, so nothing is rebuilt and nothing is pushed again: the retry re-runs only the code review.'
+          : retryIsDelivery
+            ? 'Every story is committed, so nothing is rebuilt: the retry re-runs only the push and the pull request, and adopts an existing pull request for this branch rather than opening a second one.'
+            : stage === 'container_lost'
+              ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on the same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
+              : `Nothing committed is lost. The retry resumes from the PRD: every story already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} ${outstanding === 1 ? 'is' : 'are'} left to run.`}`}
       </p>
     </Panel>
   );
