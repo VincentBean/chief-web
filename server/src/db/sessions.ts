@@ -18,7 +18,20 @@ export const SESSION_STATUSES = [
   /** Held by Claude's usage limit: the container and the build slot are kept. */
   'waiting',
   'failed',
+  /** The build ran to the end; terminal for a session that opened no PR. */
   'finished',
+  /**
+   * The build is done and its pull request is open on GitHub, not merged yet
+   * (US-001). `pr_url` is set. The sync leaves the session here until GitHub
+   * reports the PR merged (`merged`) or closed unmerged (back to `finished`).
+   */
+  'pr-open',
+  /**
+   * That pull request was merged on GitHub — terminal, and the one status
+   * nothing transitions out of. The build container is removed on the way in,
+   * because nothing will ever need it again.
+   */
+  'merged',
 ] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 

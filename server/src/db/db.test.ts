@@ -41,6 +41,9 @@ import {
 /** The migration under test in 'widens the session status check'. */
 const WAITING_MIGRATION = '0005_session_waiting_status';
 
+/** The migration under test in 'widens the check to `pr-open`/`merged`'. */
+const PR_STATES_MIGRATION = '0006_session_pr_states';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -150,6 +153,70 @@ describe('migrations', () => {
     }
     assert.ok(deleteSession(db, 's1'));
     assert.equal(listStories(db, 's1').length, 0);
+
+    closeDatabase(db);
+  });
+
+  it('widens the check to `pr-open`/`merged` and backfills delivered sessions', () => {
+    // Another CHECK-widening rebuild (US-001), walked the same way: up to the
+    // migration before it, rows in, then apply it.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === PR_STATES_MIGRATION);
+    assert.ok(index > 0, `${PR_STATES_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-01T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedRepository(db);
+    const at = '2026-09-01T00:00:00.000Z';
+    const insert = db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          pr_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'main', ?, 'main', ?, ?, ?)`,
+    );
+    insert.run('delivered', repository.id, 'delivered', 'finished',
+      'chief/delivered', 'https://github.com/acme/app/pull/7', at, at);
+    insert.run('nopr', repository.id, 'nopr', 'finished', 'chief/nopr', null, at, at);
+    insert.run('busy', repository.id, 'busy', 'building', 'chief/busy', null, at, at);
+    syncStories(db, 'delivered', [{ storyId: 'US-001', title: 'First', priority: 1, status: 'done' }]);
+
+    assert.ok(runMigrations(db).includes(PR_STATES_MIGRATION));
+
+    // Only the finished session that opened a pull request moves.
+    assert.equal(getSession(db, 'delivered')?.status, 'pr-open');
+    assert.equal(getSession(db, 'delivered')?.prUrl, 'https://github.com/acme/app/pull/7');
+    assert.equal(getSession(db, 'nopr')?.status, 'finished');
+    assert.equal(getSession(db, 'busy')?.status, 'building');
+    // The list is ordered by `updated_at`; a backfill must not reshuffle it.
+    assert.equal(getSession(db, 'delivered')?.updatedAt, at);
+    // The stories came across the rebuild, cascade and all.
+    assert.equal(listStories(db, 'delivered').length, 1);
+
+    // The widened constraint takes both new statuses and still refuses the rest.
+    assert.equal(updateSession(db, 'busy', { status: 'pr-open' })?.status, 'pr-open');
+    assert.equal(updateSession(db, 'busy', { status: 'merged' })?.status, 'merged');
+    assert.throws(
+      () => db.prepare('UPDATE sessions SET status = ? WHERE id = ?').run('bogus', 'busy'),
+      /CHECK/i,
+    );
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of ['idx_sessions_repository', 'idx_sessions_status', 'idx_sessions_queued_at']) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
+    assert.ok(deleteSession(db, 'delivered'));
+    assert.equal(listStories(db, 'delivered').length, 0);
 
     closeDatabase(db);
   });
@@ -491,6 +558,43 @@ it('holds a session at `waiting` with the time it may resume', () => {
     assert.equal(resumed?.status, 'building');
     assert.equal(resumed?.waitingUntil, null);
     assert.equal(listSessions(db, { status: 'waiting' }).length, 0);
+  });
+
+  it('round-trips the post-build states `pr-open` and `merged`', () => {
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'delivered',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      status: 'building',
+    });
+
+    // Delivery opens the pull request (US-002) and the session lands here.
+    const open = updateSession(db, session.id, {
+      status: 'pr-open',
+      prUrl: 'https://github.com/acme/app/pull/7',
+      containerId: 'container-abc',
+    });
+    assert.equal(open?.status, 'pr-open');
+    // It reads back the same way a fresh process would see it.
+    assert.equal(getSession(db, session.id)?.status, 'pr-open');
+    assert.equal(getSession(db, session.id)?.prUrl, 'https://github.com/acme/app/pull/7');
+    assert.equal(countSessionsByStatus(db, 'pr-open'), 1);
+    assert.deepEqual(
+      listSessions(db, { status: 'pr-open' }).map((s) => s.id),
+      [session.id],
+    );
+
+    // The sync sees the merge and the container goes with it (US-003, US-005).
+    const merged = updateSession(db, session.id, { status: 'merged', containerId: null });
+    assert.equal(merged?.status, 'merged');
+    assert.equal(merged?.containerId, null);
+    // The pull request URL survives the merge; the UI still links to it.
+    assert.equal(getSession(db, session.id)?.prUrl, 'https://github.com/acme/app/pull/7');
+    assert.equal(getSession(db, session.id)?.status, 'merged');
+    assert.equal(countSessionsByStatus(db, 'merged'), 1);
+    assert.equal(countSessionsByStatus(db, 'pr-open'), 0);
+    assert.equal(listSessions(db, { status: 'pr-open' }).length, 0);
   });
 
   it('deletes a session and cascades to its stories', () => {
