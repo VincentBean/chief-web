@@ -199,6 +199,17 @@ story again. Like session setup, it answers `200 { ok: false, … }` for a remot
 failure and reserves `409` for the wrong state (still building, or a story left
 outstanding).
 
+**A session with code review switched on gets a third step**, after the pull
+request exists: one headless `claude -p` over the diff, and its findings posted
+as a single `COMMENT` review. Only this step is retried — three complete
+attempts (run the agent, post what it found), because an agent that stalled or a
+GitHub call that timed out is worth trying again, and the push and the pull
+request behind it already succeeded. The third failure marks the session
+`failed` at the `review` stage with every attempt's reason on it; the pull
+request's URL stays on the session either way, and **Retry** re-runs the review
+alone, with three fresh attempts. A usage limit stops early: the next attempt
+would hit the same wall.
+
 ## Failure and recovery
 
 Every path that ends in **failed** stores two things on the session: a
