@@ -11,6 +11,7 @@ export {
   getGithubToken,
   getMaxConcurrentSessions,
   getPlanningModel,
+  getReviewModel,
   type GitIdentity,
   type GithubTokenView,
   isAgentModel,
