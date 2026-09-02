@@ -101,6 +101,42 @@ export async function openPullRequest(
   }
 }
 
+/**
+ * The state of one pull request, as GitHub reports it (US-003).
+ *
+ * `merged` is its own flag rather than a third value of `state`: GitHub says
+ * `closed` both for a pull request that was merged and for one that was closed
+ * without merging, and telling those two apart is the whole point of the sync.
+ */
+export interface PullRequestState {
+  readonly number: number;
+  /** `open` or `closed`, verbatim. */
+  readonly state: string;
+  readonly merged: boolean;
+}
+
+/**
+ * `GET /repos/{slug}/pulls/{number}` — one pull request, reduced to whether it
+ * is still open and whether it was merged.
+ */
+export async function fetchPullRequestState(
+  token: string,
+  baseUrl: string,
+  slug: string,
+  number: number,
+): Promise<PullRequestState> {
+  const response = await githubFetch(token, url(baseUrl, `/repos/${slug}/pulls/${String(number)}`), {
+    method: 'GET',
+  });
+  if (!response.ok) throw await failureOf(response);
+
+  const state = toPullRequestState(await response.json().catch(() => null));
+  if (state === null) {
+    throw new GithubApiError('github_error', 'GitHub returned an unexpected pull request body.');
+  }
+  return state;
+}
+
 /** The open pull request for `head` → `base`, or null when there is none. */
 export async function findPullRequest(
   token: string,
@@ -240,6 +276,27 @@ function toPullRequest(value: unknown): PullRequest | null {
     number: body.number,
     url: body.html_url,
     state: typeof body.state === 'string' ? body.state : 'open',
+  };
+}
+
+/**
+ * `merged` is the authoritative field; `merged_at` is only its timestamp and is
+ * accepted as a fallback, because a body that carries one without the other
+ * still says unambiguously that the pull request was merged.
+ */
+function toPullRequestState(value: unknown): PullRequestState | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const body = value as {
+    number?: unknown;
+    state?: unknown;
+    merged?: unknown;
+    merged_at?: unknown;
+  };
+  if (typeof body.number !== 'number') return null;
+  return {
+    number: body.number,
+    state: typeof body.state === 'string' ? body.state : 'open',
+    merged: body.merged === true || typeof body.merged_at === 'string',
   };
 }
 
