@@ -376,6 +376,19 @@
     padding: 0 0.125rem;
   }
 
+  /*
+   * A branch name is one long unbreakable token and the crumbs line is the
+   * only place a page shows two of them, so on a phone it has to break
+   * mid-word or it widens the whole page. Below `md` only: `overflow-wrap:
+   * anywhere` also changes an element's min-content size, which is a thing
+   * the wider layouts measure.
+   */
+  @variant max-md {
+    .crumbs {
+      overflow-wrap: anywhere;
+    }
+  }
+
   /* ----------------------------------------------------------------- grids */
   .grid {
     display: grid;

@@ -151,6 +151,14 @@
       .button--small {
         min-height: 2.5rem;
       }
+
+      /*
+       * An icon-only button is 2.5rem tall and 1.75rem wide, which is a
+       * fingertip's worth of one dimension and not the other. Square it off.
+       */
+      .button--icon {
+        min-width: 2.5rem;
+      }
     }
   }
 

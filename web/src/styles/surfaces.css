@@ -1080,6 +1080,25 @@
     }
   }
 
+  /*
+   * On a phone two stages to a row leave the marker and about eight
+   * characters of label, so the detail under it is ellipsis and nothing
+   * else. One stage to a row is the whole strip read top to bottom, which
+   * is what a stage list is for.
+   */
+  @media (max-width: 29.99rem) {
+    .stages {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stage__detail {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+    }
+  }
+
   /* --------------------------------------------------------------- stories */
   .stories {
     display: flex;
