@@ -68,6 +68,8 @@ export interface Settings {
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
   buildModel: AgentModel | null;
+  /** Model the pull request review runs on; `null` lets Claude Code choose. */
+  reviewModel: AgentModel | null;
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -81,6 +83,7 @@ export interface SettingsUpdate {
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
+  reviewModel?: AgentModel | null;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
