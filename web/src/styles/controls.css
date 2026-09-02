@@ -141,6 +141,33 @@
     }
   }
 
+  /*
+   * Below `md` the page is a stack of cards and rows, so "small" is only
+   * about type size — there is width to spare and no reason to hand a
+   * fingertip anything under the 2.5rem a coarse pointer wants.
+   */
+  @variant max-md {
+    @media (pointer: coarse) {
+      .button--small {
+        min-height: 2.5rem;
+      }
+    }
+  }
+
+  /*
+   * A panel's "see all" link is an action too. On a coarse pointer it gets
+   * the same 2.5rem box as the buttons beside it; the panel header is taller
+   * than that already, so nothing moves.
+   */
+  @media (pointer: coarse) {
+    .panel__actions .link,
+    .row__actions .link {
+      align-items: center;
+      display: inline-flex;
+      min-height: 2.5rem;
+    }
+  }
+
   /* ----------------------------------------------------------------- forms */
   .form {
     display: flex;

@@ -402,6 +402,21 @@
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
   }
 
+  /*
+   * A grid that has collapsed to one column reads top to bottom, and the
+   * cell that sits left on a desktop is not always what a phone should show
+   * first. `grid__cell--lead` pulls one to the head of the stack.
+   *
+   * Below `md` only: every grid here is certainly one column there, while
+   * at `lg` a `grid--halves` in the content column can still be a single
+   * column, and reordering it then would change the desktop page.
+   */
+  @variant max-md {
+    .grid > .grid__cell--lead {
+      order: -1;
+    }
+  }
+
   .stack {
     display: flex;
     flex-direction: column;
