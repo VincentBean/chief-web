@@ -38,15 +38,6 @@ export const MAX_BODY_CHARS = 4000;
 export const MAX_SUMMARY_CHARS = 4000;
 
 /**
- * The most findings one pass may post.
- *
- * A review that has more than this to say about a single pull request has
- * stopped reviewing and started listing, and forty inline comments is not
- * something a person reads — it is something they dismiss.
- */
-export const MAX_FINDINGS = 40;
-
-/**
  * Parses the agent's findings document.
  *
  * `raw` is whatever chief-web managed to get hold of: the file the prompt asked
@@ -135,13 +126,6 @@ function readReport(parsed: unknown): ParsedReview {
     }
     findings.push(finding);
   }
-  if (findings.length > MAX_FINDINGS) {
-    return failure(
-      `The review agent reported ${String(findings.length)} findings; the most that may be ` +
-        `posted on one pull request is ${String(MAX_FINDINGS)}.`,
-    );
-  }
-
   return {
     report: { summary: summary.trim().slice(0, MAX_SUMMARY_CHARS), findings },
     error: null,
