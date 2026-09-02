@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, describe, it } from 'node:test';
+import { after, describe, it, type TestContext } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
@@ -249,6 +249,68 @@ describe('pull request sync', () => {
     assert.equal(github.calls.length, 2);
   });
 });
+
+describe('the configurable sync interval', () => {
+  it('defaults to fifteen minutes and prefers a saved setting', () => {
+    const { db, sync } = world();
+
+    assert.equal(sync.intervalMs(), 15 * 60_000);
+
+    setSetting(db, 'pr_sync_interval_minutes', '5');
+    assert.equal(sync.intervalMs(), 5 * 60_000);
+
+    // A row written by hand cannot poll faster than the floor the settings
+    // route enforces, nor slower than a day.
+    setSetting(db, 'pr_sync_interval_minutes', '0');
+    assert.equal(sync.intervalMs(), 15 * 60_000, 'a non-positive row falls back to the default');
+    setSetting(db, 'pr_sync_interval_minutes', '9999');
+    assert.equal(sync.intervalMs(), 1440 * 60_000);
+    setSetting(db, 'pr_sync_interval_minutes', 'not a number');
+    assert.equal(sync.intervalMs(), 15 * 60_000);
+  });
+
+  it('polls at the configured interval and picks a change up without a restart', async (t) => {
+    const { db, github, sync, session } = world();
+    session({ name: 'in-review', prUrl: 'https://github.com/acme/demo/pull/4' });
+    setSetting(db, 'pr_sync_interval_minutes', '1');
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+
+    // The catch-up tick, then one a minute later: the saved interval, not the
+    // fifteen minutes the environment defaults to.
+    sync.start();
+    await settle();
+    assert.equal(github.calls.length, 1);
+
+    await advance(t, 60_000);
+    assert.equal(github.calls.length, 2);
+
+    // Saving five minutes mid-flight: the wait already armed runs out on the
+    // old value, and every wait after it uses the new one — no restart.
+    setSetting(db, 'pr_sync_interval_minutes', '5');
+    await advance(t, 60_000);
+    assert.equal(github.calls.length, 3);
+
+    await advance(t, 5 * 60_000 - 1);
+    assert.equal(github.calls.length, 3, 'the next tick is five minutes out now');
+    await advance(t, 1);
+    assert.equal(github.calls.length, 4);
+
+    // And stopping leaves nothing armed.
+    sync.stop();
+    await advance(t, 60_000 * 10);
+    assert.equal(github.calls.length, 4);
+  });
+});
+
+/** Lets the awaits inside a tick run; the mocked clock does not do that. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function advance(t: TestContext, ms: number): Promise<void> {
+  t.mock.timers.tick(ms);
+  await settle();
+}
 
 describe('reading a pull request number from its URL', () => {
   it('reads the number of a plain pull request URL', () => {

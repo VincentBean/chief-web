@@ -14,7 +14,7 @@ import {
   openDatabase,
   setSetting,
 } from '../db/index.js';
-import { getMaxConcurrentSessions } from '../settings/index.js';
+import { getMaxConcurrentSessions, getPrSyncIntervalMs } from '../settings/index.js';
 
 const PASSWORD = 'correct horse battery staple';
 const TOKEN = 'ghp_exampleTokenValue1234';
@@ -67,6 +67,7 @@ describe('settings api', () => {
   beforeEach(() => {
     deleteSetting(db, 'github_token');
     deleteSetting(db, 'max_concurrent_sessions');
+    deleteSetting(db, 'pr_sync_interval_minutes');
     deleteSetting(db, 'git_author_name');
     deleteSetting(db, 'git_author_email');
     githubReply = { status: 200, body: { login: 'octocat' } };
@@ -154,6 +155,7 @@ describe('settings api', () => {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      prSyncIntervalMinutes: 15,
       planningModel: null,
       buildModel: null,
       gitAuthorName: 'chief-web',
@@ -169,6 +171,7 @@ describe('settings api', () => {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      prSyncIntervalMinutes: 15,
       planningModel: null,
       buildModel: null,
       gitAuthorName: 'chief-web',
@@ -201,6 +204,7 @@ describe('settings api', () => {
       githubToken: { configured: true, last4: '1234' },
       maxConcurrentSessions: 7,
       agentTimeoutMinutes: 30,
+      prSyncIntervalMinutes: 15,
       planningModel: null,
       buildModel: null,
       gitAuthorName: 'chief-web',
@@ -217,6 +221,7 @@ describe('settings api', () => {
       githubToken: { configured: false, last4: null },
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
+      prSyncIntervalMinutes: 15,
       planningModel: null,
       buildModel: null,
       gitAuthorName: 'chief-web',
@@ -311,6 +316,45 @@ describe('settings api', () => {
     assert.equal(
       ((await (await get()).json()) as { agentTimeoutMinutes: number }).agentTimeoutMinutes,
       45,
+    );
+  });
+
+  it('persists the pull request sync interval and rejects out-of-range values (US-004)', async () => {
+    // The default is the 15 minutes the sync has always polled at.
+    assert.equal(
+      ((await (await get()).json()) as { prSyncIntervalMinutes: number }).prSyncIntervalMinutes,
+      15,
+    );
+
+    assert.equal((await put({ prSyncIntervalMinutes: 5 })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { prSyncIntervalMinutes: number }).prSyncIntervalMinutes,
+      5,
+    );
+    assert.equal(getPrSyncIntervalMs(db, loadConfig({})), 5 * 60_000);
+
+    // Anything under a minute is refused, with something the operator can act on.
+    const tooShort = await put({ prSyncIntervalMinutes: 0 });
+    assert.equal(tooShort.status, 400);
+    const body = (await tooShort.json()) as { error: string; message: string };
+    assert.equal(body.error, 'invalid_pr_sync_interval_minutes');
+    assert.match(body.message, /whole number of minutes between 1 and 1440/);
+
+    for (const value of [-5, 1441, 1.5, '5', null]) {
+      const response = await put({ prSyncIntervalMinutes: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_pr_sync_interval_minutes',
+      );
+    }
+
+    // Nothing the rejected requests carried was stored, and an unrelated
+    // update leaves the saved interval alone.
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(
+      ((await (await get()).json()) as { prSyncIntervalMinutes: number }).prSyncIntervalMinutes,
+      5,
     );
   });
 

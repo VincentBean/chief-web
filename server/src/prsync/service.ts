@@ -9,7 +9,7 @@ import {
 import { isValidGithubSlug } from '../lib/git-url.js';
 import { fetchPullRequestState, GithubApiError, type PullRequestState } from '../lib/github.js';
 import { logger } from '../lib/logger.js';
-import { getGithubToken } from '../settings/index.js';
+import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
 
 /**
  * Keeping `pr-open` sessions in step with GitHub (US-003).
@@ -38,6 +38,10 @@ import { getGithubToken } from '../settings/index.js';
  * request: 40/hour with ten of them, against a 5000/hour token budget. A tick
  * with no `pr-open` session costs nothing at all — not even the token lookup —
  * so an installation that has never opened a pull request never touches GitHub.
+ *
+ * The interval is the operator's dial on that budget (US-004): 15 minutes by
+ * default, settable per installation on the settings page, and re-read before
+ * every wait so a change needs no restart.
  */
 
 /** The slice of the GitHub API this service needs; tests pass a stub. */
@@ -81,19 +85,41 @@ export class PrSyncService implements PullRequestSync {
     // Whatever was merged while the stack was down is simply what this finds,
     // which is also how the US-001 backfill's `pr-open` rows get corrected.
     void this.tick();
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, this.config.prSyncIntervalMs);
-    // The HTTP listener is what keeps the process alive; the sync must never
-    // be the reason it does.
-    this.timer.unref();
-    logger.info('pull request sync started', { intervalMs: this.config.prSyncIntervalMs });
+    const intervalMs = this.intervalMs();
+    this.arm(intervalMs);
+    logger.info('pull request sync started', { intervalMs });
   }
 
   stop(): void {
     if (this.timer === null) return;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     this.timer = null;
+  }
+
+  /**
+   * How long the sync waits between polls (US-004). `PR_SYNC_INTERVAL_MS` is
+   * only the default: a value saved on the settings page wins.
+   */
+  intervalMs(): number {
+    return getPrSyncIntervalMs(this.db, this.config);
+  }
+
+  /**
+   * A self-re-arming timeout rather than one `setInterval`, so the interval is
+   * read from the settings again before every wait — an operator who changes it
+   * on the settings page gets the new cadence from the next tick, with no
+   * restart. Re-arming happens before the tick rather than after it, so the
+   * cadence is the same fixed one `setInterval` gave; a tick that outlasts the
+   * interval is joined by the next one rather than doubling the load.
+   */
+  private arm(intervalMs: number): void {
+    this.timer = setTimeout(() => {
+      this.arm(this.intervalMs());
+      void this.tick();
+    }, intervalMs);
+    // The HTTP listener is what keeps the process alive; the sync must never
+    // be the reason it does.
+    this.timer.unref();
   }
 
   tick(): Promise<number> {

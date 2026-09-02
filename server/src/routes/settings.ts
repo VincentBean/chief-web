@@ -13,8 +13,10 @@ import {
   isValidGitAuthorName,
   MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
+  MAX_PR_SYNC_INTERVAL_MINUTES,
   MIN_AGENT_TIMEOUT_MINUTES,
   MIN_CONCURRENT_SESSIONS,
+  MIN_PR_SYNC_INTERVAL_MINUTES,
   readAppSettings,
   updateAppSettings,
 } from '../settings/index.js';
@@ -27,8 +29,8 @@ interface Invalid {
 
 /**
  * Global settings (US-004): the GitHub Personal Access Token used to open pull
- * requests, the build concurrency cap, and the per-iteration agent timeout
- * (US-019).
+ * requests, the build concurrency cap, the per-iteration agent timeout
+ * (US-019) and how often open pull requests are re-checked against GitHub.
  *
  * The token is write-only over the API — `GET /api/settings` returns only its
  * last four characters, and no other response ever includes it.
@@ -96,6 +98,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     githubToken?: string | null;
     maxConcurrentSessions?: number;
     agentTimeoutMinutes?: number;
+    prSyncIntervalMinutes?: number;
     planningModel?: AgentModel | null;
     buildModel?: AgentModel | null;
     gitAuthorName?: string | null;
@@ -151,6 +154,22 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.agentTimeoutMinutes = raw;
+  }
+
+  if ('prSyncIntervalMinutes' in input && input['prSyncIntervalMinutes'] !== undefined) {
+    const raw = input['prSyncIntervalMinutes'];
+    if (
+      typeof raw !== 'number' ||
+      !Number.isInteger(raw) ||
+      raw < MIN_PR_SYNC_INTERVAL_MINUTES ||
+      raw > MAX_PR_SYNC_INTERVAL_MINUTES
+    ) {
+      return {
+        error: 'invalid_pr_sync_interval_minutes',
+        message: `The pull request sync interval must be a whole number of minutes between ${MIN_PR_SYNC_INTERVAL_MINUTES} and ${MAX_PR_SYNC_INTERVAL_MINUTES}.`,
+      };
+    }
+    update.prSyncIntervalMinutes = raw;
   }
 
   const planning = parseModelField(input, 'planningModel');

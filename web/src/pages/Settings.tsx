@@ -46,6 +46,7 @@ export function Settings() {
   const [token, setToken] = useState('');
   const [maxSessions, setMaxSessions] = useState('3');
   const [agentTimeout, setAgentTimeout] = useState('30');
+  const [prSyncInterval, setPrSyncInterval] = useState('15');
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [authorName, setAuthorName] = useState('');
@@ -88,6 +89,7 @@ export function Settings() {
     setSettings(loaded);
     setMaxSessions(String(loaded.maxConcurrentSessions));
     setAgentTimeout(String(loaded.agentTimeoutMinutes));
+    setPrSyncInterval(String(loaded.prSyncIntervalMinutes));
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setAuthorName(loaded.gitAuthorName);
@@ -122,9 +124,17 @@ export function Settings() {
       toast.error('The agent timeout must be a whole number of minutes between 1 and 720.');
       return;
     }
+    const syncInterval = Number.parseInt(prSyncInterval, 10);
+    if (!Number.isInteger(syncInterval) || syncInterval < 1 || syncInterval > 1440) {
+      toast.error(
+        'The pull request sync interval must be a whole number of minutes between 1 and 1440.',
+      );
+      return;
+    }
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
+      prSyncIntervalMinutes: syncInterval,
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
@@ -226,6 +236,7 @@ export function Settings() {
     token.trim() !== '' ||
     maxSessions !== String(settings.maxConcurrentSessions) ||
     agentTimeout !== String(settings.agentTimeoutMinutes) ||
+    prSyncInterval !== String(settings.prSyncIntervalMinutes) ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     authorName !== settings.gitAuthorName ||
@@ -337,6 +348,14 @@ export function Settings() {
             <p className="field__hint">
               Opens pull requests on your behalf. A classic token needs <code className="mono">repo</code>; a fine-grained one needs Contents and Pull requests read/write on the repositories. Stored write-only.
             </p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="pr-sync-interval">
+              Sync every (minutes)
+            </label>
+            <input id="pr-sync-interval" name="pr-sync-interval" type="number" min={1} max={1440} step={1} value={prSyncInterval} onChange={(event) => setPrSyncInterval(event.target.value)} className="field__input field__input--narrow" />
+            <p className="field__hint">How often delivered sessions are re-checked, so a merged pull request shows as merged here. Each open pull request costs one API request per interval; a change applies from the next sync.</p>
           </div>
         </Panel>
 

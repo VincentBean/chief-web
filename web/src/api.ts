@@ -64,6 +64,8 @@ export interface Settings {
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
+  /** How often open pull requests are re-checked against GitHub (US-004). */
+  prSyncIntervalMinutes: number;
   /** Model the planning terminal runs on; `null` lets Claude Code choose. */
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
@@ -78,6 +80,7 @@ export interface SettingsUpdate {
   githubToken?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
+  prSyncIntervalMinutes?: number;
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
