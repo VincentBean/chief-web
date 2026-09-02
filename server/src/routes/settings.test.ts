@@ -70,6 +70,7 @@ describe('settings api', () => {
     deleteSetting(db, 'git_author_name');
     deleteSetting(db, 'git_author_email');
     deleteSetting(db, 'review_model');
+    deleteSetting(db, 'code_review_default');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
   });
@@ -158,6 +159,7 @@ describe('settings api', () => {
       planningModel: null,
       buildModel: null,
       reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -174,6 +176,7 @@ describe('settings api', () => {
       planningModel: null,
       buildModel: null,
       reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -207,6 +210,7 @@ describe('settings api', () => {
       planningModel: null,
       buildModel: null,
       reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -224,6 +228,7 @@ describe('settings api', () => {
       planningModel: null,
       buildModel: null,
       reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });

@@ -318,7 +318,9 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     name,
     prTargetBranch: target ?? 'main',
     scheduledStartAt,
-    codeReview: codeReview ?? false,
+    // Left out when the request is silent: the service applies the global
+    // default, so an API-created session honours it too.
+    ...(codeReview === undefined ? {} : { codeReview }),
     ...(baseBranch === undefined ? {} : { baseBranch }),
   };
 }

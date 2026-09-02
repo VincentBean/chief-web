@@ -49,6 +49,7 @@ export function Settings() {
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
+  const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
@@ -92,6 +93,7 @@ export function Settings() {
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
+    setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
   }
@@ -130,6 +132,7 @@ export function Settings() {
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
+      codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
     };
@@ -232,6 +235,7 @@ export function Settings() {
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
+    codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
     authorEmail !== settings.gitAuthorEmail;
   const claudeStatus = claude?.status ?? null;
@@ -407,6 +411,14 @@ export function Settings() {
               </select>
               <p className="field__hint">The code review left on a session's pull request. One pass over the finished branch.</p>
             </div>
+          </div>
+
+          <div className="field">
+            <label className="checkbox">
+              <input type="checkbox" checked={codeReviewDefault} onChange={(event) => setCodeReviewDefault(event.target.checked)} />
+              Run code review on new sessions
+            </label>
+            <p className="field__hint">Only the starting value of the checkbox on a new session; sessions that already exist keep whatever they were created with.</p>
           </div>
         </Panel>
 

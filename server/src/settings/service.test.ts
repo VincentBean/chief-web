@@ -12,6 +12,7 @@ import {
 } from '../db/index.js';
 import {
   getBuildModel,
+  getCodeReviewDefault,
   getPlanningModel,
   getReviewModel,
   readAppSettings,
@@ -77,5 +78,48 @@ describe('review model setting (US-001)', () => {
     assert.equal(getPlanningModel(db), 'opus');
     assert.equal(getBuildModel(db), 'sonnet');
     assert.equal(getReviewModel(db), null);
+  });
+});
+
+describe('code review default setting (US-004)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    updateAppSettings(db, config, { codeReviewDefault: false });
+  });
+
+  it('is off until it is turned on', () => {
+    // Nothing stored at all is the state a fresh install starts in.
+    assert.equal(getSetting(db, 'code_review_default'), '0');
+    assert.equal(getCodeReviewDefault(db), false);
+    assert.equal(readAppSettings(db, config).codeReviewDefault, false);
+  });
+
+  it('writes the row and reads it back', () => {
+    const saved = updateAppSettings(db, config, { codeReviewDefault: true });
+
+    assert.equal(saved.codeReviewDefault, true);
+    assert.equal(getCodeReviewDefault(db), true);
+    assert.equal(getSetting(db, 'code_review_default'), '1');
+  });
+
+  it('leaves the stored value alone when the field is omitted', () => {
+    updateAppSettings(db, config, { codeReviewDefault: true });
+
+    assert.equal(
+      updateAppSettings(db, config, { maxConcurrentSessions: 4 }).codeReviewDefault,
+      true,
+    );
+  });
+
+  it('reads a hand-edited row that is not "1" as off', () => {
+    setSetting(db, 'code_review_default', 'yes');
+
+    assert.equal(getCodeReviewDefault(db), false);
   });
 });

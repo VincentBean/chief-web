@@ -84,6 +84,8 @@ export interface AppSettings {
   readonly buildModel: AgentModel | null;
   /** Model the automatic code review runs on; `null` leaves the CLI to choose. */
   readonly reviewModel: AgentModel | null;
+  /** Whether new sessions are created with the code-review flag already on. */
+  readonly codeReviewDefault: boolean;
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
 }
@@ -97,6 +99,7 @@ export interface AppSettingsUpdate {
   readonly planningModel?: AgentModel | null;
   readonly buildModel?: AgentModel | null;
   readonly reviewModel?: AgentModel | null;
+  readonly codeReviewDefault?: boolean;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
@@ -199,6 +202,18 @@ function readModel(
   return stored !== null && isAgentModel(stored) ? stored : null;
 }
 
+/**
+ * Whether a session created without an explicit `codeReview` gets the flag.
+ *
+ * Read at creation time rather than copied into new sessions by the web form,
+ * so a session created straight over the API honours the default too. Only the
+ * default is global: once a session exists its own flag is what counts, and
+ * changing this leaves existing sessions alone.
+ */
+export function getCodeReviewDefault(db: Database): boolean {
+  return getSetting(db, 'code_review_default') === '1';
+}
+
 /** The commit identity runner containers are started with (US-006). */
 export function getGitIdentity(db: Database): GitIdentity {
   return {
@@ -222,6 +237,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     planningModel: getPlanningModel(db),
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
+    codeReviewDefault: getCodeReviewDefault(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
   };
@@ -256,6 +272,10 @@ export function updateAppSettings(
 
     if (update.reviewModel === null) deleteSetting(db, 'review_model');
     else if (update.reviewModel !== undefined) setSetting(db, 'review_model', update.reviewModel);
+
+    if (update.codeReviewDefault !== undefined) {
+      setSetting(db, 'code_review_default', update.codeReviewDefault ? '1' : '0');
+    }
 
     // `null` clears the row, which makes the built-in default apply again.
     if (update.gitAuthorName === null) deleteSetting(db, 'git_author_name');

@@ -23,6 +23,7 @@ import {
   sessionRepoDir,
   sessionWorkspaceDir,
 } from '../orchestrator/index.js';
+import { updateAppSettings } from '../settings/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import {
   CONTAINER_REPO_DIR,
@@ -647,6 +648,52 @@ describe('session code review', () => {
         error instanceof SessionError && error.status === 409 && error.code === 'session_finished',
     );
     assert.equal(getSession(f.db, created)?.codeReview, true);
+  });
+
+  it('creates a session with the flag off while the global default is off', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'no-review',
+      prTargetBranch: 'main',
+    });
+
+    assert.equal(session.codeReview, false);
+  });
+
+  it('creates a session with the flag on when the global default is on', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+    updateAppSettings(f.db, f.config, { codeReviewDefault: true });
+
+    // No `codeReview` in the request: the default is applied server-side, so a
+    // session created straight over the API gets it too.
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'reviewed',
+      prTargetBranch: 'main',
+    });
+
+    assert.equal(session.codeReview, true);
+    assert.equal(getSession(f.db, session.id)?.codeReview, true);
+  });
+
+  it('lets an explicit false on create override a default of on', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+    updateAppSettings(f.db, f.config, { codeReviewDefault: true });
+
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'opted-out',
+      prTargetBranch: 'main',
+      codeReview: false,
+    });
+
+    assert.equal(session.codeReview, false);
+    assert.equal(getSession(f.db, session.id)?.codeReview, false);
   });
 });
 

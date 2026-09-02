@@ -99,6 +99,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     planningModel?: AgentModel | null;
     buildModel?: AgentModel | null;
     reviewModel?: AgentModel | null;
+    codeReviewDefault?: boolean;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   } = {};
@@ -165,6 +166,17 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   const review = parseModelField(input, 'reviewModel');
   if ('error' in review) return review;
   if (review.present) update.reviewModel = review.value;
+
+  if ('codeReviewDefault' in input && input['codeReviewDefault'] !== undefined) {
+    const raw = input['codeReviewDefault'];
+    if (typeof raw !== 'boolean') {
+      return {
+        error: 'invalid_code_review_default',
+        message: 'The code review default must be true or false.',
+      };
+    }
+    update.codeReviewDefault = raw;
+  }
 
   const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {
     error: 'invalid_git_author_name',

@@ -7,6 +7,7 @@ export {
   DEFAULT_GIT_AUTHOR_NAME,
   getAgentTimeoutMs,
   getBuildModel,
+  getCodeReviewDefault,
   getGitIdentity,
   getGithubToken,
   getMaxConcurrentSessions,

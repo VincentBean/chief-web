@@ -37,6 +37,7 @@ import {
   progressPathFor,
   readPrdDocument,
 } from '../prd/index.js';
+import { getCodeReviewDefault } from '../settings/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
 
@@ -259,7 +260,7 @@ export class SessionService {
         featureBranch: featureBranchFor(request.name),
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
-        codeReview: request.codeReview ?? false,
+        codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index

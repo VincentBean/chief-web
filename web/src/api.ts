@@ -70,6 +70,8 @@ export interface Settings {
   buildModel: AgentModel | null;
   /** Model the pull request review runs on; `null` lets Claude Code choose. */
   reviewModel: AgentModel | null;
+  /** Whether new sessions start with their code-review flag on (US-004). */
+  codeReviewDefault: boolean;
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -84,6 +86,7 @@ export interface SettingsUpdate {
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
   reviewModel?: AgentModel | null;
+  codeReviewDefault?: boolean;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
