@@ -344,6 +344,19 @@
     display: none;
   }
 
+  /*
+   * A phone cannot fit six filters on one line, and a sideways scroller
+   * hides the ones it cannot fit. Below `md` the group wraps instead: every
+   * filter is visible without a swipe.
+   */
+  @variant max-md {
+    .segmented {
+      display: flex;
+      flex-wrap: wrap;
+      overflow-x: visible;
+    }
+  }
+
   .segmented__option {
     align-items: center;
     background: transparent;

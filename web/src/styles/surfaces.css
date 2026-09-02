@@ -357,12 +357,18 @@
    *     </table>
    *   </div>
    *
-   * Two cell modifiers cover what a label cannot: `--lead` is the card's
-   * headline (full width, no label, always first) and `--foot` is the
-   * actions strip ruled off at the bottom. A cell that renders nothing is
-   * dropped so a label never appears on its own line. `table-wrap--cards`
-   * is for the case where the table is wrapped in a `panel`: the cards
-   * carry their own borders on mobile, so the panel's would double up.
+   * The card as a whole opens whatever its lead cell's `link--strong`
+   * points at, so the tap target is the row rather than its title; buttons
+   * in the `--foot` strip keep their own click.
+   *
+   * Three cell modifiers cover what a label cannot: `--lead` is the card's
+   * headline (full width, no label, always first), `--foot` is the actions
+   * strip ruled off at the bottom, and `--desktop` drops a column the card
+   * has no room to repeat — a status dot whose lead cell already carries a
+   * status badge, say. A cell that renders nothing is dropped too, so a
+   * label never appears on its own line. `table-wrap--cards` is for the
+   * case where the table is wrapped in a `panel`: the cards carry their own
+   * borders on mobile, so the panel's would double up.
    */
   @variant max-md {
     .table-wrap--cards.panel {
@@ -400,6 +406,7 @@
       flex-direction: column;
       gap: 0.375rem;
       padding: 0.625rem 0.75rem;
+      position: relative;
     }
 
     .table--cards tbody tr + tr {
@@ -433,9 +440,26 @@
       letter-spacing: 0.01em;
     }
 
+    .table--cards tbody td.table__cell--desktop {
+      display: none;
+    }
+
     .table--cards tbody td.table__cell--lead {
       display: block;
       order: -1;
+    }
+
+    /*
+     * The whole card opens what the lead cell links to: on a phone the row
+     * is the tap target, not the twenty pixels of its title. The overlay is
+     * laid over the card by the lead cell, and the actions strip is
+     * positioned and later in source order, so its buttons stay on top and
+     * keep their own click.
+     */
+    .table--cards tbody td.table__cell--lead .link--strong::after {
+      content: "";
+      inset: 0;
+      position: absolute;
     }
 
     .table--cards tbody td.table__cell--foot {
@@ -444,11 +468,18 @@
       margin-top: 0.125rem;
       order: 1;
       padding-top: 0.5rem;
+      position: relative;
     }
 
     .table--cards tbody td.table__cell--foot .row__actions {
       flex-wrap: wrap;
       justify-content: flex-start;
+    }
+
+    /* A bar sized by its column on desktop is sized by the card here: the
+     * label takes what it needs and the track spans the rest of the line. */
+    .table--cards tbody td .progress {
+      flex: 1;
     }
 
     /* Widths and clipping that keep the desktop columns honest have no job
@@ -460,6 +491,12 @@
       min-width: 0;
       overflow: visible;
       width: auto;
+    }
+
+    /* A branch name is long enough to need breaking mid-word; the ` → main`
+     * that follows it is not, and reads as nonsense when it is broken. */
+    .table--cards tbody td.table__branch .muted {
+      white-space: nowrap;
     }
 
     /* The attention marker is a rule down the card's edge, not a stub of

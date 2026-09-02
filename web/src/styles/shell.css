@@ -424,6 +424,24 @@
     flex: 1;
   }
 
+  /*
+   * On a phone the toolbar is a stack, not a row with a gap in the middle.
+   * The spacer would claim a wrapped line of its own, and each control reads
+   * — and taps — better full width than shrunk side by side.
+   */
+  @variant max-md {
+    .toolbar__spacer {
+      display: none;
+    }
+
+    .toolbar > .segmented,
+    .toolbar > .search,
+    .toolbar > .field__input--inline {
+      flex: 1 1 100%;
+      width: 100%;
+    }
+  }
+
   /* ----------------------------------------------------------------- login */
   .login {
     align-items: center;
