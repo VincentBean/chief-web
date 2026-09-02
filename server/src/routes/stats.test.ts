@@ -27,6 +27,7 @@ describe('stats api', () => {
   let cookie: string;
   let db: Database;
   let server: http.Server;
+  let repositoryId: string;
 
   before(async () => {
     const config = loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD, MAX_CONCURRENT_SESSIONS: '4' });
@@ -49,6 +50,7 @@ describe('stats api', () => {
       githubSlug: 'acme/demo',
       defaultBaseBranch: 'main',
     });
+    repositoryId = repository.id;
     const seed = (name: string, status: 'ready' | 'finished' | 'failed' | 'building') =>
       createSession(db, {
         repositoryId: repository.id,
@@ -122,5 +124,44 @@ describe('stats api', () => {
     const response = await fetch(`${baseUrl}/api/stats?days=3`, { headers: { cookie } });
     const body = (await response.json()) as StatsView;
     assert.equal(body.activity.length, 3);
+  });
+
+  /*
+   * Declared last on purpose: it seeds two more sessions, which the totals the
+   * tests above assert are counted from.
+   */
+  describe('sessions delivered and merged (US-006)', () => {
+    before(() => {
+      for (const [name, status] of [
+        ['four', 'pr-open'],
+        ['five', 'merged'],
+      ] as const) {
+        const session = createSession(db, {
+          repositoryId,
+          name,
+          baseBranch: 'main',
+          prTargetBranch: 'main',
+          featureBranch: featureBranchFor(name),
+          status,
+          scheduledStartAt: null,
+        });
+        updateSession(db, session.id, { prUrl: `https://github.com/acme/demo/pull/${name}` });
+      }
+    });
+
+    it('counts pr-open and merged sessions as finished', async () => {
+      const response = await fetch(`${baseUrl}/api/stats`, { headers: { cookie } });
+      const body = (await response.json()) as StatsView;
+
+      assert.equal(body.sessions.total, 5);
+      assert.equal(body.sessions.byStatus['pr-open'], 1);
+      assert.equal(body.sessions.byStatus.merged, 1);
+      assert.equal(body.sessions.byStatus.finished, 1);
+      assert.equal(body.pullRequestsOpened, 3);
+
+      // The three ended sessions, not just the one still called `finished`.
+      assert.equal(body.repositories[0]?.finished, 3);
+      assert.equal(body.activity[body.activity.length - 1]?.sessionsFinished, 3);
+    });
   });
 });

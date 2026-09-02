@@ -56,6 +56,7 @@
   --color-red-400: #f85149;
   --color-red-600: #da3633;
   --color-red-700: #b62324;
+  --color-purple-300: #d2a8ff;
   --color-purple-400: #a371f7;
 
   /* --------------------------------------------------------------- elevation
@@ -93,18 +94,24 @@
   --color-accent-hover: var(--color-blue-500);
 
   /* ------------------------------------------------------------------ status
-   * Seven roles; every state string in the app maps to exactly one.
+   * Eight roles; every state string in the app maps to exactly one.
    *
    * `pending` is neutral rather than amber on purpose: it means nobody has
    * started, which is not a warning. `queued` and the usage-limit hold keep
    * the amber, because there something is actually holding you up.
+   *
+   * The purple pair is the pull request lifecycle and nothing else: the light
+   * violet is a PR still waiting on a merge, the deeper one is GitHub's own
+   * merge purple. A session that ended without a PR is plain `done` green,
+   * because nothing about it is still moving.
    */
   --color-status-neutral: var(--color-ink-300); /* pending, todo, idle           */
   --color-status-ready: var(--color-teal-400); /* ready, parses, armed          */
   --color-status-active: var(--color-blue-400); /* building, in-progress, live   */
   --color-status-wait: var(--color-amber-400); /* queued, held, connecting      */
-  --color-status-done: var(--color-green-400); /* done, ok, connected           */
-  --color-status-final: var(--color-purple-400); /* finished: pushed and PR open  */
+  --color-status-done: var(--color-green-400); /* done, ok, finished, connected */
+  --color-status-review: var(--color-purple-300); /* pr-open: PR waiting to merge */
+  --color-status-final: var(--color-purple-400); /* merged: GitHub merge purple   */
   --color-status-danger: var(--color-red-400); /* failed, broken, disconnected  */
 
   /* ------------------------------------------------------------------- focus */

@@ -223,7 +223,13 @@ export interface Session {
   repositoryId: string;
   repositoryName: string;
   name: string;
-  status: 'pending' | 'ready' | 'building' | 'waiting' | 'failed' | 'finished';
+  /**
+   * Mirrors `SESSION_STATUSES` on the server, which this union has to be kept
+   * in step with by hand. `finished` means the build ended without a pull
+   * request; a delivered session is `pr-open` until the sync sees its PR
+   * merged, and `merged` after that.
+   */
+  status: 'pending' | 'ready' | 'building' | 'waiting' | 'failed' | 'finished' | 'pr-open' | 'merged';
   baseBranch: string;
   featureBranch: string;
   prTargetBranch: PrTargetBranch;

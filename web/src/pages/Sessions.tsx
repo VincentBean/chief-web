@@ -10,12 +10,12 @@ import {
   sessionPath,
 } from '../api.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import { describeError, isActive, needsAttention, useAppData, useKeyChords } from '../data.tsx';
+import { describeError, isActive, isEnded, needsAttention, useAppData, useKeyChords } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link, navigate, replaceSearch, useLocation } from '../router.tsx';
 import { since, startsIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
-import { EmptyState, Kbd, PageHeader, Progress, Segmented, Skeleton, StatusBadge, StatusDot } from '../ui.tsx';
+import { EmptyState, Kbd, PageHeader, Progress, Segmented, SESSION_TONE, Skeleton, StatusBadge, StatusDot } from '../ui.tsx';
 
 type Filter = 'all' | 'active' | 'attention' | 'planning' | 'ready' | 'finished';
 
@@ -25,7 +25,9 @@ const FILTERS: readonly { value: Filter; label: string; test: (s: Session) => bo
   { value: 'attention', label: 'Needs you', test: needsAttention },
   { value: 'planning', label: 'Planning', test: (s) => s.status === 'pending' },
   { value: 'ready', label: 'Ready', test: (s) => s.status === 'ready' && s.queuePosition === null },
-  { value: 'finished', label: 'Finished', test: (s) => s.status === 'finished' },
+  // Every ended session, whatever it ended as: the delivered ones are
+  // `pr-open`/`merged` and would otherwise fall out of this filter entirely.
+  { value: 'finished', label: 'Finished', test: isEnded },
 ];
 
 function isFilter(value: string | null): value is Filter {
@@ -335,7 +337,7 @@ function SessionRow({
         <Progress
           done={session.stories.done}
           total={session.stories.total}
-          tone={session.status === 'finished' ? 'final' : session.status === 'failed' ? 'danger' : session.status === 'waiting' ? 'wait' : 'active'}
+          tone={isEnded(session) ? SESSION_TONE[session.status] : session.status === 'failed' ? 'danger' : session.status === 'waiting' ? 'wait' : 'active'}
           compact
         />
       </td>

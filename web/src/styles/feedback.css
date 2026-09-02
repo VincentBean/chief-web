@@ -54,6 +54,10 @@
     --badge-color: var(--color-status-done);
   }
 
+  .badge--review {
+    --badge-color: var(--color-status-review);
+  }
+
   .badge--final {
     --badge-color: var(--color-status-final);
   }
@@ -70,6 +74,23 @@
    */
   .badge--pulse::before {
     animation: var(--animate-status-pulse);
+  }
+
+  /*
+   * A badge that is also a link: the anchor is a hit area and nothing else, so
+   * it takes no colour of its own and lets the badge underneath keep its tone.
+   * Only the tint deepens on hover, which is the whole affordance.
+   */
+  .badge-link {
+    border-radius: 9999px;
+    color: inherit;
+    display: inline-flex;
+    text-decoration: none;
+  }
+
+  .badge-link:hover .badge {
+    background-color: --alpha(var(--badge-color) / 22%);
+    border-color: --alpha(var(--badge-color) / 55%);
   }
 
   /* ------------------------------------------------------------------- dot */
@@ -103,6 +124,10 @@
 
   .dot--done {
     --dot-color: var(--color-status-done);
+  }
+
+  .dot--review {
+    --dot-color: var(--color-status-review);
   }
 
   .dot--final {
@@ -200,6 +225,10 @@
     --progress-color: var(--color-status-done);
   }
 
+  .progress__track--review {
+    --progress-color: var(--color-status-review);
+  }
+
   .progress__track--final {
     --progress-color: var(--color-status-final);
   }
@@ -278,6 +307,10 @@
 
   .figure--done {
     --figure-color: var(--color-status-done);
+  }
+
+  .figure--review {
+    --figure-color: var(--color-status-review);
   }
 
   .figure--final {
