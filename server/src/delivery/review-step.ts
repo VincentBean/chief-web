@@ -28,6 +28,28 @@ export interface SessionReviewer {
   review(session: Session): Promise<ReviewPassResult>;
 }
 
+/**
+ * The slice of `PrFeedbackService` this step chains into (US-011).
+ *
+ * Structural on purpose: `prfeedback` already imports this module's package
+ * for its push, so naming the class here would close an import cycle. The real
+ * service satisfies it as it stands — this is the same `start` the
+ * PullRequests page's button calls, with no second implementation behind it.
+ */
+export interface FeedbackSolver {
+  start(repositoryId: string, prNumber: number): Promise<{ readonly id: string }>;
+}
+
+/** What the chained solver run did; `null` when none was attempted. */
+export interface SolverOutcome {
+  /** The run row's id, or `null` when the start was refused. */
+  readonly runId: string | null;
+  /** The refusal's code, as the PullRequests page shows it; `null` on success. */
+  readonly code: string | null;
+  /** The sentence appended to the delivery's own message. */
+  readonly message: string;
+}
+
 /** How many complete passes a review gets before the session fails. */
 export const REVIEW_ATTEMPTS = 3;
 
@@ -39,12 +61,26 @@ export interface ReviewStepResult {
   readonly message: string;
   /** What was posted; `null` whenever this failed. */
   readonly published: PublishedReview | null;
+  /**
+   * The solver run started for the findings (US-011): `null` when there was
+   * nothing to solve, when this chief-web has no solver, or when the review
+   * itself failed.
+   */
+  readonly solver: SolverOutcome | null;
 }
 
 export class ReviewStep {
   constructor(
     private readonly reviewer: SessionReviewer,
     private readonly publisher: ReviewPublisher,
+    /**
+     * Where the findings go next (US-011). A thunk because the solver is built
+     * *after* the delivery this step belongs to — it needs the build loop's
+     * slot cap, and the build loop needs the delivery — so there is nothing to
+     * hand over at construction time. `null` for a chief-web that cannot run
+     * one, and for every test that is not about the chaining.
+     */
+    private readonly solver: () => FeedbackSolver | null = () => null,
   ) {}
 
   /**
@@ -77,7 +113,18 @@ export class ReviewStep {
           inlineComments: published.inlineComments,
           foldedFindings: published.foldedFindings,
         });
-        return { ok: true, attempts: attempt, message: postedMessage(published), published };
+        // The findings are on the pull request now, so the solver can be
+        // pointed at them exactly as the operator would from the PullRequests
+        // page. Whatever it answers, this attempt succeeded.
+        const solver = await this.startSolver(session, target, pass.report.findings.length);
+        const message = postedMessage(published);
+        return {
+          ok: true,
+          attempts: attempt,
+          message: solver === null ? message : `${message} ${solver.message}`,
+          published,
+          solver,
+        };
       } catch (cause) {
         reasons.push(
           `Attempt ${String(attempt)}: the review could not be posted to GitHub: ${describe(cause)}`,
@@ -94,8 +141,72 @@ export class ReviewStep {
         'The pull request is open and unchanged; retrying runs the review again and nothing else.' +
         `\n\n${reasons.join('\n')}`,
       published: null,
+      solver: null,
     };
   }
+
+  /**
+   * Hands the findings to the existing PR-feedback solver.
+   *
+   * Never throws and never fails the session: the review is posted either way,
+   * and a refusal here — a full server, a closed pull request, a missing token
+   * — is the same refusal the operator would have read on the PullRequests
+   * page, so it is logged with its code and reported, not raised.
+   */
+  private async startSolver(
+    session: Session,
+    target: ReviewTarget,
+    findings: number,
+  ): Promise<SolverOutcome | null> {
+    // Nothing was flagged, so there is nothing to solve. Starting a run here
+    // would spend a container on a pull request with no unresolved feedback,
+    // which the solver refuses anyway.
+    if (findings === 0) return null;
+    const solver = this.solver();
+    if (solver === null) return null;
+
+    try {
+      const run = await solver.start(session.repositoryId, target.number);
+      logger.info('code review findings handed to the feedback solver', {
+        session: session.id,
+        repository: target.slug,
+        number: target.number,
+        run: run.id,
+      });
+      return {
+        runId: run.id,
+        code: null,
+        message: `A run was started on #${String(target.number)} to work on them.`,
+      };
+    } catch (cause) {
+      const refusal = refusalOf(cause);
+      logger.warn('the code review could not start a feedback run', {
+        session: session.id,
+        repository: target.slug,
+        number: target.number,
+        code: refusal.code,
+        error: refusal.message,
+      });
+      return {
+        runId: null,
+        code: refusal.code,
+        message: `No run was started to work on them: ${refusal.message}`,
+      };
+    }
+  }
+}
+
+/**
+ * The code and message a refusal is surfaced with. `PrFeedbackError` and
+ * `GithubApiError` both carry a `code`; anything else is a crash, which the
+ * route would have answered 500 for.
+ */
+function refusalOf(cause: unknown): { code: string; message: string } {
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string'
+      ? cause.code
+      : 'feedback_run_failed';
+  return { code, message: describe(cause) };
 }
 
 /** The sentence a delivery adds to its own once the review is up. */

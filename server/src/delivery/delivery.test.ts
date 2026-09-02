@@ -20,6 +20,7 @@ import {
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { GithubApiError, openPullRequest } from '../lib/github.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
+import { PrFeedbackError } from '../prfeedback/index.js';
 import type {
   PublishedReview,
   ReviewPassResult,
@@ -30,7 +31,7 @@ import type {
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { PUSH_SCRIPT, pushExecSpec } from './push.js';
-import { ReviewStep, type SessionReviewer } from './review-step.js';
+import { type FeedbackSolver, ReviewStep, type SessionReviewer } from './review-step.js';
 import { createDeliveryService, DeliveryError, type PullRequestOpener } from './service.js';
 
 const TOKEN = 'ghp_exampleTokenValue1234';
@@ -800,6 +801,136 @@ describe('the code review of a delivery', () => {
     assert.equal(finished.lastError, null);
   });
 });
+
+/** The PR-feedback solver, scripted: it starts a run or refuses like the real one. */
+class FakeSolver implements FeedbackSolver {
+  readonly calls: { repositoryId: string; prNumber: number }[] = [];
+  /** What `start` rejects with; `null` starts a run. */
+  refusal: Error | null = null;
+
+  start(repositoryId: string, prNumber: number): Promise<{ id: string }> {
+    this.calls.push({ repositoryId, prNumber });
+    if (this.refusal !== null) return Promise.reject(this.refusal);
+    return Promise.resolve({ id: 'run-1' });
+  }
+}
+
+describe('chaining into the pull request feedback solver', () => {
+  function serviceFor(world: World, step: ReviewStep) {
+    return createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      new FakeOpener(),
+      step,
+    );
+  }
+
+  /** The session as the build loop hands it over, with the flag on. */
+  function reviewedSession(world: World): Session {
+    return updateSession(world.db, world.session.id, { codeReview: true }) ?? (undefined as never);
+  }
+
+  it('starts a run on the reviewed pull request once the findings are posted', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(2)];
+    const solver = new FakeSolver();
+    const delivery = serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    );
+
+    const result = await delivery.retry(reviewedSession(world).id).catch(() => null);
+    assert.equal(result, null, 'a building session is delivered through the loop’s seam');
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.deepEqual(solver.calls, [{ repositoryId: world.session.repositoryId, prNumber: 7 }]);
+    const finished = world.reload();
+    assert.equal(finished.status, 'finished');
+    assert.equal(finished.lastError, null);
+  });
+
+  it('does not start a run when the review found nothing to solve', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(0)];
+    const solver = new FakeSolver();
+
+    await serviceFor(world, new ReviewStep(reviewer, new FakePublisher(), () => solver)).complete(
+      reviewedSession(world),
+      world.stories(),
+    );
+
+    assert.equal(solver.calls.length, 0, 'there is nothing on the pull request to work on');
+    assert.equal(world.reload().status, 'finished');
+  });
+
+  it('finishes the session anyway when the solver refuses the run', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const solver = new FakeSolver();
+    solver.refusal = new PrFeedbackError(
+      409,
+      'no_free_slot',
+      'Every build slot is in use. Wait for one to free, or raise the cap on the settings page.',
+    );
+
+    const result = await serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    ).complete(reviewedSession(world), world.stories());
+
+    assert.equal(result, undefined, 'the loop’s hand-off answers nothing either way');
+    assert.equal(solver.calls.length, 1);
+    const finished = world.reload();
+    assert.equal(finished.status, 'finished', 'a refused run is not the session’s problem');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
+  });
+
+  it('reports the refusal the way the PullRequests page would', async () => {
+    const world = new World();
+    failedAtReviewFor(world);
+    const solver = new FakeSolver();
+    solver.refusal = new PrFeedbackError(409, 'no_free_slot', 'Every build slot is in use.');
+
+    const result = await serviceFor(
+      world,
+      new ReviewStep(new FakeReviewer(), new FakePublisher(), () => solver),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.match(result.message, /Every build slot is in use\./);
+  });
+
+  it('starts nothing when the review never posted', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('invalid_findings', 'The findings could not be read.')];
+    const solver = new FakeSolver();
+
+    await serviceFor(world, new ReviewStep(reviewer, new FakePublisher(), () => solver)).complete(
+      reviewedSession(world),
+      world.stories(),
+    );
+
+    assert.equal(solver.calls.length, 0, 'there are no findings on the pull request');
+    assert.equal(world.reload().failureStage, 'review');
+  });
+});
+
+/** A session parked exactly where a review retry picks it up. */
+function failedAtReviewFor(world: World): void {
+  updateSession(world.db, world.session.id, {
+    status: 'failed',
+    failureStage: 'review',
+    lastError: 'The code review failed after 3 attempts.',
+    prUrl: 'https://github.com/acme/demo/pull/7',
+    codeReview: true,
+  });
+}
 
 describe('retrying a session that failed at the review', () => {
   function failedAtReview(world: World, codeReview = true): void {

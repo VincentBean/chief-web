@@ -210,6 +210,14 @@ request's URL stays on the session either way, and **Retry** re-runs the review
 alone, with three fresh attempts. A usage limit stops early: the next attempt
 would hit the same wall.
 
+**A review that flagged something then starts the pull request feedback run
+itself**, exactly as the **Start** button on the PullRequests page does: the run
+shows up in that list with its usual status and phases, and is stopped or
+retried there like any other. A review that found nothing starts nothing. The
+run is not part of the delivery — a refusal (every build slot in use, no free
+capacity, a closed pull request) is logged with the reason the page would have
+shown and leaves the session `finished`.
+
 ## Failure and recovery
 
 Every path that ends in **failed** stores two things on the session: a
