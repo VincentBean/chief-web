@@ -16,6 +16,7 @@ On the sessions page, open **New session**:
 | **Base branch** | what to branch from; defaults to the repository's |
 | **PR target branch** | where the pull request will be opened (`develop` or `main`) |
 | **Scheduled start** | optional — see [Scheduled starts](scheduling.md#scheduled-starts) |
+| **Code review** | whether chief-web reviews the pull request it opens at the end — see [Code review](code-review.md). It starts at the default in Settings and can be changed later from the session page |
 
 **Create session** starts the container, checks that `chief/<name>` does not
 already exist on `origin`, clones the base branch and creates the feature
@@ -117,6 +118,12 @@ If the push or the PR fails — expired token, protected branch, no commits — 
 session goes **failed** at the `push` or `pull_request` stage with the underlying
 message, and **Retry push & PR** re-attempts *only* that step. No story is ever
 rebuilt.
+
+If you left **Code review** on, one more step runs here: chief-web reviews the
+diff and posts its findings to the pull request as a single comment review, then
+starts a feedback run to answer them. It gets three attempts, and a session that
+runs out of them is `failed` at the `review` stage with the pull request already
+open — see [Code review](code-review.md).
 
 ## 6. Review and merge
 

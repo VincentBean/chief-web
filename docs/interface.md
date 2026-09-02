@@ -67,8 +67,9 @@ cheaper than a socket per browser would be. One poll feeds the sidebar, the
 overview and the list at once; a hidden tab polls nothing.
 
 **New session** (`/sessions/new`) is its own page: repository, name, base
-branch, pull request target and an optional scheduled start, with what happens
-next explained beside it. A successful create lands on the session page; a
+branch, pull request target, an optional scheduled start and a **Code review**
+checkbox (seeded from the [global default](#settings)), with what happens next
+explained beside it. A successful create lands on the session page; a
 failed clone keeps the form and shows git's output under it.
 
 ### The session page
@@ -81,8 +82,10 @@ failed marked in red when a session has failed. The main column shows what that
 stage needs: the planning terminal while pending, the loop's iteration and
 attempt counters and the story list while building, the failure reason and what
 a retry will do when failed. The side column carries the facts (branches, pull
-request, timestamps), the PRD's parse state, and the schedule. The agent log
-runs full width underneath and follows live output while the loop runs.
+request, timestamps), the PRD's parse state, the schedule, and the
+[code review](code-review.md) toggle, which stays changeable until the session
+is finished. The agent log runs full width underneath and follows live output
+while the loop runs.
 
 ### Deleting a session
 
@@ -163,23 +166,32 @@ the `settings` table so it can be changed without a restart:
   retries. The number is also written into the prompt, so the agent knows what
   it is being held to and can decide against starting the whole test suite with
   four minutes left. `BUILD_ITERATION_TIMEOUT_MS` only supplies the default.
-- **Planning model** and **Build model** — which model Claude Code runs on, set
-  separately for the interactive planning terminal and for each headless story
-  iteration of the build loop. The choices are Claude Code's own `--model`
-  aliases — `opus`, `sonnet`, `haiku`, `fable` — so each keeps meaning the
-  latest model of its family as the pinned CLI in `runner/Dockerfile` moves.
+- **Planning model**, **Build model** and **Review model** — which model Claude
+  Code runs on, set separately for the interactive planning terminal, for each
+  headless story iteration of the build loop, and for the one
+  [code review](code-review.md) pass over a finished branch. The choices are
+  Claude Code's own `--model` aliases — `opus`, `sonnet`, `haiku`, `fable` — so
+  each keeps meaning the latest model of its family as the pinned CLI in
+  `runner/Dockerfile` moves.
   The default is **Let Claude Code choose**: no `--model` is passed at all and
   the CLI applies its own default, which on a subscription is whatever the plan
-  defaults to. Splitting the two is the point — planning is one conversation
-  and cheap to run on the best model, while a build is one fresh invocation per
-  story and is where the usage goes. The planning model applies to the next
-  terminal you open; the build model is read at the start of every iteration,
-  so changing it mid-build applies from the next story and never rebuilds one
-  already committed. To offer a pinned id (`claude-opus-5`) or another family,
-  add it to `AGENT_MODELS` in `server/src/settings/service.ts` and
-  `web/src/api.ts` — the allowlist is deliberate, because `--model` accepts any
-  string and only warns on one it does not recognise, so an unchecked typo
-  would run a whole build on the fallback rather than failing.
+  defaults to. Splitting them is the point — planning is one conversation and
+  cheap to run on the best model, a build is one fresh invocation per story and
+  is where the usage goes, and a review is one pass over a diff that is already
+  written. The planning model applies to the next terminal you open; the build
+  model is read at the start of every iteration, so changing it mid-build
+  applies from the next story and never rebuilds one already committed; the
+  review model is read when a review starts. To offer a pinned id
+  (`claude-opus-5`) or another family, add it to `AGENT_MODELS` in
+  `server/src/settings/service.ts` and `web/src/api.ts` — the allowlist is
+  deliberate, because `--model` accepts any string and only warns on one it does
+  not recognise, so an unchecked typo would run a whole build on the fallback
+  rather than failing.
+- **Run code review on new sessions** — the starting value of the **Code
+  review** checkbox on the new-session form, and what a session created through
+  `POST /api/sessions` without a `codeReview` field gets. It is only a default:
+  sessions that already exist keep the flag they were created with, and any
+  session can be toggled on its own page. See [Code review](code-review.md).
 - **Commit author name and email** — the git identity agents commit with inside
   session containers. Blank restores the defaults (`chief-web` /
   `chief-web@localhost`), which are also baked into the runner image. Use an

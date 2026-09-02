@@ -75,7 +75,7 @@ will do. Nothing already committed is ever redone: every story `prd.md` calls
 | `container_lost` | The container died or the stack was restarted mid-build | Starts a **fresh container on the same workspace** and resumes | Nothing, normally — just retry. If it recurs, check `docker compose logs` and the host's memory |
 | `push` | Deploy key without write access, protected branch, network | Re-runs the push and the pull request only | See [SSH failures](#a-clone-or-push-fails-over-ssh) |
 | `pull_request` | Expired/insufficient GitHub token, no commits between the branches, org approval missing | Same — an existing PR is adopted, never duplicated | Re-check the token on Settings with **Validate** ([token setup](../README.md#4-add-a-github-token)) |
-| `review` | The automatic code review could not run or could not be posted | Re-runs the review only — the pull request is left as it is | Check the GitHub token and the **Review model** in Settings; the reason on the session names which half failed |
+| `review` | The [automatic code review](code-review.md) could not run or could not be posted | Re-runs the review only — the pull request is left as it is | Check the GitHub token and the **Review model** in Settings; the reason on the session names which half failed |
 
 Notes that save time:
 
