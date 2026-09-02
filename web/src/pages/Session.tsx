@@ -19,6 +19,7 @@ import {
   retrySession,
   retrySessionSetup,
   type Session as SessionData,
+  setSessionCodeReview,
   setSessionSchedule,
   startBuild,
   startPlanning,
@@ -58,6 +59,7 @@ type Busy =
   | 'retry'
   | 'setup'
   | 'schedule'
+  | 'code-review'
   | 'delete'
   | null;
 
@@ -193,6 +195,15 @@ export function Session() {
       return next.scheduledStartAt === null
         ? 'Schedule cleared. This session starts when you say so.'
         : `Scheduled for ${localTime(next.scheduledStartAt)} (${startsIn(next.scheduledStartAt)}).`;
+    });
+
+  const onCodeReview = (codeReview: boolean): void =>
+    run('code-review', async () => {
+      const next = await setSessionCodeReview(id, codeReview);
+      setSession(next);
+      return next.codeReview
+        ? 'Code review on: the pull request is reviewed as soon as it is opened.'
+        : 'Code review off: the pull request is opened without one.';
     });
 
   const onBackToPlanning = (): void =>
@@ -488,6 +499,8 @@ export function Session() {
           <PrdPanel prd={planning.prd} />
 
           <SchedulePanel session={session} busy={busy} onSave={onSchedule} />
+
+          <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
         </aside>
       </div>
 
@@ -1001,3 +1014,44 @@ function SchedulePanel({
   );
 }
 
+
+/* ----------------------------------------------------------- code review */
+
+/**
+ * Whether this session's pull request is reviewed automatically (US-005).
+ * Changeable right up to the moment the session finishes, because that is
+ * when the pull request — and with it the review — is created.
+ */
+function CodeReviewPanel({
+  session,
+  busy,
+  onToggle,
+}: {
+  readonly session: SessionData;
+  readonly busy: Busy;
+  readonly onToggle: (codeReview: boolean) => void;
+}) {
+  const finished = session.status === 'finished';
+  return (
+    <Panel
+      title="Code review"
+      icon="comment"
+      meta={<Badge tone={session.codeReview ? 'ready' : 'neutral'}>{session.codeReview ? 'on' : 'off'}</Badge>}
+    >
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={session.codeReview}
+          disabled={finished || busy !== null}
+          onChange={(event) => onToggle(event.target.checked)}
+        />
+        Review this session’s pull request
+      </label>
+      <p className="field__hint">
+        {finished
+          ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: this session is finished, so its pull request has already been opened.`
+          : 'The review runs automatically after the pull request is created and posts its comments to GitHub.'}
+      </p>
+    </Panel>
+  );
+}

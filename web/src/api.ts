@@ -254,6 +254,8 @@ export interface Session {
   stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
   cloned: boolean;
+  /** Whether the pull request this session opens is reviewed automatically. */
+  codeReview: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -287,6 +289,8 @@ export interface SessionInput {
   prTargetBranch: PrTargetBranch;
   /** UTC ISO-8601; omit or null for "start it by hand". */
   scheduledStartAt?: string | null;
+  /** Omit to fall back to the global "code review by default" setting. */
+  codeReview?: boolean;
 }
 
 /** The clone's outcome; `ok: false` is an answer, not a failed request. */
@@ -513,6 +517,18 @@ export async function setSessionSchedule(
   return api<Session>(`/api/sessions/${encodeURIComponent(id)}/schedule`, {
     method: 'PUT',
     body: JSON.stringify({ scheduledStartAt }),
+  });
+}
+
+/**
+ * Turns the automatic code review of this session's pull request on or off
+ * (US-005). Allowed until the session is finished, after which the review has
+ * either run or missed its chance.
+ */
+export async function setSessionCodeReview(id: string, codeReview: boolean): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/code-review`, {
+    method: 'PUT',
+    body: JSON.stringify({ codeReview }),
   });
 }
 

@@ -1,6 +1,13 @@
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 
-import { createSession, featureBranchFor, type PrTargetBranch, type SessionInput, sessionPath } from '../api.ts';
+import {
+  createSession,
+  featureBranchFor,
+  fetchSettings,
+  type PrTargetBranch,
+  type SessionInput,
+  sessionPath,
+} from '../api.ts';
 import { describeError, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link, navigate } from '../router.tsx';
@@ -28,9 +35,24 @@ export function NewSession() {
   const [schedule, setSchedule] = useState(false);
   const [day, setDay] = useState('');
   const [time, setTime] = useState('');
+  /** null until the global default has loaded, so an early create can omit it. */
+  const [codeReview, setCodeReview] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stderr, setStderr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // "Code review by default" only seeds the checkbox: once it has loaded, or
+  // once the operator has touched the box, their choice is what is sent.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchSettings(controller.signal)
+      .then((settings) => setCodeReview((current) => current ?? settings.codeReviewDefault))
+      .catch(() => {
+        // A convenience, not a requirement: an unreadable setting leaves it off
+        // here and the server resolves the default itself.
+      });
+    return () => controller.abort();
+  }, []);
 
   // The first usable repository is the default, and the base branch follows
   // the repository until the operator overrides it.
@@ -55,6 +77,8 @@ export function NewSession() {
       return;
     }
     const input: SessionInput = { repositoryId: selected.id, name: trimmedName, prTargetBranch };
+    // Still loading: say nothing and let the server apply the global default.
+    if (codeReview !== null) input.codeReview = codeReview;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
     if (schedule) {
       const at = fromLocalParts(day, time);
@@ -229,6 +253,20 @@ export function NewSession() {
                     {schedule
                       ? 'Your timezone, 24-hour clock. The PRD has to be marked ready by then, or the start is missed.'
                       : 'Leave off to start it by hand once the PRD is ready.'}
+                  </p>
+                </div>
+
+                <div className="field">
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={codeReview ?? false}
+                      onChange={(event) => setCodeReview(event.target.checked)}
+                    />
+                    Code review
+                  </label>
+                  <p className="field__hint">
+                    The review runs automatically after the pull request is created and posts its comments to GitHub.
                   </p>
                 </div>
 
