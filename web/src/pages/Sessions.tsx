@@ -8,6 +8,8 @@ import {
   retrySessionSetup,
   type Session,
   sessionPath,
+  SESSION_STATUSES,
+  type SessionStatus,
 } from '../api.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { describeError, isActive, isEnded, needsAttention, useAppData, useKeyChords } from '../data.tsx';
@@ -15,7 +17,18 @@ import { Icon } from '../Icon.tsx';
 import { Link, navigate, replaceSearch, useLocation } from '../router.tsx';
 import { since, startsIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
-import { EmptyState, Kbd, PageHeader, Progress, Segmented, SESSION_TONE, Skeleton, StatusBadge, StatusDot } from '../ui.tsx';
+import {
+  EmptyState,
+  Kbd,
+  PageHeader,
+  Progress,
+  Segmented,
+  SESSION_LABEL,
+  SESSION_TONE,
+  Skeleton,
+  StatusBadge,
+  StatusDot,
+} from '../ui.tsx';
 
 type Filter = 'all' | 'active' | 'attention' | 'planning' | 'ready' | 'finished';
 
@@ -35,6 +48,18 @@ function isFilter(value: string | null): value is Filter {
 }
 
 /**
+ * The status filter is separate from the views above because it is exhaustive:
+ * every state a session can be in, including the two the pull request lifecycle
+ * added (US-007). The views answer "what needs me?", this answers "what is
+ * waiting on a merge?".
+ */
+type StatusFilter = SessionStatus | 'all';
+
+function isStatusFilter(value: string | null): value is SessionStatus {
+  return SESSION_STATUSES.some((status) => status === value);
+}
+
+/**
  * Every session, as a table. Filters live in the URL, so a bookmarked
  * `/sessions?filter=attention` is a to-do list and the sidebar's counts link
  * to exactly what they count.
@@ -45,6 +70,7 @@ export function Sessions() {
   const toast = useToast();
   const params = new URLSearchParams(search);
   const filter: Filter = isFilter(params.get('filter')) ? (params.get('filter') as Filter) : 'all';
+  const status: StatusFilter = isStatusFilter(params.get('status')) ? (params.get('status') as SessionStatus) : 'all';
   const repositoryFilter = params.get('repository') ?? '';
   const [query, setQuery] = useState(params.get('q') ?? '');
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -58,7 +84,9 @@ export function Sessions() {
 
   const setParam = (key: string, value: string): void => {
     const next = new URLSearchParams(window.location.search);
-    if (value === '' || (key === 'filter' && value === 'all')) next.delete(key);
+    // 'all' is the default of both segmented filters, and '' of the selects:
+    // neither belongs in the URL, so a default view has a clean address.
+    if (value === '' || value === 'all') next.delete(key);
     else next.set(key, value);
     replaceSearch(next);
   };
@@ -118,6 +146,7 @@ export function Sessions() {
   const visible = all.filter(
     (session) =>
       active.test(session) &&
+      (status === 'all' || session.status === status) &&
       (repositoryFilter === '' || session.repositoryId === repositoryFilter) &&
       (needle === '' ||
         session.name.toLowerCase().includes(needle) ||
@@ -178,6 +207,19 @@ export function Sessions() {
           }))}
         />
         <div className="toolbar__spacer" />
+        <select
+          className="field__input field__input--inline"
+          value={status}
+          onChange={(event) => setParam('status', event.target.value)}
+          aria-label="Status"
+        >
+          <option value="all">All statuses</option>
+          {SESSION_STATUSES.map((candidate) => (
+            <option key={candidate} value={candidate}>
+              {SESSION_LABEL[candidate]} ({all.filter((session) => session.status === candidate).length})
+            </option>
+          ))}
+        </select>
         {used.size > 1 && (
           <select
             className="field__input field__input--inline"
@@ -232,7 +274,7 @@ export function Sessions() {
         </EmptyState>
       ) : visible.length === 0 ? (
         <EmptyState icon="filter" title="Nothing matches">
-          No session matches this filter.{' '}
+          {status === 'all' ? 'No session matches this filter.' : `No session is ${SESSION_LABEL[status]}.`}{' '}
           <button
             type="button"
             className="link link--button"
