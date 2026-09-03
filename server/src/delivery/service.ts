@@ -322,6 +322,11 @@ export class DeliveryService implements BuildCompletion {
       if (!reviewed.ok) {
         return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
       }
+      // The review is posted by the time the step answers `ok` — publishing is
+      // what makes an attempt succeed — so releasing the draft here puts the
+      // comment on the pull request *before* anyone is told it is ready to
+      // read. A review that flagged nothing starts no feedback run, so there
+      // is nothing further to wait for and the session finishes now (US-004).
       const undrafted = await this.readyForReview(session, token, opened.pullRequest);
       if (undrafted !== null) {
         return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });

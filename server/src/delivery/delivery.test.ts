@@ -994,17 +994,46 @@ describe('the code review of a delivery', () => {
     assert.match(world.reload().lastError ?? '', /usage limit/);
   });
 
-  it('finishes a review that found nothing exactly like one that did', async () => {
+  it('posts a review that found nothing, then undrafts and finishes the session', async () => {
     const world = new World();
     const reviewer = new FakeReviewer();
     reviewer.outcomes = [reviewPass(0)];
     const publisher = new FakePublisher();
-    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, publisher));
+    const opener = new FakeOpener();
+    const solver = new FakeSolver();
+    // Both halves record into the same list: what must never happen is a pull
+    // request announced as ready before the review it is waiting for is up
+    // (US-004).
+    const order: string[] = [];
+    const seen: (SessionStatus | undefined)[] = [];
+    const watchedPublisher: ReviewPublisher = {
+      publish: (token, target, report) => {
+        seen.push(getSession(world.db, world.session.id)?.status);
+        order.push('publish');
+        return publisher.publish(token, target, report);
+      },
+    };
+    const watchedOpener: PullRequestOpener = {
+      open: (token, input) => opener.open(token, input),
+      markReady: (token, pullRequestId) => {
+        order.push('markReady');
+        return opener.markReady(token, pullRequestId);
+      },
+    };
+    const delivery = serviceFor(
+      world,
+      watchedOpener,
+      new ReviewStep(reviewer, watchedPublisher, () => solver),
+    );
 
     await delivery.complete(reviewedSession(world), world.stories());
 
+    assert.deepEqual(order, ['publish', 'markReady'], 'the comment is up before the undraft');
+    assert.deepEqual(seen, ['reviewing'], 'the review is posted with the session still reviewing');
     assert.equal(publisher.calls.length, 1);
     assert.deepEqual(publisher.calls[0]?.report.findings, []);
+    assert.equal(solver.calls.length, 0, 'nothing was flagged, so no feedback run is started');
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
     const finished = world.reload();
     assert.equal(finished.status, 'pr-open');
     assert.equal(finished.failureStage, null);
@@ -1026,15 +1055,8 @@ class FakeSolver implements FeedbackSolver {
 }
 
 describe('chaining into the pull request feedback solver', () => {
-  function serviceFor(world: World, step: ReviewStep) {
-    return createDeliveryService(
-      world.config,
-      world.db,
-      world.containers,
-      world.exec,
-      new FakeOpener(),
-      step,
-    );
+  function serviceFor(world: World, step: ReviewStep, opener: PullRequestOpener = new FakeOpener()) {
+    return createDeliveryService(world.config, world.db, world.containers, world.exec, opener, step);
   }
 
   /** The session as the build loop hands it over, with the flag on. */
@@ -1067,13 +1089,17 @@ describe('chaining into the pull request feedback solver', () => {
     const reviewer = new FakeReviewer();
     reviewer.outcomes = [reviewPass(0)];
     const solver = new FakeSolver();
+    const opener = new FakeOpener();
 
-    await serviceFor(world, new ReviewStep(reviewer, new FakePublisher(), () => solver)).complete(
-      reviewedSession(world),
-      world.stories(),
-    );
+    await serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+      opener,
+    ).complete(reviewedSession(world), world.stories());
 
     assert.equal(solver.calls.length, 0, 'there is nothing on the pull request to work on');
+    // Nothing is waited for, so the draft is released as part of this delivery.
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
     assert.equal(world.reload().status, 'pr-open');
   });
 
