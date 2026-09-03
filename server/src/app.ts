@@ -33,6 +33,7 @@ import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createLimitsRouter } from './routes/limits.js';
 import { createPlanningRouter } from './routes/planning.js';
+import { type ConflictScan, createPrConflictScan } from './prconflicts/index.js';
 import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
@@ -133,6 +134,12 @@ export interface AppDependencies {
    * on a stub gateway so they never reach the network.
    */
   readonly prSync?: PullRequestSync;
+  /**
+   * The merge conflict scan (US-003). Defaults to a service polling GitHub for
+   * the open `chief/` pull requests that have grown conflicts; tests pass one
+   * built on a stub gateway so they never reach the network.
+   */
+  readonly prConflicts?: ConflictScan;
 }
 
 /**
@@ -243,6 +250,12 @@ export function createApp(
   // away (US-005); merged work never needs one again.
   const prSync = deps.prSync ?? createPrSync(config, db, orchestrator);
   prSync.start();
+  // The merge conflict scan (US-003), started here for the same reason: a base
+  // branch that moves overnight has to be noticed whether or not anyone opens
+  // the UI. It only decides which pull requests conflict; what is done about
+  // one is the fix pipeline handed to it (US-005).
+  const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db);
+  prConflicts.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
   // stories, so a full server refuses the run instead of holding it.
