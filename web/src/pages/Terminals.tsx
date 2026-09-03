@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 
 import { closeTerminal, type Container, createTerminal, fetchContainers, fetchTerminals, type Terminal } from '../api.ts';
-import { describeError, redirectIfUnauthorised } from '../data.tsx';
+import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { replaceSearch, useLocation } from '../router.tsx';
 import { since } from '../schedule.ts';
-import { type PaneStatus, TerminalPane } from '../TerminalPane.tsx';
+import type { PaneStatus } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+
+const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
 
 /** Query parameter holding the attached terminal, so a reload rejoins it. */
 const TERMINAL_PARAM = 'id';
@@ -35,6 +37,9 @@ export function Terminals() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [command, setCommand] = useState('');
+  // A PTY needs a keyboard and a screen wider than a phone, so below `lg`
+  // nothing here is rendered — not the manager, and not a fetch to fill it.
+  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   const refresh = useCallback(async (signal?: AbortSignal): Promise<void> => {
     const [openTerminals, running] = await Promise.all([
@@ -50,6 +55,7 @@ export function Terminals() {
   }, []);
 
   useEffect(() => {
+    if (!desktop) return;
     const controller = new AbortController();
     refresh(controller.signal)
       .catch((cause: unknown) => {
@@ -61,7 +67,7 @@ export function Terminals() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [refresh]);
+  }, [desktop, refresh]);
 
   const attach = (id: string | null): void => {
     setStatus('connecting');
@@ -96,6 +102,19 @@ export function Terminals() {
   };
 
   const active = terminals.find((terminal) => terminal.id === selected) ?? null;
+
+  if (!desktop) {
+    return (
+      <div className="page page--narrow">
+        <PageHeader title="Terminals" subtitle="A shell inside a running container." />
+        <EmptyState icon="terminal" title="Terminals need a desktop">
+          A container shell is an interactive terminal: it wants a keyboard, copy and paste, and a screen wider than this one.
+          Open this page on a desktop to attach. Terminals you have already opened keep running on the server, so they are
+          waiting there when you do.
+        </EmptyState>
+      </div>
+    );
+  }
 
   return (
     <div className="page page--full">
@@ -211,16 +230,18 @@ export function Terminals() {
               }
               className="panel--terminal"
             >
-              <TerminalPane
-                terminalId={selected}
-                size="tall"
-                onStatus={setStatus}
-                onExit={(exitCode) => {
-                  setTerminals((current) =>
-                    current.map((terminal) => (terminal.id === selected ? { ...terminal, status: 'exited', exitCode } : terminal)),
-                  );
-                }}
-              />
+              <Suspense fallback={<Skeleton lines={6} />}>
+                <TerminalPane
+                  terminalId={selected}
+                  size="tall"
+                  onStatus={setStatus}
+                  onExit={(exitCode) => {
+                    setTerminals((current) =>
+                      current.map((terminal) => (terminal.id === selected ? { ...terminal, status: 'exited', exitCode } : terminal)),
+                    );
+                  }}
+                />
+              </Suspense>
               <p className="field__hint">Copy with Ctrl+Shift+C (or Ctrl+Insert), paste with Ctrl+Shift+V (or Ctrl+V). The terminal resizes with the window.</p>
             </Panel>
           )}

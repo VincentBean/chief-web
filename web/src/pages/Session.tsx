@@ -28,7 +28,7 @@ import {
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
+import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
@@ -640,6 +640,9 @@ function PlanningPanel({
   }, [planning.terminalId, planning.running, closed]);
 
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
+  // Below `lg` the pane is not rendered at all: mounting it would open a
+  // WebSocket onto a PTY nothing on screen could show or type into.
+  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   return (
     <Panel
@@ -713,11 +716,18 @@ function PlanningPanel({
         </p>
       )}
 
-      {attached !== null && (
-        <Suspense fallback={<Skeleton lines={6} />}>
-          <TerminalPane terminalId={attached} size="tall" />
-        </Suspense>
-      )}
+      {attached !== null &&
+        (desktop ? (
+          <Suspense fallback={<Skeleton lines={6} />}>
+            <TerminalPane terminalId={attached} size="tall" />
+          </Suspense>
+        ) : (
+          <Notice kind="info">
+            <strong>Terminal access is available on desktop.</strong> Planning is an interactive Claude conversation, which
+            needs a keyboard and a screen this narrow cannot give it. The session keeps running on the server; everything
+            else on this page — stages, stories, the agent log and the PRD — works here.
+          </Notice>
+        ))}
 
       {attached === null && planning.terminalId === null && (
         <p className="field__hint">

@@ -243,8 +243,8 @@ export function Sessions() {
           </button>
         </EmptyState>
       ) : (
-        <div className="table-wrap panel">
-          <table className="table table--sessions">
+        <div className="table-wrap table-wrap--cards panel">
+          <table className="table table--sessions table--cards">
             <thead>
               <tr>
                 <th className="table__status">
@@ -308,10 +308,10 @@ function SessionRow({
   const note = rowNote(session);
   return (
     <tr className={needsAttention(session) ? 'table__row--attention' : undefined}>
-      <td className="table__status">
+      <td className="table__status table__cell--desktop">
         <StatusDot status={session.status} />
       </td>
-      <td>
+      <td className="table__cell--lead">
         <div className="cell-stack">
           <span className="cell-stack__title">
             <Link className="link link--strong" href={sessionPath(session.id)}>
@@ -331,7 +331,7 @@ function SessionRow({
           </span>
         </div>
       </td>
-      <td className="table__progress">
+      <td className="table__progress" data-label="Stories">
         <Progress
           done={session.stories.done}
           total={session.stories.total}
@@ -339,14 +339,14 @@ function SessionRow({
           compact
         />
       </td>
-      <td className="mono table__branch" title={`${session.featureBranch} → ${session.prTargetBranch}`}>
+      <td className="mono table__branch" data-label="Branch" title={`${session.featureBranch} → ${session.prTargetBranch}`}>
         {session.featureBranch}
         <span className="muted"> → {session.prTargetBranch}</span>
       </td>
-      <td className="table__time" title={session.updatedAt}>
+      <td className="table__time" data-label="Updated" title={session.updatedAt}>
         {since(session.updatedAt)}
       </td>
-      <td className="table__actions">
+      <td className="table__actions table__cell--foot">
         <div className="row__actions">
           {session.prUrl !== null && (
             <a className="button button--small button--quiet" href={session.prUrl} target="_blank" rel="noreferrer" title="Open the pull request on GitHub">

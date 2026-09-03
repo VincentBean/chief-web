@@ -141,6 +141,47 @@
     }
   }
 
+  /*
+   * Below `lg` the page is a stack of cards and rows, so "small" is only
+   * about type size — there is width to spare and no reason to hand a
+   * fingertip anything under the 2.5rem a coarse pointer wants.
+   *
+   * `lg` rather than `md` because that is where the shell stops being a
+   * desktop: down there the sidebar is a drawer and the topbar's own icon
+   * button is the way into it. A tablet held in portrait is 768px wide, has a
+   * coarse pointer, and was getting 2.25rem buttons and 1.75rem-wide icon
+   * buttons — including that drawer toggle (US-008).
+   */
+  @variant max-lg {
+    @media (pointer: coarse) {
+      .button--small {
+        min-height: 2.5rem;
+      }
+
+      /*
+       * An icon-only button is 2.5rem tall and 1.75rem wide, which is a
+       * fingertip's worth of one dimension and not the other. Square it off.
+       */
+      .button--icon {
+        min-width: 2.5rem;
+      }
+    }
+  }
+
+  /*
+   * A panel's "see all" link is an action too. On a coarse pointer it gets
+   * the same 2.5rem box as the buttons beside it; the panel header is taller
+   * than that already, so nothing moves.
+   */
+  @media (pointer: coarse) {
+    .panel__actions .link,
+    .row__actions .link {
+      align-items: center;
+      display: inline-flex;
+      min-height: 2.5rem;
+    }
+  }
+
   /* ----------------------------------------------------------------- forms */
   .form {
     display: flex;
@@ -199,6 +240,18 @@
 
   .field__pair > .field__input--narrow {
     flex: 0 0 6rem;
+  }
+
+  /*
+   * Narrow, the input takes a line of its own and the buttons beside it drop
+   * underneath. Sharing 22rem between a token field and two buttons leaves
+   * the field too short to read a `github_pat_…` in, and wraps only one of
+   * the buttons, which reads as a mistake.
+   */
+  @variant max-md {
+    .field__pair > .field__input {
+      flex: 1 1 100%;
+    }
   }
 
   .field__textarea {
@@ -288,6 +341,23 @@
     width: 1rem;
   }
 
+  /*
+   * The same 2.5rem a button gets, for the things you type into and tick.
+   * A 2.125rem input and a 1rem radio are comfortable with a mouse and
+   * marginal with a fingertip; the radio grows by its label, which is the
+   * target anyway since the input is inside the `<label>`.
+   */
+  @media (pointer: coarse) {
+    .field__input {
+      min-height: 2.5rem;
+    }
+
+    .radio,
+    .checkbox {
+      min-height: 2.5rem;
+    }
+  }
+
   /* ---------------------------------------------------------------- search */
   .search {
     align-items: center;
@@ -323,6 +393,21 @@
     outline: none;
   }
 
+  /*
+   * The whole bar is a `<label>`, so the bar is the tap target — 2.125rem of
+   * it, which is under what a fingertip wants. The input stretches with it so
+   * the caret still lands where the finger did (US-008).
+   */
+  @media (pointer: coarse) {
+    .search {
+      min-height: 2.5rem;
+    }
+
+    .search__input {
+      align-self: stretch;
+    }
+  }
+
   .search__input::-webkit-search-cancel-button {
     appearance: none;
   }
@@ -344,6 +429,19 @@
     display: none;
   }
 
+  /*
+   * A phone cannot fit six filters on one line, and a sideways scroller
+   * hides the ones it cannot fit. Below `md` the group wraps instead: every
+   * filter is visible without a swipe.
+   */
+  @variant max-md {
+    .segmented {
+      display: flex;
+      flex-wrap: wrap;
+      overflow-x: visible;
+    }
+  }
+
   .segmented__option {
     align-items: center;
     background: transparent;
@@ -361,6 +459,19 @@
       background-color var(--motion-fast) var(--ease-standard),
       color var(--motion-fast) var(--ease-standard);
     white-space: nowrap;
+  }
+
+  /*
+   * The filters are the Sessions page's main triage control and each option
+   * was 1.75rem tall. Sized like the buttons beside them, width-unscoped for
+   * the same reason `.button` is (US-008).
+   */
+  @media (pointer: coarse) {
+    .segmented__option {
+      min-height: 2.5rem;
+      min-width: 2.5rem;
+      justify-content: center;
+    }
   }
 
   .segmented__option:hover {
@@ -475,6 +586,13 @@
     padding-top: 0.625rem;
   }
 
+  /* A summary is a control: "Deploy key" is 1.25rem tall and gets tapped. */
+  @media (pointer: coarse) {
+    .disclosure__summary {
+      min-height: 2.5rem;
+    }
+  }
+
   /* --------------------------------------------------------------- savebar */
   .savebar {
     align-items: center;
@@ -506,5 +624,20 @@
     color: var(--color-fg-default);
     flex: 1;
     font-size: var(--text-sm);
+  }
+
+  /*
+   * On a phone the bar is two buttons. "You have unsaved changes." takes
+   * three lines of a 22rem overlay to say what a lit-up Save changes says on
+   * its own, and the taller the bar the more of the form it covers.
+   */
+  @variant max-md {
+    .savebar__text {
+      display: none;
+    }
+
+    .savebar > .button {
+      flex: 1 1 auto;
+    }
   }
 }

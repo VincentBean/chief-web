@@ -334,6 +334,183 @@
     line-height: 1rem;
   }
 
+  /* ------------------------------------------------------------ table cards
+   * The shared answer to "this table is wider than a phone": a table at `md`
+   * (48rem) and up, one stacked card per row below it. Nothing here applies
+   * above `md`, so a table that opts in keeps its desktop rendering exactly.
+   *
+   * Opting in is markup only. Add `table--cards` beside `table`, and give
+   * each cell the column header it should carry on mobile via `data-label`
+   * — the label is drawn from the attribute, so a page never repeats its
+   * header row in a second mobile-only block:
+   *
+   *   <div className="table-wrap table-wrap--cards panel">
+   *     <table className="table table--cards">
+   *       <thead><tr><th>Session</th><th>Branch</th>…</tr></thead>
+   *       <tbody>
+   *         <tr>
+   *           <td className="table__cell--lead">…name, status…</td>
+   *           <td data-label="Branch">main</td>
+   *           <td className="table__cell--foot">…buttons…</td>
+   *         </tr>
+   *       </tbody>
+   *     </table>
+   *   </div>
+   *
+   * The card as a whole opens whatever its lead cell's `link--strong`
+   * points at, so the tap target is the row rather than its title; buttons
+   * in the `--foot` strip keep their own click.
+   *
+   * Three cell modifiers cover what a label cannot: `--lead` is the card's
+   * headline (full width, no label, always first), `--foot` is the actions
+   * strip ruled off at the bottom, and `--desktop` drops a column the card
+   * has no room to repeat — a status dot whose lead cell already carries a
+   * status badge, say. A cell that renders nothing is dropped too, so a
+   * label never appears on its own line. `table-wrap--cards` is for the
+   * case where the table is wrapped in a `panel`: the cards carry their own
+   * borders on mobile, so the panel's would double up.
+   */
+  @variant max-md {
+    .table-wrap--cards.panel {
+      background-color: transparent;
+      border: 0;
+      box-shadow: none;
+    }
+
+    /*
+     * `table` is a Tailwind display utility as well as this app's table
+     * class, and the utilities layer outranks components whatever the
+     * selector, so `!important` is what it takes to get the element out of
+     * table layout. It has to come out: a table grows to fit its content,
+     * and a card whose content did not fit would widen the page instead of
+     * wrapping.
+     */
+    .table--cards {
+      display: block !important;
+    }
+
+    .table--cards tbody {
+      display: block;
+    }
+
+    /* The headers live on in the cells' `data-label`. */
+    .table--cards thead {
+      display: none;
+    }
+
+    .table--cards tbody tr {
+      background-color: var(--color-surface-raised);
+      border: 1px solid var(--color-line-subtle);
+      border-radius: var(--radius-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+      padding: 0.625rem 0.75rem;
+      position: relative;
+    }
+
+    .table--cards tbody tr + tr {
+      margin-top: 0.5rem;
+    }
+
+    /* Label left, value right, on one line — the card's key/value pair. */
+    .table--cards tbody td {
+      align-items: baseline;
+      border-top: 0;
+      display: flex;
+      gap: 0.75rem;
+      justify-content: space-between;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      padding: 0;
+      text-align: left;
+      white-space: normal;
+    }
+
+    .table--cards tbody td:empty {
+      display: none;
+    }
+
+    .table--cards tbody td[data-label]::before {
+      color: var(--color-fg-muted);
+      content: attr(data-label);
+      flex: none;
+      font-size: var(--text-xs);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    .table--cards tbody td.table__cell--desktop {
+      display: none;
+    }
+
+    .table--cards tbody td.table__cell--lead {
+      display: block;
+      order: -1;
+    }
+
+    /*
+     * The whole card opens what the lead cell links to: on a phone the row
+     * is the tap target, not the twenty pixels of its title. The overlay is
+     * laid over the card by the lead cell, and the actions strip is
+     * positioned and later in source order, so its buttons stay on top and
+     * keep their own click.
+     */
+    .table--cards tbody td.table__cell--lead .link--strong::after {
+      content: "";
+      inset: 0;
+      position: absolute;
+    }
+
+    .table--cards tbody td.table__cell--foot {
+      border-top: 1px solid var(--color-line-subtle);
+      justify-content: flex-start;
+      margin-top: 0.125rem;
+      order: 1;
+      padding-top: 0.5rem;
+      position: relative;
+    }
+
+    .table--cards tbody td.table__cell--foot .row__actions {
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+
+    /* A bar sized by its column on desktop is sized by the card here: the
+     * label takes what it needs and the track spans the rest of the line. */
+    .table--cards tbody td .progress {
+      flex: 1;
+    }
+
+    /* Widths and clipping that keep the desktop columns honest have no job
+     * inside a card, and a fixed width there would push the page sideways. */
+    .table--cards tbody td.table__progress,
+    .table--cards tbody td.table__status,
+    .table--cards tbody td.table__branch {
+      max-width: none;
+      min-width: 0;
+      overflow: visible;
+      width: auto;
+    }
+
+    /* A branch name is long enough to need breaking mid-word; the ` → main`
+     * that follows it is not, and reads as nonsense when it is broken. */
+    .table--cards tbody td.table__branch .muted {
+      white-space: nowrap;
+    }
+
+    /* The attention marker is a rule down the card's edge, not a stub of
+     * shadow beside its first cell. */
+    .table--cards .table__row--attention {
+      border-color: --alpha(var(--color-status-danger) / 40%);
+      box-shadow: inset 2px 0 0 0 var(--color-status-danger);
+    }
+
+    .table--cards .table__row--attention td:first-child {
+      box-shadow: none;
+    }
+  }
+
   /* ----------------------------------------------------------------- facts */
   .facts {
     display: flex;
@@ -378,6 +555,30 @@
 
   .repo-fact .icon {
     color: var(--color-fg-subtle);
+  }
+
+  /*
+   * Narrow, one fact per line. Wrapped, a slug and a branch land on the same
+   * line while the SSH URL below them takes three of its own, and nothing
+   * says which icon belongs to which value. `nowrap` because a column flex
+   * container that is also allowed to wrap lays its children out in columns.
+   * The icon aligns to the first line rather than to the middle of a fact
+   * that wrapped.
+   */
+  @variant max-md {
+    .repo-facts {
+      flex-direction: column;
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+    }
+
+    .repo-fact {
+      align-items: flex-start;
+    }
+
+    .repo-fact .icon {
+      margin-top: 0.25rem;
+    }
   }
 
   .build-facts {
@@ -903,6 +1104,25 @@
     }
   }
 
+  /*
+   * On a phone two stages to a row leave the marker and about eight
+   * characters of label, so the detail under it is ellipsis and nothing
+   * else. One stage to a row is the whole strip read top to bottom, which
+   * is what a stage list is for.
+   */
+  @media (max-width: 29.99rem) {
+    .stages {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stage__detail {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+    }
+  }
+
   /* --------------------------------------------------------------- stories */
   .stories {
     display: flex;
@@ -1071,5 +1291,83 @@
     gap: 0.5rem;
     margin: 0;
     overflow-wrap: anywhere;
+  }
+
+  /*
+   * Narrow, a pull request is read one thing at a time. The title and its meta
+   * line take the width; the actions drop underneath into a strip of their own
+   * rather than squeezing the title into a column of broken words. The feedback
+   * that opens below gives up the indent it borrows from the icon column, so a
+   * review comment has the whole screen to itself.
+   */
+  @variant max-md {
+    /*
+     * .row wraps below this width, which a column flex container reads as
+     * permission to lay its children out in several horizontal lines: an
+     * expanded feedback panel would sit beside the row rather than under it,
+     * and take the page width with it.
+     */
+    .pr__row {
+      flex-wrap: nowrap;
+    }
+
+    .pr__row > .row__line {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .pr__row > .row__line > .row__main {
+      flex: 1 1 12rem;
+    }
+
+    .pr__row > .row__line > .row__actions {
+      flex: 1 0 100%;
+      justify-content: flex-start;
+      padding-left: 1.75rem;
+    }
+
+    .pr__row .pr__panel,
+    .pr__row .pr__run {
+      padding-left: 0;
+    }
+
+    /* A file path and an author login are each one unbreakable token; side by
+     * side at this width they push one another off the line. */
+    .thread__head {
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .thread__author {
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    /*
+     * A fenced snippet keeps its shape and scrolls inside its own box, the way
+     * it does on GitHub. Re-wrapping code at 390px throws away the indentation
+     * that is half of what the comment is pointing at, and the scroller is
+     * already there — .output is overflow: auto.
+     */
+    .thread__body .output {
+      overflow-wrap: normal;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* The respond control: two actions that both deserve a fingertip. */
+    .dialog {
+      padding: 1rem 1.125rem 1.25rem;
+    }
+
+    .dialog__title,
+    .dialog__body {
+      overflow-wrap: anywhere;
+    }
+
+    .dialog__actions > .button {
+      flex: 1 1 8rem;
+      justify-content: center;
+    }
   }
 }

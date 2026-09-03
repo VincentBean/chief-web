@@ -233,7 +233,7 @@ export function Overview() {
             <EmptyState icon="repo" title="No repositories yet" action={<Link className="button" href="/repositories">Add a repository</Link>} />
           ) : (
             <div className="table-wrap">
-              <table className="table">
+              <table className="table table--cards">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -247,18 +247,18 @@ export function Overview() {
                 <tbody>
                   {stats.repositories.map((repo) => (
                     <tr key={repo.repositoryId}>
-                      <td>
+                      <td className="table__cell--lead">
                         <Link className="link link--strong" href={`/sessions?repository=${encodeURIComponent(repo.repositoryId)}`}>
                           {repo.name}
                         </Link>
                       </td>
-                      <td className="num">{repo.sessions}</td>
-                      <td className="num">{repo.active === 0 ? <span className="muted">—</span> : repo.active}</td>
-                      <td>
+                      <td className="num" data-label="Sessions">{repo.sessions}</td>
+                      <td className="num" data-label="Active">{repo.active === 0 ? <span className="muted">—</span> : repo.active}</td>
+                      <td data-label="Stories">
                         <Progress done={repo.storiesDone} total={repo.storiesTotal} tone="done" compact />
                       </td>
-                      <td className="num">{repo.finished}</td>
-                      <td className="num">{repo.failed === 0 ? <span className="muted">—</span> : <span className="text-danger">{repo.failed}</span>}</td>
+                      <td className="num" data-label="Shipped">{repo.finished}</td>
+                      <td className="num" data-label="Failed">{repo.failed === 0 ? <span className="muted">—</span> : <span className="text-danger">{repo.failed}</span>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -267,7 +267,12 @@ export function Overview() {
           )}
         </Panel>
 
-        <Panel title="Recently finished" icon="check-circle" actions={<Link className="link" href="/sessions?filter=finished">All finished</Link>}>
+        <Panel
+          title="Recently finished"
+          icon="check-circle"
+          className="grid__cell--lead"
+          actions={<Link className="link" href="/sessions?filter=finished">All finished</Link>}
+        >
           {sessions === null ? (
             <Skeleton lines={3} />
           ) : finished.length === 0 ? (
