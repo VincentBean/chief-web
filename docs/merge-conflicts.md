@@ -161,8 +161,10 @@ Two endings are **not** failures and spend no attempt:
   dropped, and the next tick looks at the pull request afresh at whatever it is
   now.
 - **A usage-limit hold.** The remaining attempts would walk into the same wall,
-  so they are not spent; every agent is held for the usual hour and the pull
-  request is picked up again afterwards.
+  so they are not spent; every agent is held for the usual hour, the row is
+  dropped exactly as an abandoned run’s is, and the first tick after the hold
+  lifts picks the pull request up again. A usage limit is the account’s
+  condition and not this pull request’s, so it never leaves a standing failure.
 
 After a failure the pull request is **not retried on a loop**. A failed fix is a
 *standing failure* against the exact pair of commits it failed on — the pull
@@ -173,9 +175,12 @@ later reports the pull request mergeable — you resolved it by hand, or the bas
 moved back — the failure is cleared and the badge disappears.
 
 One gap worth knowing: if the server is restarted *while* a fix is running, the
-row stays `running`, the page shows *conflict fix interrupted*, and the scan
-treats it as an active run and leaves that pull request alone. It does not
-resume by itself.
+run does not resume by itself — the container is gone with the rest and nothing
+is left driving it. The row is not left in the way either: a `running` row
+never goes stale the way a failed one does, so on the next boot every fix a
+previous process left in flight is wound back and dropped, and the first scan
+afterwards looks at those pull requests afresh. Nothing reached `origin` unless
+the run had already got as far as pushing.
 
 ## What it means to let it push
 

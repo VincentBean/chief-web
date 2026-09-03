@@ -639,7 +639,8 @@ function ConflictFixSummary({ fix }: { readonly fix: PrConflictFix }) {
   }
   return (
     <p className="row__meta">
-      A conflict fix was interrupted; the next scan starts it again.
+      A conflict fix was interrupted by a restart; it is wound back when the server comes back up,
+      and the next scan looks at this pull request again.
     </p>
   );
 }

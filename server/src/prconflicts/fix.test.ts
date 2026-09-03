@@ -239,6 +239,22 @@ describe('resolving a pull request’s merge conflicts', () => {
     return findPrConflictFix(db, pull.repositoryId, pull.prNumber);
   };
 
+  /**
+   * The same run as {@link runOnce}, but answering with the id the row had
+   * while it was in flight — which is all a run that drops its row leaves.
+   */
+  const inFlight = async (
+    fixer: PrConflictFixService,
+    pull: ConflictedPullRequest = conflicted(),
+  ): Promise<string> => {
+    await fixer.start(pull);
+    const started = findPrConflictFix(db, pull.repositoryId, pull.prNumber);
+    assert.notEqual(started, null, 'the run should have a row while it is in flight');
+    const id = started?.id ?? '';
+    await fixer.whenIdle(id);
+    return id;
+  };
+
   it('resolves the conflict with an agent and pushes the merge commit', async () => {
     const fix = await runOnce(service());
 
@@ -493,16 +509,19 @@ describe('resolving a pull request’s merge conflicts', () => {
       timedOut: false,
     };
 
-    const fix = await runOnce(service());
+    const started = await inFlight(service());
+    const fix = findPrConflictFix(db, repository.id, 61);
 
-    assert.equal(fix?.status, 'failed');
-    assert.equal(fix?.failureStage, 'agent');
+    // A usage limit is the account’s condition, not the pull request’s: the row
+    // is dropped rather than left standing as a failure, so the first tick
+    // after the hold lifts starts a fresh run instead of skipping the pull
+    // request until somebody pushes to it.
+    assert.equal(fix, null);
     // The remaining attempts would walk into the same wall, so none is spent.
-    assert.equal(fix?.attempts, 1);
     assert.equal(runner.invocations.length, 1);
     assert.equal(slots.heldUntil.length, 1);
     assert.notEqual(hold.until(), null);
-    assert.deepEqual(runner.reaps, [fix?.id]);
+    assert.deepEqual(runner.reaps, [started]);
     assert.ok(exec.steps.includes('abort'));
     assert.ok(!exec.steps.includes('push'));
   });

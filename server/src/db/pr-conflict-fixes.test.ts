@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import {
+  clearInterruptedPrConflictFixes,
   closeDatabase,
   countActivePrConflictFixes,
   createPrConflictFix,
@@ -252,6 +253,30 @@ describe('pull request conflict fixes', () => {
 
     updatePrConflictFix(db, fix.id, { status: 'failed' });
     assert.equal(countActivePrConflictFixes(db), running);
+  });
+
+  it('drops the fixes a dead process left running, and keeps the rest', () => {
+    // The suite shares one database, so what earlier tests left running counts
+    // too: this one adds exactly one to it.
+    const running = countActivePrConflictFixes(db);
+    const interrupted = fixFor(71);
+    const finished = fixFor(72);
+    updatePrConflictFix(db, finished.id, { status: 'succeeded' });
+    const failed = fixFor(73);
+    updatePrConflictFix(db, failed.id, { status: 'failed', failureStage: 'verify' });
+
+    const cleared = clearInterruptedPrConflictFixes(db);
+
+    // Only what was in flight: a `running` row outlived the memory driving it,
+    // and unlike a failure it can never go stale, so it would hide its pull
+    // request from the scan and hold a build slot forever.
+    assert.equal(cleared, running + 1);
+    assert.equal(getPrConflictFix(db, interrupted.id), null);
+    assert.equal(getPrConflictFix(db, finished.id)?.status, 'succeeded');
+    assert.equal(getPrConflictFix(db, failed.id)?.status, 'failed');
+    // Nothing left running means nothing left holding a slot.
+    assert.equal(countActivePrConflictFixes(db), 0);
+    assert.equal(clearInterruptedPrConflictFixes(db), 0);
   });
 
   it('holds a failure only while the pull request has not moved', () => {

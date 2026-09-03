@@ -4,7 +4,13 @@ import { createApp } from './app.js';
 import { createAuthService } from './auth/index.js';
 import { createBuildLogSocketRoute, createBuildLogStore } from './build/index.js';
 import { loadConfig } from './config.js';
-import { closeDatabase, type Database, openDatabase, updatePrRun } from './db/index.js';
+import {
+  clearInterruptedPrConflictFixes,
+  closeDatabase,
+  type Database,
+  openDatabase,
+  updatePrRun,
+} from './db/index.js';
 import { logger } from './lib/logger.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createTerminalManager, createTerminalSocketRoute } from './terminal/index.js';
@@ -45,6 +51,7 @@ async function main(): Promise<void> {
     // nothing to plan: they all go.
     await orchestrator.reconcilePrRuns();
     failRunsLeftBehind(db);
+    clearConflictFixesLeftBehind(db);
   } catch (error) {
     // A daemon that cannot be reached is not evidence that anything is gone;
     // start anyway and let the next reconcile sort it out.
@@ -121,6 +128,25 @@ function failRunsLeftBehind(db: Database): void {
   if (abandoned.length > 0) {
     logger.info('failed pull request runs left by a previous process', {
       runs: abandoned.length,
+    });
+  }
+}
+
+/**
+ * Winds back the conflict fixes this process did not survive (US-005).
+ *
+ * A fix run is driven entirely from memory, so a `running` row left by a dead
+ * process is driving nothing — and unlike a `failed` one it never goes stale,
+ * so it would hide its pull request from every future scan and hold a build
+ * slot for as long as the row existed. Nothing reached `origin` unless the run
+ * had already succeeded, so the row is simply dropped and the first scan after
+ * boot looks at the pull request afresh.
+ */
+function clearConflictFixesLeftBehind(db: Database): void {
+  const cleared = clearInterruptedPrConflictFixes(db);
+  if (cleared > 0) {
+    logger.info('wound back pull request conflict fixes left by a previous process', {
+      fixes: cleared,
     });
   }
 }

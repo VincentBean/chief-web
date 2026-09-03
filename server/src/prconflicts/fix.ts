@@ -37,7 +37,7 @@ import type { ConflictedPullRequest, ConflictFixStarter } from './service.js';
  * chief-web stages, chief-web commits, chief-web pushes; the agent edits files
  * and that is the whole of its authority.
  *
- * ## Three ways a run can end
+ * ## Four ways a run can end
  *
  * - **succeeded** — the merge commit is on `origin`, the pull request is
  *   mergeable again.
@@ -49,6 +49,11 @@ import type { ConflictedPullRequest, ConflictFixStarter } from './service.js';
  *   run knows is about a commit that is no longer the head. Nothing is marked
  *   failed and no attempt is spent; the row is dropped, and the next tick sees
  *   the pull request afresh at whatever it is now.
+ * - **held** — Claude’s usage limit was reached, which is an account’s
+ *   condition and not this pull request’s. Every agent is held for the usual
+ *   hour and, like an abandonment, the row is dropped rather than failed: a
+ *   standing failure would forfeit the pull request until somebody pushed to
+ *   it, when what is wanted is for a tick after the hold lifts to try again.
  */
 
 /** Why a fix could not be started. The scan logs these and tries again later. */
@@ -86,23 +91,24 @@ interface RunState {
 }
 
 /** How a run ended, for the log and for the tests. */
-export type ConflictFixOutcome = 'succeeded' | 'failed' | 'abandoned';
+export type ConflictFixOutcome = 'succeeded' | 'failed' | 'abandoned' | 'held';
 
 /**
  * How one attempt ended.
  *
- * `failed` is the only one the loop tries again, and `final` is how an attempt
- * says trying again is pointless — the account is out of usage, so the next
- * attempt walks straight back into the same wall.
+ * `failed` is the only one the loop tries again. `held` is how an attempt says
+ * trying again is pointless *and* nothing here is the pull request’s fault —
+ * the account is out of usage, so the next attempt would walk straight back
+ * into the same wall, and the run ends the way an abandoned one does.
  */
 type AttemptResult =
   | { readonly code: 'succeeded' }
   | { readonly code: 'abandoned'; readonly message: string }
+  | { readonly code: 'held'; readonly message: string }
   | {
       readonly code: 'failed';
       readonly stage: PrConflictFixFailureStage;
       readonly message: string;
-      readonly final?: boolean;
     };
 
 /** What the PullRequests page shows for a pull request's conflict fix (US-006). */
@@ -328,6 +334,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       const pass = await this.attempt(fix, container.id, pull, repoUrl, state);
       if (pass.code === 'succeeded') return 'succeeded';
       if (pass.code === 'abandoned') return this.abandon(fix, pass.message);
+      if (pass.code === 'held') return this.held(fix, pass.message);
 
       lastStage = pass.stage;
       reasons.push(
@@ -339,7 +346,6 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
         attempt,
         stage: pass.stage,
       });
-      if (pass.final === true) break;
     }
 
     const spent = reasons.length;
@@ -518,8 +524,10 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       // The account is out of usage, not the pull request out of sense: hold
       // the whole server the way a review does, leave the branch as it was,
       // and let the next scan after the hold lifts start again. The remaining
-      // attempts would walk straight back into the same wall, so this failure
-      // is final rather than retried.
+      // attempts would walk straight back into the same wall, so none is spent
+      // — and the run ends without a standing failure, because a standing
+      // failure would keep the scan off this pull request until one of its two
+      // SHAs moved, long after the hold had lifted.
       const until = this.hold.arm();
       await this.runner.reap(fix.id, containerId);
       await abortMerge(this.exec, containerId, {
@@ -528,9 +536,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       });
       await this.slots.holdAll(until);
       return {
-        code: 'failed',
-        stage: 'agent',
-        final: true,
+        code: 'held',
         message:
           'Claude’s usage limit was reached, so the conflict was not resolved and agent work ' +
           `is held until ${until}. Nothing was pushed.`,
@@ -565,6 +571,26 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       reason: why,
     });
     return 'abandoned';
+  }
+
+  /**
+   * Ends a run because the account, not the pull request, ran out.
+   *
+   * The row is dropped for the same reason an abandoned run’s is: it is the
+   * only ending that leaves the pull request eligible. A `failed` row would
+   * stand against the two commits the conflict was seen at and keep every
+   * later tick off this pull request until one of them moved — which is exactly
+   * what must not happen for a condition that clears by itself in an hour.
+   */
+  private held(fix: PrConflictFix, why: string): ConflictFixOutcome {
+    deletePrConflictFix(this.db, fix.id);
+    logger.info('a conflict fix stopped because Claude’s usage limit was reached', {
+      fix: fix.id,
+      repository: fix.repositoryId,
+      prNumber: fix.prNumber,
+      reason: why,
+    });
+    return 'held';
   }
 
   private fail(fixId: string, stage: PrConflictFixFailureStage, message: string): void {

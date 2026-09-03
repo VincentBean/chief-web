@@ -294,6 +294,25 @@ export function countActivePrConflictFixes(db: Database): number {
 }
 
 /**
+ * Drops the fixes a previous process left in flight, and says how many.
+ *
+ * A `running` row is only ever driven from memory, so one that outlived the
+ * process that made it is driving nothing: its container is gone with the rest,
+ * and nothing was pushed unless the run had already got as far as succeeding.
+ * Left alone it would be worse than useless — the scan skips a pull request
+ * with a `running` fix, and `countActivePrConflictFixes` would hold a build
+ * slot for it, both of them forever, since no SHA can ever make a `running`
+ * row stale the way it makes a `failed` one stale.
+ *
+ * So the row goes, exactly as an abandoned run’s does: the next scan finds the
+ * pull request afresh at whatever it is now, and decides again. Called once at
+ * startup, before anything can read the table.
+ */
+export function clearInterruptedPrConflictFixes(db: Database): number {
+  return changeCount(db.prepare("DELETE FROM pr_conflict_fixes WHERE status = 'running'").run());
+}
+
+/**
  * Whether a fix stands in the way of trying the pull request again.
  *
  * A `failed` fix is only a standing failure while the pull request has not
