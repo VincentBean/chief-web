@@ -34,6 +34,9 @@ type Filter = 'all' | 'active' | 'attention' | 'planning' | 'ready' | 'finished'
 
 const FILTERS: readonly { value: Filter; label: string; test: (s: Session) => boolean }[] = [
   { value: 'all', label: 'All', test: () => true },
+  // Building, held, queued — and the sessions whose draft pull request is
+  // being reviewed or fixed (US-002), which are still work in progress and
+  // would otherwise sit in no view but "All".
   { value: 'active', label: 'Active', test: isActive },
   { value: 'attention', label: 'Needs you', test: needsAttention },
   { value: 'planning', label: 'Planning', test: (s) => s.status === 'pending' },
@@ -50,8 +53,8 @@ function isFilter(value: string | null): value is Filter {
 /**
  * The status filter is separate from the views above because it is exhaustive:
  * every state a session can be in, including the two the pull request lifecycle
- * added (US-007). The views answer "what needs me?", this answers "what is
- * waiting on a merge?".
+ * added (US-007) and the two the draft chain added (US-002). The views answer
+ * "what needs me?", this answers "what is waiting on a merge?".
  */
 type StatusFilter = SessionStatus | 'all';
 

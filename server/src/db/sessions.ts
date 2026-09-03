@@ -21,9 +21,24 @@ export const SESSION_STATUSES = [
   /** The build ran to the end; terminal for a session that opened no PR. */
   'finished',
   /**
+   * The draft pull request is open and the automatic code review is running
+   * over it (US-002). `pr_url` is set, and the pull request stays a draft
+   * for as long as the session is anywhere in this chain.
+   */
+  'reviewing',
+  /**
+   * The review found something and the feedback run is pushing fixes for it
+   * and replying to the threads (US-002). Still a draft pull request; the
+   * next stop is `pr-open` once that run is over.
+   */
+  'fixing',
+  /**
    * The build is done and its pull request is open on GitHub, not merged yet
    * (US-001). `pr_url` is set. The sync leaves the session here until GitHub
    * reports the PR merged (`merged`) or closed unmerged (back to `finished`).
+   *
+   * Reached from `reviewing`/`fixing` once the pull request has been marked
+   * ready for review, or straight from delivery when no review was asked for.
    */
   'pr-open',
   /**

@@ -48,6 +48,9 @@ const REVIEW_STAGE_MIGRATION = '0007_session_review_failure_stage';
 /** The migration under test in 'widens the check to `pr-open`/`merged`'. */
 const PR_STATES_MIGRATION = '0008_session_pr_states';
 
+/** The migration under test in 'widens the check to `reviewing`/`fixing`'. */
+const REVIEW_STATES_MIGRATION = '0010_session_review_states';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -290,6 +293,63 @@ describe('migrations', () => {
     }
     assert.ok(deleteSession(db, 'delivered'));
     assert.equal(listStories(db, 'delivered').length, 0);
+
+    closeDatabase(db);
+  });
+
+  it('widens the check to `reviewing`/`fixing` and leaves every row alone', () => {
+    // The draft chain's two in-flight states (US-002). Same walk as above,
+    // except there is nothing to backfill: no row can already be in them.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === REVIEW_STATES_MIGRATION);
+    assert.ok(index > 0, `${REVIEW_STATES_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-01T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedRepository(db);
+    const at = '2026-09-01T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          pr_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'main', ?, 'main', ?, ?, ?)`,
+    ).run('open', repository.id, 'open', 'pr-open', 'chief/open',
+      'https://github.com/acme/app/pull/7', at, at);
+    syncStories(db, 'open', [{ storyId: 'US-001', title: 'First', priority: 1, status: 'done' }]);
+
+    assert.ok(runMigrations(db).includes(REVIEW_STATES_MIGRATION));
+
+    // Nothing moved, and the stories came across the rebuild.
+    assert.equal(getSession(db, 'open')?.status, 'pr-open');
+    assert.equal(getSession(db, 'open')?.updatedAt, at);
+    assert.equal(listStories(db, 'open').length, 1);
+
+    // The widened constraint takes both new statuses and still refuses the rest.
+    assert.equal(updateSession(db, 'open', { status: 'reviewing' })?.status, 'reviewing');
+    assert.equal(updateSession(db, 'open', { status: 'fixing' })?.status, 'fixing');
+    assert.throws(
+      () => db.prepare('UPDATE sessions SET status = ? WHERE id = ?').run('bogus', 'open'),
+      /CHECK/i,
+    );
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of ['idx_sessions_repository', 'idx_sessions_status', 'idx_sessions_queued_at']) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
+    // The cascade survived the rebuild too.
+    assert.ok(deleteSession(db, 'open'));
+    assert.equal(listStories(db, 'open').length, 0);
 
     closeDatabase(db);
   });

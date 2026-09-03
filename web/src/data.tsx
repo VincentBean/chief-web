@@ -174,10 +174,19 @@ export function isEnded(session: Pick<Session, 'status'>): boolean {
   return session.status === 'finished' || session.status === 'pr-open' || session.status === 'merged';
 }
 
-/** A session with a build slot, or waiting for one. */
+/**
+ * A session with work of its own in flight: a build slot, a queue place, or —
+ * once the build is over — the review and feedback runs the draft pull request
+ * waits on (US-002). Everything that is still moving, in other words, which is
+ * what the "Active" view and the sidebar's count both mean by it.
+ */
 export function isActive(session: Session): boolean {
   return (
-    session.status === 'building' || session.status === 'waiting' || session.queuePosition !== null
+    session.status === 'building' ||
+    session.status === 'waiting' ||
+    session.status === 'reviewing' ||
+    session.status === 'fixing' ||
+    session.queuePosition !== null
   );
 }
 
