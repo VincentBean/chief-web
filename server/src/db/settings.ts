@@ -38,6 +38,18 @@ export const SETTING_KEYS = [
    */
   'pr_sync_interval_minutes',
   /**
+   * How often open pull requests are scanned for merge conflicts, in minutes
+   * (US-004). An absent row means the `PR_CONFLICT_INTERVAL_MS` default
+   * applies.
+   */
+  'pr_conflict_interval_minutes',
+  /**
+   * Whether the merge conflict fixer may run at all (US-004). Stored as
+   * `1`/`0`; an *absent* row means on, unlike `code_review_default` — the
+   * feature ships enabled and the row only ever records a deliberate "off".
+   */
+  'conflict_fix_enabled',
+  /**
    * ISO timestamp until which agent work is held after a Claude usage-limit
    * refusal (US-002). Written and read through `limits/hold.ts`; a value in
    * the past means no hold, so nothing has to sweep the row.

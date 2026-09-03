@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, describe, it } from 'node:test';
+import { after, describe, it, type TestContext } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
@@ -450,5 +450,117 @@ describe('pull request conflict scan', () => {
     assert.equal(first, 1);
     assert.equal(second, 1);
     assert.equal(github.listCalls.length, 1);
+  });
+});
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function advance(t: TestContext, ms: number): Promise<void> {
+  t.mock.timers.tick(ms);
+  await settle();
+}
+
+describe('the configurable scan interval and on/off switch (US-004)', () => {
+  it('defaults to thirty minutes and prefers a saved setting', () => {
+    const { db, scan } = world();
+
+    assert.equal(scan.intervalMs(), 30 * 60_000);
+
+    setSetting(db, 'pr_conflict_interval_minutes', '5');
+    assert.equal(scan.intervalMs(), 5 * 60_000);
+
+    // A row written by hand cannot scan faster than the floor the settings
+    // route enforces, nor slower than a day.
+    setSetting(db, 'pr_conflict_interval_minutes', '0');
+    assert.equal(scan.intervalMs(), 30 * 60_000, 'a non-positive row falls back to the default');
+    setSetting(db, 'pr_conflict_interval_minutes', '9999');
+    assert.equal(scan.intervalMs(), 1440 * 60_000);
+    setSetting(db, 'pr_conflict_interval_minutes', 'not a number');
+    assert.equal(scan.intervalMs(), 30 * 60_000);
+  });
+
+  it('is enabled until a row says otherwise', () => {
+    const { db, scan } = world();
+
+    assert.equal(scan.enabled(), true);
+
+    setSetting(db, 'conflict_fix_enabled', '0');
+    assert.equal(scan.enabled(), false);
+
+    setSetting(db, 'conflict_fix_enabled', '1');
+    assert.equal(scan.enabled(), true);
+  });
+
+  it('does nothing at all, and calls no GitHub, while it is switched off', async () => {
+    const { db, github, scan, starter } = world();
+    github.open('acme/demo', [{ number: 12 }]);
+    github.says('acme/demo', 12, { mergeable: 'conflicted' });
+    setSetting(db, 'conflict_fix_enabled', '0');
+
+    assert.equal(await scan.tick(), 0);
+
+    assert.equal(github.listCalls.length, 0, 'no listing was fetched');
+    assert.equal(github.mergeabilityCalls.length, 0, 'no mergeability was fetched');
+    assert.equal(starter.started.length, 0);
+  });
+
+  it('picks the switch back up on the next tick, with no restart', async () => {
+    const { db, github, scan, starter } = world();
+    github.open('acme/demo', [{ number: 13 }]);
+    github.says('acme/demo', 13, { mergeable: 'conflicted' });
+    setSetting(db, 'conflict_fix_enabled', '0');
+    assert.equal(await scan.tick(), 0);
+
+    setSetting(db, 'conflict_fix_enabled', '1');
+
+    assert.equal(await scan.tick(), 1);
+    assert.deepEqual(
+      starter.started.map((pull) => pull.prNumber),
+      [13],
+    );
+  });
+
+  it('scans at the configured interval and picks a change up without a restart', async (t) => {
+    const { db, github, scan } = world();
+    github.open('acme/demo', [{ number: 14 }]);
+    setSetting(db, 'pr_conflict_interval_minutes', '1');
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+
+    // The catch-up tick, then one a minute later: the saved interval, not the
+    // thirty minutes the environment defaults to.
+    scan.start();
+    await settle();
+    assert.equal(github.listCalls.length, 1);
+
+    await advance(t, 60_000);
+    assert.equal(github.listCalls.length, 2);
+
+    // Saving five minutes mid-flight: the wait already armed runs out on the
+    // old value, and every wait after it uses the new one.
+    setSetting(db, 'pr_conflict_interval_minutes', '5');
+    await advance(t, 60_000);
+    assert.equal(github.listCalls.length, 3);
+
+    await advance(t, 5 * 60_000 - 1);
+    assert.equal(github.listCalls.length, 3, 'the next tick is five minutes out now');
+    await advance(t, 1);
+    assert.equal(github.listCalls.length, 4);
+
+    // Switching the fixer off leaves the timer armed but the ticks empty…
+    setSetting(db, 'conflict_fix_enabled', '0');
+    await advance(t, 5 * 60_000);
+    assert.equal(github.listCalls.length, 4, 'a disabled tick spends nothing on GitHub');
+
+    // …and switching it back on needs no restart either.
+    setSetting(db, 'conflict_fix_enabled', '1');
+    await advance(t, 5 * 60_000);
+    assert.equal(github.listCalls.length, 5);
+
+    // And stopping leaves nothing armed.
+    scan.stop();
+    await advance(t, 60_000 * 10);
+    assert.equal(github.listCalls.length, 5);
   });
 });

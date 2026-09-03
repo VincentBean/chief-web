@@ -21,7 +21,7 @@ import {
   type RepositoryPullRequests,
 } from '../lib/github-review.js';
 import { logger } from '../lib/logger.js';
-import { getGithubToken } from '../settings/index.js';
+import { getConflictFixEnabled, getGithubToken, getPrConflictIntervalMs } from '../settings/index.js';
 
 /**
  * Watching open pull requests for merge conflicts (US-003).
@@ -151,7 +151,7 @@ export class PrConflictService implements ConflictScan {
     void this.tick();
     const intervalMs = this.intervalMs();
     this.arm(intervalMs);
-    logger.info('pull request conflict scan started', { intervalMs });
+    logger.info('pull request conflict scan started', { intervalMs, enabled: this.enabled() });
   }
 
   stop(): void {
@@ -161,12 +161,23 @@ export class PrConflictService implements ConflictScan {
   }
 
   /**
-   * How long the scan waits between passes. `PR_CONFLICT_INTERVAL_MS` is the
-   * only dial today; US-004 makes it a settings-page one, read here so a change
+   * How long the scan waits between passes (US-004).
+   * `PR_CONFLICT_INTERVAL_MS` is only the default: a value saved on the
+   * settings page wins, and it is read again before every wait so a change
    * needs no restart.
    */
   intervalMs(): number {
-    return this.config.prConflictIntervalMs;
+    return getPrConflictIntervalMs(this.db, this.config);
+  }
+
+  /**
+   * Whether the operator has left the fixer switched on (US-004). Read at the
+   * top of every tick rather than at `start()`, so switching it off stops the
+   * very next tick — and, because the timer keeps running either way,
+   * switching it back on needs no restart either.
+   */
+  enabled(): boolean {
+    return getConflictFixEnabled(this.db);
   }
 
   /**
@@ -198,6 +209,11 @@ export class PrConflictService implements ConflictScan {
   }
 
   private async runTick(): Promise<number> {
+    // Switched off means switched off: no listing, no mergeability request, no
+    // token lookup, nothing written down. The timer stays armed so the scan
+    // resumes on its own the moment the switch goes back.
+    if (!this.enabled()) return 0;
+
     let repositories: Repository[];
     try {
       repositories = listRepositories(this.db);

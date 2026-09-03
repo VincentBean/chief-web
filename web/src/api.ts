@@ -66,6 +66,10 @@ export interface Settings {
   agentTimeoutMinutes: number;
   /** How often open pull requests are re-checked against GitHub (US-004). */
   prSyncIntervalMinutes: number;
+  /** How often open pull requests are scanned for merge conflicts (US-004). */
+  prConflictIntervalMinutes: number;
+  /** Whether the merge conflict fixer may scan and push at all (US-004). */
+  conflictFixEnabled: boolean;
   /** Model the planning terminal runs on; `null` lets Claude Code choose. */
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
@@ -85,6 +89,8 @@ export interface SettingsUpdate {
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
   prSyncIntervalMinutes?: number;
+  prConflictIntervalMinutes?: number;
+  conflictFixEnabled?: boolean;
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
