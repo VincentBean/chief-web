@@ -5,17 +5,20 @@ import { after, before, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
+  createPrRun,
   createRepository,
   createSession,
   type Database,
   getSession,
   IN_MEMORY,
   openDatabase,
+  type PrRunStatus,
   type Session,
   type SessionStatus,
   setSetting,
   type Story,
   syncStories,
+  updatePrRun,
   updateSession,
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
@@ -1046,12 +1049,42 @@ class FakeSolver implements FeedbackSolver {
   readonly calls: { repositoryId: string; prNumber: number }[] = [];
   /** What `start` rejects with; `null` starts a run. */
   refusal: Error | null = null;
+  /**
+   * Answers in place of the canned id, for a test that needs a real `pr_runs`
+   * row to move. The real service answers as soon as the row says `running`
+   * and drives the rest of the pass afterwards.
+   */
+  run: ((repositoryId: string, prNumber: number) => Promise<{ id: string }>) | null = null;
 
   start(repositoryId: string, prNumber: number): Promise<{ id: string }> {
     this.calls.push({ repositoryId, prNumber });
     if (this.refusal !== null) return Promise.reject(this.refusal);
+    if (this.run !== null) return this.run(repositoryId, prNumber);
     return Promise.resolve({ id: 'run-1' });
   }
+}
+
+/** A `pr_runs` row in `running`, as `PrFeedbackService.start` leaves one. */
+function startedRun(world: World, repositoryId: string, prNumber: number): string {
+  const run = createPrRun(world.db, {
+    repositoryId,
+    prNumber,
+    prUrl: `https://github.com/acme/demo/pull/${String(prNumber)}`,
+    prTitle: 'add-login',
+    headBranch: 'chief/add-login',
+    baseBranch: 'develop',
+  });
+  updatePrRun(world.db, run.id, { status: 'running' });
+  return run.id;
+}
+
+/** Polls `predicate` for a moment; the wait under test is a poll of its own. */
+async function until(predicate: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.fail(`timed out waiting for ${what}`);
 }
 
 describe('chaining into the pull request feedback solver', () => {
@@ -1139,6 +1172,122 @@ describe('chaining into the pull request feedback solver', () => {
 
     assert.equal(result.ok, true);
     assert.match(result.message, /Every build slot is in use\./);
+  });
+
+  /**
+   * The whole point of US-005: the findings are fixed and answered while the
+   * pull request is still a draft, so nobody is told it is ready to read
+   * half-way through the run that is changing it.
+   */
+  it('holds the draft in `fixing` until the feedback run reaches a terminal status', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(2)];
+    const opener = new FakeOpener();
+    const order: string[] = [];
+    const solver = new FakeSolver();
+    const started: { settle: ((status: PrRunStatus) => void) | null } = { settle: null };
+    solver.run = (repositoryId, prNumber) => {
+      const runId = startedRun(world, repositoryId, prNumber);
+      started.settle = (status) => {
+        order.push('feedback');
+        updatePrRun(world.db, runId, { status });
+      };
+      return Promise.resolve({ id: runId });
+    };
+    const publisher = new FakePublisher();
+    const watchedPublisher: ReviewPublisher = {
+      publish: (token, target, report) => {
+        order.push('publish');
+        return publisher.publish(token, target, report);
+      },
+    };
+    const watchedOpener: PullRequestOpener = {
+      open: (token, input) => opener.open(token, input),
+      markReady: (token, pullRequestId) => {
+        order.push('markReady');
+        return opener.markReady(token, pullRequestId);
+      },
+    };
+    const delivery = createDeliveryService(
+      { ...world.config, feedbackRunPollMs: 1 },
+      world.db,
+      world.containers,
+      world.exec,
+      watchedOpener,
+      new ReviewStep(reviewer, watchedPublisher, () => solver),
+    );
+
+    const delivered = delivery.complete(reviewedSession(world), world.stories());
+    await until(() => world.reload().status === 'fixing', 'the session to reach fixing');
+    assert.deepEqual(order, ['publish'], 'the review is up and the run is being waited for');
+    assert.deepEqual(opener.ready, [], 'the pull request is still a draft');
+
+    assert.ok(started.settle, 'the feedback run was started');
+    started.settle('finished');
+    await delivered;
+
+    assert.deepEqual(order, ['publish', 'feedback', 'markReady'], 'the fix lands before the undraft');
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    assert.equal(reviewer.calls, 1, 'one review, one fix pass, and no re-review');
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
+  });
+
+  it('stops waiting when the feedback run fails, and still undrafts', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(1)];
+    const opener = new FakeOpener();
+    const solver = new FakeSolver();
+    solver.run = (repositoryId, prNumber) => {
+      const runId = startedRun(world, repositoryId, prNumber);
+      updatePrRun(world.db, runId, { status: 'failed', failureStage: 'push', lastError: 'no' });
+      return Promise.resolve({ id: runId });
+    };
+
+    const delivery = createDeliveryService(
+      { ...world.config, feedbackRunPollMs: 1 },
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    );
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('undrafts straight away when the run is refused for having nothing to fix', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(1)];
+    const opener = new FakeOpener();
+    const solver = new FakeSolver();
+    // Every finding was folded into the review body, so there is no unresolved
+    // thread to answer and nothing to wait for.
+    solver.refusal = new PrFeedbackError(
+      409,
+      'no_unresolved_feedback',
+      'There is no unresolved review feedback on that pull request.',
+    );
+
+    await serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+      opener,
+    ).complete(reviewedSession(world), world.stories());
+
+    assert.equal(solver.calls.length, 1);
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
   });
 
   it('starts nothing when the review never posted', async () => {

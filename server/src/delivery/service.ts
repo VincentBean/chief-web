@@ -4,9 +4,12 @@ import {
   type Database,
   failSession,
   type FailureStage,
+  getPrRun,
   getRepository,
   getSession,
   listStories,
+  type PrRun,
+  prFailureStageLabel,
   type Session,
   type SessionStatus,
   type Story,
@@ -27,7 +30,7 @@ import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { type PushResult, runPush } from './push.js';
-import type { ReviewStep } from './review-step.js';
+import type { ReviewStep, SolverOutcome } from './review-step.js';
 
 /**
  * Delivering a finished session: push, pull request, then — for a session with
@@ -323,15 +326,22 @@ export class DeliveryService implements BuildCompletion {
         return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
       }
       // The review is posted by the time the step answers `ok` — publishing is
-      // what makes an attempt succeed — so releasing the draft here puts the
-      // comment on the pull request *before* anyone is told it is ready to
-      // read. A review that flagged nothing starts no feedback run, so there
-      // is nothing further to wait for and the session finishes now (US-004).
+      // what makes an attempt succeed — so the comment is on the pull request
+      // before anything below runs. What may still be outstanding is the
+      // feedback run the findings were handed to: the draft is held until that
+      // is over (US-005), and released straight away when there was none
+      // (US-004).
+      const fixed = await this.awaitFeedbackRun(session, reviewed.solver);
       const undrafted = await this.readyForReview(session, token, opened.pullRequest);
       if (undrafted !== null) {
         return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });
       }
-      return this.finish(session, opened.pullRequest.url, opened.adopted, `${delivered} ${reviewed.message}`);
+      return this.finish(
+        session,
+        opened.pullRequest.url,
+        opened.adopted,
+        sentences(delivered, reviewed.message, fixed),
+      );
     }
 
     // No review will run, so there is nothing to gate readiness on: the draft
@@ -343,6 +353,76 @@ export class DeliveryService implements BuildCompletion {
     }
 
     return this.finish(session, opened.pullRequest.url, opened.adopted, delivered);
+  }
+
+  /**
+   * Waits for the feedback run the review handed its findings to (US-005).
+   *
+   * This is what keeps the pull request a draft while chief-web fixes its own
+   * review: the run pushes commits and answers the threads it was started for,
+   * and a pull request marked ready in the middle of that is one a human reads
+   * half-answered. So the session sits in `fixing` until the run's row reaches
+   * a state that is not `running` — `finished`, `failed`, or back to
+   * `pending` because somebody stopped it.
+   *
+   * Answers the sentence to add to the delivery's message, or `null` when
+   * there was nothing to wait for: a review that flagged nothing, a chief-web
+   * with no solver, or a start that was refused. A refusal is not waited for by
+   * design — `no_unresolved_feedback` means the findings were all body-only
+   * and there is nothing to fix, and the other refusals are US-006's to fail
+   * on. Exactly one review → fix pass runs either way: nothing here re-reviews
+   * what the run pushed (FR-14).
+   */
+  private async awaitFeedbackRun(
+    session: Session,
+    solver: SolverOutcome | null,
+  ): Promise<string | null> {
+    if (solver === null || solver.runId === null) return null;
+
+    updateSession(this.db, session.id, { status: 'fixing' });
+    logger.info('waiting for the feedback run on the review findings', {
+      session: session.id,
+      run: solver.runId,
+    });
+
+    const run = await this.whenFeedbackRunSettles(solver.runId);
+    if (run === null) {
+      // The row was deleted under us, which is a thing the PullRequests page
+      // can do. There is nothing left to wait for and nothing to report.
+      return null;
+    }
+
+    logger.info('the feedback run on the review findings is over', {
+      session: session.id,
+      run: run.id,
+      status: run.status,
+      stage: run.failureStage,
+    });
+
+    if (run.status === 'finished') return 'Its feedback run has finished.';
+    if (run.status === 'failed') {
+      const stage = run.failureStage === null ? '' : ` at ${prFailureStageLabel(run.failureStage)}`;
+      return `Its feedback run failed${stage}.`;
+    }
+    return 'Its feedback run was stopped.';
+  }
+
+  /**
+   * Polls the run's row until it is no longer `running`, answering the row it
+   * settled on — or `null` when the row is gone.
+   *
+   * The row is the signal because it is the only one that survives everything:
+   * the service that drives the run keeps its progress in memory, so a poll is
+   * also what a run driven by a restarted server would be watched with. `start`
+   * writes `running` before it answers, so a first read that says anything else
+   * means the run is already over.
+   */
+  private async whenFeedbackRunSettles(runId: string): Promise<PrRun | null> {
+    for (;;) {
+      const run = getPrRun(this.db, runId);
+      if (run === null || run.status !== 'running') return run;
+      await pause(this.config.feedbackRunPollMs);
+    }
   }
 
   /**
@@ -479,7 +559,12 @@ export class DeliveryService implements BuildCompletion {
     if (!reviewed.ok) {
       return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
     }
-    return this.finish(session, prUrl, true, reviewed.message);
+    // The same wait the automatic chain does: a retried review that found
+    // something hands it to a feedback run, and the session is not done until
+    // that run is (US-005). Undrafting is US-006's half of this path — this
+    // retry has a URL and no node id to call the mutation with.
+    const fixed = await this.awaitFeedbackRun(session, reviewed.solver);
+    return this.finish(session, prUrl, true, sentences(reviewed.message, fixed));
   }
 
   /** Starts (or reuses) the session container and pushes from inside it. */
@@ -534,4 +619,13 @@ export function createDeliveryService(
 
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** Joins the parts of a delivery's message, skipping the ones there were none of. */
+function sentences(...parts: (string | null)[]): string {
+  return parts.filter((part): part is string => part !== null && part !== '').join(' ');
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

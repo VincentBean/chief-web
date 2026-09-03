@@ -106,6 +106,14 @@ export interface Config {
    */
   readonly pullRequestCacheMs: number;
   /**
+   * How often the delivery re-reads the `pr_runs` row of the feedback run it
+   * is waiting for before it undrafts the pull request (US-005). A poll rather
+   * than a callback because the row is the one thing the delivery and the run
+   * both agree on; a few seconds is invisible next to an agent pass and costs
+   * one indexed read of a local database.
+   */
+  readonly feedbackRunPollMs: number;
+  /**
    * Where this chief-web is reachable, e.g. `https://chief.example.com`. Only
    * used to link a generated pull request back to its session; empty when the
    * operator has not said, in which case the link-back is plain text.
@@ -213,6 +221,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       graphqlUrlFor(str('GITHUB_API_URL', 'https://api.github.com')),
     ),
     pullRequestCacheMs: int('PULL_REQUEST_CACHE_MS', 30_000),
+    feedbackRunPollMs: int('FEEDBACK_RUN_POLL_MS', 5_000),
     publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),
     nodeEnv: env['NODE_ENV'] ?? 'development',
