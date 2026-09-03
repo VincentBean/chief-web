@@ -1669,3 +1669,253 @@ describe('the pull request number in a URL', () => {
     assert.equal(pullRequestNumber('https://github.com/acme/demo/pull/0'), null);
   });
 });
+
+/**
+ * US-008: the six ways the draft/undraft chain can end, walked end to end.
+ *
+ * The individual behaviours are covered above; what this block pins down is the
+ * *sequence*. Every case records a trace of the GitHub and review calls
+ * together with the session status at that moment, so a change that undrafts
+ * too early — before the review is posted, before the feedback run has
+ * settled, or before the session is failed — is a failing assertion rather
+ * than a behaviour nobody notices.
+ */
+describe('the draft/undraft chain', () => {
+  interface Step {
+    /** The call the delivery made. */
+    readonly step: 'open' | 'publish' | 'feedback' | 'markReady';
+    /** What the session row said at that moment, not what was handed over. */
+    readonly status: SessionStatus;
+  }
+
+  interface Chain {
+    readonly trace: Step[];
+    readonly opener: FakeOpener;
+    readonly reviewer: FakeReviewer;
+    readonly publisher: FakePublisher;
+    readonly solver: FakeSolver;
+    /** Moves the feedback run the solver started, as the real service would. */
+    settle(patch: Parameters<typeof updatePrRun>[2]): void;
+    deliver(): Promise<void>;
+    session(): Session;
+  }
+
+  /**
+   * A delivery wired to the file's fakes, with the review step always present:
+   * whether it runs is the session's `code_review` flag, exactly as in
+   * production. The feedback run is left `running` for the test to settle.
+   */
+  function chain(
+    options: { codeReview?: boolean; findings?: number; review?: ReviewPassResult } = {},
+  ): Chain {
+    const world = new World();
+    const opener = new FakeOpener();
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    const solver = new FakeSolver();
+    const trace: Step[] = [];
+    const started: { runId: string | null } = { runId: null };
+    const record = (step: Step['step']): void => {
+      trace.push({ step, status: getSession(world.db, world.session.id)?.status ?? 'building' });
+    };
+
+    reviewer.outcomes = [options.review ?? reviewPass(options.findings ?? 1)];
+    solver.run = (repositoryId, prNumber) => {
+      started.runId = startedRun(world, repositoryId, prNumber);
+      return Promise.resolve({ id: started.runId });
+    };
+    const tracedOpener: PullRequestOpener = {
+      open: (token, input) => {
+        record('open');
+        return opener.open(token, input);
+      },
+      find: (token, input) => opener.find(token, input),
+      markReady: (token, pullRequestId) => {
+        record('markReady');
+        return opener.markReady(token, pullRequestId);
+      },
+    };
+    const tracedPublisher: ReviewPublisher = {
+      publish: (token, target, report) => {
+        record('publish');
+        return publisher.publish(token, target, report);
+      },
+    };
+    const delivery = createDeliveryService(
+      { ...world.config, feedbackRunPollMs: 1 },
+      world.db,
+      world.containers,
+      world.exec,
+      tracedOpener,
+      new ReviewStep(reviewer, tracedPublisher, () => solver),
+    );
+    const session =
+      options.codeReview === false
+        ? world.session
+        : (updateSession(world.db, world.session.id, { codeReview: true }) ?? (undefined as never));
+
+    return {
+      trace,
+      opener,
+      reviewer,
+      publisher,
+      solver,
+      settle: (patch) => {
+        assert.ok(started.runId, 'the feedback run was started');
+        record('feedback');
+        updatePrRun(world.db, started.runId, patch);
+      },
+      deliver: () => delivery.complete(session, world.stories()),
+      session: () => world.reload(),
+    };
+  }
+
+  it('undrafts straight away when no review will run', async () => {
+    const chained = chain({ codeReview: false });
+
+    await chained.deliver();
+
+    // No review means nothing to gate readiness on: open, release, done — and
+    // the release is before the session is moved on from `building`.
+    assert.deepEqual(chained.trace, [
+      { step: 'open', status: 'building' },
+      { step: 'markReady', status: 'building' },
+    ]);
+    assert.equal(chained.reviewer.calls, 0);
+    assert.equal(chained.solver.calls.length, 0);
+    assert.deepEqual(chained.opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const delivered = chained.session();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.failureStage, null);
+  });
+
+  it('undrafts once the review that found nothing is posted', async () => {
+    const chained = chain({ findings: 0 });
+
+    await chained.deliver();
+
+    // Nothing was flagged, so there is no feedback run between the comment and
+    // the undraft — but the comment is still up first.
+    assert.deepEqual(chained.trace, [
+      { step: 'open', status: 'building' },
+      { step: 'publish', status: 'reviewing' },
+      { step: 'markReady', status: 'reviewing' },
+    ]);
+    assert.equal(chained.solver.calls.length, 0, 'there is nothing to fix');
+    assert.deepEqual(chained.opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const delivered = chained.session();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.failureStage, null);
+    assert.equal(delivered.lastError, null);
+  });
+
+  it('holds the draft through the feedback run when the review found something', async () => {
+    const chained = chain({ findings: 2 });
+
+    const delivered = chained.deliver();
+    await until(() => chained.session().status === 'fixing', 'the session to reach fixing');
+    assert.deepEqual(
+      chained.trace.map((step) => step.step),
+      ['open', 'publish'],
+      'the findings are posted and nothing is released yet',
+    );
+    assert.deepEqual(chained.opener.ready, [], 'the pull request is still a draft');
+
+    chained.settle({ status: 'finished' });
+    await delivered;
+
+    assert.deepEqual(chained.trace, [
+      { step: 'open', status: 'building' },
+      { step: 'publish', status: 'reviewing' },
+      { step: 'feedback', status: 'fixing' },
+      { step: 'markReady', status: 'fixing' },
+    ]);
+    assert.deepEqual(chained.solver.calls, [
+      { repositoryId: chained.session().repositoryId, prNumber: 7 },
+    ]);
+    assert.deepEqual(chained.opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const finished = chained.session();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+  });
+
+  it('undrafts and fails at the feedback stage when the run fails', async () => {
+    const chained = chain({ findings: 1 });
+
+    const delivered = chained.deliver();
+    await until(() => chained.session().status === 'fixing', 'the session to reach fixing');
+    chained.settle({ status: 'failed', failureStage: 'push', lastError: 'the push was rejected' });
+    await delivered;
+
+    // The fixes did not land, but the review did, so the pull request is a
+    // human's to read: released first, failed second.
+    assert.deepEqual(chained.trace, [
+      { step: 'open', status: 'building' },
+      { step: 'publish', status: 'reviewing' },
+      { step: 'feedback', status: 'fixing' },
+      { step: 'markReady', status: 'fixing' },
+    ]);
+    assert.deepEqual(chained.opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const failed = chained.session();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'feedback');
+    assert.equal(isDeliveryStage(failed.failureStage), true, 'the retry re-runs the delivery');
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.match(failed.lastError ?? '', /feedback run failed at the push/);
+  });
+
+  it('undrafts and fails at the review stage when the review is spent', async () => {
+    const chained = chain({ review: reviewFailure('agent_failed', 'the agent died') });
+
+    await chained.deliver();
+
+    // Three attempts and no comment: nothing is coming, so the draft is not
+    // left behind for a session nobody looks at again.
+    assert.deepEqual(chained.trace, [
+      { step: 'open', status: 'building' },
+      { step: 'markReady', status: 'reviewing' },
+    ]);
+    assert.equal(chained.reviewer.calls, 3, 'the step spends its attempts first');
+    assert.equal(chained.publisher.calls.length, 0);
+    assert.equal(chained.solver.calls.length, 0);
+    assert.deepEqual(chained.opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const failed = chained.session();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'review');
+    assert.equal(isDeliveryStage(failed.failureStage), true);
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7');
+  });
+
+  it('fails at the pull request stage when the undraft itself is refused', async () => {
+    const chained = chain({ codeReview: false });
+    chained.opener.readyFailure = new GithubApiError('github_forbidden', 'no write access', 403);
+
+    await chained.deliver();
+
+    const failed = chained.session();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request', 'the stage a retry re-runs the undraft from');
+    assert.equal(isDeliveryStage(failed.failureStage), true);
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7', 'the link survives');
+    assert.match(failed.lastError ?? '', /marked ready for review/);
+  });
+
+  it('fails at the pull request stage when a reviewed pull request cannot be released', async () => {
+    const chained = chain({ findings: 0 });
+    chained.opener.readyFailure = new GithubApiError('github_error', 'GitHub is having a moment.');
+
+    await chained.deliver();
+
+    // The review went fine; only the undraft did not, so the stage names the
+    // pull request rather than blaming the review for it.
+    assert.deepEqual(
+      chained.trace.map((step) => step.step),
+      ['open', 'publish', 'markReady'],
+    );
+    const failed = chained.session();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+    assert.match(failed.lastError ?? '', /GitHub is having a moment\./);
+  });
+});
