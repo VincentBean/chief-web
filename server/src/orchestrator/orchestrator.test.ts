@@ -31,8 +31,10 @@ import { RUNNER_CLAUDE_DIR, RUNNER_SSH_KEY_PATH, RUNNER_WORKSPACE_DIR } from '..
 import { writePrivateKey } from '../ssh/index.js';
 import {
   CONTAINER_LOST_ERROR,
+  FEEDBACK_LOST_ERROR,
   HostPaths,
   planReconciliation,
+  REVIEW_LOST_ERROR,
   SESSION_LABEL,
   sessionContainerName,
   sessionContainerSpec,
@@ -320,6 +322,70 @@ describe('reconciliation plan', () => {
       container({}),
     ]);
     assert.deepEqual(plan, { remove: [], correct: [] });
+  });
+
+  it('fails a reviewing session, whose review only ever ran in memory (US-002)', () => {
+    // The delivery that was running the review is gone with the process, and
+    // nothing else ever comes back to it — so it is failed at the review
+    // stage, which is the one a retry re-runs on its own.
+    const plan = planReconciliation([session({ status: 'reviewing', containerId: 'c1' })], []);
+    assert.deepEqual(plan.correct, [
+      {
+        sessionId: 's1',
+        patch: {
+          status: 'failed',
+          containerId: null,
+          lastError: REVIEW_LOST_ERROR,
+          failureStage: 'review',
+          waitingUntil: null,
+        },
+        reason: 'review lost',
+      },
+    ]);
+  });
+
+  it('fails a reviewing session even when its container survived (US-002)', () => {
+    // The container is not what was lost: the review, the wait and the undraft
+    // all lived in the process that went down. Adopting the container and
+    // leaving the status alone would strand the session in `reviewing` and
+    // its pull request as a draft forever.
+    const plan = planReconciliation(
+      [session({ status: 'reviewing', containerId: null })],
+      [container({})],
+    );
+    assert.deepEqual(plan.remove, []);
+    assert.deepEqual(plan.correct, [
+      {
+        sessionId: 's1',
+        patch: {
+          status: 'failed',
+          containerId: 'c1',
+          lastError: REVIEW_LOST_ERROR,
+          failureStage: 'review',
+          waitingUntil: null,
+        },
+        reason: 'review lost',
+      },
+    ]);
+  });
+
+  it('fails a fixing session at the feedback stage (US-005)', () => {
+    // Its feedback run died with the process too — the containers of one are
+    // cleared out at startup — so there is nothing left to wait for.
+    const plan = planReconciliation([session({ status: 'fixing', containerId: 'c1' })], []);
+    assert.deepEqual(plan.correct, [
+      {
+        sessionId: 's1',
+        patch: {
+          status: 'failed',
+          containerId: null,
+          lastError: FEEDBACK_LOST_ERROR,
+          failureStage: 'feedback',
+          waitingUntil: null,
+        },
+        reason: 'feedback run lost',
+      },
+    ]);
   });
 
   it('treats a stopped container as gone and fails the building session', () => {
