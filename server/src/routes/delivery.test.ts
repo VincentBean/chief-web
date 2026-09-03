@@ -165,6 +165,7 @@ describe('delivery api', () => {
         body: (posted[0] as { body: string }).body,
         head: 'chief/add-login',
         base: 'main',
+        draft: true,
       },
     ]);
 

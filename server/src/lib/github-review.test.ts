@@ -7,6 +7,8 @@ import { GithubApiError, githubFetch } from './github.js';
 import {
   fetchPullRequestFeedback,
   graphqlUrlFor,
+  MARK_READY_FOR_REVIEW_MUTATION,
+  markPullRequestReadyForReview,
   listOpenPullRequestsAcross,
   nextLink,
   paginate,
@@ -418,6 +420,60 @@ describe('the review client', () => {
       assert.equal((await errorFor('NOT_FOUND')).code, 'github_not_found');
       assert.equal((await errorFor('RATE_LIMITED')).code, 'github_forbidden');
       assert.equal((await errorFor('SOMETHING_ELSE')).code, 'github_error');
+    });
+  });
+
+  describe('marking a pull request ready for review', () => {
+    it('sends the mutation with the node id and reports the pull request ready', async () => {
+      replies['POST /graphql'] = {
+        status: 200,
+        body: {
+          data: {
+            markPullRequestReadyForReview: { pullRequest: { id: 'PR_kwDO7', isDraft: false } },
+          },
+        },
+      };
+
+      const ready = await markPullRequestReadyForReview(TOKEN, `${baseUrl}/graphql`, 'PR_kwDO7');
+
+      assert.deepEqual(ready, { isDraft: false, alreadyReady: false });
+      const sent = requests.at(-1)?.body as { query?: string; variables?: unknown };
+      assert.match(sent.query ?? '', /markPullRequestReadyForReview/);
+      assert.deepEqual(sent.variables, { pullRequestId: 'PR_kwDO7' });
+    });
+
+    it('treats a pull request that is already ready as success', async () => {
+      // What delivery meets routinely: an adopted pull request somebody opened
+      // by hand, or a retry after the undraft already went through.
+      replies['POST /graphql'] = {
+        status: 200,
+        body: {
+          data: null,
+          errors: [
+            { type: 'UNPROCESSABLE', message: 'Pull request is not in the draft state.' },
+          ],
+        },
+      };
+
+      const ready = await markPullRequestReadyForReview(TOKEN, `${baseUrl}/graphql`, 'PR_kwDO7');
+
+      assert.deepEqual(ready, { isDraft: false, alreadyReady: true });
+    });
+
+    it('still fails loudly on a refusal that is not about the draft state', async () => {
+      replies['POST /graphql'] = {
+        status: 200,
+        body: { data: null, errors: [{ type: 'FORBIDDEN', message: 'no write access' }] },
+      };
+
+      await assert.rejects(
+        markPullRequestReadyForReview(TOKEN, `${baseUrl}/graphql`, 'PR_kwDO7'),
+        (cause: unknown) => cause instanceof GithubApiError && cause.code === 'github_forbidden',
+      );
+    });
+
+    it('asks for the field that says whether the undraft took', () => {
+      assert.match(MARK_READY_FOR_REVIEW_MUTATION, /isDraft/);
     });
   });
 

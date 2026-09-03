@@ -35,6 +35,15 @@ export interface PullRequest {
   /** The `html_url`: what the session page links to. */
   readonly url: string;
   readonly state: string;
+  /**
+   * The GraphQL `node_id`. REST cannot turn a draft into a ready pull
+   * request, so undrafting goes through `markPullRequestReadyForReview`, and
+   * that mutation accepts nothing but this id. Null when GitHub did not send
+   * one.
+   */
+  readonly nodeId: string | null;
+  /** Still a draft. An adopted pull request is frequently already ready. */
+  readonly draft: boolean;
 }
 
 /** Everything `POST /repos/{owner}/{repo}/pulls` needs. */
@@ -176,6 +185,9 @@ export async function createPullRequest(
       body: input.body,
       head: input.head,
       base: input.base,
+      // Every session pull request starts as a draft; delivery marks it ready
+      // once the review — and whatever fixes it asked for — are done (US-001).
+      draft: true,
     }),
   });
   if (!response.ok) throw await failureOf(response);
@@ -270,12 +282,23 @@ export async function failureOf(response: Response): Promise<GithubApiError> {
 
 function toPullRequest(value: unknown): PullRequest | null {
   if (typeof value !== 'object' || value === null) return null;
-  const body = value as { number?: unknown; html_url?: unknown; state?: unknown };
+  const body = value as {
+    number?: unknown;
+    html_url?: unknown;
+    state?: unknown;
+    node_id?: unknown;
+    draft?: unknown;
+  };
   if (typeof body.number !== 'number' || typeof body.html_url !== 'string') return null;
   return {
     number: body.number,
     url: body.html_url,
     state: typeof body.state === 'string' ? body.state : 'open',
+    // Both the create response and the list entries carry these, so an adopted
+    // pull request answers "is it a draft, and what do I undraft?" as fully as
+    // one this session created.
+    nodeId: typeof body.node_id === 'string' && body.node_id !== '' ? body.node_id : null,
+    draft: body.draft === true,
   };
 }
 
