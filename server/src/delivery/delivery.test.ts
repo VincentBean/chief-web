@@ -11,6 +11,7 @@ import {
   type Database,
   getSession,
   IN_MEMORY,
+  isDeliveryStage,
   openDatabase,
   type PrRunStatus,
   type Session,
@@ -23,6 +24,7 @@ import {
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { GithubApiError, openPullRequest } from '../lib/github.js';
+import { UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { PrFeedbackError } from '../prfeedback/index.js';
 import type {
@@ -382,6 +384,12 @@ class FakeOpener implements PullRequestOpener {
   readonly calls: { token: string; input: Parameters<PullRequestOpener['open']>[1] }[] = [];
   /** Every undraft, in order: what the delivery asked GitHub to mark ready. */
   readonly ready: { token: string; pullRequestId: string }[] = [];
+  /** Every lookup a retry did to find the pull request it has to undraft. */
+  readonly lookups: { token: string; input: Parameters<PullRequestOpener['find']>[1] }[] = [];
+  /** Answers the lookup with this instead of a pull request, when set. */
+  findFailure: Error | null = null;
+  /** Whether the lookup finds anything: a closed pull request is `false`. */
+  open_ = true;
   adopted = false;
   failure: Error | null = null;
   /** Answers the undraft with this instead of succeeding, when set. */
@@ -406,6 +414,22 @@ class FakeOpener implements PullRequestOpener {
         draft: this.draft,
       },
       adopted: this.adopted,
+    });
+  }
+
+  find(
+    token: string,
+    input: Parameters<PullRequestOpener['find']>[1],
+  ): ReturnType<PullRequestOpener['find']> {
+    this.lookups.push({ token, input });
+    if (this.findFailure !== null) return Promise.reject(this.findFailure);
+    if (!this.open_) return Promise.resolve(null);
+    return Promise.resolve({
+      number: 7,
+      url: this.url,
+      state: 'open',
+      nodeId: this.nodeId,
+      draft: this.draft,
     });
   }
 
@@ -889,7 +913,7 @@ describe('the code review of a delivery', () => {
     assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
   });
 
-  it('stores the pull request URL before the review, and leaves it draft on failure', async () => {
+  it('stores the pull request URL, and undrafts before failing at the review', async () => {
     const world = new World();
     const reviewer = new FakeReviewer();
     reviewer.outcomes = [reviewFailure('agent_failed', 'the agent died')];
@@ -902,7 +926,26 @@ describe('the code review of a delivery', () => {
     assert.equal(failed.status, 'failed');
     assert.equal(failed.failureStage, 'review');
     assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7');
-    assert.equal(opener.ready.length, 0, 'a review that never worked leaves the draft alone');
+    // A review that has spent its three attempts is not coming back, so the
+    // pull request is released rather than stranded as a draft (US-006).
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+  });
+
+  it('keeps the session failed at the review when the undraft fails too', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('agent_failed', 'the agent died')];
+    const opener = new FakeOpener();
+    opener.readyFailure = new GithubApiError('github_error', 'GitHub is having a moment.');
+    const delivery = serviceFor(world, opener, new ReviewStep(reviewer, new FakePublisher()));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    const failed = world.reload();
+    // The review is the root cause and the stage a retry re-runs; the undraft
+    // it could not do is reported in the same message and attempted again.
+    assert.equal(failed.failureStage, 'review');
+    assert.match(failed.lastError ?? '', /could not be marked ready for review/);
   });
 
   it('reviews the pull request it just opened, then finishes the session', async () => {
@@ -984,17 +1027,26 @@ describe('the code review of a delivery', () => {
     assert.equal(opener.calls.length, 1, 'the pull request was not opened again');
   });
 
-  it('stops at the first attempt when the account is out of usage', async () => {
+  it('holds the session on the usage limit instead of failing it', async () => {
     const world = new World();
     const reviewer = new FakeReviewer();
     reviewer.outcomes = [reviewFailure('usage_limit', 'The review agent stopped on a usage limit.')];
-    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, new FakePublisher()));
+    const opener = new FakeOpener();
+    const delivery = serviceFor(world, opener, new ReviewStep(reviewer, new FakePublisher()));
 
     await delivery.complete(reviewedSession(world), world.stories());
 
     assert.equal(reviewer.calls, 1, 'a second attempt walks into the same wall');
-    assert.equal(world.reload().failureStage, 'review');
-    assert.match(world.reload().lastError ?? '', /usage limit/);
+    const held = world.reload();
+    // The account is out, not the review: the session waits for the hold and
+    // resumes into the same chain, so the pull request stays a draft (US-006).
+    assert.equal(held.status, 'waiting');
+    assert.equal(held.failureStage, null);
+    assert.notEqual(held.waitingUntil, null);
+    assert.equal(new UsageLimitHold(world.db).active(), true, 'agent work is held');
+    assert.match(held.lastError ?? '', /usage limit/);
+    assert.equal(opener.ready.length, 0, 'the review it is waiting for has not happened');
+    assert.equal(held.prUrl, 'https://github.com/acme/demo/pull/7');
   });
 
   it('posts a review that found nothing, then undrafts and finishes the session', async () => {
@@ -1018,6 +1070,7 @@ describe('the code review of a delivery', () => {
     };
     const watchedOpener: PullRequestOpener = {
       open: (token, input) => opener.open(token, input),
+      find: (token, input) => opener.find(token, input),
       markReady: (token, pullRequestId) => {
         order.push('markReady');
         return opener.markReady(token, pullRequestId);
@@ -1136,9 +1189,10 @@ describe('chaining into the pull request feedback solver', () => {
     assert.equal(world.reload().status, 'pr-open');
   });
 
-  it('finishes the session anyway when the solver refuses the run', async () => {
+  it('undrafts and fails at the feedback stage when the solver refuses the run', async () => {
     const world = new World();
     const reviewer = new FakeReviewer();
+    const opener = new FakeOpener();
     const solver = new FakeSolver();
     solver.refusal = new PrFeedbackError(
       409,
@@ -1149,14 +1203,19 @@ describe('chaining into the pull request feedback solver', () => {
     const result = await serviceFor(
       world,
       new ReviewStep(reviewer, new FakePublisher(), () => solver),
+      opener,
     ).complete(reviewedSession(world), world.stories());
 
     assert.equal(result, undefined, 'the loop’s hand-off answers nothing either way');
     assert.equal(solver.calls.length, 1);
-    const finished = world.reload();
-    assert.equal(finished.status, 'pr-open', 'a refused run is not the session’s problem');
-    assert.equal(finished.failureStage, null);
-    assert.equal(finished.lastError, null);
+    const failed = world.reload();
+    // The findings are on the pull request with nothing coming to fix them, so
+    // the pull request is released and the stage is one a retry re-runs.
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'feedback');
+    assert.equal(isDeliveryStage(failed.failureStage), true);
+    assert.match(failed.lastError ?? '', /Every build slot is in use\./);
   });
 
   it('reports the refusal the way the PullRequests page would', async () => {
@@ -1170,7 +1229,8 @@ describe('chaining into the pull request feedback solver', () => {
       new ReviewStep(new FakeReviewer(), new FakePublisher(), () => solver),
     ).retry(world.session.id);
 
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false, 'a run that never started is the retry’s outcome');
+    assert.equal(result.code, 'feedback_failed');
     assert.match(result.message, /Every build slot is in use\./);
   });
 
@@ -1204,6 +1264,7 @@ describe('chaining into the pull request feedback solver', () => {
     };
     const watchedOpener: PullRequestOpener = {
       open: (token, input) => opener.open(token, input),
+      find: (token, input) => opener.find(token, input),
       markReady: (token, pullRequestId) => {
         order.push('markReady');
         return opener.markReady(token, pullRequestId);
@@ -1258,8 +1319,13 @@ describe('chaining into the pull request feedback solver', () => {
     );
     await delivery.complete(reviewedSession(world), world.stories());
 
+    // Released first, failed second: the fixes did not land, but the pull
+    // request is a human's to read either way (US-006).
     assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
-    assert.equal(world.reload().status, 'pr-open');
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'feedback');
+    assert.match(failed.lastError ?? '', /feedback run failed at the push/);
   });
 
   it('undrafts straight away when the run is refused for having nothing to fix', async () => {
@@ -1353,6 +1419,139 @@ describe('retrying a session that failed at the review', () => {
     assert.equal(finished.status, 'pr-open');
     assert.equal(finished.failureStage, null);
     assert.equal(finished.lastError, null);
+  });
+
+  it('waits for the retried review’s feedback run, then looks the pull request up and undrafts it', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(1)];
+    const opener = new FakeOpener();
+    const solver = new FakeSolver();
+    const order: string[] = [];
+    const holder: { settle: (() => void) | null } = { settle: null };
+    solver.run = (repositoryId, prNumber) => {
+      const runId = startedRun(world, repositoryId, prNumber);
+      order.push('feedback');
+      holder.settle = () => {
+        updatePrRun(world.db, runId, { status: 'finished' });
+      };
+      return Promise.resolve({ id: runId });
+    };
+    const watchedOpener: PullRequestOpener = {
+      open: (token, input) => opener.open(token, input),
+      find: (token, input) => {
+        order.push('find');
+        return opener.find(token, input);
+      },
+      markReady: (token, pullRequestId) => {
+        order.push('markReady');
+        return opener.markReady(token, pullRequestId);
+      },
+    };
+    const delivery = createDeliveryService(
+      { ...world.config, feedbackRunPollMs: 1 },
+      world.db,
+      world.containers,
+      world.exec,
+      watchedOpener,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    );
+
+    const retried = delivery.retry(world.session.id);
+    // The retry has no node id of its own, so it may not undraft before the
+    // run it started is over: the session sits in `fixing` until it is.
+    await until(() => world.reload().status === 'fixing', 'the retry to start fixing');
+    assert.deepEqual(opener.ready, [], 'nothing is released while the fixes are in flight');
+    holder.settle?.();
+
+    const result = await retried;
+    assert.equal(result.ok, true);
+    assert.deepEqual(order, ['feedback', 'find', 'markReady'], 'the wait comes before the undraft');
+    assert.deepEqual(opener.lookups, [
+      { token: TOKEN, input: { slug: 'acme/demo', head: 'chief/add-login', base: 'develop' } },
+    ]);
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+  });
+
+  it('fails the retry at the pull request stage when the undraft is refused', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const opener = new FakeOpener();
+    opener.readyFailure = new GithubApiError('github_forbidden', 'This token cannot write here.');
+
+    const result = await serviceFor(
+      world,
+      opener,
+      new ReviewStep(new FakeReviewer(), new FakePublisher()),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'pull_request_failed');
+    const failed = world.reload();
+    assert.equal(failed.failureStage, 'pull_request');
+    assert.match(failed.lastError ?? '', /could not be marked ready for review/);
+  });
+
+  it('finishes the retry when the pull request is no longer open to undraft', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const opener = new FakeOpener();
+    // Merged or closed while the review was failing: there is no draft left to
+    // release, and that is not something to fail a session over.
+    opener.open_ = false;
+
+    const result = await serviceFor(
+      world,
+      opener,
+      new ReviewStep(new FakeReviewer(), new FakePublisher()),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(opener.ready, []);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('undrafts before failing again when the retried review also fails', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('agent_failed', 'The review agent exited with code 1.')];
+    const opener = new FakeOpener();
+
+    const result = await serviceFor(
+      world,
+      opener,
+      new ReviewStep(reviewer, new FakePublisher()),
+    ).retry(world.session.id);
+
+    assert.equal(result.code, 'review_failed');
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    assert.equal(world.reload().failureStage, 'review');
+  });
+
+  it('holds the retry on the usage limit, leaving the pull request a draft', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('usage_limit', 'The review agent stopped on a usage limit.')];
+    const opener = new FakeOpener();
+
+    const result = await serviceFor(
+      world,
+      opener,
+      new ReviewStep(reviewer, new FakePublisher()),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'usage_limit_hold');
+    const held = world.reload();
+    assert.equal(held.status, 'waiting');
+    assert.equal(held.failureStage, null);
+    assert.equal(opener.ready.length, 0);
   });
 
   it('gives the retry its own three attempts before failing again', async () => {

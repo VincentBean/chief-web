@@ -292,7 +292,14 @@ export interface Session {
 export type PrTargetBranch = 'develop' | 'main';
 
 /** Mirrors the server's `FailureStage` (US-019): where a session failed. */
-export type FailureStage = 'agent' | 'prd' | 'push' | 'pull_request' | 'review' | 'container_lost';
+export type FailureStage =
+  | 'agent'
+  | 'prd'
+  | 'push'
+  | 'pull_request'
+  | 'review'
+  | 'feedback'
+  | 'container_lost';
 
 /** What each stage is called on screen. */
 export function failureStageLabel(stage: FailureStage): string {
@@ -307,6 +314,8 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the pull request';
     case 'review':
       return 'the code review';
+    case 'feedback':
+      return 'the feedback run';
     case 'container_lost':
       return 'the container';
   }
@@ -317,7 +326,9 @@ export function failureStageLabel(stage: FailureStage): string {
  * retry re-runs delivery from the step that failed and never a story.
  */
 export function isDeliveryStage(stage: FailureStage | null): boolean {
-  return stage === 'push' || stage === 'pull_request' || stage === 'review';
+  return (
+    stage === 'push' || stage === 'pull_request' || stage === 'review' || stage === 'feedback'
+  );
 }
 
 export interface SessionInput {

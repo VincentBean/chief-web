@@ -50,6 +50,7 @@ const PR_STATES_MIGRATION = '0008_session_pr_states';
 
 /** The migration under test in 'widens the check to `reviewing`/`fixing`'. */
 const REVIEW_STATES_MIGRATION = '0010_session_review_states';
+const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
@@ -353,6 +354,59 @@ describe('migrations', () => {
 
     closeDatabase(db);
   });
+
+  it('widens the failure stage check to `feedback`, stories intact', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === FEEDBACK_STAGE_MIGRATION);
+    assert.ok(index > 0, `${FEEDBACK_STAGE_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-01T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedRepository(db);
+    const at = '2026-09-01T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          pr_url, last_error, failure_stage, created_at, updated_at)
+       VALUES (?, ?, ?, 'failed', 'main', ?, 'main', ?, 'the review died', 'review', ?, ?)`,
+    ).run('failed', repository.id, 'failed', 'chief/failed',
+      'https://github.com/acme/app/pull/7', at, at);
+    syncStories(db, 'failed', [{ storyId: 'US-001', title: 'First', priority: 1, status: 'done' }]);
+
+    assert.ok(runMigrations(db).includes(FEEDBACK_STAGE_MIGRATION));
+
+    // The failed session came across the rebuild with its stage and stories.
+    assert.equal(getSession(db, 'failed')?.failureStage, 'review');
+    assert.equal(getSession(db, 'failed')?.lastError, 'the review died');
+    assert.equal(listStories(db, 'failed').length, 1);
+
+    // The widened constraint takes the new stage and still refuses the rest.
+    assert.equal(failSession(db, 'failed', 'feedback', 'the run died')?.failureStage, 'feedback');
+    assert.throws(
+      () => db.prepare('UPDATE sessions SET failure_stage = ? WHERE id = ?').run('bogus', 'failed'),
+      /CHECK/i,
+    );
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of ['idx_sessions_repository', 'idx_sessions_status', 'idx_sessions_queued_at']) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
+    assert.ok(deleteSession(db, 'failed'));
+    assert.equal(listStories(db, 'failed').length, 0);
+
+    closeDatabase(db);
+  });
 });
 
 describe('persistence across restarts', () => {
@@ -578,6 +632,10 @@ describe('sessions', () => {
     // retry re-runs on its own (US-006).
     assert.equal(failureStageLabel('review'), 'the code review');
     assert.equal(isDeliveryStage('review'), true);
+    // And so does the feedback run the review's findings are handed to
+    // (US-006): the pull request is open and reviewed by the time it runs.
+    assert.equal(failureStageLabel('feedback'), 'the feedback run');
+    assert.equal(isDeliveryStage('feedback'), true);
     assert.equal(isDeliveryStage('agent'), false);
     assert.equal(isDeliveryStage(null), false);
     // Every stage has a label; none of them falls through to undefined.

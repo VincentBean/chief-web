@@ -18,6 +18,7 @@ import {
 import { isValidGithubSlug } from '../lib/git-url.js';
 import { markPullRequestReadyForReview, type ReadyForReview } from '../lib/github-review.js';
 import {
+  findPullRequest,
   GithubApiError,
   type OpenedPullRequest,
   openPullRequest,
@@ -25,6 +26,7 @@ import {
   type PullRequestInput,
 } from '../lib/github.js';
 import { logger } from '../lib/logger.js';
+import { UsageLimitHold } from '../limits/index.js';
 import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
@@ -66,6 +68,15 @@ export class DeliveryError extends Error {
 export interface PullRequestOpener {
   open(token: string, input: PullRequestInput): Promise<OpenedPullRequest>;
   /**
+   * The open pull request for a head → base pair, or `null` when there is
+   * none. The review-stage retry has a URL and no node id (US-006), so this is
+   * how it finds the pull request it has to undraft.
+   */
+  find(
+    token: string,
+    input: Pick<PullRequestInput, 'slug' | 'head' | 'base'>,
+  ): Promise<PullRequest | null>;
+  /**
    * Undrafts a pull request by its GraphQL node id (US-003). Idempotent: a
    * pull request that is already ready is a success, not a failure.
    */
@@ -81,6 +92,13 @@ export class GithubPullRequests implements PullRequestOpener {
 
   open(token: string, input: PullRequestInput): Promise<OpenedPullRequest> {
     return openPullRequest(token, this.config.githubApiUrl, input);
+  }
+
+  find(
+    token: string,
+    input: Pick<PullRequestInput, 'slug' | 'head' | 'base'>,
+  ): Promise<PullRequest | null> {
+    return findPullRequest(token, this.config.githubApiUrl, input);
   }
 
   markReady(token: string, pullRequestId: string): Promise<ReadyForReview> {
@@ -111,7 +129,9 @@ export type DeliveryCode =
   | 'repository_missing'
   | 'invalid_github_slug'
   | 'pull_request_failed'
-  | 'review_failed';
+  | 'review_failed'
+  | 'feedback_failed'
+  | 'usage_limit_hold';
 
 /**
  * Which of the three steps each failure belongs to (US-019, US-009). It is what
@@ -119,7 +139,7 @@ export type DeliveryCode =
  * the operator is told which part to go and fix — the remote, GitHub, or the
  * review — and a `review` failure is the one that re-runs *only* the review.
  */
-const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok'>, FailureStage> = {
+const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok' | 'usage_limit_hold'>, FailureStage> = {
   container_unavailable: 'push',
   push_failed: 'push',
   github_token_missing: 'pull_request',
@@ -127,7 +147,16 @@ const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok'>, FailureStage> = {
   invalid_github_slug: 'pull_request',
   pull_request_failed: 'pull_request',
   review_failed: 'review',
+  feedback_failed: 'feedback',
 };
+
+/** What waiting for the feedback run left the delivery with (US-006). */
+interface FeedbackOutcome {
+  /** The sentence added to the delivery's message; `null` when there is none. */
+  readonly message: string | null;
+  /** Why the session must fail at the `feedback` stage; `null` when it must not. */
+  readonly failure: string | null;
+}
 
 export class DeliveryService implements BuildCompletion {
   constructor(
@@ -142,6 +171,12 @@ export class DeliveryService implements BuildCompletion {
      * review. A session with `codeReview` off never reaches it either way.
      */
     private readonly review: ReviewStep | null = null,
+    /**
+     * The global usage-limit hold (US-004). The review runs an agent, so it can
+     * be refused for the same reason a build iteration can, and the answer is
+     * the same one: hold agent work and park the session rather than fail it.
+     */
+    private readonly hold: UsageLimitHold = new UsageLimitHold(db),
   ) {}
 
   /**
@@ -323,7 +358,19 @@ export class DeliveryService implements BuildCompletion {
         number: opened.pullRequest.number,
       });
       if (!reviewed.ok) {
-        return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
+        // The account is out of usage rather than the review being broken, so
+        // this is a pause, not a failure: the draft stays a draft and the
+        // session waits for the hold to lift (US-006).
+        if (reviewed.code === 'usage_limit') return this.held(session, opened, reviewed.message);
+        // Everything else has spent its attempts. The pull request is not
+        // getting any more of chief-web's attention, so it is released before
+        // the session is failed — a session nobody looks at again must never
+        // leave a draft behind (US-006).
+        const stranded = await this.readyForReview(session, token, opened.pullRequest);
+        return this.failed(session, 'review_failed', {
+          message: sentences(reviewed.message, stranded),
+          stderr: '',
+        });
       }
       // The review is posted by the time the step answers `ok` — publishing is
       // what makes an attempt succeed — so the comment is on the pull request
@@ -332,15 +379,24 @@ export class DeliveryService implements BuildCompletion {
       // is over (US-005), and released straight away when there was none
       // (US-004).
       const fixed = await this.awaitFeedbackRun(session, reviewed.solver);
+      // The undraft comes first whether or not the run went well: a failed run
+      // is still a pull request a human has to look at, and the failure below
+      // is what makes that a retryable `feedback` stage (US-006).
       const undrafted = await this.readyForReview(session, token, opened.pullRequest);
       if (undrafted !== null) {
         return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });
+      }
+      if (fixed.failure !== null) {
+        return this.failed(session, 'feedback_failed', {
+          message: sentences(delivered, reviewed.message, fixed.failure),
+          stderr: '',
+        });
       }
       return this.finish(
         session,
         opened.pullRequest.url,
         opened.adopted,
-        sentences(delivered, reviewed.message, fixed),
+        sentences(delivered, reviewed.message, fixed.message),
       );
     }
 
@@ -365,19 +421,29 @@ export class DeliveryService implements BuildCompletion {
    * a state that is not `running` — `finished`, `failed`, or back to
    * `pending` because somebody stopped it.
    *
-   * Answers the sentence to add to the delivery's message, or `null` when
-   * there was nothing to wait for: a review that flagged nothing, a chief-web
-   * with no solver, or a start that was refused. A refusal is not waited for by
-   * design — `no_unresolved_feedback` means the findings were all body-only
-   * and there is nothing to fix, and the other refusals are US-006's to fail
-   * on. Exactly one review → fix pass runs either way: nothing here re-reviews
+   * Answers the sentence to add to the delivery's message and, when the run
+   * did not work out, the sentence that fails the session at the `feedback`
+   * stage (US-006). Both are `null` when there was nothing to wait for: a
+   * review that flagged nothing, or a chief-web with no solver.
+   *
+   * A refusal is not waited for — there is no run to wait for — but it is
+   * still read: `no_unresolved_feedback` means the findings were all
+   * body-only and there is genuinely nothing to fix, which is a success, while
+   * every other refusal is the run this delivery needed not happening, and
+   * fails the session so the operator can retry it (US-006).
+   *
+   * Exactly one review → fix pass runs either way: nothing here re-reviews
    * what the run pushed (FR-14).
    */
   private async awaitFeedbackRun(
     session: Session,
     solver: SolverOutcome | null,
-  ): Promise<string | null> {
-    if (solver === null || solver.runId === null) return null;
+  ): Promise<FeedbackOutcome> {
+    if (solver === null) return { message: null, failure: null };
+    if (solver.runId === null) {
+      if (solver.code === 'no_unresolved_feedback') return { message: null, failure: null };
+      return { message: null, failure: solver.message };
+    }
 
     updateSession(this.db, session.id, { status: 'fixing' });
     logger.info('waiting for the feedback run on the review findings', {
@@ -389,7 +455,7 @@ export class DeliveryService implements BuildCompletion {
     if (run === null) {
       // The row was deleted under us, which is a thing the PullRequests page
       // can do. There is nothing left to wait for and nothing to report.
-      return null;
+      return { message: null, failure: null };
     }
 
     logger.info('the feedback run on the review findings is over', {
@@ -399,12 +465,23 @@ export class DeliveryService implements BuildCompletion {
       stage: run.failureStage,
     });
 
-    if (run.status === 'finished') return 'Its feedback run has finished.';
+    if (run.status === 'finished') {
+      return { message: 'Its feedback run has finished.', failure: null };
+    }
     if (run.status === 'failed') {
       const stage = run.failureStage === null ? '' : ` at ${prFailureStageLabel(run.failureStage)}`;
-      return `Its feedback run failed${stage}.`;
+      return {
+        message: null,
+        failure:
+          `Its feedback run failed${stage}: ${run.lastError ?? 'no reason was recorded'}. The ` +
+          'pull request has been marked ready for review all the same; retrying runs the ' +
+          'feedback on it again.',
+      };
     }
-    return 'Its feedback run was stopped.';
+    // Stopped by hand, which is the operator saying the fixes are not wanted
+    // rather than anything having gone wrong. The pull request is released and
+    // the session finishes.
+    return { message: 'Its feedback run was stopped.', failure: null };
   }
 
   /**
@@ -555,16 +632,110 @@ export class DeliveryService implements BuildCompletion {
     }
 
     const target: ReviewTarget = { slug: repository.githubSlug, number };
+    updateSession(this.db, session.id, { status: 'reviewing' });
     const reviewed = await this.review.run(session, token, target);
     if (!reviewed.ok) {
-      return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
+      if (reviewed.code === 'usage_limit') return this.held(session, null, reviewed.message);
+      const stranded = await this.undraft(session, token, repository.githubSlug);
+      return this.failed(session, 'review_failed', {
+        message: sentences(reviewed.message, stranded),
+        stderr: '',
+      });
     }
-    // The same wait the automatic chain does: a retried review that found
-    // something hands it to a feedback run, and the session is not done until
-    // that run is (US-005). Undrafting is US-006's half of this path — this
-    // retry has a URL and no node id to call the mutation with.
+    // The same chain the automatic delivery does: a retried review that found
+    // something hands it to a feedback run, the session is not done until that
+    // run is (US-005), and the pull request is released afterwards either way
+    // (US-006). The one difference is where the node id comes from — this path
+    // has a URL — so the pull request is looked up rather than remembered.
     const fixed = await this.awaitFeedbackRun(session, reviewed.solver);
-    return this.finish(session, prUrl, true, sentences(reviewed.message, fixed));
+    const undrafted = await this.undraft(session, token, repository.githubSlug);
+    if (undrafted !== null) {
+      return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });
+    }
+    if (fixed.failure !== null) {
+      return this.failed(session, 'feedback_failed', {
+        message: sentences(reviewed.message, fixed.failure),
+        stderr: '',
+      });
+    }
+    return this.finish(session, prUrl, true, sentences(reviewed.message, fixed.message));
+  }
+
+  /**
+   * Undrafts the session's pull request when all that is known about it is
+   * which branch it is for (US-006).
+   *
+   * The retry paths reach the undraft with a URL rather than with the pull
+   * request GitHub answered the create with, and the mutation takes nothing
+   * but a node id — so the open pull request for this session's head → base is
+   * looked up first, exactly as the delivery does when it adopts one. A pull
+   * request that is no longer open is nothing to fail over: it was merged or
+   * closed while the review ran, and neither leaves a draft behind.
+   */
+  private async undraft(session: Session, token: string, slug: string): Promise<string | null> {
+    let pullRequest: PullRequest | null;
+    try {
+      pullRequest = await this.pullRequests.find(token, {
+        slug,
+        head: session.featureBranch,
+        base: session.prTargetBranch,
+      });
+    } catch (cause) {
+      const detail = cause instanceof GithubApiError ? cause.message : describe(cause);
+      return `The pull request could not be looked up to mark it ready for review: ${detail}`;
+    }
+    if (pullRequest === null) {
+      logger.info('no open pull request left to mark ready for review', {
+        session: session.id,
+        branch: session.featureBranch,
+      });
+      return null;
+    }
+    return this.readyForReview(session, token, pullRequest);
+  }
+
+  /**
+   * Parks the session on the global usage-limit hold instead of failing it
+   * (US-006).
+   *
+   * A review refused for the account's usage limit says nothing about the pull
+   * request: there is no failure to report and nothing for the operator to fix,
+   * so this matches what a refused build iteration does — arm the hold, put the
+   * session in `waiting` with the expiry, and let the scheduler's resume walk
+   * it back through the delivery once the hour is up. The pull request stays a
+   * draft on purpose: the review that gates it has not happened yet.
+   */
+  private held(
+    session: Session,
+    opened: OpenedPullRequest | null,
+    reason: string,
+  ): DeliveryResult {
+    const until = this.hold.arm();
+    logger.warn('delivery held: the review agent was refused for Claude’s usage limit', {
+      session: session.id,
+      name: session.name,
+      until,
+      error: reason,
+    });
+    const updated = updateSession(this.db, session.id, {
+      status: 'waiting',
+      waitingUntil: until,
+      // A pause rather than a failure, so no stage: the session page reads the
+      // sentence below instead of offering a retry for something unbroken.
+      lastError: heldMessage(until),
+      failureStage: null,
+    });
+
+    return {
+      ok: false,
+      sessionId: session.id,
+      status: updated?.status ?? 'waiting',
+      prUrl: updated?.prUrl ?? session.prUrl,
+      adopted: opened?.adopted ?? false,
+      code: 'usage_limit_hold',
+      message: `${reason}\n\n${heldMessage(until)}`,
+      stderr: '',
+    };
   }
 
   /** Starts (or reuses) the session container and pushes from inside it. */
@@ -578,7 +749,7 @@ export class DeliveryService implements BuildCompletion {
 
   private failed(
     session: Session,
-    code: Exclude<DeliveryCode, 'ok'>,
+    code: Exclude<DeliveryCode, 'ok' | 'usage_limit_hold'>,
     detail: { message: string; stderr: string },
   ): DeliveryResult {
     const stored = detail.stderr === '' ? detail.message : `${detail.message}\n\n${detail.stderr}`;
@@ -624,6 +795,15 @@ function describe(cause: unknown): string {
 /** Joins the parts of a delivery's message, skipping the ones there were none of. */
 function sentences(...parts: (string | null)[]): string {
   return parts.filter((part): part is string => part !== null && part !== '').join(' ');
+}
+
+/** What a session parked on the hold carries until it resumes (US-006). */
+function heldMessage(until: string): string {
+  return (
+    'Claude’s usage limit was reached, so the code review of this pull request is held until ' +
+    `${until}. The pull request is open as a draft and the session resumes the review by ` +
+    'itself once the hold lifts.'
+  );
 }
 
 function pause(ms: number): Promise<void> {
