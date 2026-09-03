@@ -114,6 +114,25 @@ describe('the GitHub client', () => {
       assert.equal(result.baseSha, 'base-sha');
     });
 
+    it('carries the pull request description, and copes with one that has none', async () => {
+      replies['GET /repos/acme/one/pulls/61'] = {
+        status: 200,
+        body: pull({ mergeable: false, body: 'Why this pull request exists.' }),
+      };
+
+      const described = await fetchPullRequestMergeability(TOKEN, baseUrl, 'acme/one', 61);
+
+      // It is what a conflict-resolving agent is shown about the intent of the
+      // change (US-005).
+      assert.equal(described.body, 'Why this pull request exists.');
+
+      replies['GET /repos/acme/one/pulls/61'] = { status: 200, body: pull({ body: null }) };
+
+      const bare = await fetchPullRequestMergeability(TOKEN, baseUrl, 'acme/one', 61);
+
+      assert.equal(bare.body, '');
+    });
+
     it('treats a missing mergeable field as unknown rather than clean', async () => {
       replies['GET /repos/acme/one/pulls/61'] = { status: 200, body: pull({}) };
 

@@ -33,7 +33,11 @@ import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createLimitsRouter } from './routes/limits.js';
 import { createPlanningRouter } from './routes/planning.js';
-import { type ConflictScan, createPrConflictScan } from './prconflicts/index.js';
+import {
+  type ConflictScan,
+  createPrConflictFixService,
+  createPrConflictScan,
+} from './prconflicts/index.js';
 import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
@@ -254,7 +258,25 @@ export function createApp(
   // branch that moves overnight has to be noticed whether or not anyone opens
   // the UI. It only decides which pull requests conflict; what is done about
   // one is the fix pipeline handed to it (US-005).
-  const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db);
+  // What the scan does about a conflict (US-005): its own container through
+  // the same machinery a feedback run uses, one agent on the conflicted files,
+  // and a merge commit chief-web makes and pushes itself. It shares the build
+  // loop's slot cap, so a fix queues to the next scan rather than
+  // oversubscribing the host.
+  const prConflicts =
+    deps.prConflicts ??
+    createPrConflictScan(
+      config,
+      db,
+      createPrConflictFixService(
+        config,
+        db,
+        sessionOrchestrator,
+        exec,
+        createAgentRunner(exec),
+        builds,
+      ),
+    );
   prConflicts.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of

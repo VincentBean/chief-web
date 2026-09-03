@@ -107,6 +107,13 @@ export interface ConflictedPullRequest {
   readonly prNumber: number;
   readonly prUrl: string;
   readonly prTitle: string;
+  /**
+   * The pull request's description, verbatim; empty when it has none. Carried
+   * because the agent that resolves the conflict is shown it (US-005): an
+   * intent-heavy conflict is decided by what the pull request was for, and the
+   * description is usually the only place that is written down.
+   */
+  readonly prBody: string;
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly headSha: string;
@@ -394,6 +401,7 @@ export class PrConflictService implements ConflictScan {
       prNumber: pull.number,
       prUrl: pull.url,
       prTitle: pull.title,
+      prBody: mergeability.body,
       headBranch: pull.headRef,
       // The mergeability answer is the fresher of the two, and the only one
       // carrying a base SHA at all.

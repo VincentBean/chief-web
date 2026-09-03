@@ -140,6 +140,7 @@ function mergeability(overrides: Partial<PullRequestMergeability> = {}): PullReq
     baseSha: 'base000',
     headRef: 'chief/feature',
     baseRef: 'main',
+    body: 'Why this pull request exists.',
     ...overrides,
   };
 }
@@ -195,6 +196,7 @@ describe('pull request conflict scan', () => {
       baseSha: 'bbb222',
       headRef: 'chief/fix-login',
       baseRef: 'main',
+      body: 'Login broke when the session cookie moved.',
     });
 
     assert.equal(await scan.tick(), 1);
@@ -208,6 +210,9 @@ describe('pull request conflict scan', () => {
         prNumber: 7,
         prUrl: 'https://github.com/acme/demo/pull/7',
         prTitle: 'Fix login',
+        // Carried for the agent's prompt: what the pull request is for is
+        // most of what deciding between two conflicting hunks needs (US-005).
+        prBody: 'Login broke when the session cookie moved.',
         headBranch: 'chief/fix-login',
         baseBranch: 'main',
         headSha: 'aaa111',

@@ -166,6 +166,14 @@ export interface PullRequestMergeability {
   readonly headRef: string;
   /** Branch the pull request targets, the one that gets merged in. */
   readonly baseRef: string;
+  /**
+   * The pull request description, verbatim; empty when it has none.
+   *
+   * Carried because an agent resolving a conflict has to know what the pull
+   * request was trying to do — the diff alone does not say which side of a
+   * conflicting hunk is the point of the change (US-005).
+   */
+  readonly body: string;
 }
 
 /**
@@ -384,6 +392,7 @@ function toPullRequestMergeability(value: unknown): PullRequestMergeability | nu
     baseSha,
     headRef,
     baseRef,
+    body: readField(body, 'body') ?? '',
   };
 }
 
