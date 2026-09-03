@@ -10,6 +10,7 @@ import {
   type PrReviewFailureStage,
   updatePrReview,
 } from '../db/index.js';
+import { REVIEW_ATTEMPTS } from '../delivery/index.js';
 import type { BuildSlots, PrRunContainers } from '../prfeedback/index.js';
 import { runPrCheckout } from '../prfeedback/index.js';
 import { isValidGithubSlug } from '../lib/git-url.js';
@@ -40,9 +41,9 @@ import { getGithubToken } from '../settings/index.js';
  * branch, one agent, and then a hand-off to the feedback solver exactly as the
  * session review does it.
  *
- * Single-shot on purpose. The session review gets three attempts because the
- * operator is not there when it runs; here they are, and "start it again" is
- * the retry.
+ * It gets the session review's three attempts too: an agent is flaky for
+ * reasons nobody can act on — an overloaded API, a half-written document — and
+ * one such failure should not cost the operator a click and a fresh checkout.
  */
 
 /** Where a live review is; meaningless once it is over, so it is not persisted. */
@@ -86,7 +87,10 @@ export interface PrReviewView {
   /** True while *this* server is driving it. */
   readonly running: boolean;
   readonly phase: PrReviewPhase | null;
+  /** How many times the review has been started by hand. */
   readonly attempt: number;
+  /** Which pass of the current start is running; `null` once it is over. */
+  readonly pass: number | null;
   readonly failureStage: PrReviewFailureStage | null;
   readonly lastError: string | null;
   readonly headSha: string | null;
@@ -100,6 +104,8 @@ export interface PrReviewView {
 
 interface RunState {
   phase: PrReviewPhase;
+  /** Which of the {@link REVIEW_ATTEMPTS} passes is running. */
+  attempt: number;
   containerId: string | null;
   finished: Promise<void>;
   stopping: boolean;
@@ -239,6 +245,7 @@ export class PrReviewService {
 
     const state: RunState = {
       phase: 'starting',
+      attempt: 0,
       containerId: null,
       finished: Promise.resolve(),
       stopping: false,
@@ -311,48 +318,88 @@ export class PrReviewService {
     updatePrReview(this.db, review.id, { headSha: checkout.headSha });
     if (state.stopping) return this.stopped(review.id);
 
-    state.phase = 'reviewing';
-    const pass = await this.reviewer.reviewInContainer({
-      id: review.id,
-      name: `${slug}#${String(review.prNumber)}`,
-      containerId: container.id,
-      targetBranch: review.baseBranch,
-      featureBranch: review.headBranch,
-    });
-    if (state.stopping) return this.stopped(review.id);
-    if (pass.code === 'usage_limit') {
-      // The account is out, not the pull request: hold the whole server, as a
-      // feedback run does, and leave this one to be started again afterwards.
-      const until = this.hold.arm();
+    // The same three complete attempts the session review gets: run the
+    // agent, then post what it found. A pass that fell over — an overloaded
+    // API, a document that came back half-written, a GitHub call that timed
+    // out — costs a fresh look at the diff, not the whole review. The branch
+    // stays checked out in the same container throughout.
+    const reasons: string[] = [];
+    // Where the most recent attempt failed: the stage the operator reads first.
+    let lastStage: PrReviewFailureStage = 'agent';
+    let published: PublishedReview | null = null;
+    let findings = 0;
+    for (let attempt = 1; attempt <= REVIEW_ATTEMPTS; attempt += 1) {
+      state.phase = 'reviewing';
+      state.attempt = attempt;
+      const pass = await this.reviewer.reviewInContainer({
+        id: review.id,
+        name: `${slug}#${String(review.prNumber)}`,
+        containerId: container.id,
+        targetBranch: review.baseBranch,
+        featureBranch: review.headBranch,
+      });
+      if (state.stopping) return this.stopped(review.id);
+      if (pass.code === 'usage_limit') {
+        // The account is out, not the pull request: the next attempt walks
+        // straight back into the same wall, so hold the whole server, as a
+        // feedback run does, and leave this one to be started again after.
+        const until = this.hold.arm();
+        reasons.push(`Attempt ${String(attempt)}: ${pass.message}`);
+        this.fail(
+          review.id,
+          'agent',
+          'Claude’s usage limit was reached, so the review was stopped before it could ' +
+            `finish and agent work is held until ${until}. Nothing was posted — start the ` +
+            `review again once the hold lifts.\n\n${reasons.join('\n')}`,
+        );
+        await this.slots.holdAll(until);
+        return;
+      }
+      if (!pass.ok || pass.report === null) {
+        lastStage = pass.code === 'invalid_findings' ? 'findings' : 'agent';
+        reasons.push(`Attempt ${String(attempt)}: ${pass.message}\n${pass.output}`.trim());
+        logger.warn('pull request review attempt failed', {
+          review: review.id,
+          attempt,
+          code: pass.code,
+        });
+        continue;
+      }
+
+      state.phase = 'publishing';
+      try {
+        published = await this.publisher.publish(
+          token,
+          { slug, number: review.prNumber },
+          pass.report,
+        );
+        findings = pass.report.findings.length;
+        break;
+      } catch (cause) {
+        const message = cause instanceof GithubApiError ? cause.message : String(cause);
+        lastStage = 'publish';
+        reasons.push(
+          `Attempt ${String(attempt)}: the review could not be posted to GitHub: ${message}`,
+        );
+        logger.warn('pull request review attempt failed', {
+          review: review.id,
+          attempt,
+          code: 'publish',
+        });
+      }
+    }
+    if (published === null) {
+      const attempts = reasons.length;
       this.fail(
         review.id,
-        'agent',
-        'Claude’s usage limit was reached, so the review was stopped before it could ' +
-          `finish and agent work is held until ${until}. Nothing was posted — start the ` +
-          'review again once the hold lifts.',
+        lastStage,
+        `The code review failed after ${String(attempts)} attempt${attempts === 1 ? '' : 's'}. ` +
+          'Nothing was posted; starting the review again runs it afresh.' +
+          `\n\n${reasons.join('\n')}`,
       );
-      await this.slots.holdAll(until);
-      return;
-    }
-    if (!pass.ok || pass.report === null) {
-      const stage: PrReviewFailureStage = pass.code === 'invalid_findings' ? 'findings' : 'agent';
-      this.fail(review.id, stage, `${pass.message}\n${pass.output}`.trim());
       return;
     }
 
-    state.phase = 'publishing';
-    let published: PublishedReview;
-    try {
-      published = await this.publisher.publish(
-        token,
-        { slug, number: review.prNumber },
-        pass.report,
-      );
-    } catch (cause) {
-      const message = cause instanceof GithubApiError ? cause.message : String(cause);
-      this.fail(review.id, 'publish', `The review could not be posted to GitHub: ${message}`);
-      return;
-    }
     logger.info('pull request review posted', {
       review: review.id,
       repository: slug,
@@ -371,7 +418,7 @@ export class PrReviewService {
       finishedAt: new Date().toISOString(),
     });
 
-    const solverMessage = await this.handOff(review, slug, pass.report.findings.length);
+    const solverMessage = await this.handOff(review, slug, findings);
     if (solverMessage !== null) updatePrReview(this.db, review.id, { solverMessage });
   }
 
@@ -452,6 +499,7 @@ export class PrReviewService {
       running: state !== undefined,
       phase: state?.phase ?? null,
       attempt: review.attempt,
+      pass: state === undefined || state.attempt === 0 ? null : state.attempt,
       failureStage: review.failureStage,
       lastError: review.lastError,
       headSha: review.headSha,

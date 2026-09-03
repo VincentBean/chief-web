@@ -147,10 +147,15 @@ It takes one build slot while it runs, and is refused — like a feedback run �
 when every slot is taken or Claude's usage limit is being waited out. A pass
 that hits the limit itself holds every agent for the usual hour.
 
-Unlike a session's review it is **single-shot**: one attempt, and a failure
-shows on the row with the stage it failed at (the checkout, the agent, the
-findings, posting to GitHub, or the container). Pressing **Review** again is the
-retry. **Stop review** signals the agent and posts nothing.
+It gets the same [three complete attempts](#attempts-failure-and-retry) as a
+session's review, in the same container and on the same checkout: an agent that
+fell over — an overloaded API, a document it never finished — is run again, and
+a GitHub refusal costs a fresh look at the diff rather than a re-post. The badge
+says which pass is running. A usage limit stops the attempts early, as it does
+for a session. After the third failure the row shows the stage of the last
+attempt (the checkout, the agent, the findings, posting to GitHub, or the
+container) with every attempt's reason. Pressing **Review** again starts
+another three. **Stop review** signals the agent and posts nothing.
 
 ## What it needs
 

@@ -1048,7 +1048,10 @@ export interface PrReview {
   /** True while the server is driving it right now. */
   running: boolean;
   phase: PrReviewPhase | null;
+  /** How many times the review has been started by hand. */
   attempt: number;
+  /** Which of the three passes of this start is running; null once over. */
+  pass: number | null;
   failureStage: PrReviewFailureStage | null;
   lastError: string | null;
   /** The commit the review was read at. */

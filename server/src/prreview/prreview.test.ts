@@ -355,7 +355,7 @@ describe('reviewing an open pull request by hand', () => {
     assert.equal(publisher.published.length, 0);
   });
 
-  it('fails at the agent when the pass produced nothing, and posts nothing', async () => {
+  it('fails at the agent after three passes that produced nothing, and posts nothing', async () => {
     reviewer.result = passResult(null, 'agent_failed');
     const service = serviceWith();
     const id = await reviewOnce(service);
@@ -363,9 +363,48 @@ describe('reviewing an open pull request by hand', () => {
 
     assert.equal(view.status, 'failed');
     assert.equal(view.failureStage, 'agent');
-    assert.match(view.lastError ?? '', /The agent fell over/);
+    assert.equal(reviewer.subjects.length, 3);
+    assert.match(view.lastError ?? '', /failed after 3 attempts/);
+    assert.match(view.lastError ?? '', /Attempt 1: The agent fell over/);
+    assert.match(view.lastError ?? '', /Attempt 3: The agent fell over/);
     assert.equal(publisher.published.length, 0);
     assert.deepEqual(solver.starts, []);
+    // The branch was checked out once; the attempts reuse it.
+    assert.deepEqual(containersStarted, [id]);
+  });
+
+  it('retries a pass that fell over, and posts the one that worked', async () => {
+    const good = reviewer.result;
+    let calls = 0;
+    reviewer.behaviour = () => {
+      calls += 1;
+      reviewer.result = calls === 1 ? passResult(null, 'agent_failed') : good;
+    };
+    reviewer.result = passResult(null, 'agent_failed');
+    const service = serviceWith();
+    const id = await reviewOnce(service);
+    const view = service.status(id);
+
+    assert.equal(view.status, 'finished');
+    assert.equal(reviewer.subjects.length, 2);
+    assert.equal(publisher.published.length, 1);
+    assert.deepEqual(solver.starts, [{ repositoryId: repository.id, prNumber: 61 }]);
+  });
+
+  it('runs the agent again when GitHub refused the post, rather than re-posting a stale document', async () => {
+    let posts = 0;
+    publisher.publish = (_token, target, report) => {
+      posts += 1;
+      if (posts === 1) return Promise.reject(new GithubApiError('github_unreachable', 'ECONNRESET'));
+      publisher.published.push({ target, report });
+      return Promise.resolve({ url: 'https://github.com/r/1', inlineComments: 1, foldedFindings: 0 });
+    };
+    const service = serviceWith();
+    const id = await reviewOnce(service);
+
+    assert.equal(service.status(id).status, 'finished');
+    assert.equal(reviewer.subjects.length, 2);
+    assert.equal(publisher.published.length, 1);
   });
 
   it('names the findings as the stage when the document could not be parsed', async () => {
@@ -383,7 +422,8 @@ describe('reviewing an open pull request by hand', () => {
 
     assert.equal(view.status, 'failed');
     assert.equal(view.failureStage, 'publish');
-    assert.match(view.lastError ?? '', /Resource not accessible/);
+    assert.equal(reviewer.subjects.length, 3);
+    assert.match(view.lastError ?? '', /Attempt 3: the review could not be posted to GitHub: Resource not accessible/);
     assert.deepEqual(solver.starts, []);
   });
 
@@ -396,6 +436,8 @@ describe('reviewing an open pull request by hand', () => {
     assert.equal(view.status, 'failed');
     assert.equal(view.failureStage, 'agent');
     assert.match(view.lastError ?? '', /usage limit/);
+    // The remaining attempts are not spent on the same wall.
+    assert.equal(reviewer.subjects.length, 1);
     assert.equal(slots.heldUntil.length, 1);
     assert.ok(hold.active());
     assert.equal(publisher.published.length, 0);

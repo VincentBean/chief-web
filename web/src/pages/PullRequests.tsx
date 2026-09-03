@@ -548,6 +548,7 @@ function ReviewBadge({ review }: { readonly review: PrReview }) {
     return (
       <Badge tone="review" pulse>
         {prReviewPhaseLabel(review.phase)}
+        {review.pass !== null && review.pass > 1 && ` (pass ${String(review.pass)})`}
       </Badge>
     );
   }
