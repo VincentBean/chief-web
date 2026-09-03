@@ -2,11 +2,12 @@ import { type Response, Router } from 'express';
 
 import { GithubApiError } from '../lib/github.js';
 import { PrFeedbackError, type PrFeedbackService } from '../prfeedback/index.js';
+import { PrReviewError, type PrReviewService } from '../prreview/index.js';
 import { PullRequestError, type PullRequestService } from '../pullrequests/index.js';
 
 /**
- * Open pull requests, their review feedback, and the runs that answer it
- * (US-021).
+ * Open pull requests, their review feedback, the runs that answer it (US-021),
+ * and the code reviews started on them by hand.
  *
  * Reading is deliberately not behind the Claude guard: listing runs no agent,
  * and a page that refuses to render because Claude Code is signed out would
@@ -16,6 +17,7 @@ import { PullRequestError, type PullRequestService } from '../pullrequests/index
 export function createPullRequestsRouter(
   pullRequests: PullRequestService,
   prFeedback: PrFeedbackService,
+  prReviews: PrReviewService,
 ): Router {
   const router = Router();
 
@@ -27,7 +29,8 @@ export function createPullRequestsRouter(
       .list({ refresh })
       .then((view) => {
         // Each pull request carries whatever chief-web knows about running one
-        // against it, so the list renders a row's state without a second call.
+        // against it — the feedback run and the review — so the list renders a
+        // row's state without a second call.
         res.status(200).json({
           ...view,
           repositories: view.repositories.map((repository) => ({
@@ -35,6 +38,7 @@ export function createPullRequestsRouter(
             pullRequests: repository.pullRequests.map((pull) => ({
               ...pull,
               run: prFeedback.find(repository.repositoryId, pull.number),
+              review: prReviews.find(repository.repositoryId, pull.number),
             })),
           })),
         });
@@ -85,6 +89,48 @@ export function createPullRequestsRouter(
       });
   });
 
+  /**
+   * Starts a code review of the pull request: the session review's pass, in a
+   * container of its own, posted to GitHub as one review. 200 for the same
+   * reason as the feedback run: one row per pull request, reused across passes.
+   */
+  router.post('/pull-requests/:repositoryId/:number/review', (req, res) => {
+    const number = parseNumber(req.params.number);
+    if (number === null) {
+      respondWithInvalidNumber(res);
+      return;
+    }
+
+    prReviews
+      .start(req.params.repositoryId, number)
+      .then((review) => {
+        res.status(200).json(review);
+      })
+      .catch((cause: unknown) => {
+        respondWithFailure(res, cause);
+      });
+  });
+
+  router.get('/pull-requests/reviews/:reviewId', (req, res) => {
+    try {
+      res.status(200).json(prReviews.status(req.params.reviewId));
+    } catch (cause) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  /** Signals the review agent; nothing is posted for a stopped review. */
+  router.delete('/pull-requests/reviews/:reviewId', (req, res) => {
+    prReviews
+      .stop(req.params.reviewId)
+      .then((review) => {
+        res.status(200).json(review);
+      })
+      .catch((cause: unknown) => {
+        respondWithFailure(res, cause);
+      });
+  });
+
   router.get('/pull-requests/runs/:runId', (req, res) => {
     try {
       res.status(200).json(prFeedback.status(req.params.runId));
@@ -126,7 +172,11 @@ function respondWithInvalidNumber(res: Response): void {
  * a 400 the operator has to read.
  */
 function respondWithFailure(res: Response, cause: unknown): void {
-  if (cause instanceof PullRequestError || cause instanceof PrFeedbackError) {
+  if (
+    cause instanceof PullRequestError ||
+    cause instanceof PrFeedbackError ||
+    cause instanceof PrReviewError
+  ) {
     res.status(cause.status).json({ error: cause.code, message: cause.message });
     return;
   }

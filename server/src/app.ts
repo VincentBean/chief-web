@@ -35,6 +35,7 @@ import { createLimitsRouter } from './routes/limits.js';
 import { createPlanningRouter } from './routes/planning.js';
 import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
+import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
@@ -82,6 +83,12 @@ export interface AppDependencies {
    * on stubs so they never reach Docker or GitHub.
    */
   readonly prFeedback?: PrFeedbackService;
+  /**
+   * Code reviews started by hand on an open pull request. Defaults to a
+   * service driving the shared orchestrator, the session review's pass and the
+   * build cap; tests pass one built on stubs.
+   */
+  readonly prReviews?: PrReviewService;
   /**
    * Session containers (US-009). `index.ts` passes the same orchestrator it
    * reconciles with at startup so both share one Docker client; tests pass a
@@ -181,6 +188,8 @@ export function createApp(
   // list and stopping a run are not guarded: being unable to stop something you
   // could not start is a trap.
   api.post('/pull-requests/:repositoryId/:number/run', guard);
+  // So is reviewing one by hand.
+  api.post('/pull-requests/:repositoryId/:number/review', guard);
 
   // The client is cheap to construct — nothing is dialled until the first
   // request — so one instance serves both the orchestrator and the setup
@@ -203,6 +212,10 @@ export function createApp(
   // request, then review it when the session asked for one (US-009). It is both
   // the loop's completion hand-off and its own endpoint, so a delivery that
   // failed can be retried without rerunning a story.
+  // The review pass is one object shared by the delivery's review step and the
+  // reviews started by hand on the Pull requests page: same prompt, same model
+  // setting, same findings file.
+  const reviewer = createReviewService(config, db, orchestrator, createAgentRunner(exec));
   const delivery =
     deps.delivery ??
     createDeliveryService(
@@ -211,11 +224,7 @@ export function createApp(
       orchestrator,
       exec,
       undefined,
-      new ReviewStep(
-        createReviewService(config, db, orchestrator, createAgentRunner(exec)),
-        new GithubReviewPublisher(config),
-        () => prFeedback,
-      ),
+      new ReviewStep(reviewer, new GithubReviewPublisher(config), () => prFeedback),
     );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
@@ -240,8 +249,27 @@ export function createApp(
   prFeedback =
     deps.prFeedback ??
     createPrFeedbackService(config, db, sessionOrchestrator, exec, createAgentRunner(exec), builds);
+  // A code review started by hand on an open pull request: the same pass the
+  // delivery runs, in a feedback-run container, handing its findings to the
+  // solver above exactly as the delivery's review does.
+  const prReviews =
+    deps.prReviews ??
+    createPrReviewService(
+      config,
+      db,
+      sessionOrchestrator,
+      exec,
+      createAgentRunner(exec),
+      reviewer,
+      builds,
+      () => prFeedback,
+    );
   api.use(
-    createPullRequestsRouter(deps.pullRequests ?? createPullRequestService(config, db), prFeedback),
+    createPullRequestsRouter(
+      deps.pullRequests ?? createPullRequestService(config, db),
+      prFeedback,
+      prReviews,
+    ),
   );
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.

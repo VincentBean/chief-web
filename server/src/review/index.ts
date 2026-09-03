@@ -25,4 +25,5 @@ export {
   type ReviewCode,
   type ReviewPassResult,
   ReviewService,
+  type ReviewSubject,
 } from './service.js';

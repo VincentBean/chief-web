@@ -8,9 +8,12 @@ posted to that pull request as one GitHub review. It is the same agent in the
 same container the build ran in — one more invocation, at the one moment where
 the whole feature exists and nothing is half-written.
 
-Nothing about it is interactive: there is no button that runs a review on
-demand, no review of a branch chief-web did not build, and no findings anywhere
-in this app. **The comments live on the GitHub pull request and only there.**
+There is also a **Review** button on every open pull request on the Pull
+requests page, which runs the same pass by hand — on any pull request, whether
+or not chief-web built it. See [Reviewing an open pull request by hand](#reviewing-an-open-pull-request-by-hand).
+
+Either way there are no findings anywhere in this app. **The comments live on
+the GitHub pull request and only there.**
 
 ## Switching it on
 
@@ -115,6 +118,40 @@ any other — chief-web has no second implementation of it.
 The delivery waits only for the run to *start*, not to finish, so a session does
 not sit in delivery while an agent works through the comments.
 
+## Reviewing an open pull request by hand
+
+**Review** on a row of the Pull requests page runs the same pass on that pull
+request, right now, without a session: same prompt, same review model, same
+`COMMENT` review posted the same way, same hand-off to the feedback run when it
+flags something. The difference is where it runs. A session's review reuses the
+session's container and clone; this one has neither, so it gets a container of
+its own, the way a feedback run does, and checks the pull request's head branch
+out into it first.
+
+What happens after the confirmation:
+
+1. The pull request is read from GitHub. A closed or merged one is refused, and
+   so is one whose branch lives on a fork — the clone is made with the
+   repository's deploy key, which cannot read another repository.
+2. A container is started for the review and the head branch is checked out at
+   the commit GitHub reported. If someone pushed in between, the review fails at
+   the checkout rather than reviewing a diff nobody asked about; start it again.
+3. The pass runs and the review is posted. The row then shows **reviewed** with
+   the number of findings, a link to the review on GitHub, and what became of
+   the feedback run it started.
+4. The container is removed. The workspace and clone stay on the data volume
+   under the review's id, so a second review of the same pull request reuses
+   them.
+
+It takes one build slot while it runs, and is refused — like a feedback run —
+when every slot is taken or Claude's usage limit is being waited out. A pass
+that hits the limit itself holds every agent for the usual hour.
+
+Unlike a session's review it is **single-shot**: one attempt, and a failure
+shows on the row with the stage it failed at (the checkout, the agent, the
+findings, posting to GitHub, or the container). Pressing **Review** again is the
+retry. **Stop review** signals the agent and posts nothing.
+
 ## What it needs
 
 - The **GitHub Personal Access Token** in Settings, with write access to pull
@@ -124,3 +161,5 @@ not sit in delivery while an agent works through the comments.
   It is the only part of delivery that needs Claude at all — the push and the
   pull request do not.
 - A pull request that exists. The review never opens one and never pushes.
+- For a review started by hand: a pull request whose branch is on the
+  repository itself, so the deploy key can clone it.

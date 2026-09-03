@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  fetchPrReview,
   fetchPrRun,
   fetchPullRequestFeedback,
   fetchPullRequests,
+  type PrReview,
   type PrRun,
   prFailureStageLabel,
   prPhaseLabel,
+  prReviewFailureStageLabel,
+  prReviewPhaseLabel,
   type PullRequest,
   type PullRequestFeedback,
   type PullRequestList,
@@ -14,7 +18,9 @@ import {
   type RepositoryPullRequests,
   type ReviewThread,
   sessionPath,
+  startPrReview,
   startPrRun,
+  stopPrReview,
   stopPrRun,
 } from '../api.ts';
 import { type BodyPart, parseCommentBody, splitPath } from '../comment.ts';
@@ -56,8 +62,12 @@ export function PullRequests() {
   const [feedback, setFeedback] = useState<Record<string, FeedbackState>>({});
   /** Run state per pull request, seeded from the list and then polled. */
   const [runs, setRuns] = useState<Record<string, PrRun>>({});
+  /** Review state per pull request, seeded and polled the same way. */
+  const [reviews, setReviews] = useState<Record<string, PrReview>>({});
   const [confirming, setConfirming] = useState<{ group: RepositoryPullRequests; pull: PullRequest; count: number } | null>(null);
   const [starting, setStarting] = useState(false);
+  const [confirmingReview, setConfirmingReview] = useState<{ group: RepositoryPullRequests; pull: PullRequest } | null>(null);
+  const [startingReview, setStartingReview] = useState(false);
   const [preparing, setPreparing] = useState<string | null>(null);
   const loadedAt = useRef(0);
   const feedbackRef = useRef(feedback);
@@ -75,6 +85,15 @@ export function PullRequests() {
           for (const group of value.repositories) {
             for (const pull of group.pullRequests) {
               if (pull.run !== null) next[pullRequestKey(group.repositoryId, pull.number)] = pull.run;
+            }
+          }
+          return next;
+        });
+        setReviews((current) => {
+          const next = { ...current };
+          for (const group of value.repositories) {
+            for (const pull of group.pullRequests) {
+              if (pull.review !== null) next[pullRequestKey(group.repositoryId, pull.number)] = pull.review;
             }
           }
           return next;
@@ -141,6 +160,62 @@ export function PullRequests() {
       window.clearInterval(timer);
     };
   }, [liveKeys, load]);
+
+  const liveReviewKeys = Object.entries(reviews)
+    .filter(([, review]) => review.running)
+    .map(([key, review]) => `${key}:${review.id}`)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    if (liveReviewKeys === '') return;
+    const entries = liveReviewKeys.split(',').map((entry) => {
+      const cut = entry.lastIndexOf(':');
+      return { key: entry.slice(0, cut), id: entry.slice(cut + 1) };
+    });
+    const tick = (): void => {
+      for (const { key, id } of entries) {
+        fetchPrReview(id)
+          .then((review) => {
+            setReviews((current) => ({ ...current, [key]: review }));
+            // A finished review may have started a feedback run; the refresh
+            // picks that run up along with the review itself.
+            if (!review.running) load({ refresh: true });
+          })
+          .catch(() => {
+            // The next tick, or a refresh, sorts it out.
+          });
+      }
+    };
+    const timer = window.setInterval(tick, RUN_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [liveReviewKeys, load]);
+
+  const onStartReview = (): void => {
+    if (confirmingReview === null) return;
+    const { group, pull } = confirmingReview;
+    const key = pullRequestKey(group.repositoryId, pull.number);
+    setStartingReview(true);
+    startPrReview(group.repositoryId, pull.number)
+      .then((review) => {
+        setReviews((current) => ({ ...current, [key]: review }));
+        toast.ok(`Reviewing #${String(pull.number)}.`);
+      })
+      .catch((error: unknown) => toast.error(describeError(error)))
+      .finally(() => {
+        setConfirmingReview(null);
+        setStartingReview(false);
+      });
+  };
+
+  const onStopReview = (group: RepositoryPullRequests, pull: PullRequest, review: PrReview): void => {
+    const key = pullRequestKey(group.repositoryId, pull.number);
+    stopPrReview(review.id)
+      .then((stopped) => setReviews((current) => ({ ...current, [key]: stopped })))
+      .catch((error: unknown) => toast.error(describeError(error)));
+  };
 
   const onStart = (): void => {
     if (confirming === null) return;
@@ -275,10 +350,13 @@ export function PullRequests() {
                   expanded={expanded === pullRequestKey(group.repositoryId, pull.number)}
                   feedback={feedback[pullRequestKey(group.repositoryId, pull.number)]}
                   run={runs[pullRequestKey(group.repositoryId, pull.number)]}
+                  review={reviews[pullRequestKey(group.repositoryId, pull.number)]}
                   preparing={preparing === pullRequestKey(group.repositoryId, pull.number)}
                   onToggle={() => onToggle(group, pull)}
                   onProcess={() => onProcess(group, pull)}
                   onStop={(run) => onStop(group, pull, run)}
+                  onReview={() => setConfirmingReview({ group, pull })}
+                  onStopReview={(review) => onStopReview(group, pull, review)}
                 />
               ))}
             </ul>
@@ -311,6 +389,29 @@ export function PullRequests() {
           nothing, nothing is pushed.
         </p>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmingReview !== null}
+        title={confirmingReview === null ? '' : `Review ${confirmingReview.group.githubSlug} #${String(confirmingReview.pull.number)}?`}
+        confirmLabel="Start review"
+        busyLabel="Starting…"
+        busy={startingReview}
+        onConfirm={onStartReview}
+        onCancel={() => setConfirmingReview(null)}
+      >
+        <p>
+          chief-web checks out <code className="mono">{confirmingReview?.pull.headRef}</code> and runs a headless Claude Code agent over
+          its diff against <code className="mono">{confirmingReview?.pull.baseRef}</code>. It changes nothing on the branch.
+        </p>
+        <p>
+          The findings are posted to the pull request as one review, of type comment. <strong>That review is public</strong>, posted by
+          the account your stored GitHub token belongs to. Findings that flag something then start a feedback run to work on them, as
+          if you had pressed Address feedback.
+        </p>
+        <p className="field__hint">
+          The review runs on the model chosen under Settings → Models → Review, and takes one build slot while it runs.
+        </p>
+      </ConfirmDialog>
     </div>
   );
 }
@@ -321,20 +422,26 @@ function PullRequestRow({
   expanded,
   feedback,
   run,
+  review,
   preparing,
   onToggle,
   onProcess,
   onStop,
+  onReview,
+  onStopReview,
 }: {
   readonly group: RepositoryPullRequests;
   readonly pull: PullRequest;
   readonly expanded: boolean;
   readonly feedback: FeedbackState | undefined;
   readonly run: PrRun | undefined;
+  readonly review: PrReview | undefined;
   readonly preparing: boolean;
   readonly onToggle: () => void;
   readonly onProcess: () => void;
   readonly onStop: (run: PrRun) => void;
+  readonly onReview: () => void;
+  readonly onStopReview: (review: PrReview) => void;
 }) {
   const panelId = `pr-panel-${group.repositoryId}-${String(pull.number)}`;
   const unresolved =
@@ -356,6 +463,7 @@ function PullRequestRow({
             {pull.draft && <Badge>draft</Badge>}
             {pull.fromFork && <Badge tone="danger">fork</Badge>}
             {run !== undefined && <RunBadge run={run} />}
+            {review !== undefined && <ReviewBadge review={review} />}
           </span>
           <span className="row__meta">
             <span className="mono">
@@ -380,6 +488,19 @@ function PullRequestRow({
             <span className="visually-hidden"> on pull request {pull.number}</span>
             <Icon name="chevron-down" />
           </button>
+          {!pull.fromFork && review?.running !== true && (
+            <button type="button" className="button button--small" onClick={onReview}>
+              <Icon name="search" />
+              Review
+              <span className="visually-hidden"> pull request {pull.number}</span>
+            </button>
+          )}
+          {review?.running === true && (
+            <button type="button" className="button button--small" onClick={() => onStopReview(review)}>
+              <Icon name="stop" />
+              Stop review
+            </button>
+          )}
           {!pull.fromFork && run?.running !== true && (
             <button type="button" className="button button--small button--primary" disabled={preparing} onClick={onProcess}>
               <Icon name="zap" />
@@ -395,6 +516,7 @@ function PullRequestRow({
         </div>
       </div>
 
+      {review !== undefined && review.status !== 'pending' && <ReviewSummary review={review} />}
       {run !== undefined && run.status !== 'pending' && <RunSummary run={run} />}
 
       {expanded && (
@@ -419,6 +541,64 @@ function RunBadge({ run }: { readonly run: PrRun }) {
   }
   if (run.status === 'finished') return <Badge tone="done">answered</Badge>;
   return null;
+}
+
+function ReviewBadge({ review }: { readonly review: PrReview }) {
+  if (review.running && review.phase !== null) {
+    return (
+      <Badge tone="review" pulse>
+        {prReviewPhaseLabel(review.phase)}
+      </Badge>
+    );
+  }
+  if (review.status === 'failed') {
+    return (
+      <Badge tone="danger">
+        review failed{review.failureStage === null ? '' : `: ${prReviewFailureStageLabel(review.failureStage)}`}
+      </Badge>
+    );
+  }
+  if (review.status === 'finished') return <Badge tone="review">reviewed</Badge>;
+  return null;
+}
+
+function ReviewSummary({ review }: { readonly review: PrReview }) {
+  if (review.running) {
+    return (
+      <p className="row__meta">
+        Review {review.attempt} · started {review.startedAt === null ? 'just now' : since(review.startedAt)}
+      </p>
+    );
+  }
+  if (review.status === 'failed') {
+    return (
+      <div className="pr__run">
+        <Notice kind="error">{review.lastError ?? 'The review failed.'}</Notice>
+      </div>
+    );
+  }
+
+  const total = (review.inlineComments ?? 0) + (review.foldedFindings ?? 0);
+  return (
+    <div className="pr__run">
+      <Notice kind="ok">
+        {total === 0
+          ? 'The review found nothing to comment on.'
+          : `The review posted ${String(total)} ${total === 1 ? 'finding' : 'findings'}${(review.foldedFindings ?? 0) > 0 ? ` (${String(review.foldedFindings)} in the review body)` : ''}.`}
+        {review.headSha !== null && ` Reviewed ${review.headSha.slice(0, 7)}.`}
+        {review.solverMessage !== null && ` ${review.solverMessage}`}
+        {review.reviewUrl !== null && (
+          <>
+            {' '}
+            <a className="link" href={review.reviewUrl} target="_blank" rel="noreferrer">
+              Open on GitHub
+              <Icon name="link-external" />
+            </a>
+          </>
+        )}
+      </Notice>
+    </div>
+  );
 }
 
 function RunSummary({ run }: { readonly run: PrRun }) {

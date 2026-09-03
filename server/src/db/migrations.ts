@@ -420,6 +420,58 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE queued_at IS NOT NULL;
     `,
   },
+  {
+    id: '0009_pr_reviews',
+    sql: `
+      -- Code reviews started by hand on an open pull request, from the Pull
+      -- requests page. A session's own review (US-007) is a step of its
+      -- delivery and leaves nothing behind but the review on GitHub; this is
+      -- the same pass pointed at a pull request chief-web may never have built,
+      -- so it needs a row of its own to be started, watched and stopped from.
+      --
+      -- Kept apart from \`pr_runs\` for the reason that table is kept apart
+      -- from \`sessions\`: the two runs share a pull request, not a lifecycle.
+      -- A feedback pass pushes and replies; a review changes nothing and posts
+      -- one review. One row per pull request, reused across re-runs, so the
+      -- workspace and the clone survive between them.
+      CREATE TABLE IF NOT EXISTS pr_reviews (
+        id              TEXT PRIMARY KEY,
+        repository_id   TEXT NOT NULL
+                          REFERENCES repositories (id) ON DELETE CASCADE,
+        pr_number       INTEGER NOT NULL,
+        pr_url          TEXT NOT NULL,
+        pr_title        TEXT NOT NULL,
+        head_branch     TEXT NOT NULL,
+        base_branch     TEXT NOT NULL,
+        status          TEXT NOT NULL
+                          CHECK (status IN ('pending', 'running', 'finished', 'failed')),
+        failure_stage   TEXT
+                          CHECK (failure_stage IS NULL OR failure_stage IN
+                            ('checkout', 'agent', 'findings', 'publish',
+                             'container_lost')),
+        attempt         INTEGER NOT NULL DEFAULT 0,
+        container_id    TEXT,
+        -- The commit the review was read at; what the findings are about.
+        head_sha        TEXT,
+        -- What the last successful pass posted: the review's URL and how many
+        -- findings went inline versus into the body.
+        review_url      TEXT,
+        inline_comments INTEGER,
+        folded_findings INTEGER,
+        -- The sentence about the feedback run the findings were handed to.
+        solver_message  TEXT,
+        last_error      TEXT,
+        started_at      TEXT,
+        finished_at     TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE (repository_id, pr_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_repository ON pr_reviews (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_status ON pr_reviews (status);
+    `,
+  },
 ];
 
 /**

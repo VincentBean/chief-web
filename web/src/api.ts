@@ -806,6 +806,8 @@ export interface PullRequest {
   sessionId: string | null;
   /** The last feedback run against it, when there has been one. */
   run: PrRun | null;
+  /** The last code review started on it by hand, when there has been one. */
+  review: PrReview | null;
 }
 
 /**
@@ -1024,4 +1026,92 @@ export async function fetchPrRun(runId: string, signal?: AbortSignal): Promise<P
 /** Signals the agent; anything already committed and pushed is kept. */
 export async function stopPrRun(runId: string): Promise<PrRun> {
   return api<PrRun>(`/api/pull-requests/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' });
+}
+
+/* ------------------------------------------------------------ pr reviews */
+
+/** Where a live review is; null once it is over. */
+export type PrReviewPhase = 'starting' | 'checking-out' | 'reviewing' | 'publishing';
+
+export type PrReviewFailureStage = 'checkout' | 'agent' | 'findings' | 'publish' | 'container_lost';
+
+/** Mirrors the server's `PrReviewView`: one code review of a pull request. */
+export interface PrReview {
+  id: string;
+  repositoryId: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string;
+  headBranch: string;
+  baseBranch: string;
+  status: PrRunStatus;
+  /** True while the server is driving it right now. */
+  running: boolean;
+  phase: PrReviewPhase | null;
+  attempt: number;
+  failureStage: PrReviewFailureStage | null;
+  lastError: string | null;
+  /** The commit the review was read at. */
+  headSha: string | null;
+  /** The posted review on GitHub; null until a pass has posted one. */
+  reviewUrl: string | null;
+  inlineComments: number | null;
+  foldedFindings: number | null;
+  /** What became of the hand-off to the feedback run, when there was one. */
+  solverMessage: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export function prReviewPhaseLabel(phase: PrReviewPhase): string {
+  switch (phase) {
+    case 'starting':
+      return 'starting';
+    case 'checking-out':
+      return 'checking out';
+    case 'reviewing':
+      return 'reviewing';
+    case 'publishing':
+      return 'posting review';
+  }
+}
+
+export function prReviewFailureStageLabel(stage: PrReviewFailureStage): string {
+  switch (stage) {
+    case 'checkout':
+      return 'the checkout';
+    case 'agent':
+      return 'the agent';
+    case 'findings':
+      return 'the agent’s findings';
+    case 'publish':
+      return 'posting to GitHub';
+    case 'container_lost':
+      return 'the container';
+  }
+}
+
+/**
+ * "Review": posts one review on the pull request under the token's account,
+ * so this is only ever called from the confirmation.
+ */
+export async function startPrReview(repositoryId: string, number: number): Promise<PrReview> {
+  return api<PrReview>(
+    `/api/pull-requests/${encodeURIComponent(repositoryId)}/${String(number)}/review`,
+    { method: 'POST' },
+  );
+}
+
+export async function fetchPrReview(reviewId: string, signal?: AbortSignal): Promise<PrReview> {
+  return api<PrReview>(
+    `/api/pull-requests/reviews/${encodeURIComponent(reviewId)}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Signals the review agent; nothing is posted for a stopped review. */
+export async function stopPrReview(reviewId: string): Promise<PrReview> {
+  return api<PrReview>(`/api/pull-requests/reviews/${encodeURIComponent(reviewId)}`, {
+    method: 'DELETE',
+  });
 }

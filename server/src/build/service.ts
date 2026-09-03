@@ -2,6 +2,7 @@ import fs from 'node:fs';
 
 import type { Config } from '../config.js';
 import {
+  countActivePrReviews,
   countActivePrRuns,
   countSessionsByStatus,
   type Database,
@@ -347,7 +348,10 @@ export class BuildService {
     // its slot is already spoken for.
     return (
       max -
-      (countActiveBuilds(this.db) + this.launching.size + countActivePrRuns(this.db))
+      (countActiveBuilds(this.db) +
+        this.launching.size +
+        countActivePrRuns(this.db) +
+        countActivePrReviews(this.db))
     );
   }
 
@@ -439,7 +443,8 @@ export class BuildService {
       max -
       (countSessionsByStatus(this.db, 'building') +
         this.launching.size +
-        countActivePrRuns(this.db))
+        countActivePrRuns(this.db) +
+        countActivePrReviews(this.db))
     );
   }
 

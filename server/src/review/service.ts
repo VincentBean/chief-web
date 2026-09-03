@@ -47,6 +47,19 @@ export interface ReviewPassResult {
   readonly output: string;
 }
 
+/** What {@link ReviewService.reviewInContainer} is pointed at. */
+export interface ReviewSubject {
+  /** The workspace and pid-file key: a session id, or a review run's id. */
+  readonly id: string;
+  /** What the log lines call it. */
+  readonly name: string;
+  readonly containerId: string;
+  /** The branch the pull request merges into; the left side of the diff. */
+  readonly targetBranch: string;
+  /** The pull request's branch, already checked out in the container. */
+  readonly featureBranch: string;
+}
+
 /**
  * The pid-file slot this pass uses.
  *
@@ -65,9 +78,9 @@ export class ReviewService {
   ) {}
 
   /**
-   * Runs the pass. Never throws: every way this can go wrong is an attempt the
-   * caller may want to make again, and an exception is not something a retry
-   * count can be kept against.
+   * Runs the pass over a session's pull request. Never throws: every way this
+   * can go wrong is an attempt the caller may want to make again, and an
+   * exception is not something a retry count can be kept against.
    */
   async review(session: Session): Promise<ReviewPassResult> {
     // The container the session already has — started again only because a
@@ -76,26 +89,47 @@ export class ReviewService {
     try {
       containerId = (await this.containers.start(session)).id;
     } catch (cause) {
-      return this.failed(session, 'container_unavailable', {
+      return this.failed(session.id, session.name, 'container_unavailable', {
         message: `The review could not be started: ${describe(cause)}`,
         output: '',
       });
     }
 
+    return this.reviewInContainer({
+      id: session.id,
+      name: session.name,
+      containerId,
+      targetBranch: session.prTargetBranch,
+      featureBranch: session.featureBranch,
+    });
+  }
+
+  /**
+   * Runs the pass in a container the caller already has.
+   *
+   * This is the whole review minus the container: what a session's delivery
+   * runs after starting the session container, and what a review started by
+   * hand on an open pull request runs after checking that pull request's
+   * branch out in a container of its own. `id` names the workspace on the
+   * data volume the findings are read from, and the pid file the agent is
+   * addressed by.
+   */
+  async reviewInContainer(subject: ReviewSubject): Promise<ReviewPassResult> {
+    const { id, name, containerId } = subject;
     // Read now rather than cached, so a model or a timeout changed on the
     // settings page applies to the next review without a restart. A null model
     // is passed straight through: that absence is what selects the CLI's own.
     const timeoutMs = getAgentTimeoutMs(this.db, this.config);
     const model = getReviewModel(this.db);
 
-    this.clearFindings(session.id);
+    this.clearFindings(id);
     const result = await this.runner.run({
-      sessionId: session.id,
+      sessionId: id,
       containerId,
       iteration: REVIEW_ITERATION,
       prompt: reviewPrompt({
-        targetBranch: session.prTargetBranch,
-        featureBranch: session.featureBranch,
+        targetBranch: subject.targetBranch,
+        featureBranch: subject.featureBranch,
         timeoutMs,
       }),
       timeoutMs,
@@ -106,8 +140,8 @@ export class ReviewService {
       // The timeout closed chief-web's end of the exec and nothing else. The
       // agent is still in the container, and a retry is about to exec a second
       // one into it, so this one is reaped before its findings file is read.
-      await this.runner.reap(session.id, containerId);
-      return this.failed(session, 'agent_timed_out', {
+      await this.runner.reap(id, containerId);
+      return this.failed(id, name, 'agent_timed_out', {
         message: 'The review agent ran out of time before it wrote its findings.',
         output: result.output,
       });
@@ -117,8 +151,8 @@ export class ReviewService {
       // pass: the account is out of usage and the next attempt runs into the
       // same wall. Reported as its own code so the caller can hold rather than
       // spend the two attempts it has left on it.
-      await this.runner.reap(session.id, containerId);
-      return this.failed(session, 'usage_limit', {
+      await this.runner.reap(id, containerId);
+      return this.failed(id, name, 'usage_limit', {
         message: 'The review agent stopped on a usage limit.',
         output: result.output,
       });
@@ -128,10 +162,10 @@ export class ReviewService {
     // a pass that answered in its reply instead of writing the file has still
     // done the review, and the parser is strict enough that the fallback can
     // only ever yield a document of exactly the right shape.
-    const parsed = parseReviewFindings(this.readFindings(session.id) ?? result.output);
+    const parsed = parseReviewFindings(this.readFindings(id) ?? result.output);
     if (parsed.report === null) {
       const code = result.exitCode === 0 ? 'invalid_findings' : 'agent_failed';
-      return this.failed(session, code, {
+      return this.failed(id, name, code, {
         message:
           result.exitCode === 0
             ? `${parsed.error ?? 'The review agent produced nothing usable.'}`
@@ -142,15 +176,15 @@ export class ReviewService {
     }
 
     logger.info('code review finished', {
-      session: session.id,
-      name: session.name,
+      session: id,
+      name,
       findings: parsed.report.findings.length,
       model,
     });
 
     return {
       ok: true,
-      sessionId: session.id,
+      sessionId: id,
       code: 'ok',
       message:
         parsed.report.findings.length === 0
@@ -197,19 +231,20 @@ export class ReviewService {
   }
 
   private failed(
-    session: Session,
+    id: string,
+    name: string,
     code: Exclude<ReviewCode, 'ok'>,
     detail: { message: string; output: string },
   ): ReviewPassResult {
     logger.warn('code review attempt failed', {
-      session: session.id,
-      name: session.name,
+      session: id,
+      name,
       code,
       error: detail.message,
     });
     return {
       ok: false,
-      sessionId: session.id,
+      sessionId: id,
       code,
       message: detail.message,
       report: null,
