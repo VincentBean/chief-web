@@ -44,8 +44,8 @@ export type PrTargetBranch = (typeof PR_TARGET_BRANCHES)[number];
  * Every path to `failed` records one of these next to the human-readable
  * `last_error`, because the stage is what decides how a retry resumes: an
  * `agent`, `prd` or `container_lost` failure is retried by starting the loop
- * again at the first story that is not done, while `push` and `pull_request`
- * re-run only the delivery of work that is already committed.
+ * again at the first story that is not done, while `push`, `pull_request`
+ * and `review` re-run only the delivery of work that is already committed.
  *
  * A clone or setup failure is deliberately not in this list: it leaves the
  * session `pending` with a "Retry setup" action (US-010), never `failed`.
@@ -59,6 +59,12 @@ export const FAILURE_STAGES = [
   'push',
   /** Opening the pull request at GitHub. */
   'pull_request',
+  /**
+   * The automatic code review of the pull request (US-006). The branch is
+   * pushed and the pull request is open by the time it runs, so it is a
+   * delivery stage: a retry re-runs the review and nothing else.
+   */
+  'review',
   /** The session's container disappeared while it was building (US-009). */
   'container_lost',
 ] as const;
@@ -75,9 +81,21 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the push';
     case 'pull_request':
       return 'the pull request';
+    case 'review':
+      return 'the code review';
     case 'container_lost':
       return 'the container';
   }
+}
+
+/**
+ * The stages that come after the build (US-006): the work is committed, so a
+ * retry re-runs delivery from the step that failed and never the story loop.
+ */
+export function isDeliveryStage(
+  stage: FailureStage | null,
+): stage is 'push' | 'pull_request' | 'review' {
+  return stage === 'push' || stage === 'pull_request' || stage === 'review';
 }
 
 /** Session names are slugs: letters, numbers, hyphens and underscores. */
@@ -105,6 +123,12 @@ export interface Session {
    * usage-limit hold (US-003) — and null for every other status.
    */
   readonly waitingUntil: string | null;
+  /**
+   * Whether the pull request this session opens should get an automatic code
+   * review (US-003). Stored as 0/1; false for every session created before the
+   * feature existed.
+   */
+  readonly codeReview: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -118,6 +142,8 @@ export interface CreateSessionInput {
   readonly featureBranch?: string;
   readonly status?: SessionStatus;
   readonly scheduledStartAt?: string | null;
+  /** Defaults to false: a session asks for a review only when it says so. */
+  readonly codeReview?: boolean;
 }
 
 export interface UpdateSessionInput {
@@ -133,6 +159,7 @@ export interface UpdateSessionInput {
   readonly lastError?: string | null;
   readonly failureStage?: FailureStage | null;
   readonly waitingUntil?: string | null;
+  readonly codeReview?: boolean;
 }
 
 export interface ListSessionsFilter {
@@ -153,6 +180,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   lastError: 'last_error',
   failureStage: 'failure_stage',
   waitingUntil: 'waiting_until',
+  codeReview: 'code_review',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -165,6 +193,11 @@ function assertValidSessionName(name: string): void {
       `Invalid session name "${name}": use letters, numbers, hyphens and underscores only`,
     );
   }
+}
+
+/** SQLite has no boolean type; flags are stored as 0/1 integers. */
+function sqlBoolean(value: boolean): number {
+  return value ? 1 : 0;
 }
 
 export function featureBranchFor(name: string): string {
@@ -196,6 +229,7 @@ export function mapSession(row: Row): Session {
     lastError: nullableText(row, 'last_error'),
     failureStage: failureStageOf(row),
     waitingUntil: nullableText(row, 'waiting_until'),
+    codeReview: integer(row, 'code_review') === 1,
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -220,6 +254,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     lastError: null,
     failureStage: null,
     waitingUntil: null,
+    codeReview: input.codeReview ?? false,
     createdAt: now,
     updatedAt: now,
   };
@@ -228,8 +263,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
-        waiting_until, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, code_review, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -245,6 +280,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.lastError,
     session.failureStage,
     session.waitingUntil,
+    sqlBoolean(session.codeReview),
     session.createdAt,
     session.updatedAt,
   );
@@ -403,13 +439,13 @@ export function updateSession(
   if (patch.name !== undefined) assertValidSessionName(patch.name);
 
   const assignments: string[] = [];
-  const params: Record<string, string | null> = { ':id': id, ':updated_at': nowIso() };
+  const params: Record<string, string | number | null> = { ':id': id, ':updated_at': nowIso() };
 
   for (const [field, column] of Object.entries(COLUMNS)) {
     const value = patch[field as keyof UpdateSessionInput];
     if (value === undefined) continue;
     assignments.push(`${column} = :${column}`);
-    params[`:${column}`] = value;
+    params[`:${column}`] = typeof value === 'boolean' ? sqlBoolean(value) : value;
   }
 
   if (assignments.length > 0) {

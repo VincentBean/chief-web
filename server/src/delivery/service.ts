@@ -15,13 +15,16 @@ import {
 import { isValidGithubSlug } from '../lib/git-url.js';
 import { GithubApiError, type OpenedPullRequest, openPullRequest, type PullRequestInput } from '../lib/github.js';
 import { logger } from '../lib/logger.js';
+import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
-import { pullRequestBody, pullRequestTitle } from './pull-request.js';
+import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { type PushResult, runPush } from './push.js';
+import type { ReviewStep } from './review-step.js';
 
 /**
- * Delivering a finished session: push, then pull request (US-014).
+ * Delivering a finished session: push, pull request, then — for a session with
+ * `codeReview` on — the code review (US-014, US-009).
  *
  * This is the {@link BuildCompletion} the build loop hands over to when every
  * story is done, and it is also its own endpoint — a delivery that failed on
@@ -85,12 +88,14 @@ export type DeliveryCode =
   | 'github_token_missing'
   | 'repository_missing'
   | 'invalid_github_slug'
-  | 'pull_request_failed';
+  | 'pull_request_failed'
+  | 'review_failed';
 
 /**
- * Which of the two steps each failure belongs to (US-019). It is what a retry
- * dispatches on: both stages re-run the delivery and nothing else, but the
- * operator is told which half to go and fix — the remote, or GitHub.
+ * Which of the three steps each failure belongs to (US-019, US-009). It is what
+ * a retry dispatches on: every stage re-runs the delivery and nothing else, but
+ * the operator is told which part to go and fix — the remote, GitHub, or the
+ * review — and a `review` failure is the one that re-runs *only* the review.
  */
 const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok'>, FailureStage> = {
   container_unavailable: 'push',
@@ -99,6 +104,7 @@ const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok'>, FailureStage> = {
   repository_missing: 'pull_request',
   invalid_github_slug: 'pull_request',
   pull_request_failed: 'pull_request',
+  review_failed: 'review',
 };
 
 export class DeliveryService implements BuildCompletion {
@@ -108,6 +114,12 @@ export class DeliveryService implements BuildCompletion {
     private readonly containers: SessionContainers,
     private readonly exec: SessionExecutor,
     private readonly pullRequests: PullRequestOpener,
+    /**
+     * The code review (US-009), or `null` where nothing can run one — a
+     * deployment without an agent runner, and every test that is not about the
+     * review. A session with `codeReview` off never reaches it either way.
+     */
+    private readonly review: ReviewStep | null = null,
   ) {}
 
   /**
@@ -189,6 +201,12 @@ export class DeliveryService implements BuildCompletion {
       );
     }
 
+    // The review is the only step that can fail with the pull request already
+    // open, so it is the only stage that resumes part-way (US-009).
+    if (session.failureStage === 'review' && session.prUrl !== null) {
+      return this.reviewOnly(session, session.prUrl);
+    }
+
     return this.deliver(session, stories);
   }
 
@@ -254,18 +272,6 @@ export class DeliveryService implements BuildCompletion {
       });
     }
 
-    // The pull request exists, so the session lands in `pr-open` rather than
-    // `finished` (US-002): the build is over, but the work is not in the target
-    // branch until GitHub says the pull request was merged. The PR sync is what
-    // moves the session on from here — to `merged`, or back to `finished` if
-    // the pull request is closed without ever being merged.
-    const delivered = updateSession(this.db, session.id, {
-      status: 'pr-open',
-      prUrl: opened.pullRequest.url,
-      lastError: null,
-      failureStage: null,
-    });
-
     logger.info(opened.adopted ? 'pull request adopted' : 'pull request opened', {
       session: session.id,
       name: session.name,
@@ -276,18 +282,121 @@ export class DeliveryService implements BuildCompletion {
       url: opened.pullRequest.url,
     });
 
+    const delivered = opened.adopted
+      ? `Pushed "${session.featureBranch}"; pull request #${String(opened.pullRequest.number)} was already open and has been adopted.`
+      : `Pushed "${session.featureBranch}" and opened pull request #${String(opened.pullRequest.number)}.`;
+
+    if (session.codeReview && this.review !== null) {
+      // The URL goes on the session *before* the review runs: the pull request
+      // exists from here on, whatever the review does, and a session left
+      // `failed` at the review stage still has to link to it.
+      updateSession(this.db, session.id, { prUrl: opened.pullRequest.url });
+      const reviewed = await this.review.run(session, token, {
+        slug: repository.githubSlug,
+        number: opened.pullRequest.number,
+      });
+      if (!reviewed.ok) {
+        return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
+      }
+      return this.finish(session, opened.pullRequest.url, opened.adopted, `${delivered} ${reviewed.message}`);
+    }
+
+    return this.finish(session, opened.pullRequest.url, opened.adopted, delivered);
+  }
+
+  /**
+   * Everything after the last step that can fail. The pull request exists, so
+   * the session lands in `pr-open` rather than `finished` (US-002): the build
+   * is over, but the work is not in the target branch until GitHub says the
+   * pull request was merged. The PR sync is what moves the session on from
+   * here — to `merged`, or back to `finished` if the pull request is closed
+   * without ever being merged.
+   */
+  private finish(
+    session: Session,
+    prUrl: string,
+    adopted: boolean,
+    message: string,
+  ): DeliveryResult {
+    const delivered = updateSession(this.db, session.id, {
+      status: 'pr-open',
+      prUrl,
+      lastError: null,
+      failureStage: null,
+    });
+
     return {
       ok: true,
       sessionId: session.id,
       status: delivered?.status ?? 'pr-open',
-      prUrl: opened.pullRequest.url,
-      adopted: opened.adopted,
+      prUrl,
+      adopted,
       code: 'ok',
-      message: opened.adopted
-        ? `Pushed "${session.featureBranch}"; pull request #${String(opened.pullRequest.number)} was already open and has been adopted.`
-        : `Pushed "${session.featureBranch}" and opened pull request #${String(opened.pullRequest.number)}.`,
+      message,
       stderr: '',
     };
+  }
+
+  /**
+   * "Retry" on a session that failed at the review (US-009): the review again,
+   * and only the review. The branch is pushed and the pull request is open —
+   * pushing again would change nothing and re-opening it is not a thing that
+   * can happen twice — so the one step that failed is the one that runs.
+   */
+  private async reviewOnly(session: Session, prUrl: string): Promise<DeliveryResult> {
+    if (!session.codeReview) {
+      // The operator switched the review off after it failed. That is an
+      // answer: the session is done, and re-running a review nobody wants is
+      // the one thing this must not do.
+      return this.finish(
+        session,
+        prUrl,
+        true,
+        'Code review is switched off for this session, so its pull request is left open as-is.',
+      );
+    }
+    if (this.review === null) {
+      return this.failed(session, 'review_failed', {
+        message: 'This chief-web cannot run code reviews, so the review could not be retried.',
+        stderr: '',
+      });
+    }
+
+    const token = getGithubToken(this.db);
+    if (token === null) {
+      return this.failed(session, 'review_failed', {
+        message:
+          `The pull request is open at ${prUrl}, but no GitHub token is configured, so the code ` +
+          'review could not be posted. Add a token on the Settings page and retry.',
+        stderr: '',
+      });
+    }
+
+    const repository = getRepository(this.db, session.repositoryId);
+    if (repository === null || !isValidGithubSlug(repository.githubSlug)) {
+      return this.failed(session, 'review_failed', {
+        message:
+          `The pull request is open at ${prUrl}, but this session's repository ` +
+          `${repository === null ? 'no longer exists' : `slug "${repository.githubSlug}" is not owner/repo`}, ` +
+          'so the code review could not be posted.',
+        stderr: '',
+      });
+    }
+
+    const number = pullRequestNumber(prUrl);
+    if (number === null) {
+      return this.failed(session, 'review_failed', {
+        message: `"${prUrl}" is not a pull request URL, so there is nothing to review.`,
+        stderr: '',
+      });
+    }
+
+    const target: ReviewTarget = { slug: repository.githubSlug, number };
+    const reviewed = await this.review.run(session, token, target);
+    if (!reviewed.ok) {
+      return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
+    }
+    return this.finish(session, prUrl, true, reviewed.message);
   }
 
   /** Starts (or reuses) the session container and pushes from inside it. */
@@ -335,8 +444,9 @@ export function createDeliveryService(
   containers: SessionContainers,
   exec: SessionExecutor,
   pullRequests: PullRequestOpener = new GithubPullRequests(config),
+  review: ReviewStep | null = null,
 ): DeliveryService {
-  return new DeliveryService(config, db, containers, exec, pullRequests);
+  return new DeliveryService(config, db, containers, exec, pullRequests, review);
 }
 
 function describe(cause: unknown): string {

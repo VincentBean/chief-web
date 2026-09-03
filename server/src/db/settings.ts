@@ -25,6 +25,13 @@ export const SETTING_KEYS = [
    */
   'planning_model',
   'build_model',
+  /** `--model` for the automatic pull-request code review; same absent-row rule. */
+  'review_model',
+  /**
+   * Whether a new session gets its code-review flag set when the request does
+   * not say (US-004). Stored as `1`/`0`; an absent row means off.
+   */
+  'code_review_default',
   /**
    * How often the pull request sync polls GitHub, in minutes (US-004). An
    * absent row means the `PR_SYNC_INTERVAL_MS` default applies.

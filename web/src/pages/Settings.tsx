@@ -12,7 +12,7 @@ import {
   stopClaudeLogin,
   validateGithubToken,
 } from '../api.ts';
-import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
+import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
@@ -49,6 +49,8 @@ export function Settings() {
   const [prSyncInterval, setPrSyncInterval] = useState('15');
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
+  const [reviewModel, setReviewModel] = useState('');
+  const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
@@ -56,6 +58,10 @@ export function Settings() {
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
   const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
+  // Below `lg` the login terminal is not rendered at all: mounting it would
+  // open a WebSocket onto a PTY too narrow to read and impossible to paste
+  // a code into. The login itself keeps running on the server.
+  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -92,6 +98,8 @@ export function Settings() {
     setPrSyncInterval(String(loaded.prSyncIntervalMinutes));
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
+    setReviewModel(loaded.reviewModel ?? '');
+    setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
   }
@@ -137,6 +145,8 @@ export function Settings() {
       prSyncIntervalMinutes: syncInterval,
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
+      reviewModel: asModel(reviewModel),
+      codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
     };
@@ -239,6 +249,8 @@ export function Settings() {
     prSyncInterval !== String(settings.prSyncIntervalMinutes) ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
+    reviewModel !== (settings.reviewModel ?? '') ||
+    codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
     authorEmail !== settings.gitAuthorEmail;
   const claudeStatus = claude?.status ?? null;
@@ -292,23 +304,34 @@ export function Settings() {
                 {claudeBusy === 'stop' ? 'Closing…' : 'Close login terminal'}
               </button>
             </div>
-            <Suspense fallback={<Skeleton lines={6} />}>
-              <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
-            </Suspense>
-            <ol className="steps steps--plain steps--compact">
-              <li className="step">
-                <span className="step__marker">1</span>
-                <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
-              </li>
-              <li className="step">
-                <span className="step__marker">2</span>
-                <span className="step__body">Approve the request and copy the code Claude gives back.</span>
-              </li>
-              <li className="step">
-                <span className="step__marker">3</span>
-                <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
-              </li>
-            </ol>
+            {desktop ? (
+              <>
+                <Suspense fallback={<Skeleton lines={6} />}>
+                  <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
+                </Suspense>
+                <ol className="steps steps--plain steps--compact">
+                  <li className="step">
+                    <span className="step__marker">1</span>
+                    <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
+                  </li>
+                  <li className="step">
+                    <span className="step__marker">2</span>
+                    <span className="step__body">Approve the request and copy the code Claude gives back.</span>
+                  </li>
+                  <li className="step">
+                    <span className="step__marker">3</span>
+                    <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
+                  </li>
+                </ol>
+              </>
+            ) : (
+              <Notice kind="info">
+                <strong>Finish this sign-in on a desktop.</strong> The login is an interactive terminal: it prints a URL to
+                open and waits for the code you get back, which needs a keyboard and a wider screen. The terminal is already
+                running on the server, so opening this page on a desktop picks it up where it is — or close it here and start
+                again there.
+              </Notice>
+            )}
           </div>
         )}
       </Panel>
@@ -408,6 +431,28 @@ export function Settings() {
               </select>
               <p className="field__hint">Each headless story iteration. Read at the start of every iteration, so a change applies from the next story.</p>
             </div>
+            <div className="field">
+              <label className="field__label" htmlFor="review-model">
+                Review
+              </label>
+              <select id="review-model" name="review-model" value={reviewModel} onChange={(event) => setReviewModel(event.target.value)} className="field__input">
+                <option value="">Let Claude Code choose</option>
+                {AGENT_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {MODEL_LABELS[model]}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">The code review left on a session's pull request. One pass over the finished branch.</p>
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="checkbox">
+              <input type="checkbox" checked={codeReviewDefault} onChange={(event) => setCodeReviewDefault(event.target.checked)} />
+              Run code review on new sessions
+            </label>
+            <p className="field__hint">Only the starting value of the checkbox on a new session; sessions that already exist keep whatever they were created with.</p>
           </div>
         </Panel>
 

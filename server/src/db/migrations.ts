@@ -259,21 +259,102 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    id: '0006_session_pr_states',
+    id: '0006_session_code_review',
+    sql: `
+      -- Whether this session's pull request should be reviewed automatically
+      -- once it is opened (US-003). Stored as 0/1 because SQLite has no
+      -- boolean; existing sessions default to off, so turning the feature on
+      -- never surprises a session that was planned without it.
+      ALTER TABLE sessions ADD COLUMN code_review INTEGER NOT NULL DEFAULT 0
+        CHECK (code_review IN (0, 1));
+    `,
+  },
+  {
+    id: '0007_session_review_failure_stage',
+    sql: `
+      -- The code review gets a failure stage of its own (US-006): a session
+      -- whose review failed has its commits pushed and its pull request open,
+      -- so a retry must re-run the review alone.
+      --
+      -- SQLite cannot widen a CHECK in place, so \`sessions\` is rebuilt the
+      -- same way \`0005\` rebuilt it: the stories are set aside first, because
+      -- with foreign keys on, dropping the table would cascade them away.
+      CREATE TABLE sessions_backup AS SELECT * FROM sessions;
+      CREATE TABLE stories_backup AS SELECT * FROM stories;
+
+      -- Takes the stories and the indexes with it; both are restored below.
+      DROP TABLE sessions;
+
+      CREATE TABLE sessions (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE RESTRICT,
+        -- Slug: letters, numbers, hyphens and underscores only.
+        name               TEXT NOT NULL
+                             CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        status             TEXT NOT NULL
+                             CHECK (status IN
+                               ('pending', 'ready', 'building', 'waiting', 'failed', 'finished')),
+        base_branch        TEXT NOT NULL,
+        feature_branch     TEXT NOT NULL,
+        pr_target_branch   TEXT NOT NULL CHECK (pr_target_branch IN ('develop', 'main')),
+        scheduled_start_at TEXT,
+        queued_at          TEXT,
+        container_id       TEXT,
+        pr_url             TEXT,
+        last_error         TEXT,
+        failure_stage      TEXT
+                             CHECK (failure_stage IS NULL OR failure_stage IN
+                               ('agent', 'prd', 'push', 'pull_request', 'review',
+                                'container_lost')),
+        -- UTC ISO time a \`waiting\` session may resume; NULL for every other
+        -- status, and for every row that predates the hold.
+        waiting_until      TEXT,
+        code_review        INTEGER NOT NULL DEFAULT 0 CHECK (code_review IN (0, 1)),
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      INSERT INTO sessions
+        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at)
+      SELECT
+         id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at
+      FROM sessions_backup;
+
+      INSERT INTO stories SELECT * FROM stories_backup;
+
+      DROP TABLE sessions_backup;
+      DROP TABLE stories_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_repository ON sessions (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
+      -- Backs the FIFO build queue (US-018); NULLs are not indexed by SQLite.
+      CREATE INDEX IF NOT EXISTS idx_sessions_queued_at ON sessions (queued_at)
+        WHERE queued_at IS NOT NULL;
+    `,
+  },
+  {
+    id: '0008_session_pr_states',
     sql: `
       -- The two post-build states of US-001: \`pr-open\` (the pull request is
       -- open on GitHub) and \`merged\` (it was merged). \`finished\` stays the
       -- terminal state of a session that opened no pull request at all.
       --
-      -- Same rebuild dance as 0005: SQLite cannot widen a CHECK in place, and
-      -- the table cannot be renamed out of the way because foreign keys on
-      -- would rewrite \`stories.session_id\` to follow the rename and then
-      -- cascade every story away with the old table. So the stories are set
-      -- aside, \`sessions\` is rebuilt under its own name, and both sets of
+      -- Same rebuild dance as 0005 and 0007: SQLite cannot widen a CHECK in
+      -- place, and the table cannot be renamed out of the way because foreign
+      -- keys on would rewrite \`stories.session_id\` to follow the rename and
+      -- then cascade every story away with the old table. So the stories are
+      -- set aside, \`sessions\` is rebuilt under its own name, and both sets of
       -- rows go back inside the migration runner's transaction.
       CREATE TABLE sessions_backup AS SELECT * FROM sessions;
       CREATE TABLE stories_backup AS SELECT * FROM stories;
 
+      -- Takes the stories and the indexes with it; both are restored below.
       DROP TABLE sessions;
 
       CREATE TABLE sessions (
@@ -297,10 +378,12 @@ export const MIGRATIONS: readonly Migration[] = [
         last_error         TEXT,
         failure_stage      TEXT
                              CHECK (failure_stage IS NULL OR failure_stage IN
-                               ('agent', 'prd', 'push', 'pull_request', 'container_lost')),
+                               ('agent', 'prd', 'push', 'pull_request', 'review',
+                                'container_lost')),
         -- UTC ISO time a \`waiting\` session may resume; NULL for every other
         -- status, and for every row that predates the hold.
         waiting_until      TEXT,
+        code_review        INTEGER NOT NULL DEFAULT 0 CHECK (code_review IN (0, 1)),
         created_at         TEXT NOT NULL,
         updated_at         TEXT NOT NULL,
         UNIQUE (repository_id, name)
@@ -309,11 +392,11 @@ export const MIGRATIONS: readonly Migration[] = [
       INSERT INTO sessions
         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
          scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
-         waiting_until, created_at, updated_at)
+         waiting_until, code_review, created_at, updated_at)
       SELECT
          id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
          scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
-         waiting_until, created_at, updated_at
+         waiting_until, code_review, created_at, updated_at
       FROM sessions_backup;
 
       INSERT INTO stories SELECT * FROM stories_backup;

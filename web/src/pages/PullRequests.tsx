@@ -343,7 +343,7 @@ function PullRequestRow({
       : feedback.value.threads.filter((thread) => !thread.isResolved).length + feedback.value.reviews.length;
 
   return (
-    <li className="row row--stacked">
+    <li className="row row--stacked pr__row">
       <div className="row__line">
         <Icon name="git-pull-request" className={pull.draft ? 'text-muted' : 'text-done'} />
         <div className="row__main">

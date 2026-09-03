@@ -4,9 +4,10 @@
 
 A session is one feature: its own container, its own clone, its own branch. The
 [dashboard](interface.md#sessions) creates one from a repository, a name, a base branch, a PR
-target (`develop` or `main`) and an optional scheduled start. The name is a slug
-(letters, numbers, hyphens, underscores), unique per repository, and becomes both
-the feature branch **`chief/<session-name>`** and the workspace directory.
+target (`develop` or `main`), an optional scheduled start and a [code
+review](code-review.md) flag. The name is a slug (letters, numbers, hyphens,
+underscores), unique per repository, and becomes both the feature branch
+**`chief/<session-name>`** and the workspace directory.
 
 Submitting the form does four things, in order:
 
@@ -45,10 +46,18 @@ A session is in exactly one of six states, and the badge on the
 | `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
 | `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires, **Resume now**, or **Stop build** |
 | `failed` | A stage gave up and stored why (see [Failure and recovery](build-loop.md#failure-and-recovery)) | **Retry**, which resumes at the stage that failed |
-| `finished` | Every story is `done` and the pull request is open | Nothing — the session's work is on `origin` |
+| `finished` | Every story is `done`, the pull request is open and the [code review](code-review.md), if it was on, has been posted | Nothing — the session's work is on `origin` |
 
 A queued session is `ready` with a `queued_at` timestamp, not a state of its
 own, so leaving the queue costs nothing.
+
+## Code review
+
+Every session carries one more flag: whether chief-web reviews the pull request
+it opens. It is set on the new-session form (seeded from **Settings → Run code
+review on new sessions**) and can be changed from the session page at any time
+until the session is finished. What the review does, what it posts and what
+happens when it fails is [its own page](code-review.md).
 
 ## Planning
 

@@ -569,3 +569,107 @@ export async function resolveReviewThread(
   const thread = asRecord(data.resolveReviewThread?.thread);
   return { isResolved: thread !== null && thread['isResolved'] === true };
 }
+
+/** One inline comment of a review, anchored to a line of the new file. */
+export interface ReviewCommentInput {
+  /** Repository-relative path, as the diff names the file's new side. */
+  readonly path: string;
+  /** A line of the new file, which must be inside the pull request's diff. */
+  readonly line: number;
+  readonly body: string;
+}
+
+/** What a posted review is known by afterwards. */
+export interface PostedReview {
+  readonly id: number;
+  /** The `html_url` of the review, empty when GitHub did not return one. */
+  readonly url: string;
+}
+
+/**
+ * `POST /repos/{slug}/pulls/{number}/reviews` — one review, event `COMMENT`.
+ *
+ * The event is not a parameter on purpose: an automated review comments, and
+ * nothing here may ever approve a pull request or request changes on a human's
+ * behalf (US-008). `side: RIGHT` is likewise fixed — a finding is about the
+ * code the branch proposes, never about the line it replaced.
+ *
+ * GitHub validates every comment before it creates anything, so a rejected
+ * anchor is a 422 and *no* review: the caller retries without the comments it
+ * could not place rather than being left with half a review posted.
+ */
+export async function createPullRequestReview(
+  token: string,
+  baseUrl: string,
+  slug: string,
+  number: number,
+  input: { readonly body: string; readonly comments: readonly ReviewCommentInput[] },
+): Promise<PostedReview> {
+  const response = await githubFetch(
+    token,
+    url(baseUrl, `/repos/${slug}/pulls/${String(number)}/reviews`),
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        body: input.body,
+        event: 'COMMENT',
+        comments: input.comments.map((comment) => ({
+          path: comment.path,
+          line: comment.line,
+          side: 'RIGHT',
+          body: comment.body,
+        })),
+      }),
+    },
+  );
+  if (!response.ok) throw await failureOf(response);
+
+  const created = asRecord(await response.json().catch(() => null));
+  const id = created === null ? null : created['id'];
+  return {
+    id: typeof id === 'number' ? id : 0,
+    url: (created === null ? null : readString(created, 'html_url')) ?? '',
+  };
+}
+
+/** A file the pull request touches, with the diff GitHub will anchor against. */
+export interface PullRequestFile {
+  readonly filename: string;
+  /** The unified diff of this file; null for a binary or over-large file. */
+  readonly patch: string | null;
+}
+
+/**
+ * `GET /repos/{slug}/pulls/{number}/files` — every file the diff touches.
+ *
+ * Used to tell an anchorable finding from one GitHub would reject, before the
+ * review is posted: a single rejected comment fails the whole call, so the
+ * ones that cannot be placed are folded into the review body instead.
+ * `truncated` means the pull request is larger than {@link MAX_PAGES} pages and
+ * the answer is not the whole diff — the caller must not treat a missing file
+ * as one that is not in the diff.
+ */
+export async function listPullRequestFiles(
+  token: string,
+  baseUrl: string,
+  slug: string,
+  number: number,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<{ files: PullRequestFile[]; truncated: boolean }> {
+  const query = new URLSearchParams({ per_page: '100' });
+  const { items, truncated } = await paginate(
+    token,
+    `${url(baseUrl, `/repos/${slug}/pulls/${String(number)}/files`)}?${query.toString()}`,
+    (body) => (Array.isArray(body) ? body.map(toPullRequestFile).filter(isPresent) : []),
+    timeoutMs,
+  );
+  return { files: items, truncated };
+}
+
+function toPullRequestFile(value: unknown): PullRequestFile | null {
+  const raw = asRecord(value);
+  if (raw === null) return null;
+  const filename = readString(raw, 'filename');
+  if (filename === null) return null;
+  return { filename, patch: readString(raw, 'patch') };
+}

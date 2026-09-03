@@ -20,9 +20,18 @@ import {
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { GithubApiError, openPullRequest } from '../lib/github.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
+import { PrFeedbackError } from '../prfeedback/index.js';
+import type {
+  PublishedReview,
+  ReviewPassResult,
+  ReviewPublisher,
+  ReviewReport,
+  ReviewTarget,
+} from '../review/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
-import { pullRequestBody, pullRequestTitle } from './pull-request.js';
+import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { PUSH_SCRIPT, pushExecSpec } from './push.js';
+import { type FeedbackSolver, ReviewStep, type SessionReviewer } from './review-step.js';
 import { createDeliveryService, DeliveryError, type PullRequestOpener } from './service.js';
 
 const TOKEN = 'ghp_exampleTokenValue1234';
@@ -628,5 +637,432 @@ describe('retrying a delivery', () => {
       .catch((cause: unknown) => cause);
     assert.ok(failure instanceof DeliveryError);
     assert.equal(failure.status, 404);
+  });
+});
+
+/** A review pass the test scripts, one outcome per attempt. */
+class FakeReviewer implements SessionReviewer {
+  calls = 0;
+  /** Consumed one per attempt; the last one repeats for every attempt after. */
+  outcomes: ReviewPassResult[] = [reviewPass()];
+
+  review(session: Session): Promise<ReviewPassResult> {
+    this.calls += 1;
+    const outcome =
+      this.outcomes[Math.min(this.calls - 1, this.outcomes.length - 1)] ?? reviewPass();
+    return Promise.resolve({ ...outcome, sessionId: session.id });
+  }
+}
+
+/** A {@link ReviewPublisher} the test scripts the same way. */
+class FakePublisher implements ReviewPublisher {
+  readonly calls: { token: string; target: ReviewTarget; report: ReviewReport }[] = [];
+  /** Consumed one per call; the last one repeats. `null` is a success. */
+  failures: (Error | null)[] = [null];
+
+  publish(token: string, target: ReviewTarget, report: ReviewReport): Promise<PublishedReview> {
+    this.calls.push({ token, target, report });
+    const failure = this.failures[Math.min(this.calls.length - 1, this.failures.length - 1)] ?? null;
+    if (failure !== null) return Promise.reject(failure);
+    return Promise.resolve({
+      url: 'https://github.com/acme/demo/pull/7#pullrequestreview-1',
+      inlineComments: report.findings.length,
+      foldedFindings: 0,
+    });
+  }
+}
+
+function reviewPass(findings = 1): ReviewPassResult {
+  return {
+    ok: true,
+    sessionId: 's',
+    code: 'ok',
+    message: 'The review found something to comment on.',
+    report: {
+      summary: 'Two files changed; one thing worth a look.',
+      findings: Array.from({ length: findings }, (_unused, index) => ({
+        path: 'src/index.ts',
+        line: index + 1,
+        body: 'This can be null here.',
+      })),
+    },
+    output: '',
+  };
+}
+
+function reviewFailure(code: ReviewPassResult['code'], message: string): ReviewPassResult {
+  return { ok: false, sessionId: 's', code, message, report: null, output: '' };
+}
+
+describe('the code review of a delivery', () => {
+  function serviceFor(world: World, opener: PullRequestOpener, step: ReviewStep) {
+    return createDeliveryService(world.config, world.db, world.containers, world.exec, opener, step);
+  }
+
+  /** The session as the build loop hands it over, with the flag on. */
+  function reviewedSession(world: World): Session {
+    return updateSession(world.db, world.session.id, { codeReview: true }) ?? (undefined as never);
+  }
+
+  it('does not review a session with the flag off', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, publisher));
+
+    await delivery.complete(world.session, world.stories());
+
+    assert.equal(reviewer.calls, 0, 'no review is run for a session that did not ask for one');
+    assert.equal(publisher.calls.length, 0);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(finished.lastError, null);
+  });
+
+  it('reviews the pull request it just opened, then finishes the session', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, publisher));
+
+    const result = await delivery.retry(reviewedSession(world).id).catch(() => null);
+    assert.equal(result, null, 'a building session is delivered through the loop’s seam');
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.equal(reviewer.calls, 1);
+    assert.equal(publisher.calls.length, 1);
+    assert.equal(publisher.calls[0]?.token, TOKEN);
+    assert.deepEqual(publisher.calls[0]?.target, { slug: 'acme/demo', number: 7 });
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(finished.lastError, null);
+  });
+
+  it('retries a failed attempt and finishes on the second', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [
+      reviewFailure('agent_timed_out', 'The review agent ran out of time.'),
+      reviewPass(),
+    ];
+    const publisher = new FakePublisher();
+    const opener = new FakeOpener();
+    const delivery = serviceFor(world, opener, new ReviewStep(reviewer, publisher));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.equal(reviewer.calls, 2);
+    assert.equal(publisher.calls.length, 1, 'only the attempt that produced findings posted');
+    assert.equal(world.reload().status, 'pr-open');
+    assert.equal(world.reload().lastError, null);
+    // The half of the delivery that already worked is not repeated by a retry.
+    assert.equal(world.execs.length, 1, 'exactly one push');
+    assert.equal(opener.calls.length, 1, 'exactly one pull request');
+  });
+
+  it('retries a GitHub posting error too', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    publisher.failures = [new GithubApiError('github_unreachable', 'GitHub is unreachable.', 0), null];
+    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, publisher));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.equal(reviewer.calls, 2, 'a posting failure costs a whole attempt, review included');
+    assert.equal(publisher.calls.length, 2);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('fails the session at the review stage after three attempts, keeping the pull request', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('invalid_findings', 'The findings could not be read.')];
+    const publisher = new FakePublisher();
+    const opener = new FakeOpener();
+    const delivery = serviceFor(world, opener, new ReviewStep(reviewer, publisher));
+
+    const result = await delivery.complete(reviewedSession(world), world.stories());
+    assert.equal(result, undefined, 'the loop’s hand-off answers nothing');
+
+    assert.equal(reviewer.calls, 3, 'three attempts, then no more');
+    assert.equal(publisher.calls.length, 0);
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'review');
+    assert.match(failed.lastError ?? '', /failed after 3 attempts/);
+    assert.match(failed.lastError ?? '', /The findings could not be read\./);
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7', 'the pull request is kept');
+    assert.equal(world.execs.length, 1, 'the push was not repeated');
+    assert.equal(opener.calls.length, 1, 'the pull request was not opened again');
+  });
+
+  it('stops at the first attempt when the account is out of usage', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('usage_limit', 'The review agent stopped on a usage limit.')];
+    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, new FakePublisher()));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.equal(reviewer.calls, 1, 'a second attempt walks into the same wall');
+    assert.equal(world.reload().failureStage, 'review');
+    assert.match(world.reload().lastError ?? '', /usage limit/);
+  });
+
+  it('finishes a review that found nothing exactly like one that did', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(0)];
+    const publisher = new FakePublisher();
+    const delivery = serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, publisher));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.equal(publisher.calls.length, 1);
+    assert.deepEqual(publisher.calls[0]?.report.findings, []);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
+  });
+});
+
+/** The PR-feedback solver, scripted: it starts a run or refuses like the real one. */
+class FakeSolver implements FeedbackSolver {
+  readonly calls: { repositoryId: string; prNumber: number }[] = [];
+  /** What `start` rejects with; `null` starts a run. */
+  refusal: Error | null = null;
+
+  start(repositoryId: string, prNumber: number): Promise<{ id: string }> {
+    this.calls.push({ repositoryId, prNumber });
+    if (this.refusal !== null) return Promise.reject(this.refusal);
+    return Promise.resolve({ id: 'run-1' });
+  }
+}
+
+describe('chaining into the pull request feedback solver', () => {
+  function serviceFor(world: World, step: ReviewStep) {
+    return createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      new FakeOpener(),
+      step,
+    );
+  }
+
+  /** The session as the build loop hands it over, with the flag on. */
+  function reviewedSession(world: World): Session {
+    return updateSession(world.db, world.session.id, { codeReview: true }) ?? (undefined as never);
+  }
+
+  it('starts a run on the reviewed pull request once the findings are posted', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(2)];
+    const solver = new FakeSolver();
+    const delivery = serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    );
+
+    const result = await delivery.retry(reviewedSession(world).id).catch(() => null);
+    assert.equal(result, null, 'a building session is delivered through the loop’s seam');
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.deepEqual(solver.calls, [{ repositoryId: world.session.repositoryId, prNumber: 7 }]);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.lastError, null);
+  });
+
+  it('does not start a run when the review found nothing to solve', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewPass(0)];
+    const solver = new FakeSolver();
+
+    await serviceFor(world, new ReviewStep(reviewer, new FakePublisher(), () => solver)).complete(
+      reviewedSession(world),
+      world.stories(),
+    );
+
+    assert.equal(solver.calls.length, 0, 'there is nothing on the pull request to work on');
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('finishes the session anyway when the solver refuses the run', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const solver = new FakeSolver();
+    solver.refusal = new PrFeedbackError(
+      409,
+      'no_free_slot',
+      'Every build slot is in use. Wait for one to free, or raise the cap on the settings page.',
+    );
+
+    const result = await serviceFor(
+      world,
+      new ReviewStep(reviewer, new FakePublisher(), () => solver),
+    ).complete(reviewedSession(world), world.stories());
+
+    assert.equal(result, undefined, 'the loop’s hand-off answers nothing either way');
+    assert.equal(solver.calls.length, 1);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open', 'a refused run is not the session’s problem');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
+  });
+
+  it('reports the refusal the way the PullRequests page would', async () => {
+    const world = new World();
+    failedAtReviewFor(world);
+    const solver = new FakeSolver();
+    solver.refusal = new PrFeedbackError(409, 'no_free_slot', 'Every build slot is in use.');
+
+    const result = await serviceFor(
+      world,
+      new ReviewStep(new FakeReviewer(), new FakePublisher(), () => solver),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.match(result.message, /Every build slot is in use\./);
+  });
+
+  it('starts nothing when the review never posted', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('invalid_findings', 'The findings could not be read.')];
+    const solver = new FakeSolver();
+
+    await serviceFor(world, new ReviewStep(reviewer, new FakePublisher(), () => solver)).complete(
+      reviewedSession(world),
+      world.stories(),
+    );
+
+    assert.equal(solver.calls.length, 0, 'there are no findings on the pull request');
+    assert.equal(world.reload().failureStage, 'review');
+  });
+});
+
+/** A session parked exactly where a review retry picks it up. */
+function failedAtReviewFor(world: World): void {
+  updateSession(world.db, world.session.id, {
+    status: 'failed',
+    failureStage: 'review',
+    lastError: 'The code review failed after 3 attempts.',
+    prUrl: 'https://github.com/acme/demo/pull/7',
+    codeReview: true,
+  });
+}
+
+describe('retrying a session that failed at the review', () => {
+  function failedAtReview(world: World, codeReview = true): void {
+    updateSession(world.db, world.session.id, {
+      status: 'failed',
+      failureStage: 'review',
+      lastError: 'The code review failed after 3 attempts.',
+      prUrl: 'https://github.com/acme/demo/pull/7',
+      codeReview,
+    });
+  }
+
+  function serviceFor(world: World, opener: PullRequestOpener, step: ReviewStep) {
+    return createDeliveryService(world.config, world.db, world.containers, world.exec, opener, step);
+  }
+
+  it('re-runs the review only, and finishes the session', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    const opener = new FakeOpener();
+
+    const result = await serviceFor(world, opener, new ReviewStep(reviewer, publisher)).retry(
+      world.session.id,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(world.execs.length, 0, 'nothing was pushed again');
+    assert.equal(opener.calls.length, 0, 'the pull request was not opened again');
+    assert.equal(reviewer.calls, 1);
+    assert.deepEqual(publisher.calls[0]?.target, { slug: 'acme/demo', number: 7 });
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.failureStage, null);
+    assert.equal(finished.lastError, null);
+  });
+
+  it('gives the retry its own three attempts before failing again', async () => {
+    const world = new World();
+    failedAtReview(world);
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('agent_failed', 'The review agent exited with code 1.')];
+    const opener = new FakeOpener();
+
+    const result = await serviceFor(world, opener, new ReviewStep(reviewer, new FakePublisher())).retry(
+      world.session.id,
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'review_failed');
+    assert.equal(reviewer.calls, 3);
+    assert.equal(world.execs.length, 0);
+    assert.equal(opener.calls.length, 0);
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'review');
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7');
+  });
+
+  it('just finishes the session when the review was switched off since', async () => {
+    const world = new World();
+    failedAtReview(world, false);
+    const reviewer = new FakeReviewer();
+
+    const result = await serviceFor(world, new FakeOpener(), new ReviewStep(reviewer, new FakePublisher()))
+      .retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(reviewer.calls, 0);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('delivers in full when the failed session has no pull request URL', async () => {
+    const world = new World();
+    failedAtReview(world);
+    updateSession(world.db, world.session.id, { prUrl: null });
+    const opener = new FakeOpener();
+    const reviewer = new FakeReviewer();
+
+    await serviceFor(world, opener, new ReviewStep(reviewer, new FakePublisher())).retry(
+      world.session.id,
+    );
+
+    assert.equal(world.execs.length, 1, 'without a pull request there is one to open again');
+    assert.equal(opener.calls.length, 1);
+    assert.equal(reviewer.calls, 1);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+});
+
+describe('the pull request number in a URL', () => {
+  it('reads the number a session stores its pull request as', () => {
+    assert.equal(pullRequestNumber('https://github.com/acme/demo/pull/7'), 7);
+    assert.equal(pullRequestNumber('https://github.com/acme/demo/pull/1234#issuecomment-1'), 1234);
+    assert.equal(pullRequestNumber('https://github.example.com/acme/demo/pull/9/files'), 9);
+  });
+
+  it('answers null rather than guessing at anything else', () => {
+    assert.equal(pullRequestNumber(null), null);
+    assert.equal(pullRequestNumber(''), null);
+    assert.equal(pullRequestNumber('https://github.com/acme/demo/pulls'), null);
+    assert.equal(pullRequestNumber('https://github.com/acme/demo/pull/abc'), null);
+    assert.equal(pullRequestNumber('https://github.com/acme/demo/pull/0'), null);
   });
 });

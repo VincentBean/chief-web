@@ -7,6 +7,7 @@ import {
   deleteSession,
   type FailureStage,
   failureStageLabel,
+  isDeliveryStage,
   fetchBuild,
   fetchPlanning,
   fetchSession,
@@ -19,6 +20,7 @@ import {
   retrySession,
   retrySessionSetup,
   type Session as SessionData,
+  setSessionCodeReview,
   setSessionSchedule,
   startBuild,
   startPlanning,
@@ -28,7 +30,14 @@ import {
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import { describeError, isEnded, redirectIfUnauthorised, useAppData } from '../data.tsx';
+import {
+  DESKTOP_QUERY,
+  describeError,
+  isEnded,
+  redirectIfUnauthorised,
+  useAppData,
+  useMediaQuery,
+} from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
@@ -58,6 +67,7 @@ type Busy =
   | 'retry'
   | 'setup'
   | 'schedule'
+  | 'code-review'
   | 'delete'
   | null;
 
@@ -195,6 +205,15 @@ export function Session() {
         : `Scheduled for ${localTime(next.scheduledStartAt)} (${startsIn(next.scheduledStartAt)}).`;
     });
 
+  const onCodeReview = (codeReview: boolean): void =>
+    run('code-review', async () => {
+      const next = await setSessionCodeReview(id, codeReview);
+      setSession(next);
+      return next.codeReview
+        ? 'Code review on: the pull request is reviewed as soon as it is opened.'
+        : 'Code review off: the pull request is opened without one.';
+    });
+
   const onBackToPlanning = (): void =>
     run('planning', async () => {
       const result = await backToPlanning(id);
@@ -277,8 +296,7 @@ export function Session() {
   const stories = build.stories;
   const done = stories.filter((story) => story.status === 'done').length;
   const complete = stories.length > 0 && done === stories.length;
-  const retryIsDelivery =
-    build.failureStage === 'push' || build.failureStage === 'pull_request' || (build.failureStage === null && complete);
+  const retryIsDelivery = isDeliveryStage(build.failureStage) || (build.failureStage === null && complete);
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -488,6 +506,8 @@ export function Session() {
           <PrdPanel prd={planning.prd} />
 
           <SchedulePanel session={session} busy={busy} onSave={onSchedule} />
+
+          <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
         </aside>
       </div>
 
@@ -566,11 +586,7 @@ type StageKey = 'plan' | 'ready' | 'build' | 'deliver';
 function Stages({ session, build, prd }: { readonly session: SessionData; readonly build: Build; readonly prd: PrdStatus }) {
   const status = session.status;
   const failedAt: StageKey | null =
-    status !== 'failed'
-      ? null
-      : session.failureStage === 'push' || session.failureStage === 'pull_request'
-        ? 'deliver'
-        : 'build';
+    status !== 'failed' ? null : isDeliveryStage(session.failureStage) ? 'deliver' : 'build';
   const current: StageKey =
     status === 'pending' ? 'plan' : status === 'ready' ? 'ready' : isEnded(session) ? 'deliver' : (failedAt ?? 'build');
   const order: StageKey[] = ['plan', 'ready', 'build', 'deliver'];
@@ -641,6 +657,9 @@ function PlanningPanel({
   }, [planning.terminalId, planning.running, closed]);
 
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
+  // Below `lg` the pane is not rendered at all: mounting it would open a
+  // WebSocket onto a PTY nothing on screen could show or type into.
+  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   return (
     <Panel
@@ -714,11 +733,18 @@ function PlanningPanel({
         </p>
       )}
 
-      {attached !== null && (
-        <Suspense fallback={<Skeleton lines={6} />}>
-          <TerminalPane terminalId={attached} size="tall" />
-        </Suspense>
-      )}
+      {attached !== null &&
+        (desktop ? (
+          <Suspense fallback={<Skeleton lines={6} />}>
+            <TerminalPane terminalId={attached} size="tall" />
+          </Suspense>
+        ) : (
+          <Notice kind="info">
+            <strong>Terminal access is available on desktop.</strong> Planning is an interactive Claude conversation, which
+            needs a keyboard and a screen this narrow cannot give it. The session keeps running on the server; everything
+            else on this page — stages, stories, the agent log and the PRD — works here.
+          </Notice>
+        ))}
 
       {attached === null && planning.terminalId === null && (
         <p className="field__hint">
@@ -832,11 +858,13 @@ function FailurePanel({
         <pre className="output output--wrap">{error}</pre>
       )}
       <p className="field__hint">
-        {retryIsDelivery
-          ? 'Every story is committed, so nothing is rebuilt: the retry re-runs only the push and the pull request, and adopts an existing pull request for this branch rather than opening a second one.'
-          : stage === 'container_lost'
-            ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on the same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
-            : `Nothing committed is lost. The retry resumes from the PRD: every story already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} ${outstanding === 1 ? 'is' : 'are'} left to run.`}`}
+        {stage === 'review'
+          ? 'Every story is committed and the pull request is open, so nothing is rebuilt and nothing is pushed again: the retry re-runs only the code review.'
+          : retryIsDelivery
+            ? 'Every story is committed, so nothing is rebuilt: the retry re-runs only the push and the pull request, and adopts an existing pull request for this branch rather than opening a second one.'
+            : stage === 'container_lost'
+              ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on the same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
+              : `Nothing committed is lost. The retry resumes from the PRD: every story already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} ${outstanding === 1 ? 'is' : 'are'} left to run.`}`}
       </p>
     </Panel>
   );
@@ -1002,3 +1030,44 @@ function SchedulePanel({
   );
 }
 
+
+/* ----------------------------------------------------------- code review */
+
+/**
+ * Whether this session's pull request is reviewed automatically (US-005).
+ * Changeable right up to the moment the session finishes, because that is
+ * when the pull request — and with it the review — is created.
+ */
+function CodeReviewPanel({
+  session,
+  busy,
+  onToggle,
+}: {
+  readonly session: SessionData;
+  readonly busy: Busy;
+  readonly onToggle: (codeReview: boolean) => void;
+}) {
+  const finished = session.status === 'finished';
+  return (
+    <Panel
+      title="Code review"
+      icon="comment"
+      meta={<Badge tone={session.codeReview ? 'ready' : 'neutral'}>{session.codeReview ? 'on' : 'off'}</Badge>}
+    >
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={session.codeReview}
+          disabled={finished || busy !== null}
+          onChange={(event) => onToggle(event.target.checked)}
+        />
+        Review this session’s pull request
+      </label>
+      <p className="field__hint">
+        {finished
+          ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: this session is finished, so its pull request has already been opened.`
+          : 'The review runs automatically after the pull request is created and posts its comments to GitHub.'}
+      </p>
+    </Panel>
+  );
+}

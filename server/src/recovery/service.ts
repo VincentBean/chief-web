@@ -3,6 +3,7 @@ import {
   type Database,
   type FailureStage,
   failureStageLabel,
+  isDeliveryStage,
   getSession,
   listStories,
   type Session,
@@ -24,7 +25,7 @@ import { logger } from '../lib/logger.js';
  *
  * Neither path redoes work. The build resumes at the first story `prd.md` does
  * not call done — everything committed stays committed — and the delivery
- * re-runs the push and the pull request against commits that already exist.
+ * re-runs the steps after the build against commits that already exist.
  */
 
 /** A failure with the HTTP status and code the route should answer with. */
@@ -68,11 +69,12 @@ export interface RetryResult {
 /**
  * Where to resume, from the stage the session failed at (US-019).
  *
- * Pure, so every branch is testable without a container: `push` and
- * `pull_request` mean the work is committed and only the delivery has to run
- * again; anything else means the loop has stories left. A session that failed
- * before chief-web recorded stages has only its story list as evidence, so it
- * is read the same way the UI used to guess: all stories done means delivery.
+ * Pure, so every branch is testable without a container: `push`,
+ * `pull_request` and `review` mean the work is committed and only the
+ * delivery has to run again; anything else means the loop has stories left. A
+ * session that failed before chief-web recorded stages has only its story list
+ * as evidence, so it is read the same way the UI used to guess: all stories
+ * done means delivery.
  */
 export function planRetry(
   session: Pick<Session, 'failureStage'>,
@@ -81,13 +83,13 @@ export function planRetry(
   const outstanding = stories.filter((story) => story.status !== 'done').length;
   const stage = session.failureStage;
 
-  if (stage === 'push' || stage === 'pull_request') {
+  if (isDeliveryStage(stage)) {
     return {
       action: 'delivery',
       stage,
       reason:
         `The build finished; ${failureStageLabel(stage)} is what failed. Retrying re-runs the ` +
-        'push and the pull request only — no story is built again.',
+        'delivery from there only — no story is built again.',
     };
   }
 

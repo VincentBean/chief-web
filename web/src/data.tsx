@@ -225,3 +225,34 @@ export function useKeyChords(bindings: Record<string, () => void>): void {
     };
   }, []);
 }
+
+/**
+ * `lg` (64rem), the breakpoint `shell.css` builds the frame around: below it
+ * the sidebar is a drawer, every grid is one column, and the terminal panes
+ * are not shown at all.
+ */
+export const DESKTOP_QUERY = '(min-width: 64rem)';
+
+/**
+ * A live media query.
+ *
+ * CSS decides nearly everything responsive here, but not this: a terminal
+ * pane that is merely hidden still mounts xterm.js and opens its WebSocket,
+ * so a phone would attach to a PTY it cannot show. Reading the breakpoint in
+ * JavaScript is what lets the component not exist below `lg`.
+ */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const list = window.matchMedia(query);
+    const update = (): void => {
+      setMatches(list.matches);
+    };
+    update();
+    list.addEventListener('change', update);
+    return () => {
+      list.removeEventListener('change', update);
+    };
+  }, [query]);
+  return matches;
+}

@@ -23,6 +23,7 @@ import {
   sessionRepoDir,
   sessionWorkspaceDir,
 } from '../orchestrator/index.js';
+import { updateAppSettings } from '../settings/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import {
   CONTAINER_REPO_DIR,
@@ -614,6 +615,85 @@ describe('session scheduling', () => {
     assert.deepEqual(fired, []);
     assert.equal(result.session.status, 'ready');
     assert.equal(result.session.scheduledStartAt, '2999-01-01T00:00:00.000Z');
+  });
+});
+
+describe('session code review', () => {
+  it('defaults to off and toggles for every status but finished', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+
+    assert.equal(f.service.get(created)?.codeReview, false);
+    assert.equal(f.service.setCodeReview(created, true).codeReview, true);
+    assert.equal(getSession(f.db, created)?.codeReview, true);
+    assert.equal(f.service.setCodeReview(created, false).codeReview, false);
+
+    // The flag stays editable right up to the moment the session finishes.
+    for (const status of ['ready', 'building', 'waiting', 'failed'] as const) {
+      updateSession(f.db, created, { status });
+      assert.equal(f.service.setCodeReview(created, true).codeReview, true);
+      assert.equal(f.service.setCodeReview(created, false).codeReview, false);
+    }
+  });
+
+  it('refuses to change the flag once the session has finished', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    f.service.setCodeReview(created, true);
+    updateSession(f.db, created, { status: 'finished' });
+
+    assert.throws(
+      () => f.service.setCodeReview(created, false),
+      (error: unknown) =>
+        error instanceof SessionError && error.status === 409 && error.code === 'session_finished',
+    );
+    assert.equal(getSession(f.db, created)?.codeReview, true);
+  });
+
+  it('creates a session with the flag off while the global default is off', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'no-review',
+      prTargetBranch: 'main',
+    });
+
+    assert.equal(session.codeReview, false);
+  });
+
+  it('creates a session with the flag on when the global default is on', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+    updateAppSettings(f.db, f.config, { codeReviewDefault: true });
+
+    // No `codeReview` in the request: the default is applied server-side, so a
+    // session created straight over the API gets it too.
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'reviewed',
+      prTargetBranch: 'main',
+    });
+
+    assert.equal(session.codeReview, true);
+    assert.equal(getSession(f.db, session.id)?.codeReview, true);
+  });
+
+  it('lets an explicit false on create override a default of on', async () => {
+    const f = await fixture();
+    f.script(() => ({ exitCode: 2 }));
+    updateAppSettings(f.db, f.config, { codeReviewDefault: true });
+
+    const { session } = await f.service.create({
+      repositoryId: f.repository.id,
+      name: 'opted-out',
+      prTargetBranch: 'main',
+      codeReview: false,
+    });
+
+    assert.equal(session.codeReview, false);
+    assert.equal(getSession(f.db, session.id)?.codeReview, false);
   });
 });
 

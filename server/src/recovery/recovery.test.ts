@@ -34,8 +34,8 @@ function story(storyId: string, status: Story['status']): Story {
 }
 
 describe('where a retry resumes', () => {
-  it('re-runs only the delivery when the push or the pull request failed', () => {
-    for (const stage of ['push', 'pull_request'] as const) {
+  it('re-runs only the delivery when the push, the pull request or the review failed', () => {
+    for (const stage of ['push', 'pull_request', 'review'] as const) {
       const plan = planRetry({ failureStage: stage }, [story('US-001', 'done')]);
       assert.equal(plan.action, 'delivery');
       assert.equal(plan.stage, stage);
