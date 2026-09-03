@@ -619,7 +619,7 @@ describe('session scheduling', () => {
 });
 
 describe('session code review', () => {
-  it('defaults to off and toggles for every status but finished', async () => {
+  it('defaults to off and toggles until the pull request exists', async () => {
     const f = await fixture();
     const created = createSessionRow(f);
 
@@ -628,7 +628,8 @@ describe('session code review', () => {
     assert.equal(getSession(f.db, created)?.codeReview, true);
     assert.equal(f.service.setCodeReview(created, false).codeReview, false);
 
-    // The flag stays editable right up to the moment the session finishes.
+    // The flag stays editable right up to the moment the delivery opens the
+    // pull request the flag decides the review of.
     for (const status of ['ready', 'building', 'waiting', 'failed'] as const) {
       updateSession(f.db, created, { status });
       assert.equal(f.service.setCodeReview(created, true).codeReview, true);
@@ -636,18 +637,26 @@ describe('session code review', () => {
     }
   });
 
-  it('refuses to change the flag once the session has finished', async () => {
+  it('refuses to change the flag once the pull request exists (US-007)', async () => {
     const f = await fixture();
     const created = createSessionRow(f);
     f.service.setCodeReview(created, true);
-    updateSession(f.db, created, { status: 'finished' });
 
-    assert.throws(
-      () => f.service.setCodeReview(created, false),
-      (error: unknown) =>
-        error instanceof SessionError && error.status === 409 && error.code === 'session_finished',
-    );
-    assert.equal(getSession(f.db, created)?.codeReview, true);
+    // Every status the delivery reaches with a pull request open: the review
+    // chain itself, and the three states after it.
+    for (const status of ['finished', 'reviewing', 'fixing', 'pr-open', 'merged'] as const) {
+      updateSession(f.db, created, { status });
+      assert.throws(
+        () => f.service.setCodeReview(created, false),
+        (error: unknown) =>
+          error instanceof SessionError &&
+          error.status === 409 &&
+          error.code === 'code_review_locked' &&
+          error.message.includes(status === 'finished' ? 'has finished' : 'pull request'),
+        `${status} should refuse the toggle`,
+      );
+      assert.equal(getSession(f.db, created)?.codeReview, true);
+    }
   });
 
   it('creates a session with the flag off while the global default is off', async () => {

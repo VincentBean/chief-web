@@ -237,7 +237,7 @@ describe('sessions api', () => {
     });
 
     assert.equal(response.status, 409);
-    assert.equal(((await response.json()) as ErrorBody).error, 'session_finished');
+    assert.equal(((await response.json()) as ErrorBody).error, 'code_review_locked');
   });
 
   it('stores a scheduled start as UTC', async () => {

@@ -913,6 +913,53 @@ describe('the code review of a delivery', () => {
     assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
   });
 
+  it('leaves a session the sync merged mid-review merged (US-007)', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const opener = new FakeOpener();
+    // Somebody merges the draft from GitHub while the review runs, and the
+    // pull request sync writes that down before the delivery is finished.
+    const watcher: SessionReviewer = {
+      review: (session) => {
+        updateSession(world.db, session.id, { status: 'merged' });
+        return reviewer.review(session);
+      },
+    };
+    const delivery = serviceFor(world, opener, new ReviewStep(watcher, new FakePublisher()));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    // GitHub's answer stands: the delivery does not put the session back into
+    // pr-open behind a pull request that is already in the base branch.
+    const row = world.reload();
+    assert.equal(row.status, 'merged');
+    assert.equal(row.prUrl, 'https://github.com/acme/demo/pull/7');
+    // The pull request was still released before the sync took over.
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+  });
+
+  it('does not fail a session the sync merged mid-review (US-007)', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('agent_failed', 'the agent died')];
+    const opener = new FakeOpener();
+    const watcher: SessionReviewer = {
+      review: (session) => {
+        updateSession(world.db, session.id, { status: 'merged' });
+        return reviewer.review(session);
+      },
+    };
+    const delivery = serviceFor(world, opener, new ReviewStep(watcher, new FakePublisher()));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    const row = world.reload();
+    // The review really did fail, but a merged pull request is not a thing to
+    // retry, so the failure is reported and not written.
+    assert.equal(row.status, 'merged');
+    assert.equal(row.failureStage, null);
+  });
+
   it('stores the pull request URL, and undrafts before failing at the review', async () => {
     const world = new World();
     const reviewer = new FakeReviewer();

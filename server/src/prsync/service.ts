@@ -4,6 +4,7 @@ import {
   getRepository,
   listSessions,
   type Session,
+  type SessionStatus,
   updateSession,
 } from '../db/index.js';
 import { isValidGithubSlug } from '../lib/git-url.js';
@@ -12,7 +13,7 @@ import { logger } from '../lib/logger.js';
 import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
 
 /**
- * Keeping `pr-open` sessions in step with GitHub (US-003).
+ * Keeping the sessions with a pull request in step with GitHub (US-003).
  *
  * The same philosophy as the scheduler: the state is a column — a session is
  * `pr-open` with a `pr_url` on it — and this service is only the thing that
@@ -27,16 +28,34 @@ import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
  * marked `failed` here — GitHub being unreachable says nothing about the work,
  * which is committed, pushed and delivered.
  *
+ * ## The sessions it looks at
+ *
+ * `pr-open` is where a delivered session sits, but it is not the only status
+ * with a pull request behind it (US-007): a draft is open from the moment the
+ * delivery created it, and the session spends the review in `reviewing` and
+ * the feedback run in `fixing` before it ever reaches `pr-open`. Somebody who
+ * closes or merges that draft in the meantime has said what they think of it,
+ * so those two statuses are synced exactly like `pr-open` — the alternative
+ * is a session that keeps reviewing a pull request nobody can merge and then
+ * lands in `pr-open` behind a closed one.
+ *
+ * The review or feedback run that is still in flight is not stopped: it is
+ * abandoned, and whatever it does next is harmless. A delivery that finishes
+ * after the sync moved the session on sees it — {@link DeliveryService} does
+ * not overwrite a `merged` session — and one that finishes just before the
+ * next tick is corrected by that tick, because the sync remembers nothing and
+ * simply reads the status column again.
+ *
  * ## Rate limit
  *
- * One `GET /repos/{slug}/pulls/{number}` per `pr-open` session per tick — the
+ * One `GET /repos/{slug}/pulls/{number}` per synced session per tick — the
  * response's `merged` flag is the authoritative answer, and listing a
  * repository's *open* pull requests cannot give it, because an absent pull
  * request is equally consistent with "merged" and "closed unmerged".
  *
  * At the default 15-minute interval that is 4 requests per hour per open pull
  * request: 40/hour with ten of them, against a 5000/hour token budget. A tick
- * with no `pr-open` session costs nothing at all — not even the token lookup —
+ * with no such session costs nothing at all — not even the token lookup —
  * so an installation that has never opened a pull request never touches GitHub.
  *
  * The interval is the operator's dial on that budget (US-004): 15 minutes by
@@ -51,6 +70,16 @@ import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
  * installation runs. The workspace is deliberately *not* touched — that is
  * only ever the session-deletion path (US-012).
  */
+
+/**
+ * The statuses a session's pull request is asked about in (US-007).
+ *
+ * `reviewing` and `fixing` are in here because the draft is already open in
+ * both of them, so an external merge or close has to be seen there too — and
+ * because a session whose pull request is gone must not be left running a
+ * review chain that can only end in `pr-open` behind it.
+ */
+const SYNCED_STATUSES = ['pr-open', 'reviewing', 'fixing'] as const satisfies readonly SessionStatus[];
 
 /** The slice of the GitHub API this service needs; tests pass a stub. */
 export interface PullRequestStateGateway {
@@ -80,7 +109,7 @@ export interface PullRequestSync {
   /** Catches up once, then polls. Idempotent. */
   start(): void;
   stop(): void;
-  /** One pass over every `pr-open` session. Returns how many changed status. */
+  /** One pass over every session with a pull request. Returns how many changed status. */
   tick(): Promise<number>;
 }
 
@@ -160,11 +189,11 @@ export class PrSyncService implements PullRequestSync {
 
     let open: Session[];
     try {
-      open = listSessions(this.db, { status: 'pr-open' });
+      open = SYNCED_STATUSES.flatMap((status) => listSessions(this.db, { status }));
     } catch (cause) {
       // A database that cannot be read is not evidence that nothing changed;
       // the next tick asks again.
-      logger.warn('could not read the sessions with an open pull request', {
+      logger.warn('could not read the sessions with a pull request', {
         error: describe(cause),
       });
       return 0;
@@ -224,6 +253,7 @@ export class PrSyncService implements PullRequestSync {
       logger.info('pull request merged', {
         session: session.id,
         name: session.name,
+        status: session.status,
         prUrl: session.prUrl,
       });
       await this.cleanUp(merged);
@@ -239,6 +269,7 @@ export class PrSyncService implements PullRequestSync {
       logger.info('pull request closed without merging', {
         session: session.id,
         name: session.name,
+        status: session.status,
         prUrl: session.prUrl,
       });
       return true;
@@ -251,8 +282,8 @@ export class PrSyncService implements PullRequestSync {
    * Every `merged` session that still owns a container (US-005).
    *
    * A removal can fail — the daemon can be down, or busy — and the session is
-   * `merged` by then, so the sync would never look at it again: the `pr-open`
-   * pass only lists sessions it has not moved yet. Sweeping the leftovers at
+   * `merged` by then, so the sync would never look at it again: the main pass
+   * only lists sessions it has not moved yet. Sweeping the leftovers at
    * the top of every tick is the retry, and `container_id` is the record of
    * what is still owed. Startup reconciliation (US-009) reaps the same
    * containers, so this only shortens the wait on a running stack.
@@ -313,9 +344,10 @@ export class PrSyncService implements PullRequestSync {
    */
   private targetOf(session: Session): { slug: string; number: number } | null {
     if (session.prUrl === null) {
-      logger.warn('a session is pr-open with no pull request URL, so it cannot be synced', {
+      logger.warn('a session has no pull request URL, so it cannot be synced', {
         session: session.id,
         name: session.name,
+        status: session.status,
       });
       return null;
     }

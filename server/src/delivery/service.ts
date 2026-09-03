@@ -337,6 +337,7 @@ export class DeliveryService implements BuildCompletion {
       base: session.prTargetBranch,
       number: opened.pullRequest.number,
       url: opened.pullRequest.url,
+      draft: opened.pullRequest.draft,
     });
 
     const delivered = opened.adopted
@@ -353,6 +354,12 @@ export class DeliveryService implements BuildCompletion {
       // the board says `reviewing` rather than leaving the session in
       // `building` with nothing building (US-003).
       updateSession(this.db, session.id, { status: 'reviewing' });
+      logger.info('code review started; the pull request stays a draft until it is over', {
+        session: session.id,
+        name: session.name,
+        number: opened.pullRequest.number,
+        url: opened.pullRequest.url,
+      });
       const reviewed = await this.review.run(session, token, {
         slug: repository.githubSlug,
         number: opened.pullRequest.number,
@@ -558,6 +565,20 @@ export class DeliveryService implements BuildCompletion {
     adopted: boolean,
     message: string,
   ): DeliveryResult {
+    const merged = this.takenOver(session);
+    if (merged !== null) {
+      return {
+        ok: true,
+        sessionId: session.id,
+        status: merged.status,
+        prUrl: merged.prUrl ?? prUrl,
+        adopted,
+        code: 'ok',
+        message: sentences(message, MERGED_MEANWHILE),
+        stderr: '',
+      };
+    }
+
     const delivered = updateSession(this.db, session.id, {
       status: 'pr-open',
       prUrl,
@@ -633,6 +654,12 @@ export class DeliveryService implements BuildCompletion {
 
     const target: ReviewTarget = { slug: repository.githubSlug, number };
     updateSession(this.db, session.id, { status: 'reviewing' });
+    logger.info('code review restarted; the pull request stays a draft until it is over', {
+      session: session.id,
+      name: session.name,
+      number,
+      url: prUrl,
+    });
     const reviewed = await this.review.run(session, token, target);
     if (!reviewed.ok) {
       if (reviewed.code === 'usage_limit') return this.held(session, null, reviewed.message);
@@ -738,6 +765,29 @@ export class DeliveryService implements BuildCompletion {
     };
   }
 
+  /**
+   * The session's current row when the pull request sync has already moved it
+   * to `merged` (US-007), or null while the session is still this delivery's
+   * to write.
+   *
+   * The chain the delivery walks — draft, review, feedback run — can outlast
+   * the pull request it is about: somebody can merge or close the draft from
+   * GitHub at any point in it, and the sync writes that down. The review work
+   * in flight is simply abandoned, but its *result* must not be: a merge is
+   * the last word on a pull request, and putting the session back to
+   * `pr-open` (or into `failed`) after it would only be corrected by the next
+   * tick, or not at all.
+   *
+   * Only `merged` is guarded. A pull request closed unmerged puts the session
+   * in `finished`, which is also where a retried delivery legitimately starts
+   * from, so there is nothing here to tell those two apart — and the next tick
+   * closes that window by reading the same closed pull request again.
+   */
+  private takenOver(session: Session): Session | null {
+    const current = getSession(this.db, session.id);
+    return current !== null && current.status === 'merged' ? current : null;
+  }
+
   /** Starts (or reuses) the session container and pushes from inside it. */
   private async pushBranch(session: Session): Promise<PushResult> {
     const container = await this.containers.start(session);
@@ -752,6 +802,29 @@ export class DeliveryService implements BuildCompletion {
     code: Exclude<DeliveryCode, 'ok' | 'usage_limit_hold'>,
     detail: { message: string; stderr: string },
   ): DeliveryResult {
+    const merged = this.takenOver(session);
+    if (merged !== null) {
+      // Whatever went wrong was work on a pull request that has since been
+      // merged: failing the session now would replace GitHub's answer with a
+      // stage nobody can usefully retry (US-007).
+      logger.warn('delivery failed after its pull request was merged; leaving the session merged', {
+        session: session.id,
+        name: session.name,
+        code,
+        error: detail.message,
+      });
+      return {
+        ok: false,
+        sessionId: session.id,
+        status: merged.status,
+        prUrl: merged.prUrl ?? session.prUrl,
+        adopted: false,
+        code,
+        message: sentences(detail.message, MERGED_MEANWHILE),
+        stderr: detail.stderr,
+      };
+    }
+
     const stored = detail.stderr === '' ? detail.message : `${detail.message}\n\n${detail.stderr}`;
     const stage = FAILURE_STAGE_OF[code];
     const updated = failSession(this.db, session.id, stage, stored);
@@ -791,6 +864,10 @@ export function createDeliveryService(
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+
+/** What a delivery says when GitHub merged its pull request while it ran (US-007). */
+const MERGED_MEANWHILE =
+  'Its pull request was merged while this ran, so the session was left merged.';
 
 /** Joins the parts of a delivery's message, skipping the ones there were none of. */
 function sentences(...parts: (string | null)[]): string {
