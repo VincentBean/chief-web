@@ -7,7 +7,7 @@ import {
   sessionPath,
   type Stats,
 } from '../api.ts';
-import { describeError, isActive, needsAttention, useAppData } from '../data.tsx';
+import { describeError, isActive, isEnded, needsAttention, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { localTime, since, startsIn } from '../schedule.ts';
@@ -56,8 +56,10 @@ export function Overview() {
   const upcoming = all
     .filter((s) => s.scheduledStartAt !== null && !s.scheduleMissed && (s.status === 'pending' || s.status === 'ready'))
     .sort((a, b) => (a.scheduledStartAt ?? '').localeCompare(b.scheduledStartAt ?? ''));
+  // Every session whose build is over, including the delivered ones: what
+  // this panel answers is "what shipped lately", not "what has no PR".
   const finished = all
-    .filter((s) => s.status === 'finished')
+    .filter(isEnded)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 6);
 
@@ -276,7 +278,7 @@ export function Overview() {
           {sessions === null ? (
             <Skeleton lines={3} />
           ) : finished.length === 0 ? (
-            <p className="muted">Nothing has finished yet. A finished session has every story committed and a pull request open.</p>
+            <p className="muted">Nothing has finished yet. A finished session has every story committed and, unless delivery was skipped, a pull request.</p>
           ) : (
             <ul className="rows rows--tight">
               {finished.map((session) => (
@@ -335,8 +337,12 @@ function Activity({ stats }: { readonly stats: Stats | null }) {
   const storiesFortnight = sum((d) => d.storiesDone);
   const finishedFortnight = sum((d) => d.sessionsFinished);
   const createdFortnight = sum((d) => d.sessionsCreated);
-  const outcomes = stats.sessions.byStatus.finished + stats.sessions.byStatus.failed;
-  const successRate = outcomes === 0 ? null : Math.round((stats.sessions.byStatus.finished / outcomes) * 100);
+  // A session that ended counts as finished however it ended; `pr-open` and
+  // `merged` are where delivered sessions live now, so leaving them out would
+  // read as a collapsing finish rate rather than as a renamed state.
+  const ended = stats.sessions.byStatus.finished + stats.sessions.byStatus['pr-open'] + stats.sessions.byStatus.merged;
+  const outcomes = ended + stats.sessions.byStatus.failed;
+  const successRate = outcomes === 0 ? null : Math.round((ended / outcomes) * 100);
 
   return (
     <div className="figures">
@@ -363,7 +369,7 @@ function Activity({ stats }: { readonly stats: Stats | null }) {
         value={successRate === null ? '—' : `${String(successRate)}%`}
         hint={
           <span className="figure__note">
-            {stats.sessions.byStatus.finished} finished · {stats.sessions.byStatus.failed} failed ·{' '}
+            {ended} finished · {stats.sessions.byStatus.failed} failed ·{' '}
             {stats.pullRequestsOpened} {stats.pullRequestsOpened === 1 ? 'PR' : 'PRs'} opened
           </span>
         }

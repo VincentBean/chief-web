@@ -30,12 +30,19 @@ import {
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
+import {
+  DESKTOP_QUERY,
+  describeError,
+  isEnded,
+  redirectIfUnauthorised,
+  useAppData,
+  useMediaQuery,
+} from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
-import { Badge, Facts, Notice, PageHeader, Panel, Progress, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
+import { Badge, Facts, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
 /** How often the PRD indicator, the terminal's state and the build are re-read. */
@@ -340,10 +347,10 @@ export function Session() {
           {busy === 'retry' ? 'Retrying…' : retryIsDelivery ? 'Retry push & PR' : 'Retry build'}
         </button>
       )}
-      {status === 'finished' && session.prUrl !== null && (
+      {isEnded(session) && session.prUrl !== null && (
         <a className="button button--primary" href={session.prUrl} target="_blank" rel="noreferrer">
           <Icon name="git-pull-request" />
-          Open pull request
+          {status === 'merged' ? 'Open merged pull request' : 'Open pull request'}
           <Icon name="link-external" />
         </a>
       )}
@@ -472,7 +479,7 @@ export function Session() {
                   <code className="mono">{build.prd.path}</code> says so.
                 </p>
               )}
-              <Progress done={done} total={stories.length} tone={status === 'finished' ? 'final' : status === 'failed' ? 'danger' : 'active'} label="Stories done" />
+              <Progress done={done} total={stories.length} tone={isEnded(session) ? SESSION_TONE[status] : status === 'failed' ? 'danger' : 'active'} label="Stories done" />
               <StoryList stories={stories} currentStoryId={status === 'building' ? build.currentStoryId : null} />
             </Panel>
           )}
@@ -581,7 +588,7 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
   const failedAt: StageKey | null =
     status !== 'failed' ? null : isDeliveryStage(session.failureStage) ? 'deliver' : 'build';
   const current: StageKey =
-    status === 'pending' ? 'plan' : status === 'ready' ? 'ready' : status === 'finished' ? 'deliver' : (failedAt ?? 'build');
+    status === 'pending' ? 'plan' : status === 'ready' ? 'ready' : isEnded(session) ? 'deliver' : (failedAt ?? 'build');
   const order: StageKey[] = ['plan', 'ready', 'build', 'deliver'];
   const index = order.indexOf(current);
   const done = build.stories.filter((s) => s.status === 'done').length;
@@ -597,14 +604,15 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
           : build.stories.length > 0
             ? `${String(done)}/${String(build.stories.length)} done`
             : '',
-    deliver: session.prUrl !== null ? 'pull request open' : status === 'finished' ? 'no pull request' : '',
+    deliver:
+      status === 'merged' ? 'pull request merged' : session.prUrl !== null ? 'pull request open' : status === 'finished' ? 'no pull request' : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };
 
   return (
     <ol className="stages" aria-label="Progress">
       {order.map((stage, i) => {
-        const state = failedAt === stage ? 'failed' : i < index || (stage === 'deliver' && status === 'finished') ? 'done' : i === index ? 'current' : 'todo';
+        const state = failedAt === stage ? 'failed' : i < index || (stage === 'deliver' && isEnded(session)) ? 'done' : i === index ? 'current' : 'todo';
         return (
           <li className={`stage stage--${state}`} key={stage} aria-current={state === 'current' ? 'step' : undefined}>
             <span className="stage__marker">

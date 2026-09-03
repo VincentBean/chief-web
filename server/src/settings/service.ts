@@ -23,6 +23,15 @@ export const MIN_AGENT_TIMEOUT_MINUTES = 1;
 export const MAX_AGENT_TIMEOUT_MINUTES = 720;
 
 /**
+ * Bounds for the pull request sync interval, in minutes (US-004). One minute
+ * is the floor `PR_SYNC_INTERVAL_MS` already enforces — below that the poll
+ * costs more GitHub rate budget than the freshness is worth — and a day is the
+ * point past which the sync has stopped being a sync.
+ */
+export const MIN_PR_SYNC_INTERVAL_MINUTES = 1;
+export const MAX_PR_SYNC_INTERVAL_MINUTES = 1440;
+
+/**
  * Models an agent may be run on, as Claude Code's own `--model` values.
  *
  * These are the CLI's *aliases* rather than pinned ids (`claude-opus-5`), so
@@ -78,6 +87,8 @@ export interface AppSettings {
   readonly maxConcurrentSessions: number;
   /** Cap on one headless agent iteration of the build loop, in minutes. */
   readonly agentTimeoutMinutes: number;
+  /** How often the pull request sync asks GitHub about open PRs, in minutes. */
+  readonly prSyncIntervalMinutes: number;
   /** Model the planning terminal runs on; `null` leaves the CLI to choose. */
   readonly planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` leaves the CLI to choose. */
@@ -95,6 +106,7 @@ export interface AppSettingsUpdate {
   readonly githubToken?: string | null;
   readonly maxConcurrentSessions?: number;
   readonly agentTimeoutMinutes?: number;
+  readonly prSyncIntervalMinutes?: number;
   /** `null` hands the choice back to the CLI; omitted leaves the stored value. */
   readonly planningModel?: AgentModel | null;
   readonly buildModel?: AgentModel | null;
@@ -172,6 +184,27 @@ function clampAgentTimeoutMinutes(minutes: number): number {
 }
 
 /**
+ * How long the pull request sync waits between polls of GitHub (US-004).
+ *
+ * Same shape as {@link getAgentTimeoutMs}: `PR_SYNC_INTERVAL_MS` is only the
+ * default, the settings row wins once the operator has saved one, and it is
+ * read again every time the sync re-arms its timer — so a change applies to the
+ * next tick with no restart. Only a *stored* value is clamped; the environment
+ * keeps its own floor, checked when the config is loaded.
+ */
+export function getPrSyncIntervalMs(
+  db: Database,
+  config: Pick<Config, 'prSyncIntervalMs'>,
+): number {
+  const stored = getSettingNumber(db, 'pr_sync_interval_minutes', 0);
+  if (stored <= 0) return config.prSyncIntervalMs;
+  return (
+    Math.min(MAX_PR_SYNC_INTERVAL_MINUTES, Math.max(MIN_PR_SYNC_INTERVAL_MINUTES, stored)) *
+    MS_PER_MINUTE
+  );
+}
+
+/**
  * Which model the interactive planning `claude` runs on, or `null` to pass no
  * `--model` at all and let the CLI apply its own default.
  *
@@ -234,6 +267,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
       config.maxConcurrentSessions,
     ),
     agentTimeoutMinutes: Math.round(getAgentTimeoutMs(db, config) / MS_PER_MINUTE),
+    prSyncIntervalMinutes: Math.round(getPrSyncIntervalMs(db, config) / MS_PER_MINUTE),
     planningModel: getPlanningModel(db),
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
@@ -258,6 +292,10 @@ export function updateAppSettings(
 
     if (update.agentTimeoutMinutes !== undefined) {
       setSettingNumber(db, 'agent_timeout_minutes', update.agentTimeoutMinutes);
+    }
+
+    if (update.prSyncIntervalMinutes !== undefined) {
+      setSettingNumber(db, 'pr_sync_interval_minutes', update.prSyncIntervalMinutes);
     }
 
     // For every model `null` clears the row, which is what "let the CLI

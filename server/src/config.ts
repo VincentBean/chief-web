@@ -67,6 +67,14 @@ export interface Config {
    * has passed (US-017). Capped at 30 s, which is the promise the UI makes.
    */
   readonly schedulerIntervalMs: number;
+  /**
+   * How often the pull request sync asks GitHub what became of each
+   * `pr-open` session's pull request (US-003). One request per `pr-open`
+   * session per tick, so the default of 15 minutes costs 4 requests per hour
+   * per open pull request — under 1% of the 5000/hour token budget even with
+   * 10 of them, which is why polling this at all is affordable.
+   */
+  readonly prSyncIntervalMs: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -141,6 +149,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // A minute is the floor the settings field will offer (US-004): below that
+  // the sync stops being a background job and starts being a way to spend the
+  // hour's rate limit on a handful of sessions.
+  const prSyncIntervalMs = int('PR_SYNC_INTERVAL_MS', 900_000);
+  if (prSyncIntervalMs < 60_000) {
+    throw new Error(
+      `Environment variable PR_SYNC_INTERVAL_MS must be at least 60000, got "${String(prSyncIntervalMs)}"`,
+    );
+  }
+
   // The login throttle is the only thing standing between an unauthenticated
   // caller and unlimited password guessing, so it cannot be configured away:
   // zero attempts would lock the operator out, and a zero-length window would
@@ -180,6 +198,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     buildStopTimeoutMs: int('BUILD_STOP_TIMEOUT_MS', 60_000),
     pushTimeoutMs: int('PUSH_TIMEOUT_MS', 300_000),
     schedulerIntervalMs,
+    prSyncIntervalMs,
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),

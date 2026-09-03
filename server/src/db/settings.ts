@@ -33,6 +33,11 @@ export const SETTING_KEYS = [
    */
   'code_review_default',
   /**
+   * How often the pull request sync polls GitHub, in minutes (US-004). An
+   * absent row means the `PR_SYNC_INTERVAL_MS` default applies.
+   */
+  'pr_sync_interval_minutes',
+  /**
    * ISO timestamp until which agent work is held after a Claude usage-limit
    * refusal (US-002). Written and read through `limits/hold.ts`; a value in
    * the past means no hold, so nothing has to sweep the row.

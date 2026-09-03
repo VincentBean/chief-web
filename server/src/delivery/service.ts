@@ -212,7 +212,7 @@ export class DeliveryService implements BuildCompletion {
 
   /**
    * Push, then pull request, then the session's final state. The session ends
-   * `finished` with its pull request URL, or `failed` with the reason — git's
+   * `pr-open` with its pull request URL, or `failed` with the reason — git's
    * stderr or GitHub's own message — so "Retry" always has something to show.
    */
   private async deliver(session: Session, stories: readonly Story[]): Promise<DeliveryResult> {
@@ -305,8 +305,12 @@ export class DeliveryService implements BuildCompletion {
   }
 
   /**
-   * Everything after the last step that can fail: the session is `finished`,
-   * with its pull request and without the error a previous attempt left.
+   * Everything after the last step that can fail. The pull request exists, so
+   * the session lands in `pr-open` rather than `finished` (US-002): the build
+   * is over, but the work is not in the target branch until GitHub says the
+   * pull request was merged. The PR sync is what moves the session on from
+   * here — to `merged`, or back to `finished` if the pull request is closed
+   * without ever being merged.
    */
   private finish(
     session: Session,
@@ -314,8 +318,8 @@ export class DeliveryService implements BuildCompletion {
     adopted: boolean,
     message: string,
   ): DeliveryResult {
-    const finished = updateSession(this.db, session.id, {
-      status: 'finished',
+    const delivered = updateSession(this.db, session.id, {
+      status: 'pr-open',
       prUrl,
       lastError: null,
       failureStage: null,
@@ -324,7 +328,7 @@ export class DeliveryService implements BuildCompletion {
     return {
       ok: true,
       sessionId: session.id,
-      status: finished?.status ?? 'finished',
+      status: delivered?.status ?? 'pr-open',
       prUrl,
       adopted,
       code: 'ok',
@@ -348,7 +352,7 @@ export class DeliveryService implements BuildCompletion {
         session,
         prUrl,
         true,
-        'Code review is switched off for this session, so it has been marked finished.',
+        'Code review is switched off for this session, so its pull request is left open as-is.',
       );
     }
     if (this.review === null) {

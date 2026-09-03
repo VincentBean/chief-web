@@ -57,6 +57,14 @@ function dayOf(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * The statuses a session can end in. `finished` alone stopped meaning "shipped"
+ * when delivery started landing on `pr-open`, so every "finished" aggregate
+ * below counts all three — otherwise the finish rate reads as a collapse the
+ * day the new states ship.
+ */
+const ENDED_STATUSES = "('finished', 'pr-open', 'merged')";
+
 /** Counts rows grouped by the first `length` characters of a timestamp column. */
 function countByDay(
   db: Database,
@@ -121,10 +129,12 @@ export function readStats(db: Database, days = 14, now: Date = new Date()): Stat
        FROM stories WHERE status = 'done' AND updated_at >= ? GROUP BY day`,
     since,
   );
+  // A session lands on the day it last changed, so a merge moves it to the day
+  // the sync saw the merge. It is counted once either way.
   const finished = countByDay(
     db,
     `SELECT substr(updated_at, 1, 10) AS day, COUNT(*) AS n
-       FROM sessions WHERE status = 'finished' AND updated_at >= ? GROUP BY day`,
+       FROM sessions WHERE status IN ${ENDED_STATUSES} AND updated_at >= ? GROUP BY day`,
     since,
   );
   const created = countByDay(
@@ -151,7 +161,7 @@ export function readStats(db: Database, days = 14, now: Date = new Date()): Stat
            r.id AS id,
            r.name AS name,
            COUNT(DISTINCT s.id) AS sessions,
-           SUM(CASE WHEN s.status = 'finished' THEN 1 ELSE 0 END) AS finished,
+           SUM(CASE WHEN s.status IN ${ENDED_STATUSES} THEN 1 ELSE 0 END) AS finished,
            SUM(CASE WHEN s.status = 'failed' THEN 1 ELSE 0 END) AS failed,
            SUM(CASE WHEN s.status IN ('building', 'waiting') THEN 1 ELSE 0 END) AS active,
            (SELECT COUNT(*) FROM stories st JOIN sessions ss ON ss.id = st.session_id

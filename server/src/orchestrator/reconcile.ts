@@ -40,8 +40,15 @@ export interface ReconciliationPlan {
   readonly correct: readonly SessionCorrection[];
 }
 
-/** A session in one of these states has no business owning a container. */
-const TERMINAL_STATUSES = new Set(['finished', 'failed']);
+/**
+ * A session in one of these states has no business owning a container.
+ *
+ * `pr-open` and `merged` (US-002) sit here for the same reason `finished` does:
+ * they are the states a delivered session ends in, its branch is on `origin`,
+ * and anything that still needs a container — a delivery retry, a PR feedback
+ * run — starts a fresh one on the same workspace volume.
+ */
+const TERMINAL_STATUSES = new Set(['finished', 'pr-open', 'merged', 'failed']);
 
 /**
  * Pure: given every session and every container labelled with a session id,

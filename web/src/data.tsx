@@ -164,6 +164,16 @@ export function needsAttention(session: Session): boolean {
   return session.status === 'failed' || session.status === 'waiting' || session.scheduleMissed;
 }
 
+/**
+ * A session whose build is over, however it ended: without a pull request
+ * (`finished`), with one still open (`pr-open`), or with that one merged.
+ * The three share a place in every list and every stage bar, so the set is
+ * named once here rather than spelled out at each of them.
+ */
+export function isEnded(session: Pick<Session, 'status'>): boolean {
+  return session.status === 'finished' || session.status === 'pr-open' || session.status === 'merged';
+}
+
 /** A session with a build slot, or waiting for one. */
 export function isActive(session: Session): boolean {
   return (

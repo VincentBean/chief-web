@@ -139,7 +139,13 @@ export interface BuildCompletion {
   complete(session: Session, stories: readonly Story[]): Promise<void>;
 }
 
-/** The default hand-off: the session is finished, with nothing pushed. */
+/**
+ * The default hand-off: the session is finished, with nothing pushed.
+ *
+ * `finished` — and not `pr-open` (US-002) — is exactly right here: no pull
+ * request was opened, so there is nothing for the PR sync to follow, and this
+ * is where such a session's life ends.
+ */
 export class MarkSessionFinished implements BuildCompletion {
   constructor(private readonly db: Database) {}
 

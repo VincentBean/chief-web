@@ -10,7 +10,7 @@ import { Link } from './router.tsx';
  * badge or a progress bar, and so every page's badge is the same badge.
  */
 
-export type Tone = 'neutral' | 'ready' | 'active' | 'wait' | 'done' | 'final' | 'danger';
+export type Tone = 'neutral' | 'ready' | 'active' | 'wait' | 'done' | 'review' | 'final' | 'danger';
 
 /**
  * Every state string the app produces maps to exactly one tone, so a session,
@@ -22,7 +22,11 @@ export const SESSION_TONE: Record<Session['status'], Tone> = {
   building: 'active',
   waiting: 'wait',
   failed: 'danger',
-  finished: 'final',
+  // The purple pair is the pull request lifecycle; a session that ended with
+  // no pull request is done green, because nothing about it is still moving.
+  finished: 'done',
+  'pr-open': 'review',
+  merged: 'final',
 };
 
 export const STORY_TONE: Record<Story['status'], Tone> = {
@@ -39,6 +43,8 @@ export const SESSION_LABEL: Record<Session['status'], string> = {
   waiting: 'on hold',
   failed: 'failed',
   finished: 'finished',
+  'pr-open': 'pr open',
+  merged: 'merged',
 };
 
 export function Badge({
@@ -60,11 +66,27 @@ export function Badge({
   );
 }
 
-export function StatusBadge({ session }: { readonly session: Pick<Session, 'status'> }) {
-  return (
+export function StatusBadge({ session }: { readonly session: Pick<Session, 'status' | 'prUrl'> }) {
+  // Once a session is about its pull request, the badge is also the way to it:
+  // the state and the thing in that state are the same click.
+  const pr = session.status === 'pr-open' || session.status === 'merged' ? session.prUrl : null;
+  const badge = (
     <Badge tone={SESSION_TONE[session.status]} pulse={session.status === 'building'}>
       {SESSION_LABEL[session.status]}
+      {pr !== null && <Icon name="link-external" />}
     </Badge>
+  );
+  if (pr === null) return badge;
+  return (
+    <a
+      className="badge-link"
+      href={pr}
+      target="_blank"
+      rel="noreferrer"
+      title={session.status === 'merged' ? 'Open the merged pull request on GitHub' : 'Open the pull request on GitHub'}
+    >
+      {badge}
+    </a>
   );
 }
 

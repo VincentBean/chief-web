@@ -33,6 +33,7 @@ import { createDeliveryRouter } from './routes/delivery.js';
 import { createHealthRouter } from './routes/health.js';
 import { createLimitsRouter } from './routes/limits.js';
 import { createPlanningRouter } from './routes/planning.js';
+import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
@@ -119,6 +120,12 @@ export interface AppDependencies {
    * anyone opens the UI. Tests pass one they drive by hand.
    */
   readonly scheduler?: SessionScheduler;
+  /**
+   * The pull request sync (US-003). Defaults to a service polling GitHub for
+   * what became of each `pr-open` session's pull request; tests pass one built
+   * on a stub gateway so they never reach the network.
+   */
+  readonly prSync?: PullRequestSync;
 }
 
 /**
@@ -219,6 +226,14 @@ export function createApp(
   // that came due while the stack was down.
   const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
   scheduler.start();
+  // The pull request sync (US-003), started for the same reason: a merge that
+  // happens overnight has to be noticed whether or not anyone opens the UI,
+  // and the first tick is the catch-up on everything that was merged while the
+  // stack was down.
+  // The orchestrator comes along so a merge can throw the session's container
+  // away (US-005); merged work never needs one again.
+  const prSync = deps.prSync ?? createPrSync(config, db, orchestrator);
+  prSync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
   // stories, so a full server refuses the run instead of holding it.

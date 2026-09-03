@@ -64,6 +64,8 @@ export interface Settings {
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
+  /** How often open pull requests are re-checked against GitHub (US-004). */
+  prSyncIntervalMinutes: number;
   /** Model the planning terminal runs on; `null` lets Claude Code choose. */
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
@@ -82,6 +84,7 @@ export interface SettingsUpdate {
   githubToken?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
+  prSyncIntervalMinutes?: number;
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
@@ -220,13 +223,35 @@ export async function testRepositoryConnection(id: string): Promise<ConnectionTe
   );
 }
 
+/**
+ * Mirrors `SESSION_STATUSES` on the server, which this tuple has to be kept
+ * in step with by hand. `finished` means the build ended without a pull
+ * request; a delivered session is `pr-open` until the sync sees its PR
+ * merged, and `merged` after that.
+ *
+ * A tuple rather than a bare union because the session list enumerates it to
+ * offer one filter option per status (US-007); the order is the lifecycle.
+ */
+export const SESSION_STATUSES = [
+  'pending',
+  'ready',
+  'building',
+  'waiting',
+  'failed',
+  'finished',
+  'pr-open',
+  'merged',
+] as const;
+
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
+
 /** Mirrors the server's `SessionView` (US-010). */
 export interface Session {
   id: string;
   repositoryId: string;
   repositoryName: string;
   name: string;
-  status: 'pending' | 'ready' | 'building' | 'waiting' | 'failed' | 'finished';
+  status: SessionStatus;
   baseBranch: string;
   featureBranch: string;
   prTargetBranch: PrTargetBranch;

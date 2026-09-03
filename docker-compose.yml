@@ -38,6 +38,11 @@ services:
       BUILD_ITERATION_TIMEOUT_MS: ${BUILD_ITERATION_TIMEOUT_MS:-1800000}
       # How often scheduled session starts are checked (US-017); capped at 30s.
       SCHEDULER_INTERVAL_MS: ${SCHEDULER_INTERVAL_MS:-30000}
+      # How often GitHub is asked what became of each open pull request
+      # (US-003). One request per pr-open session per tick, so 15 minutes is
+      # 4 requests an hour per open PR against a 5000/hour budget.
+      # Only the default: a value saved on the settings page wins (US-004).
+      PR_SYNC_INTERVAL_MS: ${PR_SYNC_INTERVAL_MS:-900000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # Application data: SQLite database, SSH deploy keys, session workspaces.

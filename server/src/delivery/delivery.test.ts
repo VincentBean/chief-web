@@ -366,7 +366,7 @@ class FakeOpener implements PullRequestOpener {
 }
 
 describe('delivering a finished session', () => {
-  it('pushes, opens the pull request, and finishes the session', async () => {
+  it('pushes, opens the pull request, and leaves the session pr-open', async () => {
     const world = new World({ publicUrl: 'https://chief.example.com/' });
     const opener = new FakeOpener();
     const delivery = createDeliveryService(
@@ -391,10 +391,12 @@ describe('delivering a finished session', () => {
     assert.match(call?.input.body ?? '', /\*\*US-001\*\* — US-001/);
     assert.match(call?.input.body ?? '', /https:\/\/chief\.example\.com\/sessions\//);
 
-    const finished = world.reload();
-    assert.equal(finished.status, 'finished');
-    assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
-    assert.equal(finished.lastError, null);
+    // The pull request is open, so the session is `pr-open` and not `finished`
+    // (US-002); only the sync moves it on from there.
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.lastError, null);
   });
 
   it('adopts an existing pull request without failing', async () => {
@@ -410,7 +412,7 @@ describe('delivering a finished session', () => {
 
     await delivery.complete(world.session, world.stories());
     assert.equal(world.reload().prUrl, 'https://github.com/acme/demo/pull/4');
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 
   it('fails the session with git stderr when the push is rejected', async () => {
@@ -560,8 +562,34 @@ describe('retrying a delivery', () => {
     assert.equal(result.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(world.execs.length, 1, 'exactly one command ran: the push');
     assert.equal(opener.calls.length, 1);
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
     assert.equal(world.reload().lastError, null);
+  });
+
+  it('ends a retried pull_request failure in pr-open, not finished', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.failure = new GithubApiError('github_rejected', 'GitHub is having a moment', 500);
+    const delivery = serviceFor(world, opener);
+
+    await delivery.complete(world.session, world.stories());
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+
+    // The same session, retried once GitHub answers: the delivery that opens
+    // the pull request lands in `pr-open` whether it is the first attempt or
+    // the fifth.
+    opener.failure = null;
+    const result = await delivery.retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 'pr-open');
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.failureStage, null);
+    assert.equal(delivered.lastError, null);
   });
 
   it('reports a failure as an answer, not as a failed request', async () => {
@@ -687,7 +715,7 @@ describe('the code review of a delivery', () => {
     assert.equal(reviewer.calls, 0, 'no review is run for a session that did not ask for one');
     assert.equal(publisher.calls.length, 0);
     const finished = world.reload();
-    assert.equal(finished.status, 'finished');
+    assert.equal(finished.status, 'pr-open');
     assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(finished.lastError, null);
   });
@@ -707,7 +735,7 @@ describe('the code review of a delivery', () => {
     assert.equal(publisher.calls[0]?.token, TOKEN);
     assert.deepEqual(publisher.calls[0]?.target, { slug: 'acme/demo', number: 7 });
     const finished = world.reload();
-    assert.equal(finished.status, 'finished');
+    assert.equal(finished.status, 'pr-open');
     assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(finished.lastError, null);
   });
@@ -727,7 +755,7 @@ describe('the code review of a delivery', () => {
 
     assert.equal(reviewer.calls, 2);
     assert.equal(publisher.calls.length, 1, 'only the attempt that produced findings posted');
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
     assert.equal(world.reload().lastError, null);
     // The half of the delivery that already worked is not repeated by a retry.
     assert.equal(world.execs.length, 1, 'exactly one push');
@@ -745,7 +773,7 @@ describe('the code review of a delivery', () => {
 
     assert.equal(reviewer.calls, 2, 'a posting failure costs a whole attempt, review included');
     assert.equal(publisher.calls.length, 2);
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 
   it('fails the session at the review stage after three attempts, keeping the pull request', async () => {
@@ -796,7 +824,7 @@ describe('the code review of a delivery', () => {
     assert.equal(publisher.calls.length, 1);
     assert.deepEqual(publisher.calls[0]?.report.findings, []);
     const finished = world.reload();
-    assert.equal(finished.status, 'finished');
+    assert.equal(finished.status, 'pr-open');
     assert.equal(finished.failureStage, null);
     assert.equal(finished.lastError, null);
   });
@@ -848,7 +876,7 @@ describe('chaining into the pull request feedback solver', () => {
 
     assert.deepEqual(solver.calls, [{ repositoryId: world.session.repositoryId, prNumber: 7 }]);
     const finished = world.reload();
-    assert.equal(finished.status, 'finished');
+    assert.equal(finished.status, 'pr-open');
     assert.equal(finished.lastError, null);
   });
 
@@ -864,7 +892,7 @@ describe('chaining into the pull request feedback solver', () => {
     );
 
     assert.equal(solver.calls.length, 0, 'there is nothing on the pull request to work on');
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 
   it('finishes the session anyway when the solver refuses the run', async () => {
@@ -885,7 +913,7 @@ describe('chaining into the pull request feedback solver', () => {
     assert.equal(result, undefined, 'the loop’s hand-off answers nothing either way');
     assert.equal(solver.calls.length, 1);
     const finished = world.reload();
-    assert.equal(finished.status, 'finished', 'a refused run is not the session’s problem');
+    assert.equal(finished.status, 'pr-open', 'a refused run is not the session’s problem');
     assert.equal(finished.failureStage, null);
     assert.equal(finished.lastError, null);
   });
@@ -965,7 +993,7 @@ describe('retrying a session that failed at the review', () => {
     assert.equal(reviewer.calls, 1);
     assert.deepEqual(publisher.calls[0]?.target, { slug: 'acme/demo', number: 7 });
     const finished = world.reload();
-    assert.equal(finished.status, 'finished');
+    assert.equal(finished.status, 'pr-open');
     assert.equal(finished.failureStage, null);
     assert.equal(finished.lastError, null);
   });
@@ -1002,7 +1030,7 @@ describe('retrying a session that failed at the review', () => {
 
     assert.equal(result.ok, true);
     assert.equal(reviewer.calls, 0);
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 
   it('delivers in full when the failed session has no pull request URL', async () => {
@@ -1019,7 +1047,7 @@ describe('retrying a session that failed at the review', () => {
     assert.equal(world.execs.length, 1, 'without a pull request there is one to open again');
     assert.equal(opener.calls.length, 1);
     assert.equal(reviewer.calls, 1);
-    assert.equal(world.reload().status, 'finished');
+    assert.equal(world.reload().status, 'pr-open');
   });
 });
 
