@@ -1,10 +1,12 @@
 export {
   ConflictFixError,
+  type ConflictFixLookup,
   type ConflictFixOutcome,
   type ConflictFixPhase,
   type ConflictFixRefusal,
   createPrConflictFixService,
   PrConflictFixService,
+  type PrConflictFixView,
 } from './fix.js';
 export {
   abortMerge,

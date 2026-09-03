@@ -8,12 +8,15 @@ import { createAuthService } from '../auth/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createPrConflictFix,
   createRepository,
   type Database,
+  deletePrConflictFix,
   deleteSetting,
   IN_MEMORY,
   openDatabase,
   setSetting,
+  updatePrConflictFix,
 } from '../db/index.js';
 import { GithubApiError } from '../lib/github.js';
 import type { PullRequestFeedback, RepositoryPullRequests } from '../lib/github-review.js';
@@ -135,6 +138,74 @@ describe('pull requests api', () => {
       body.repositories[0]?.pullRequests.map((entry) => entry.number),
       [61, 60],
     );
+  });
+
+  it('carries each pull request’s conflict fix, read past the cache (US-006)', async () => {
+    gateway.listResult = [
+      {
+        slug: 'VincentBean/leo',
+        pullRequests: [pull(61, 'VincentBean/leo'), pull(60, 'VincentBean/leo')],
+        error: null,
+        message: null,
+        truncated: false,
+      },
+    ];
+    const read = async (): Promise<
+      { number: number; conflictFix: { status: string; failureStage: string | null; failureStageLabel: string | null; attempts: number; lastError: string | null } | null }[]
+    > => {
+      const body = (await (await get('/api/pull-requests')).json()) as {
+        repositories: {
+          pullRequests: {
+            number: number;
+            conflictFix: {
+              status: string;
+              failureStage: string | null;
+              failureStageLabel: string | null;
+              attempts: number;
+              lastError: string | null;
+            } | null;
+          }[];
+        }[];
+      };
+      return body.repositories[0]?.pullRequests ?? [];
+    };
+
+    await get('/api/pull-requests?refresh=1');
+    // Nothing has ever conflicted: the page's "none" state.
+    assert.deepEqual(
+      (await read()).map((entry) => entry.conflictFix),
+      [null, null],
+    );
+
+    const fix = createPrConflictFix(db, {
+      repositoryId,
+      prNumber: 61,
+      prUrl: 'https://github.com/VincentBean/leo/pull/61',
+      prTitle: 'PR 61',
+      headBranch: 'chief/feature',
+      baseBranch: 'develop',
+      headSha: 'abc',
+      baseSha: 'def',
+    });
+    updatePrConflictFix(db, fix.id, {
+      status: 'failed',
+      attempts: 3,
+      failureStage: 'verify',
+      lastError: 'Conflict markers are still unresolved in src/one.ts.',
+    });
+
+    // The list is still the cached GitHub answer, but the fix is read on every
+    // request: the scan runs on its own timer, not the page's.
+    const rows = await read();
+    assert.equal(gateway.listCalls, 1, 'the cache should still have answered');
+    assert.equal(rows[1]?.conflictFix, null);
+    assert.equal(rows[0]?.conflictFix?.status, 'failed');
+    assert.equal(rows[0]?.conflictFix?.attempts, 3);
+    assert.equal(rows[0]?.conflictFix?.failureStage, 'verify');
+    assert.equal(rows[0]?.conflictFix?.failureStageLabel, 'verifying the resolution');
+    assert.match(rows[0]?.conflictFix?.lastError ?? '', /src\/one\.ts/);
+
+    deletePrConflictFix(db, fix.id);
   });
 
   it('reports one repository’s failure inside a 200, not as a page failure', async () => {

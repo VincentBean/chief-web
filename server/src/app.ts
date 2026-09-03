@@ -263,20 +263,17 @@ export function createApp(
   // and a merge commit chief-web makes and pushes itself. It shares the build
   // loop's slot cap, so a fix queues to the next scan rather than
   // oversubscribing the host.
-  const prConflicts =
-    deps.prConflicts ??
-    createPrConflictScan(
-      config,
-      db,
-      createPrConflictFixService(
-        config,
-        db,
-        sessionOrchestrator,
-        exec,
-        createAgentRunner(exec),
-        builds,
-      ),
-    );
+  // Built whether or not the scan is the injected one: the pull requests page
+  // reads its rows, and a fixer nobody starts a run on is inert.
+  const prConflictFixes = createPrConflictFixService(
+    config,
+    db,
+    sessionOrchestrator,
+    exec,
+    createAgentRunner(exec),
+    builds,
+  );
+  const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db, prConflictFixes);
   prConflicts.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
@@ -304,6 +301,7 @@ export function createApp(
       deps.pullRequests ?? createPullRequestService(config, db),
       prFeedback,
       prReviews,
+      prConflictFixes,
     ),
   );
   // Deleting a session (US-015) has to unwind whatever is running in its

@@ -360,6 +360,44 @@ describe('pull request conflict scan', () => {
     assert.equal(starter.started.length, 1);
   });
 
+  it('starts a fresh fix once the head branch has moved past a failure (US-006)', async () => {
+    const { db, github, scan, starter, repositoryId } = world();
+    github.open('acme/demo', [{ number: 42 }]);
+    github.says('acme/demo', 42, { mergeable: 'conflicted', headSha: 'aaa', baseSha: 'bbb' });
+    const failed = createPrConflictFix(db, {
+      repositoryId,
+      prNumber: 42,
+      prUrl: 'https://github.com/acme/demo/pull/42',
+      prTitle: 'Pull request #42',
+      headBranch: 'chief/feature',
+      baseBranch: 'main',
+      headSha: 'aaa',
+      baseSha: 'bbb',
+    });
+    updatePrConflictFix(db, failed.id, {
+      status: 'failed',
+      failureStage: 'verify',
+      attempts: 3,
+      lastError: 'The merge conflicts could not be resolved after 3 attempts.',
+    });
+
+    // The three attempts are spent, so nothing is tried while the pull request
+    // stands where it failed: this is the state the operator is looking at.
+    assert.equal(await scan.tick(), 0);
+    assert.deepEqual(starter.started, []);
+    assert.deepEqual(github.mergeabilityCalls, [{ slug: 'acme/demo', number: 42 }]);
+
+    // Somebody pushed to the branch — quite possibly the manual resolution the
+    // failure asked for. The failure is about a commit that is no longer the
+    // head, so it is stale and a fresh run may start.
+    github.says('acme/demo', 42, { mergeable: 'conflicted', headSha: 'ddd', baseSha: 'bbb' });
+    assert.equal(await scan.tick(), 1);
+    assert.deepEqual(
+      starter.started.map((pull) => pull.headSha),
+      ['ddd'],
+    );
+  });
+
   it('makes no GitHub call at all when no repository is connected', async () => {
     const { github, scan } = world({ repositories: false });
 

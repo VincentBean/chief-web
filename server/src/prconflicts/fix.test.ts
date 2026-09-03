@@ -270,6 +270,86 @@ describe('resolving a pull request’s merge conflicts', () => {
     assert.equal(slots.pumps, 1);
   });
 
+  it('tries again after a failed attempt, and succeeds on the second (US-006)', async () => {
+    // The first agent leaves a marker behind; the second one does the job.
+    exec.markersOut = 'src/one.ts\n';
+    runner.behaviour = () => {
+      if (runner.invocations.length >= 2) exec.markersOut = '';
+    };
+
+    const fix = await runOnce(service());
+
+    assert.equal(fix?.status, 'succeeded');
+    assert.equal(fix?.attempts, 2);
+    assert.equal(fix?.failureStage, null);
+    assert.equal(fix?.lastError, null);
+    assert.equal(fix?.mergeSha, 'merge-sha');
+    assert.equal(runner.invocations.length, 2);
+    // The failed attempt put the branch back before the second one checked it
+    // out again, and the whole run took one container.
+    assert.deepEqual(exec.steps, [
+      'check-head',
+      'clone',
+      'checkout',
+      'fetch-base',
+      'merge',
+      'conflicts',
+      'stage',
+      'status',
+      'markers',
+      'abort',
+      'check-head',
+      'clone',
+      'checkout',
+      'fetch-base',
+      'merge',
+      'conflicts',
+      'stage',
+      'status',
+      'markers',
+      'commit',
+      'push',
+    ]);
+    assert.deepEqual(containersStarted, [fix?.id]);
+    assert.deepEqual(containersRemoved, [fix?.id]);
+  });
+
+  it('gives up after three attempts, records the stage and cleans the container up (US-006)', async () => {
+    // Every attempt's agent leaves the same marker behind.
+    exec.markersOut = 'src/two.ts\n';
+
+    const fix = await runOnce(service());
+
+    assert.equal(fix?.status, 'failed');
+    assert.equal(fix?.attempts, 3);
+    assert.equal(fix?.failureStage, 'verify');
+    assert.notEqual(fix?.finishedAt, null);
+    // Every attempt is in the message, so the operator can see whether it was
+    // the same failure three times or three different ones.
+    assert.match(fix?.lastError ?? '', /after 3 attempts/);
+    assert.match(fix?.lastError ?? '', /Attempt 1 failed at verifying the resolution/);
+    assert.match(fix?.lastError ?? '', /Attempt 3 failed at verifying the resolution/);
+    assert.match(fix?.lastError ?? '', /src\/two\.ts/);
+    assert.equal(runner.invocations.length, 3);
+    // Three attempts, three aborted merges, nothing pushed — and the container
+    // is gone whichever way the run ended.
+    assert.equal(exec.steps.filter((step) => step === 'abort').length, 3);
+    assert.ok(!exec.steps.includes('push'));
+    assert.deepEqual(containersRemoved, [fix?.id]);
+    assert.equal(slots.pumps, 1);
+  });
+
+  it('spends no attempt on a branch that moved under the run (US-006)', async () => {
+    exec.headSha = 'moved111';
+
+    await runOnce(service());
+
+    // The head moved: trying twice more would only check the same wrong commit
+    // out again, so the run is over after one look.
+    assert.equal(exec.steps.filter((step) => step === 'checkout').length, 1);
+    assert.equal(runner.invocations.length, 0);
+  });
+
   it('checks the head branch out at the sha the scan saw, and tells the agent why the pull request exists', async () => {
     await runOnce(service());
 
@@ -417,6 +497,9 @@ describe('resolving a pull request’s merge conflicts', () => {
 
     assert.equal(fix?.status, 'failed');
     assert.equal(fix?.failureStage, 'agent');
+    // The remaining attempts would walk into the same wall, so none is spent.
+    assert.equal(fix?.attempts, 1);
+    assert.equal(runner.invocations.length, 1);
     assert.equal(slots.heldUntil.length, 1);
     assert.notEqual(hold.until(), null);
     assert.deepEqual(runner.reaps, [fix?.id]);
