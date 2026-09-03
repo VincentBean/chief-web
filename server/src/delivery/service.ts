@@ -13,7 +13,14 @@ import {
   updateSession,
 } from '../db/index.js';
 import { isValidGithubSlug } from '../lib/git-url.js';
-import { GithubApiError, type OpenedPullRequest, openPullRequest, type PullRequestInput } from '../lib/github.js';
+import { markPullRequestReadyForReview, type ReadyForReview } from '../lib/github-review.js';
+import {
+  GithubApiError,
+  type OpenedPullRequest,
+  openPullRequest,
+  type PullRequest,
+  type PullRequestInput,
+} from '../lib/github.js';
 import { logger } from '../lib/logger.js';
 import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
@@ -55,14 +62,26 @@ export class DeliveryError extends Error {
 /** The slice of the GitHub API this service needs; tests pass a stub. */
 export interface PullRequestOpener {
   open(token: string, input: PullRequestInput): Promise<OpenedPullRequest>;
+  /**
+   * Undrafts a pull request by its GraphQL node id (US-003). Idempotent: a
+   * pull request that is already ready is a success, not a failure.
+   */
+  markReady(token: string, pullRequestId: string): Promise<ReadyForReview>;
 }
 
-/** The production opener: the real REST API at the configured base URL. */
+/**
+ * The production opener: the real REST API at the configured base URL, plus
+ * the one GraphQL mutation REST has no equivalent for.
+ */
 export class GithubPullRequests implements PullRequestOpener {
-  constructor(private readonly config: Pick<Config, 'githubApiUrl'>) {}
+  constructor(private readonly config: Pick<Config, 'githubApiUrl' | 'githubGraphqlUrl'>) {}
 
   open(token: string, input: PullRequestInput): Promise<OpenedPullRequest> {
     return openPullRequest(token, this.config.githubApiUrl, input);
+  }
+
+  markReady(token: string, pullRequestId: string): Promise<ReadyForReview> {
+    return markPullRequestReadyForReview(token, this.config.githubGraphqlUrl, pullRequestId);
   }
 }
 
@@ -286,11 +305,16 @@ export class DeliveryService implements BuildCompletion {
       ? `Pushed "${session.featureBranch}"; pull request #${String(opened.pullRequest.number)} was already open and has been adopted.`
       : `Pushed "${session.featureBranch}" and opened pull request #${String(opened.pullRequest.number)}.`;
 
+    // The URL goes on the session as soon as the pull request exists, before
+    // any review work: it exists from here on, whatever comes next, and a
+    // session left `failed` further down the chain still has to link to it.
+    updateSession(this.db, session.id, { prUrl: opened.pullRequest.url });
+
     if (session.codeReview && this.review !== null) {
-      // The URL goes on the session *before* the review runs: the pull request
-      // exists from here on, whatever the review does, and a session left
-      // `failed` at the review stage still has to link to it.
-      updateSession(this.db, session.id, { prUrl: opened.pullRequest.url });
+      // The pull request is a draft and stays one while the review runs, so
+      // the board says `reviewing` rather than leaving the session in
+      // `building` with nothing building (US-003).
+      updateSession(this.db, session.id, { status: 'reviewing' });
       const reviewed = await this.review.run(session, token, {
         slug: repository.githubSlug,
         number: opened.pullRequest.number,
@@ -298,10 +322,64 @@ export class DeliveryService implements BuildCompletion {
       if (!reviewed.ok) {
         return this.failed(session, 'review_failed', { message: reviewed.message, stderr: '' });
       }
+      const undrafted = await this.readyForReview(session, token, opened.pullRequest);
+      if (undrafted !== null) {
+        return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });
+      }
       return this.finish(session, opened.pullRequest.url, opened.adopted, `${delivered} ${reviewed.message}`);
     }
 
+    // No review will run, so there is nothing to gate readiness on: the draft
+    // is released straight away and the session ends exactly where it did
+    // before pull requests were opened as drafts (US-003).
+    const undrafted = await this.readyForReview(session, token, opened.pullRequest);
+    if (undrafted !== null) {
+      return this.failed(session, 'pull_request_failed', { message: undrafted, stderr: '' });
+    }
+
     return this.finish(session, opened.pullRequest.url, opened.adopted, delivered);
+  }
+
+  /**
+   * Marks the pull request ready for review, answering `null` when it is (now
+   * or already) ready and the failure's message when it is not (US-003).
+   *
+   * Called unconditionally rather than only for a pull request we know to be a
+   * draft: the mutation is idempotent — an adopted pull request somebody opened
+   * by hand answers "not in the draft state", which the client reads as success
+   * — and that is one behaviour fewer to get wrong than a flag read moments
+   * earlier. The exception is a pull request GitHub sent no node id for: there
+   * is nothing to call the mutation with, so a draft is a failure the operator
+   * retries and a ready one is simply left alone.
+   */
+  private async readyForReview(
+    session: Session,
+    token: string,
+    pullRequest: PullRequest,
+  ): Promise<string | null> {
+    if (pullRequest.nodeId === null) {
+      if (!pullRequest.draft) return null;
+      return (
+        `Pull request #${String(pullRequest.number)} is a draft, but GitHub did not return an id ` +
+        'for it, so it could not be marked ready for review.'
+      );
+    }
+
+    try {
+      const ready = await this.pullRequests.markReady(token, pullRequest.nodeId);
+      logger.info(ready.alreadyReady ? 'pull request was already ready' : 'pull request undrafted', {
+        session: session.id,
+        number: pullRequest.number,
+        url: pullRequest.url,
+      });
+      return null;
+    } catch (cause) {
+      const detail = cause instanceof GithubApiError ? cause.message : describe(cause);
+      return (
+        `The pull request is open at ${pullRequest.url}, but it could not be marked ready for ` +
+        `review: ${detail}`
+      );
+    }
   }
 
   /**

@@ -12,6 +12,7 @@ import {
   IN_MEMORY,
   openDatabase,
   type Session,
+  type SessionStatus,
   setSetting,
   type Story,
   syncStories,
@@ -376,8 +377,15 @@ class World {
 /** A {@link PullRequestOpener} the test scripts. */
 class FakeOpener implements PullRequestOpener {
   readonly calls: { token: string; input: Parameters<PullRequestOpener['open']>[1] }[] = [];
+  /** Every undraft, in order: what the delivery asked GitHub to mark ready. */
+  readonly ready: { token: string; pullRequestId: string }[] = [];
   adopted = false;
   failure: Error | null = null;
+  /** Answers the undraft with this instead of succeeding, when set. */
+  readyFailure: Error | null = null;
+  /** The state the opened/adopted pull request comes back in. */
+  draft = true;
+  nodeId: string | null = 'PR_kwDO7';
   url = 'https://github.com/acme/demo/pull/7';
 
   open(
@@ -387,9 +395,26 @@ class FakeOpener implements PullRequestOpener {
     this.calls.push({ token, input });
     if (this.failure !== null) return Promise.reject(this.failure);
     return Promise.resolve({
-      pullRequest: { number: 7, url: this.url, state: 'open', nodeId: 'PR_kwDO7', draft: true },
+      pullRequest: {
+        number: 7,
+        url: this.url,
+        state: 'open',
+        nodeId: this.nodeId,
+        draft: this.draft,
+      },
       adopted: this.adopted,
     });
+  }
+
+  markReady(
+    token: string,
+    pullRequestId: string,
+  ): ReturnType<PullRequestOpener['markReady']> {
+    this.ready.push({ token, pullRequestId });
+    if (this.readyFailure !== null) return Promise.reject(this.readyFailure);
+    // The real client answers an already-ready pull request the same way it
+    // answers one it just undrafted: success.
+    return Promise.resolve({ isDraft: false, alreadyReady: !this.draft });
   }
 }
 
@@ -425,6 +450,91 @@ describe('delivering a finished session', () => {
     assert.equal(delivered.status, 'pr-open');
     assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(delivered.lastError, null);
+  });
+
+  it('undrafts the pull request it opened when no review will run', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    );
+
+    await delivery.complete(world.session, world.stories());
+
+    // The pull request is opened as a draft and released straight away, so a
+    // session without code review ends exactly where it always did (US-003).
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+  });
+
+  it('undrafts an adopted pull request that is already ready', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.adopted = true;
+    opener.draft = false;
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    );
+
+    await delivery.complete(world.session, world.stories());
+
+    // The undraft is idempotent, so it is called without reading the flag
+    // first — and the refusal it gets back is not an error.
+    assert.equal(opener.ready.length, 1);
+    assert.equal(world.reload().status, 'pr-open');
+    assert.equal(world.reload().lastError, null);
+  });
+
+  it('leaves a ready pull request alone when GitHub sent no node id', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.adopted = true;
+    opener.draft = false;
+    opener.nodeId = null;
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    );
+
+    await delivery.complete(world.session, world.stories());
+
+    assert.equal(opener.ready.length, 0, 'there is nothing to call the mutation with');
+    assert.equal(world.reload().status, 'pr-open');
+    assert.equal(world.reload().lastError, null);
+  });
+
+  it('fails at the pull request stage when the undraft is refused', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.readyFailure = new GithubApiError('github_forbidden', 'no write access', 403);
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    );
+
+    await delivery.complete(world.session, world.stories());
+
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7', 'the link survives');
+    assert.match(failed.lastError ?? '', /marked ready for review/);
   });
 
   it('adopts an existing pull request without failing', async () => {
@@ -746,6 +856,50 @@ describe('the code review of a delivery', () => {
     assert.equal(finished.status, 'pr-open');
     assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
     assert.equal(finished.lastError, null);
+  });
+
+  it('puts the session in reviewing while the draft pull request is reviewed', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    const opener = new FakeOpener();
+    const seen: (SessionStatus | undefined)[] = [];
+    const publisher = new FakePublisher();
+    // Reading the row rather than the handed-over object: the status write is
+    // the point, and the object the step was called with is a snapshot.
+    const watcher: SessionReviewer = {
+      review: (session) => {
+        seen.push(getSession(world.db, session.id)?.status);
+        return reviewer.review(session);
+      },
+    };
+    const delivery = serviceFor(world, opener, new ReviewStep(watcher, publisher));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    assert.deepEqual(seen, ['reviewing'], 'the review runs with the session in reviewing');
+    // The pull request URL is stored before the review, and the undraft waits
+    // until the review is posted (US-003).
+    assert.equal(publisher.calls.length, 1);
+    assert.deepEqual(opener.ready, [{ token: TOKEN, pullRequestId: 'PR_kwDO7' }]);
+    const finished = world.reload();
+    assert.equal(finished.status, 'pr-open');
+    assert.equal(finished.prUrl, 'https://github.com/acme/demo/pull/7');
+  });
+
+  it('stores the pull request URL before the review, and leaves it draft on failure', async () => {
+    const world = new World();
+    const reviewer = new FakeReviewer();
+    reviewer.outcomes = [reviewFailure('agent_failed', 'the agent died')];
+    const opener = new FakeOpener();
+    const delivery = serviceFor(world, opener, new ReviewStep(reviewer, new FakePublisher()));
+
+    await delivery.complete(reviewedSession(world), world.stories());
+
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'review');
+    assert.equal(failed.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(opener.ready.length, 0, 'a review that never worked leaves the draft alone');
   });
 
   it('reviews the pull request it just opened, then finishes the session', async () => {
