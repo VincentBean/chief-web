@@ -25,6 +25,13 @@ export const SETTING_KEYS = [
    */
   'planning_model',
   'build_model',
+  /** `--model` for the automatic pull-request code review; same absent-row rule. */
+  'review_model',
+  /**
+   * Whether a new session gets its code-review flag set when the request does
+   * not say (US-004). Stored as `1`/`0`; an absent row means off.
+   */
+  'code_review_default',
   /**
    * ISO timestamp until which agent work is held after a Claude usage-limit
    * refusal (US-002). Written and read through `limits/hold.ts`; a value in

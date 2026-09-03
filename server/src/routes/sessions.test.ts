@@ -14,10 +14,13 @@ import {
   createRepository,
   type Database,
   deleteSession,
+  deleteSetting,
   IN_MEMORY,
   listSessions,
   openDatabase,
   type Repository,
+  setSetting,
+  updateSession,
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
@@ -178,8 +181,63 @@ describe('sessions api', () => {
     assert.equal(body.session.prTargetBranch, 'develop');
     assert.equal(body.session.repositoryName, 'demo');
     assert.equal(body.session.lastError, null);
+    assert.equal(body.session.codeReview, false);
     assert.deepEqual(started, [body.session.id]);
     assert.deepEqual(removed, []);
+  });
+
+  it('accepts the code review flag on create and toggles it afterwards', async () => {
+    const { body } = await create({ codeReview: true });
+    assert.equal(body.session.codeReview, true);
+
+    const off = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: false,
+    });
+    assert.equal(off.status, 200);
+    assert.equal(((await off.json()) as SessionView).codeReview, false);
+
+    // It is on every session payload, not just the one the write answered with.
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).codeReview, false);
+  });
+
+  it('applies the global default when the create request does not say (US-004)', async () => {
+    setSetting(db, 'code_review_default', '1');
+    try {
+      // No `codeReview` field at all: the server, not the web form, is what
+      // applies the default, so an API-created session gets it too.
+      const on = await create({ name: 'default-on' });
+      assert.equal(on.body.session.codeReview, true);
+
+      // An explicit false still wins over a default of on.
+      const off = await create({ name: 'default-overridden', codeReview: false });
+      assert.equal(off.body.session.codeReview, false);
+    } finally {
+      deleteSetting(db, 'code_review_default');
+    }
+  });
+
+  it('rejects a code review flag that is not a boolean', async () => {
+    const { body } = await create();
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: 'yes',
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as ErrorBody).error, 'invalid_code_review');
+  });
+
+  it('refuses to change the code review flag of a finished session', async () => {
+    const { body } = await create();
+    updateSession(db, body.session.id, { status: 'finished' });
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/code-review`, {
+      codeReview: true,
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_finished');
   });
 
   it('stores a scheduled start as UTC', async () => {

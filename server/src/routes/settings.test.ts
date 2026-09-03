@@ -69,6 +69,8 @@ describe('settings api', () => {
     deleteSetting(db, 'max_concurrent_sessions');
     deleteSetting(db, 'git_author_name');
     deleteSetting(db, 'git_author_email');
+    deleteSetting(db, 'review_model');
+    deleteSetting(db, 'code_review_default');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
   });
@@ -156,6 +158,8 @@ describe('settings api', () => {
       agentTimeoutMinutes: 30,
       planningModel: null,
       buildModel: null,
+      reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -171,6 +175,8 @@ describe('settings api', () => {
       agentTimeoutMinutes: 30,
       planningModel: null,
       buildModel: null,
+      reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -203,6 +209,8 @@ describe('settings api', () => {
       agentTimeoutMinutes: 30,
       planningModel: null,
       buildModel: null,
+      reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -219,6 +227,8 @@ describe('settings api', () => {
       agentTimeoutMinutes: 30,
       planningModel: null,
       buildModel: null,
+      reviewModel: null,
+      codeReviewDefault: false,
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -287,6 +297,38 @@ describe('settings api', () => {
     };
     assert.equal(cleared.planningModel, null);
     // Clearing one must not disturb the other.
+    assert.equal(cleared.buildModel, 'sonnet');
+  });
+
+  it('persists the review model and rejects unknown ones (US-001)', async () => {
+    assert.equal((await put({ reviewModel: 'haiku' })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { reviewModel: string | null }).reviewModel,
+      'haiku',
+    );
+
+    for (const value of ['claude-opus-5', 'Haiku', 'gpt-5', '', 3, true]) {
+      const response = await put({ reviewModel: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_review_model');
+    }
+
+    // Setting the build model leaves the review model alone, and null hands
+    // the choice back to the CLI without disturbing the other two.
+    await put({ planningModel: 'opus', buildModel: 'sonnet' });
+    assert.equal(
+      ((await (await get()).json()) as { reviewModel: string | null }).reviewModel,
+      'haiku',
+    );
+
+    assert.equal((await put({ reviewModel: null })).status, 200);
+    const cleared = (await (await get()).json()) as {
+      planningModel: string | null;
+      buildModel: string | null;
+      reviewModel: string | null;
+    };
+    assert.equal(cleared.reviewModel, null);
+    assert.equal(cleared.planningModel, 'opus');
     assert.equal(cleared.buildModel, 'sonnet');
   });
 

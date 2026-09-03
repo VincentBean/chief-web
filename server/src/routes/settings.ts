@@ -98,6 +98,8 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     agentTimeoutMinutes?: number;
     planningModel?: AgentModel | null;
     buildModel?: AgentModel | null;
+    reviewModel?: AgentModel | null;
+    codeReviewDefault?: boolean;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   } = {};
@@ -161,6 +163,21 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   if ('error' in build) return build;
   if (build.present) update.buildModel = build.value;
 
+  const review = parseModelField(input, 'reviewModel');
+  if ('error' in review) return review;
+  if (review.present) update.reviewModel = review.value;
+
+  if ('codeReviewDefault' in input && input['codeReviewDefault'] !== undefined) {
+    const raw = input['codeReviewDefault'];
+    if (typeof raw !== 'boolean') {
+      return {
+        error: 'invalid_code_review_default',
+        message: 'The code review default must be true or false.',
+      };
+    }
+    update.codeReviewDefault = raw;
+  }
+
   const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {
     error: 'invalid_git_author_name',
     message:
@@ -186,7 +203,7 @@ type ModelField =
   | { readonly present: true; readonly value: AgentModel | null };
 
 /**
- * The two model fields behave alike: omitted leaves the stored value alone,
+ * The model fields all behave alike: omitted leaves the stored value alone,
  * `null` hands the choice back to Claude Code's own default, and a string has
  * to be one chief-web offers.
  *
@@ -194,19 +211,24 @@ type ModelField =
  * it does not know, so an unchecked typo here would not fail — it would quietly
  * run a whole build on whatever the CLI fell back to.
  */
-function parseModelField(
-  input: Record<string, unknown>,
-  key: 'planningModel' | 'buildModel',
-): ModelField | Invalid {
+function parseModelField(input: Record<string, unknown>, key: ModelKey): ModelField | Invalid {
   if (!(key in input) || input[key] === undefined) return ABSENT_MODEL;
   const raw = input[key];
   if (raw === null) return { present: true, value: null };
   if (typeof raw === 'string' && isAgentModel(raw)) return { present: true, value: raw };
   return {
-    error: key === 'planningModel' ? 'invalid_planning_model' : 'invalid_build_model',
+    error: MODEL_ERRORS[key],
     message: `The model must be one of ${AGENT_MODELS.join(', ')}. Send null to let Claude Code choose.`,
   };
 }
+
+type ModelKey = 'planningModel' | 'buildModel' | 'reviewModel';
+
+const MODEL_ERRORS: Record<ModelKey, string> = {
+  planningModel: 'invalid_planning_model',
+  buildModel: 'invalid_build_model',
+  reviewModel: 'invalid_review_model',
+};
 
 const ABSENT_MODEL: ModelField = { present: false };
 

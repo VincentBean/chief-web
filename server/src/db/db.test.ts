@@ -14,12 +14,15 @@ import {
   deleteRepository,
   deleteSession,
   failSession,
+  FAILURE_STAGES,
+  failureStageLabel,
   getAllSettings,
   getRepository,
   getSession,
   getSetting,
   getSettingNumber,
   IN_MEMORY,
+  isDeliveryStage,
   listDueScheduledSessions,
   listQueuedSessions,
   listRepositories,
@@ -40,6 +43,7 @@ import {
 
 /** The migration under test in 'widens the session status check'. */
 const WAITING_MIGRATION = '0005_session_waiting_status';
+const REVIEW_STAGE_MIGRATION = '0007_session_review_failure_stage';
 
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
@@ -153,6 +157,75 @@ describe('migrations', () => {
 
     closeDatabase(db);
   });
+
+  it('widens the failure stage check to `review`, rows intact', () => {
+    // Same rebuild as `0005`, so the same walk: a session that already failed
+    // at the push, with a story and the code-review flag set, has to come out
+    // the other side unchanged (US-006).
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec(
+      'CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);',
+    );
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === REVIEW_STAGE_MIGRATION);
+    assert.ok(index > 0, `${REVIEW_STAGE_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-01T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedRepository(db);
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'legacy',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      codeReview: true,
+    });
+    failSession(db, session.id, 'push', 'Permission denied (publickey).');
+    syncStories(db, session.id, [
+      { storyId: 'US-001', title: 'First', priority: 1, status: 'done' },
+    ]);
+
+    // The stage the schema did not know yet.
+    assert.throws(
+      () =>
+        db
+          .prepare('UPDATE sessions SET failure_stage = ? WHERE id = ?')
+          .run('review', session.id),
+      /CHECK/i,
+    );
+
+    assert.ok(runMigrations(db).includes(REVIEW_STAGE_MIGRATION));
+
+    const migrated = getSession(db, session.id);
+    assert.equal(migrated?.status, 'failed');
+    assert.equal(migrated?.failureStage, 'push');
+    assert.equal(migrated?.lastError, 'Permission denied (publickey).');
+    assert.equal(migrated?.codeReview, true);
+    assert.equal(listStories(db, session.id).length, 1);
+
+    // The widened constraint takes the new stage and still refuses the rest.
+    assert.equal(failSession(db, session.id, 'review', 'The review failed.')?.failureStage, 'review');
+    assert.throws(
+      () => db.prepare('UPDATE sessions SET failure_stage = ? WHERE id = ?').run('bogus', session.id),
+      /CHECK/i,
+    );
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of ['idx_sessions_repository', 'idx_sessions_status', 'idx_sessions_queued_at']) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
+
+    closeDatabase(db);
+  });
 });
 
 describe('persistence across restarts', () => {
@@ -254,6 +327,25 @@ describe('sessions', () => {
     assert.equal(session.containerId, null);
     assert.equal(session.prUrl, null);
     assert.equal(session.lastError, null);
+    assert.equal(session.codeReview, false);
+  });
+
+  it('round-trips the code review flag', () => {
+    const asked = createSession(db, {
+      repositoryId: repository.id,
+      name: 'reviewed',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+      codeReview: true,
+    });
+
+    assert.equal(asked.codeReview, true);
+    // Read back from SQLite, where the flag is a 0/1 integer, not a boolean.
+    assert.equal(getSession(db, asked.id)?.codeReview, true);
+
+    assert.equal(updateSession(db, asked.id, { codeReview: false })?.codeReview, false);
+    assert.equal(getSession(db, asked.id)?.codeReview, false);
+    assert.equal(updateSession(db, asked.id, { codeReview: true })?.codeReview, true);
   });
 
   it('rejects names that are not slugs', () => {
@@ -352,6 +444,31 @@ describe('sessions', () => {
     assert.equal(retried?.lastError, 'container lost');
 
     assert.equal(updateSession(db, 'missing', { status: 'ready' }), null);
+  });
+
+  it('names every failure stage the way the UI says it', () => {
+    // The review sits with the push and the pull request: a delivery step the
+    // retry re-runs on its own (US-006).
+    assert.equal(failureStageLabel('review'), 'the code review');
+    assert.equal(isDeliveryStage('review'), true);
+    assert.equal(isDeliveryStage('agent'), false);
+    assert.equal(isDeliveryStage(null), false);
+    // Every stage has a label; none of them falls through to undefined.
+    for (const stage of FAILURE_STAGES) {
+      assert.equal(typeof failureStageLabel(stage), 'string');
+    }
+  });
+
+  it('stores a review failure like any other stage', () => {
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'reviewed',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+    });
+    const failed = failSession(db, session.id, 'review', 'The code review did not post.');
+    assert.equal(failed?.failureStage, 'review');
+    assert.equal(getSession(db, session.id)?.failureStage, 'review');
   });
 
   it('refuses a failure stage the schema does not know', () => {

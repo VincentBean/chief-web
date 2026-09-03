@@ -48,6 +48,8 @@ export function Settings() {
   const [agentTimeout, setAgentTimeout] = useState('30');
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
+  const [reviewModel, setReviewModel] = useState('');
+  const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
@@ -94,6 +96,8 @@ export function Settings() {
     setAgentTimeout(String(loaded.agentTimeoutMinutes));
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
+    setReviewModel(loaded.reviewModel ?? '');
+    setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
   }
@@ -131,6 +135,8 @@ export function Settings() {
       agentTimeoutMinutes: timeout,
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
+      reviewModel: asModel(reviewModel),
+      codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
     };
@@ -232,6 +238,8 @@ export function Settings() {
     agentTimeout !== String(settings.agentTimeoutMinutes) ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
+    reviewModel !== (settings.reviewModel ?? '') ||
+    codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
     authorEmail !== settings.gitAuthorEmail;
   const claudeStatus = claude?.status ?? null;
@@ -404,6 +412,28 @@ export function Settings() {
               </select>
               <p className="field__hint">Each headless story iteration. Read at the start of every iteration, so a change applies from the next story.</p>
             </div>
+            <div className="field">
+              <label className="field__label" htmlFor="review-model">
+                Review
+              </label>
+              <select id="review-model" name="review-model" value={reviewModel} onChange={(event) => setReviewModel(event.target.value)} className="field__input">
+                <option value="">Let Claude Code choose</option>
+                {AGENT_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {MODEL_LABELS[model]}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">The code review left on a session's pull request. One pass over the finished branch.</p>
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="checkbox">
+              <input type="checkbox" checked={codeReviewDefault} onChange={(event) => setCodeReviewDefault(event.target.checked)} />
+              Run code review on new sessions
+            </label>
+            <p className="field__hint">Only the starting value of the checkbox on a new session; sessions that already exist keep whatever they were created with.</p>
           </div>
         </Panel>
 

@@ -19,12 +19,13 @@ import {
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
-import { createDeliveryService, type DeliveryService } from './delivery/index.js';
+import { createDeliveryService, type DeliveryService, ReviewStep } from './delivery/index.js';
 import { DockerApi } from './docker/index.js';
 import { UsageLimitHold } from './limits/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
+import { createReviewService, GithubReviewPublisher } from './review/index.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
@@ -186,10 +187,29 @@ export function createApp(
   const orchestrator = deps.orchestrator ?? sessionOrchestrator;
   const exec = deps.exec ?? docker;
   const planning = deps.planning ?? createPlanningService(config, db, terminals, orchestrator);
-  // What the build loop does with a finished session: push, then open the pull
-  // request. It is both the loop's completion hand-off and its own endpoint, so
-  // a delivery that failed can be retried without rerunning a story.
-  const delivery = deps.delivery ?? createDeliveryService(config, db, orchestrator, exec);
+  // Assigned further down: the review chains into this solver (US-011), and the
+  // solver needs the build loop's slot cap, which in turn needs the delivery.
+  // The thunk below is what breaks that circle — nothing reads it until a
+  // review has actually posted findings, by which point all three exist.
+  let prFeedback: PrFeedbackService | null = null;
+  // What the build loop does with a finished session: push, open the pull
+  // request, then review it when the session asked for one (US-009). It is both
+  // the loop's completion hand-off and its own endpoint, so a delivery that
+  // failed can be retried without rerunning a story.
+  const delivery =
+    deps.delivery ??
+    createDeliveryService(
+      config,
+      db,
+      orchestrator,
+      exec,
+      undefined,
+      new ReviewStep(
+        createReviewService(config, db, orchestrator, createAgentRunner(exec)),
+        new GithubReviewPublisher(config),
+        () => prFeedback,
+      ),
+    );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
     deps.builds ??
@@ -202,19 +222,11 @@ export function createApp(
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
   // stories, so a full server refuses the run instead of holding it.
+  prFeedback =
+    deps.prFeedback ??
+    createPrFeedbackService(config, db, sessionOrchestrator, exec, createAgentRunner(exec), builds);
   api.use(
-    createPullRequestsRouter(
-      deps.pullRequests ?? createPullRequestService(config, db),
-      deps.prFeedback ??
-        createPrFeedbackService(
-          config,
-          db,
-          sessionOrchestrator,
-          exec,
-          createAgentRunner(exec),
-          builds,
-        ),
-    ),
+    createPullRequestsRouter(deps.pullRequests ?? createPullRequestService(config, db), prFeedback),
   );
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.

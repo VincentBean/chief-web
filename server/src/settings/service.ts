@@ -82,6 +82,10 @@ export interface AppSettings {
   readonly planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` leaves the CLI to choose. */
   readonly buildModel: AgentModel | null;
+  /** Model the automatic code review runs on; `null` leaves the CLI to choose. */
+  readonly reviewModel: AgentModel | null;
+  /** Whether new sessions are created with the code-review flag already on. */
+  readonly codeReviewDefault: boolean;
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
 }
@@ -94,6 +98,8 @@ export interface AppSettingsUpdate {
   /** `null` hands the choice back to the CLI; omitted leaves the stored value. */
   readonly planningModel?: AgentModel | null;
   readonly buildModel?: AgentModel | null;
+  readonly reviewModel?: AgentModel | null;
+  readonly codeReviewDefault?: boolean;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
@@ -183,9 +189,29 @@ export function getBuildModel(db: Database): AgentModel | null {
   return readModel(db, 'build_model');
 }
 
-function readModel(db: Database, key: 'planning_model' | 'build_model'): AgentModel | null {
+/** As above, for the headless review pass over a session's pull request. */
+export function getReviewModel(db: Database): AgentModel | null {
+  return readModel(db, 'review_model');
+}
+
+function readModel(
+  db: Database,
+  key: 'planning_model' | 'build_model' | 'review_model',
+): AgentModel | null {
   const stored = getSetting(db, key);
   return stored !== null && isAgentModel(stored) ? stored : null;
+}
+
+/**
+ * Whether a session created without an explicit `codeReview` gets the flag.
+ *
+ * Read at creation time rather than copied into new sessions by the web form,
+ * so a session created straight over the API honours the default too. Only the
+ * default is global: once a session exists its own flag is what counts, and
+ * changing this leaves existing sessions alone.
+ */
+export function getCodeReviewDefault(db: Database): boolean {
+  return getSetting(db, 'code_review_default') === '1';
 }
 
 /** The commit identity runner containers are started with (US-006). */
@@ -210,6 +236,8 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     agentTimeoutMinutes: Math.round(getAgentTimeoutMs(db, config) / MS_PER_MINUTE),
     planningModel: getPlanningModel(db),
     buildModel: getBuildModel(db),
+    reviewModel: getReviewModel(db),
+    codeReviewDefault: getCodeReviewDefault(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
   };
@@ -232,7 +260,7 @@ export function updateAppSettings(
       setSettingNumber(db, 'agent_timeout_minutes', update.agentTimeoutMinutes);
     }
 
-    // For both models `null` clears the row, which is what "let the CLI
+    // For every model `null` clears the row, which is what "let the CLI
     // choose" is stored as — there is no sentinel model name for it.
     if (update.planningModel === null) deleteSetting(db, 'planning_model');
     else if (update.planningModel !== undefined) {
@@ -241,6 +269,13 @@ export function updateAppSettings(
 
     if (update.buildModel === null) deleteSetting(db, 'build_model');
     else if (update.buildModel !== undefined) setSetting(db, 'build_model', update.buildModel);
+
+    if (update.reviewModel === null) deleteSetting(db, 'review_model');
+    else if (update.reviewModel !== undefined) setSetting(db, 'review_model', update.reviewModel);
+
+    if (update.codeReviewDefault !== undefined) {
+      setSetting(db, 'code_review_default', update.codeReviewDefault ? '1' : '0');
+    }
 
     // `null` clears the row, which makes the built-in default apply again.
     if (update.gitAuthorName === null) deleteSetting(db, 'git_author_name');

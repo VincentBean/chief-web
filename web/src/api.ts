@@ -68,6 +68,10 @@ export interface Settings {
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
   buildModel: AgentModel | null;
+  /** Model the pull request review runs on; `null` lets Claude Code choose. */
+  reviewModel: AgentModel | null;
+  /** Whether new sessions start with their code-review flag on (US-004). */
+  codeReviewDefault: boolean;
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -81,6 +85,8 @@ export interface SettingsUpdate {
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
+  reviewModel?: AgentModel | null;
+  codeReviewDefault?: boolean;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
@@ -248,6 +254,8 @@ export interface Session {
   stories: { total: number; done: number };
   /** Whether `/workspace/repo` is a clone — i.e. whether setup finished. */
   cloned: boolean;
+  /** Whether the pull request this session opens is reviewed automatically. */
+  codeReview: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -255,7 +263,7 @@ export interface Session {
 export type PrTargetBranch = 'develop' | 'main';
 
 /** Mirrors the server's `FailureStage` (US-019): where a session failed. */
-export type FailureStage = 'agent' | 'prd' | 'push' | 'pull_request' | 'container_lost';
+export type FailureStage = 'agent' | 'prd' | 'push' | 'pull_request' | 'review' | 'container_lost';
 
 /** What each stage is called on screen. */
 export function failureStageLabel(stage: FailureStage): string {
@@ -268,9 +276,19 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the push';
     case 'pull_request':
       return 'the pull request';
+    case 'review':
+      return 'the code review';
     case 'container_lost':
       return 'the container';
   }
+}
+
+/**
+ * Mirrors the server's `isDeliveryStage`: the stages after the build, whose
+ * retry re-runs delivery from the step that failed and never a story.
+ */
+export function isDeliveryStage(stage: FailureStage | null): boolean {
+  return stage === 'push' || stage === 'pull_request' || stage === 'review';
 }
 
 export interface SessionInput {
@@ -281,6 +299,8 @@ export interface SessionInput {
   prTargetBranch: PrTargetBranch;
   /** UTC ISO-8601; omit or null for "start it by hand". */
   scheduledStartAt?: string | null;
+  /** Omit to fall back to the global "code review by default" setting. */
+  codeReview?: boolean;
 }
 
 /** The clone's outcome; `ok: false` is an answer, not a failed request. */
@@ -507,6 +527,18 @@ export async function setSessionSchedule(
   return api<Session>(`/api/sessions/${encodeURIComponent(id)}/schedule`, {
     method: 'PUT',
     body: JSON.stringify({ scheduledStartAt }),
+  });
+}
+
+/**
+ * Turns the automatic code review of this session's pull request on or off
+ * (US-005). Allowed until the session is finished, after which the review has
+ * either run or missed its chance.
+ */
+export async function setSessionCodeReview(id: string, codeReview: boolean): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/code-review`, {
+    method: 'PUT',
+    body: JSON.stringify({ codeReview }),
   });
 }
 
