@@ -249,6 +249,7 @@ The rest of the manual lives in [`docs/`](docs/):
 | [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
 | [Code review](docs/code-review.md) | the per-session flag, the review model, what lands on the pull request, the three attempts, the feedback hand-off, reviewing an open pull request by hand |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts and the FIFO build queue |
+| [Merge conflict fixer](docs/merge-conflicts.md) | the conflict scan, the `chief/`-branch rule, the three attempts, and what letting an agent push to your pull requests means |
 | [Web interface](docs/interface.md) | the layout and shortcuts, the overview, sessions, browser terminals, the settings page |
 | [Claude authentication](docs/claude-auth.md) | the one-time login and the shared credentials volume |
 | [Security model](docs/security.md) | what the password protects, and what it does not |

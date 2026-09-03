@@ -384,7 +384,10 @@ describe('pull request conflict scan', () => {
     // The three attempts are spent, so nothing is tried while the pull request
     // stands where it failed: this is the state the operator is looking at.
     assert.equal(await scan.tick(), 0);
-    assert.deepEqual(starter.started, []);
+    // Spread rather than the property itself: `assert.deepEqual` is typed
+    // `asserts actual is T`, so passing `starter.started` would narrow it to
+    // `never[]` for the rest of the test and break the `.map` below.
+    assert.deepEqual([...starter.started], []);
     assert.deepEqual(github.mergeabilityCalls, [{ slug: 'acme/demo', number: 42 }]);
 
     // Somebody pushed to the branch — quite possibly the manual resolution the
