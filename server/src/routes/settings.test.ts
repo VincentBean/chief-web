@@ -14,7 +14,12 @@ import {
   openDatabase,
   setSetting,
 } from '../db/index.js';
-import { getMaxConcurrentSessions, getPrSyncIntervalMs } from '../settings/index.js';
+import {
+  getConflictFixEnabled,
+  getMaxConcurrentSessions,
+  getPrConflictIntervalMs,
+  getPrSyncIntervalMs,
+} from '../settings/index.js';
 
 const PASSWORD = 'correct horse battery staple';
 const TOKEN = 'ghp_exampleTokenValue1234';
@@ -68,6 +73,8 @@ describe('settings api', () => {
     deleteSetting(db, 'github_token');
     deleteSetting(db, 'max_concurrent_sessions');
     deleteSetting(db, 'pr_sync_interval_minutes');
+    deleteSetting(db, 'pr_conflict_interval_minutes');
+    deleteSetting(db, 'conflict_fix_enabled');
     deleteSetting(db, 'git_author_name');
     deleteSetting(db, 'git_author_email');
     deleteSetting(db, 'review_model');
@@ -158,6 +165,8 @@ describe('settings api', () => {
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
       prSyncIntervalMinutes: 15,
+      prConflictIntervalMinutes: 30,
+      conflictFixEnabled: true,
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -176,6 +185,8 @@ describe('settings api', () => {
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
       prSyncIntervalMinutes: 15,
+      prConflictIntervalMinutes: 30,
+      conflictFixEnabled: true,
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -211,6 +222,8 @@ describe('settings api', () => {
       maxConcurrentSessions: 7,
       agentTimeoutMinutes: 30,
       prSyncIntervalMinutes: 15,
+      prConflictIntervalMinutes: 30,
+      conflictFixEnabled: true,
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -230,6 +243,8 @@ describe('settings api', () => {
       maxConcurrentSessions: 3,
       agentTimeoutMinutes: 30,
       prSyncIntervalMinutes: 15,
+      prConflictIntervalMinutes: 30,
+      conflictFixEnabled: true,
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -398,6 +413,82 @@ describe('settings api', () => {
       ((await (await get()).json()) as { prSyncIntervalMinutes: number }).prSyncIntervalMinutes,
       5,
     );
+  });
+
+  it('persists the merge conflict scan interval and rejects out-of-range values (US-004)', async () => {
+    // Half an hour by default: often enough to catch a conflict the morning
+    // after, cheap enough to leave running on a shared rate limit.
+    assert.equal(
+      ((await (await get()).json()) as { prConflictIntervalMinutes: number })
+        .prConflictIntervalMinutes,
+      30,
+    );
+
+    assert.equal((await put({ prConflictIntervalMinutes: 10 })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { prConflictIntervalMinutes: number })
+        .prConflictIntervalMinutes,
+      10,
+    );
+    assert.equal(getPrConflictIntervalMs(db, loadConfig({})), 10 * 60_000);
+
+    const tooShort = await put({ prConflictIntervalMinutes: 0 });
+    assert.equal(tooShort.status, 400);
+    const body = (await tooShort.json()) as { error: string; message: string };
+    assert.equal(body.error, 'invalid_pr_conflict_interval_minutes');
+    assert.match(body.message, /whole number of minutes between 1 and 1440/);
+
+    for (const value of [-5, 1441, 1.5, '10', null]) {
+      const response = await put({ prConflictIntervalMinutes: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_pr_conflict_interval_minutes',
+      );
+    }
+
+    // Nothing a rejected request carried was stored.
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(
+      ((await (await get()).json()) as { prConflictIntervalMinutes: number })
+        .prConflictIntervalMinutes,
+      10,
+    );
+  });
+
+  it('turns the merge conflict fixer off and back on (US-004)', async () => {
+    // Enabled until the operator says otherwise.
+    assert.equal(
+      ((await (await get()).json()) as { conflictFixEnabled: boolean }).conflictFixEnabled,
+      true,
+    );
+
+    assert.equal(
+      ((await put({ conflictFixEnabled: false })).status),
+      200,
+    );
+    assert.equal(
+      ((await (await get()).json()) as { conflictFixEnabled: boolean }).conflictFixEnabled,
+      false,
+    );
+    assert.equal(getConflictFixEnabled(db), false);
+
+    // An unrelated save leaves the switch where the operator left it.
+    await put({ maxConcurrentSessions: 2 });
+    assert.equal(getConflictFixEnabled(db), false);
+
+    assert.equal((await put({ conflictFixEnabled: true })).status, 200);
+    assert.equal(getConflictFixEnabled(db), true);
+
+    for (const value of ['false', 0, null]) {
+      const response = await put({ conflictFixEnabled: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_conflict_fix_enabled',
+      );
+    }
+    assert.equal(getConflictFixEnabled(db), true);
   });
 
   it('validates the stored token and returns the login', async () => {

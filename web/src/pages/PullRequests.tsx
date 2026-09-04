@@ -6,7 +6,9 @@ import {
   fetchPullRequestFeedback,
   fetchPullRequests,
   type PrReview,
+  type PrConflictFix,
   type PrRun,
+  prConflictFixPhaseLabel,
   prFailureStageLabel,
   prPhaseLabel,
   prReviewFailureStageLabel,
@@ -464,6 +466,7 @@ function PullRequestRow({
             {pull.fromFork && <Badge tone="danger">fork</Badge>}
             {run !== undefined && <RunBadge run={run} />}
             {review !== undefined && <ReviewBadge review={review} />}
+            {pull.conflictFix !== null && <ConflictFixBadge fix={pull.conflictFix} />}
           </span>
           <span className="row__meta">
             <span className="mono">
@@ -518,6 +521,7 @@ function PullRequestRow({
 
       {review !== undefined && review.status !== 'pending' && <ReviewSummary review={review} />}
       {run !== undefined && run.status !== 'pending' && <RunSummary run={run} />}
+      {pull.conflictFix !== null && <ConflictFixSummary fix={pull.conflictFix} />}
 
       {expanded && (
         <div className="pr__panel" id={panelId}>
@@ -561,6 +565,84 @@ function ReviewBadge({ review }: { readonly review: PrReview }) {
   }
   if (review.status === 'finished') return <Badge tone="review">reviewed</Badge>;
   return null;
+}
+
+/**
+ * What the merge conflict fixer has made of this pull request (US-006).
+ *
+ * Nobody starts one of these from here, so there is no button and no polling:
+ * the badge is the scan reporting in. A pull request with no fix row shows
+ * nothing at all, which is the "none" state — the vast majority of rows.
+ */
+function ConflictFixBadge({ fix }: { readonly fix: PrConflictFix }) {
+  if (fix.running && fix.phase !== null) {
+    return (
+      <Badge tone="active" pulse>
+        fixing conflicts: {prConflictFixPhaseLabel(fix.phase)}
+        {fix.attempts > 1 && ` (attempt ${String(fix.attempts)})`}
+      </Badge>
+    );
+  }
+  if (fix.status === 'failed') {
+    return (
+      <Badge tone="danger">
+        conflicts unresolved
+        {fix.failureStageLabel === null ? '' : `: ${fix.failureStageLabel}`}
+      </Badge>
+    );
+  }
+  if (fix.status === 'succeeded') return <Badge tone="done">conflicts fixed</Badge>;
+  // `running` on the row but nothing driving it: this server restarted mid-run.
+  return <Badge tone="wait">conflict fix interrupted</Badge>;
+}
+
+/**
+ * The failure an operator has to act on, spelled out: which stage broke, what
+ * it said, and how many attempts were spent before it was given up on.
+ */
+function ConflictFixSummary({ fix }: { readonly fix: PrConflictFix }) {
+  if (fix.running) {
+    return (
+      <p className="row__meta">
+        Fixing merge conflicts · attempt {fix.attempts} of 3 · started{' '}
+        {fix.startedAt === null ? 'just now' : since(fix.startedAt)}
+      </p>
+    );
+  }
+  if (fix.status === 'failed') {
+    return (
+      <div className="pr__run">
+        <Notice kind="error">
+          <strong>
+            The merge conflicts could not be resolved automatically
+            {fix.failureStageLabel === null ? '' : ` — it failed at ${fix.failureStageLabel}`}.
+          </strong>{' '}
+          {fix.attempts} of 3 attempts were spent; nothing was pushed, so{' '}
+          <code className="mono">{fix.headBranch}</code> still has to be merged with{' '}
+          <code className="mono">{fix.baseBranch}</code> by hand. It will only be tried again once
+          the pull request or its base branch moves.
+          {fix.lastError !== null && <span className="pr__error">{fix.lastError}</span>}
+        </Notice>
+      </div>
+    );
+  }
+  if (fix.status === 'succeeded') {
+    return (
+      <div className="pr__run">
+        <Notice kind="ok">
+          The merge conflicts were resolved and pushed
+          {fix.finishedAt === null ? '' : ` ${since(fix.finishedAt)}`}
+          {fix.mergeSha === null ? '' : ` as ${fix.mergeSha.slice(0, 7)}`}.
+        </Notice>
+      </div>
+    );
+  }
+  return (
+    <p className="row__meta">
+      A conflict fix was interrupted by a restart; it is wound back when the server comes back up,
+      and the next scan looks at this pull request again.
+    </p>
+  );
 }
 
 function ReviewSummary({ review }: { readonly review: PrReview }) {

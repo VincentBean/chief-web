@@ -5,6 +5,7 @@ import { loadConfig } from '../config.js';
 import {
   closeDatabase,
   type Database,
+  deleteSetting,
   getSetting,
   IN_MEMORY,
   openDatabase,
@@ -13,7 +14,9 @@ import {
 import {
   getBuildModel,
   getCodeReviewDefault,
+  getConflictFixEnabled,
   getPlanningModel,
+  getPrConflictIntervalMs,
   getReviewModel,
   readAppSettings,
   updateAppSettings,
@@ -121,5 +124,78 @@ describe('code review default setting (US-004)', () => {
     setSetting(db, 'code_review_default', 'yes');
 
     assert.equal(getCodeReviewDefault(db), false);
+  });
+});
+
+describe('merge conflict scan interval and switch (US-004)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'pr_conflict_interval_minutes');
+    deleteSetting(db, 'conflict_fix_enabled');
+  });
+
+  it('falls back to the thirty-minute default with nothing stored', () => {
+    assert.equal(getPrConflictIntervalMs(db, config), 30 * 60_000);
+    assert.equal(readAppSettings(db, config).prConflictIntervalMinutes, 30);
+  });
+
+  it('prefers a stored override over the environment default', () => {
+    const saved = updateAppSettings(db, config, { prConflictIntervalMinutes: 10 });
+
+    assert.equal(saved.prConflictIntervalMinutes, 10);
+    assert.equal(getPrConflictIntervalMs(db, config), 10 * 60_000);
+    assert.equal(getSetting(db, 'pr_conflict_interval_minutes'), '10');
+  });
+
+  it('clamps a hand-edited row to the bounds the route enforces', () => {
+    // A row written straight into the database must not be able to poll
+    // GitHub every second, nor stall the scan for a month.
+    setSetting(db, 'pr_conflict_interval_minutes', '9999');
+    assert.equal(getPrConflictIntervalMs(db, config), 1440 * 60_000);
+
+    setSetting(db, 'pr_conflict_interval_minutes', '0');
+    assert.equal(getPrConflictIntervalMs(db, config), 30 * 60_000, 'non-positive falls back');
+
+    setSetting(db, 'pr_conflict_interval_minutes', 'not a number');
+    assert.equal(getPrConflictIntervalMs(db, config), 30 * 60_000);
+  });
+
+  it('is enabled until the operator turns it off', () => {
+    assert.equal(getSetting(db, 'conflict_fix_enabled'), null);
+    assert.equal(getConflictFixEnabled(db), true);
+    assert.equal(readAppSettings(db, config).conflictFixEnabled, true);
+  });
+
+  it('stores the disabled state and reads it back', () => {
+    const saved = updateAppSettings(db, config, { conflictFixEnabled: false });
+
+    assert.equal(saved.conflictFixEnabled, false);
+    assert.equal(getConflictFixEnabled(db), false);
+    assert.equal(getSetting(db, 'conflict_fix_enabled'), '0');
+
+    const back = updateAppSettings(db, config, { conflictFixEnabled: true });
+    assert.equal(back.conflictFixEnabled, true);
+    assert.equal(getSetting(db, 'conflict_fix_enabled'), '1');
+  });
+
+  it('leaves both alone when the fields are omitted', () => {
+    updateAppSettings(db, config, { prConflictIntervalMinutes: 45, conflictFixEnabled: false });
+
+    const other = updateAppSettings(db, config, { maxConcurrentSessions: 4 });
+
+    assert.equal(other.prConflictIntervalMinutes, 45);
+    assert.equal(other.conflictFixEnabled, false);
+  });
+
+  it('reads any row that is not "0" as enabled, so only a deliberate off counts', () => {
+    setSetting(db, 'conflict_fix_enabled', 'nonsense');
+
+    assert.equal(getConflictFixEnabled(db), true);
   });
 });

@@ -1230,6 +1230,17 @@
     padding-left: 1.75rem;
   }
 
+  /* What the failing stage actually said, kept readable inside its notice. */
+  .pr__error {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    margin-top: 0.5rem;
+    max-height: 12rem;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+
   .threads {
     display: flex;
     flex-direction: column;

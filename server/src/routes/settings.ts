@@ -13,9 +13,11 @@ import {
   isValidGitAuthorName,
   MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
+  MAX_PR_CONFLICT_INTERVAL_MINUTES,
   MAX_PR_SYNC_INTERVAL_MINUTES,
   MIN_AGENT_TIMEOUT_MINUTES,
   MIN_CONCURRENT_SESSIONS,
+  MIN_PR_CONFLICT_INTERVAL_MINUTES,
   MIN_PR_SYNC_INTERVAL_MINUTES,
   readAppSettings,
   updateAppSettings,
@@ -99,6 +101,8 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     maxConcurrentSessions?: number;
     agentTimeoutMinutes?: number;
     prSyncIntervalMinutes?: number;
+    prConflictIntervalMinutes?: number;
+    conflictFixEnabled?: boolean;
     planningModel?: AgentModel | null;
     buildModel?: AgentModel | null;
     reviewModel?: AgentModel | null;
@@ -172,6 +176,33 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.prSyncIntervalMinutes = raw;
+  }
+
+  if ('prConflictIntervalMinutes' in input && input['prConflictIntervalMinutes'] !== undefined) {
+    const raw = input['prConflictIntervalMinutes'];
+    if (
+      typeof raw !== 'number' ||
+      !Number.isInteger(raw) ||
+      raw < MIN_PR_CONFLICT_INTERVAL_MINUTES ||
+      raw > MAX_PR_CONFLICT_INTERVAL_MINUTES
+    ) {
+      return {
+        error: 'invalid_pr_conflict_interval_minutes',
+        message: `The merge conflict scan interval must be a whole number of minutes between ${MIN_PR_CONFLICT_INTERVAL_MINUTES} and ${MAX_PR_CONFLICT_INTERVAL_MINUTES}.`,
+      };
+    }
+    update.prConflictIntervalMinutes = raw;
+  }
+
+  if ('conflictFixEnabled' in input && input['conflictFixEnabled'] !== undefined) {
+    const raw = input['conflictFixEnabled'];
+    if (typeof raw !== 'boolean') {
+      return {
+        error: 'invalid_conflict_fix_enabled',
+        message: 'The merge conflict fixer switch must be true or false.',
+      };
+    }
+    update.conflictFixEnabled = raw;
   }
 
   const planning = parseModelField(input, 'planningModel');

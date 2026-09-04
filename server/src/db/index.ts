@@ -1,5 +1,6 @@
 export { closeDatabase, IN_MEMORY, openDatabase } from './database.js';
 export { MIGRATIONS, type Migration, runMigrations } from './migrations.js';
+export * from './pr-conflict-fixes.js';
 export * from './pr-reviews.js';
 export * from './pr-runs.js';
 export * from './repositories.js';

@@ -75,6 +75,15 @@ export interface Config {
    * 10 of them, which is why polling this at all is affordable.
    */
   readonly prSyncIntervalMs: number;
+  /**
+   * How often the conflict fixer scans every connected repository's open pull
+   * requests for merge conflicts (US-003). One list request per repository per
+   * tick plus one detail request per `chief/` candidate, so the default of 30
+   * minutes costs ~22 requests/hour with ten candidates — the same order as the
+   * pull request sync. US-004 turns this into a settings-page dial; until then
+   * the environment variable is the only override.
+   */
+  readonly prConflictIntervalMs: number;
   /** Cap on how long a repository "test connection" run may take. */
   readonly connectionTestTimeoutMs: number;
   /** Lines of terminal output replayed to a browser that (re)attaches. */
@@ -159,6 +168,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // The same floor, for the same reason: below a minute the scan stops being a
+  // background job and starts being a way to spend the hour's rate limit on a
+  // handful of pull requests.
+  const prConflictIntervalMs = int('PR_CONFLICT_INTERVAL_MS', 1_800_000);
+  if (prConflictIntervalMs < 60_000) {
+    throw new Error(
+      `Environment variable PR_CONFLICT_INTERVAL_MS must be at least 60000, got "${String(prConflictIntervalMs)}"`,
+    );
+  }
+
   // The login throttle is the only thing standing between an unauthenticated
   // caller and unlimited password guessing, so it cannot be configured away:
   // zero attempts would lock the operator out, and a zero-length window would
@@ -199,6 +218,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pushTimeoutMs: int('PUSH_TIMEOUT_MS', 300_000),
     schedulerIntervalMs,
     prSyncIntervalMs,
+    prConflictIntervalMs,
     connectionTestTimeoutMs: int('CONNECTION_TEST_TIMEOUT_MS', 60_000),
     terminalScrollbackLines: int('TERMINAL_SCROLLBACK_LINES', 2000),
     terminalScrollbackBytes: int('TERMINAL_SCROLLBACK_BYTES', 1_048_576),
