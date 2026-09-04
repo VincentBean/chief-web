@@ -25,6 +25,10 @@ export const SESSION_TONE: Record<Session['status'], Tone> = {
   // The purple pair is the pull request lifecycle; a session that ended with
   // no pull request is done green, because nothing about it is still moving.
   finished: 'done',
+  // The draft chain: the review reads (purple, like the pull request it is
+  // about), the feedback run writes (green-blue `active`, like a build).
+  reviewing: 'review',
+  fixing: 'active',
   'pr-open': 'review',
   merged: 'final',
 };
@@ -43,9 +47,16 @@ export const SESSION_LABEL: Record<Session['status'], string> = {
   waiting: 'on hold',
   failed: 'failed',
   finished: 'finished',
+  reviewing: 'reviewing',
+  fixing: 'fixing feedback',
   'pr-open': 'pr open',
   merged: 'merged',
 };
+
+/** Statuses with an agent of their own running: worth a moving dot. */
+function isRunning(status: Session['status']): boolean {
+  return status === 'building' || status === 'reviewing' || status === 'fixing';
+}
 
 export function Badge({
   tone = 'neutral',
@@ -71,7 +82,7 @@ export function StatusBadge({ session }: { readonly session: Pick<Session, 'stat
   // the state and the thing in that state are the same click.
   const pr = session.status === 'pr-open' || session.status === 'merged' ? session.prUrl : null;
   const badge = (
-    <Badge tone={SESSION_TONE[session.status]} pulse={session.status === 'building'}>
+    <Badge tone={SESSION_TONE[session.status]} pulse={isRunning(session.status)}>
       {SESSION_LABEL[session.status]}
       {pr !== null && <Icon name="link-external" />}
     </Badge>
@@ -94,7 +105,7 @@ export function StatusBadge({ session }: { readonly session: Pick<Session, 'stat
 export function StatusDot({ status }: { readonly status: Session['status'] }) {
   return (
     <span
-      className={`dot dot--${SESSION_TONE[status]}${status === 'building' ? ' dot--pulse' : ''}`}
+      className={`dot dot--${SESSION_TONE[status]}${isRunning(status) ? ' dot--pulse' : ''}`}
       title={SESSION_LABEL[status]}
       aria-label={SESSION_LABEL[status]}
       role="img"

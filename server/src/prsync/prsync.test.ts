@@ -163,6 +163,65 @@ describe('pull request sync', () => {
     assert.equal(row?.lastError, null);
   });
 
+  it('moves a session merged while its review was running out of the chain (US-007)', async () => {
+    const { db, github, containers, sync, session } = world();
+    const reviewing = session({
+      name: 'reviewed',
+      status: 'reviewing',
+      prUrl: 'https://github.com/acme/demo/pull/21',
+      containerId: 'c-reviewing',
+    });
+    github.merged('acme/demo', 21);
+
+    assert.equal(await sync.tick(), 1);
+
+    const row = getSession(db, reviewing.id);
+    assert.equal(row?.status, 'merged');
+    // The review still running against it is abandoned with its container:
+    // a merged pull request is the last word on the work it was reviewing.
+    assert.deepEqual(containers.removed, [reviewing.id]);
+    assert.equal(row?.containerId, null);
+  });
+
+  it('puts a session whose draft was closed while it was fixing back to finished (US-007)', async () => {
+    const { db, github, sync, session } = world();
+    const fixing = session({
+      name: 'abandoned-draft',
+      status: 'fixing',
+      prUrl: 'https://github.com/acme/demo/pull/22',
+    });
+    github.closed('acme/demo', 22);
+
+    assert.equal(await sync.tick(), 1);
+
+    const row = getSession(db, fixing.id);
+    assert.equal(row?.status, 'finished');
+    assert.equal(row?.prUrl, 'https://github.com/acme/demo/pull/22');
+    // Nothing is failed by somebody closing a pull request.
+    assert.equal(row?.lastError, null);
+    assert.equal(row?.failureStage, null);
+  });
+
+  it('leaves a session whose draft is still open in the chain it is in (US-007)', async () => {
+    const { db, sync, session } = world();
+    const reviewing = session({
+      name: 'still-reviewing',
+      status: 'reviewing',
+      prUrl: 'https://github.com/acme/demo/pull/23',
+    });
+    const fixing = session({
+      name: 'still-fixing',
+      status: 'fixing',
+      prUrl: 'https://github.com/acme/demo/pull/24',
+    });
+
+    assert.equal(await sync.tick(), 0);
+
+    assert.equal(getSession(db, reviewing.id)?.status, 'reviewing');
+    assert.equal(getSession(db, fixing.id)?.status, 'fixing');
+    assert.equal(getSession(db, reviewing.id)?.updatedAt, reviewing.updatedAt);
+  });
+
   it('leaves a session whose pull request is still open exactly where it is', async () => {
     const { db, sync, session } = world();
     const waiting = session({ name: 'in-review', prUrl: 'https://github.com/acme/demo/pull/3' });
@@ -193,10 +252,12 @@ describe('pull request sync', () => {
     assert.equal(github.calls.length, 3);
   });
 
-  it('asks GitHub once per pr-open session and about nothing else', async () => {
+  it('asks GitHub once per session with a pull request and about nothing else', async () => {
     const { github, sync, session } = world();
     session({ name: 'open-one', prUrl: 'https://github.com/acme/demo/pull/11' });
     session({ name: 'open-two', prUrl: 'https://github.com/acme/demo/pull/12' });
+    session({ name: 'in-review', status: 'reviewing', prUrl: 'https://github.com/acme/demo/pull/14' });
+    session({ name: 'in-fixing', status: 'fixing', prUrl: 'https://github.com/acme/demo/pull/15' });
     session({ name: 'building-one', status: 'building', prUrl: null });
     session({ name: 'finished-one', status: 'finished', prUrl: null });
     session({ name: 'merged-one', status: 'merged', prUrl: 'https://github.com/acme/demo/pull/13' });
@@ -206,7 +267,7 @@ describe('pull request sync', () => {
 
     assert.deepEqual(
       github.calls.map((call) => call.number).sort((left, right) => left - right),
-      [11, 12],
+      [11, 12, 14, 15],
     );
   });
 

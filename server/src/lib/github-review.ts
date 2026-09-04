@@ -570,6 +570,68 @@ export async function resolveReviewThread(
   return { isResolved: thread !== null && thread['isResolved'] === true };
 }
 
+/** The mutation, exported so a test can assert it still sends what it must. */
+export const MARK_READY_FOR_REVIEW_MUTATION = `
+mutation($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { id isDraft }
+  }
+}`;
+
+/** What an undraft did: the state afterwards, and whether it had to act. */
+export interface ReadyForReview {
+  /** The pull request's draft flag after the call — false on success. */
+  readonly isDraft: boolean;
+  /** It was already ready, so the mutation was a no-op. */
+  readonly alreadyReady: boolean;
+}
+
+/**
+ * `markPullRequestReadyForReview(input: { pullRequestId })` — undraft (US-001).
+ *
+ * GraphQL-only: REST cannot flip `draft` to ready, which is why the pull
+ * request's `node_id` is carried all the way from the create/list response.
+ *
+ * Idempotent by construction. GitHub rejects the mutation on a pull request
+ * that is already ready, and delivery meets that case routinely — an adopted
+ * pull request somebody opened by hand, or a retry after the undraft succeeded
+ * and something later did not. That rejection says the caller's goal is
+ * already true, so it is reported as success rather than raised.
+ */
+export async function markPullRequestReadyForReview(
+  token: string,
+  graphqlUrl: string,
+  pullRequestId: string,
+): Promise<ReadyForReview> {
+  try {
+    const data = await githubGraphql<{
+      markPullRequestReadyForReview?: { pullRequest?: unknown } | null;
+    }>(token, graphqlUrl, MARK_READY_FOR_REVIEW_MUTATION, { pullRequestId });
+    const pr = asRecord(data.markPullRequestReadyForReview?.pullRequest);
+    return { isDraft: pr !== null && pr['isDraft'] === true, alreadyReady: false };
+  } catch (cause) {
+    if (isAlreadyReady(cause)) return { isDraft: false, alreadyReady: true };
+    throw cause;
+  }
+}
+
+/**
+ * Tells "this pull request is not a draft" from every other refusal.
+ *
+ * GitHub answers that one with an `UNPROCESSABLE` error — "Pull request is not
+ * in the draft state" — which {@link githubGraphql} maps to a plain
+ * `github_error`, so the message is the only thing left to read. Deliberately
+ * narrow: a missing pull request or a token without write access must still
+ * fail loudly, and neither of those says "draft".
+ */
+function isAlreadyReady(cause: unknown): boolean {
+  return (
+    cause instanceof GithubApiError &&
+    cause.code === 'github_error' &&
+    /\bnot\b[^.]*\bdraft\b/i.test(cause.message)
+  );
+}
+
 /** One inline comment of a review, anchored to a line of the new file. */
 export interface ReviewCommentInput {
   /** Repository-relative path, as the diff names the file's new side. */

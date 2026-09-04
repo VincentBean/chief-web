@@ -15,8 +15,10 @@ export { HostPaths } from './host-paths.js';
 export {
   CONTAINER_LOST_ERROR,
   type ContainerRemoval,
+  FEEDBACK_LOST_ERROR,
   planReconciliation,
   type ReconciliationPlan,
+  REVIEW_LOST_ERROR,
   type SessionCorrection,
 } from './reconcile.js';
 export {

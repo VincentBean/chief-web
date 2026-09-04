@@ -522,6 +522,158 @@ export const MIGRATIONS: readonly Migration[] = [
         ON pr_conflict_fixes (status);
     `,
   },
+  {
+    id: '0010_session_review_states',
+    sql: `
+      -- The two in-flight states of the draft chain (US-002): \`reviewing\`
+      -- (the automatic code review is running over the draft pull request) and
+      -- \`fixing\` (the feedback run is pushing fixes for what it found). Both
+      -- sit between \`building\` and \`pr-open\`, which is now only reached once
+      -- the pull request has been marked ready for review.
+      --
+      -- Same rebuild dance as 0005, 0007 and 0008: SQLite cannot widen a CHECK
+      -- in place, and \`sessions\` cannot be renamed out of the way because the
+      -- foreign key on \`stories.session_id\` would follow the rename and then
+      -- cascade every story away with the old table. No backfill this time --
+      -- no existing row can legitimately be in either new state.
+      --
+      -- The \`0010\` prefix is shared with \`0010_pr_conflict_fixes\`, which
+      -- landed on \`main\` while this branch was open. Migrations are matched
+      -- and ordered by their full id, so neither had to be renumbered out from
+      -- under the databases that have already recorded it; the fixer creates a
+      -- table of its own and runs first, which is where an ORDER BY id puts it
+      -- too.
+      CREATE TABLE sessions_backup AS SELECT * FROM sessions;
+      CREATE TABLE stories_backup AS SELECT * FROM stories;
+
+      DROP TABLE sessions;
+
+      CREATE TABLE sessions (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE RESTRICT,
+        -- Slug: letters, numbers, hyphens and underscores only.
+        name               TEXT NOT NULL
+                             CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        status             TEXT NOT NULL
+                             CHECK (status IN
+                               ('pending', 'ready', 'building', 'waiting', 'failed',
+                                'finished', 'reviewing', 'fixing', 'pr-open', 'merged')),
+        base_branch        TEXT NOT NULL,
+        feature_branch     TEXT NOT NULL,
+        pr_target_branch   TEXT NOT NULL CHECK (pr_target_branch IN ('develop', 'main')),
+        scheduled_start_at TEXT,
+        queued_at          TEXT,
+        container_id       TEXT,
+        pr_url             TEXT,
+        last_error         TEXT,
+        failure_stage      TEXT
+                             CHECK (failure_stage IS NULL OR failure_stage IN
+                               ('agent', 'prd', 'push', 'pull_request', 'review',
+                                'container_lost')),
+        -- UTC ISO time a \`waiting\` session may resume; NULL for every other
+        -- status, and for every row that predates the hold.
+        waiting_until      TEXT,
+        code_review        INTEGER NOT NULL DEFAULT 0 CHECK (code_review IN (0, 1)),
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      INSERT INTO sessions
+        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at)
+      SELECT
+         id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at
+      FROM sessions_backup;
+
+      INSERT INTO stories SELECT * FROM stories_backup;
+
+      DROP TABLE sessions_backup;
+      DROP TABLE stories_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_repository ON sessions (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
+      -- Backs the FIFO build queue (US-018); NULLs are not indexed by SQLite.
+      CREATE INDEX IF NOT EXISTS idx_sessions_queued_at ON sessions (queued_at)
+        WHERE queued_at IS NOT NULL;
+    `,
+  },
+  {
+    id: '0011_session_feedback_failure_stage',
+    sql: `
+      -- The feedback run gets a failure stage of its own (US-006). A session
+      -- whose run failed has its commits pushed, its pull request open and its
+      -- review posted, so — like \`review\` before it — a retry re-runs the
+      -- delivery from there and never a story.
+      --
+      -- The same rebuild dance as 0005, 0007, 0008 and the migration right
+      -- before this one: SQLite cannot widen a CHECK in place, and
+      -- \`sessions\` cannot be renamed out of the way because the foreign key
+      -- on \`stories.session_id\` would follow the rename and cascade every
+      -- story away with the old table.
+      CREATE TABLE sessions_backup AS SELECT * FROM sessions;
+      CREATE TABLE stories_backup AS SELECT * FROM stories;
+
+      DROP TABLE sessions;
+
+      CREATE TABLE sessions (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE RESTRICT,
+        -- Slug: letters, numbers, hyphens and underscores only.
+        name               TEXT NOT NULL
+                             CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        status             TEXT NOT NULL
+                             CHECK (status IN
+                               ('pending', 'ready', 'building', 'waiting', 'failed',
+                                'finished', 'reviewing', 'fixing', 'pr-open', 'merged')),
+        base_branch        TEXT NOT NULL,
+        feature_branch     TEXT NOT NULL,
+        pr_target_branch   TEXT NOT NULL CHECK (pr_target_branch IN ('develop', 'main')),
+        scheduled_start_at TEXT,
+        queued_at          TEXT,
+        container_id       TEXT,
+        pr_url             TEXT,
+        last_error         TEXT,
+        failure_stage      TEXT
+                             CHECK (failure_stage IS NULL OR failure_stage IN
+                               ('agent', 'prd', 'push', 'pull_request', 'review',
+                                'feedback', 'container_lost')),
+        -- UTC ISO time a \`waiting\` session may resume; NULL for every other
+        -- status, and for every row that predates the hold.
+        waiting_until      TEXT,
+        code_review        INTEGER NOT NULL DEFAULT 0 CHECK (code_review IN (0, 1)),
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      INSERT INTO sessions
+        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at)
+      SELECT
+         id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at
+      FROM sessions_backup;
+
+      INSERT INTO stories SELECT * FROM stories_backup;
+
+      DROP TABLE sessions_backup;
+      DROP TABLE stories_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_repository ON sessions (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
+      -- Backs the FIFO build queue (US-018); NULLs are not indexed by SQLite.
+      CREATE INDEX IF NOT EXISTS idx_sessions_queued_at ON sessions (queued_at)
+        WHERE queued_at IS NOT NULL;
+    `,
+  },
 ];
 
 /**

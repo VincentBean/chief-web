@@ -402,6 +402,7 @@ export function Session() {
         <FailurePanel error={session.lastError} stage={session.failureStage} stories={stories} retryIsDelivery={retryIsDelivery} />
       )}
       {status === 'waiting' && <HoldPanel until={session.waitingUntil} />}
+      {(status === 'reviewing' || status === 'fixing') && <DraftPanel status={status} prUrl={session.prUrl} />}
       {session.scheduleMissed && (
         <Notice kind="warn">
           <strong>Missed its scheduled start.</strong> The session was still being planned at{' '}
@@ -587,8 +588,17 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
   const status = session.status;
   const failedAt: StageKey | null =
     status !== 'failed' ? null : isDeliveryStage(session.failureStage) ? 'deliver' : 'build';
+  // `reviewing` and `fixing` are the delivery running, not the build: the
+  // stories are all done and the pull request is open as a draft (US-007).
+  const delivering = status === 'reviewing' || status === 'fixing';
   const current: StageKey =
-    status === 'pending' ? 'plan' : status === 'ready' ? 'ready' : isEnded(session) ? 'deliver' : (failedAt ?? 'build');
+    status === 'pending'
+      ? 'plan'
+      : status === 'ready'
+        ? 'ready'
+        : isEnded(session) || delivering
+          ? 'deliver'
+          : (failedAt ?? 'build');
   const order: StageKey[] = ['plan', 'ready', 'build', 'deliver'];
   const index = order.indexOf(current);
   const done = build.stories.filter((s) => s.status === 'done').length;
@@ -605,7 +615,17 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
             ? `${String(done)}/${String(build.stories.length)} done`
             : '',
     deliver:
-      status === 'merged' ? 'pull request merged' : session.prUrl !== null ? 'pull request open' : status === 'finished' ? 'no pull request' : '',
+      status === 'reviewing'
+        ? 'draft, code review running'
+        : status === 'fixing'
+          ? 'draft, fixing review feedback'
+          : status === 'merged'
+            ? 'pull request merged'
+            : session.prUrl !== null
+              ? 'pull request open'
+              : status === 'finished'
+                ? 'no pull request'
+                : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };
 
@@ -1031,12 +1051,55 @@ function SchedulePanel({
 }
 
 
+/**
+ * Where a session in the draft chain has got to (US-007).
+ *
+ * The pull request exists from the start of this, which is why the panel
+ * always links to it — it is a draft, so nobody can merge it by accident, and
+ * reading along while the review runs is the point of opening it early.
+ */
+function DraftPanel({ status, prUrl }: { readonly status: 'reviewing' | 'fixing'; readonly prUrl: string | null }) {
+  return (
+    <Panel
+      title={status === 'reviewing' ? 'Reviewing the draft pull request' : 'Fixing the review feedback'}
+      icon="comment"
+      meta={<Badge tone="review">draft</Badge>}
+    >
+      <p>
+        {status === 'reviewing'
+          ? 'Every story is done and the pull request is open as a draft. The code review is running on it now; the pull request is marked ready for review once the review — and any feedback run it starts — is over.'
+          : 'The code review found things to fix, so a feedback run is answering its comments on the draft. The pull request is marked ready for review as soon as that run is over.'}
+      </p>
+      {prUrl !== null && (
+        <p className="field__hint">
+          <a href={prUrl} target="_blank" rel="noreferrer">
+            Follow along on GitHub <Icon name="link-external" />
+          </a>
+        </p>
+      )}
+    </Panel>
+  );
+}
+
 /* ----------------------------------------------------------- code review */
 
 /**
+ * Why the flag is frozen, per status — the mirror of the server's own guard
+ * (US-007). A status that is missing here is one the toggle still works in.
+ */
+const CODE_REVIEW_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  reviewing: 'the pull request is open as a draft and the review is running.',
+  fixing: 'the pull request is open as a draft and its review feedback is being fixed.',
+  finished: 'this session has finished, so its pull request has already been opened.',
+  'pr-open': 'the pull request is already open and any review of it has run.',
+  merged: 'the pull request has already been merged.',
+};
+
+/**
  * Whether this session's pull request is reviewed automatically (US-005).
- * Changeable right up to the moment the session finishes, because that is
- * when the pull request — and with it the review — is created.
+ * Changeable right up to the moment the pull request is opened, because that
+ * is when the flag decides something; every status from there on refuses the
+ * toggle server-side too (US-007).
  */
 function CodeReviewPanel({
   session,
@@ -1047,7 +1110,7 @@ function CodeReviewPanel({
   readonly busy: Busy;
   readonly onToggle: (codeReview: boolean) => void;
 }) {
-  const finished = session.status === 'finished';
+  const locked = CODE_REVIEW_LOCKED[session.status];
   return (
     <Panel
       title="Code review"
@@ -1058,14 +1121,14 @@ function CodeReviewPanel({
         <input
           type="checkbox"
           checked={session.codeReview}
-          disabled={finished || busy !== null}
+          disabled={locked !== undefined || busy !== null}
           onChange={(event) => onToggle(event.target.checked)}
         />
         Review this session’s pull request
       </label>
       <p className="field__hint">
-        {finished
-          ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: this session is finished, so its pull request has already been opened.`
+        {locked !== undefined
+          ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: ${locked}`
           : 'The review runs automatically after the pull request is created and posts its comments to GitHub.'}
       </p>
     </Panel>

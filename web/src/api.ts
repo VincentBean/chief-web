@@ -232,8 +232,10 @@ export async function testRepositoryConnection(id: string): Promise<ConnectionTe
 /**
  * Mirrors `SESSION_STATUSES` on the server, which this tuple has to be kept
  * in step with by hand. `finished` means the build ended without a pull
- * request; a delivered session is `pr-open` until the sync sees its PR
- * merged, and `merged` after that.
+ * request; a delivered session runs through `reviewing` and `fixing` while
+ * its pull request is still a draft, is `pr-open` from the moment that pull
+ * request is ready for review until the sync sees it merged, and `merged`
+ * after that.
  *
  * A tuple rather than a bare union because the session list enumerates it to
  * offer one filter option per status (US-007); the order is the lifecycle.
@@ -245,6 +247,8 @@ export const SESSION_STATUSES = [
   'waiting',
   'failed',
   'finished',
+  'reviewing',
+  'fixing',
   'pr-open',
   'merged',
 ] as const;
@@ -294,7 +298,14 @@ export interface Session {
 export type PrTargetBranch = 'develop' | 'main';
 
 /** Mirrors the server's `FailureStage` (US-019): where a session failed. */
-export type FailureStage = 'agent' | 'prd' | 'push' | 'pull_request' | 'review' | 'container_lost';
+export type FailureStage =
+  | 'agent'
+  | 'prd'
+  | 'push'
+  | 'pull_request'
+  | 'review'
+  | 'feedback'
+  | 'container_lost';
 
 /** What each stage is called on screen. */
 export function failureStageLabel(stage: FailureStage): string {
@@ -309,6 +320,8 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the pull request';
     case 'review':
       return 'the code review';
+    case 'feedback':
+      return 'the feedback run';
     case 'container_lost':
       return 'the container';
   }
@@ -319,7 +332,9 @@ export function failureStageLabel(stage: FailureStage): string {
  * retry re-runs delivery from the step that failed and never a story.
  */
 export function isDeliveryStage(stage: FailureStage | null): boolean {
-  return stage === 'push' || stage === 'pull_request' || stage === 'review';
+  return (
+    stage === 'push' || stage === 'pull_request' || stage === 'review' || stage === 'feedback'
+  );
 }
 
 export interface SessionInput {

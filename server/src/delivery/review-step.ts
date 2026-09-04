@@ -62,6 +62,14 @@ export interface ReviewStepResult {
   /** What was posted; `null` whenever this failed. */
   readonly published: PublishedReview | null;
   /**
+   * Why the last attempt failed, as the review pass named it; `null` when the
+   * step succeeded. The delivery reads it to tell a permanent failure — which
+   * releases the draft and fails the session (US-006) — from a
+   * `usage_limit`, which is the account being out rather than the review
+   * being broken, and parks the session instead.
+   */
+  readonly code: string | null;
+  /**
    * The solver run started for the findings (US-011): `null` when there was
    * nothing to solve, when this chief-web has no solver, or when the review
    * itself failed.
@@ -90,12 +98,14 @@ export class ReviewStep {
    */
   async run(session: Session, token: string, target: ReviewTarget): Promise<ReviewStepResult> {
     const reasons: string[] = [];
+    let code: string | null = null;
 
     for (let attempt = 1; attempt <= REVIEW_ATTEMPTS; attempt += 1) {
       const pass = await this.reviewer.review(session);
 
       if (!pass.ok || pass.report === null) {
         reasons.push(`Attempt ${String(attempt)}: ${pass.message}`);
+        code = pass.code;
         // A usage limit is the one failure a second attempt walks straight
         // back into: the account is out, not the pass. Spending the remaining
         // attempts on it only delays the same message.
@@ -123,9 +133,11 @@ export class ReviewStep {
           attempts: attempt,
           message: solver === null ? message : `${message} ${solver.message}`,
           published,
+          code: null,
           solver,
         };
       } catch (cause) {
+        code = 'publish_failed';
         reasons.push(
           `Attempt ${String(attempt)}: the review could not be posted to GitHub: ${describe(cause)}`,
         );
@@ -141,6 +153,7 @@ export class ReviewStep {
         'The pull request is open and unchanged; retrying runs the review again and nothing else.' +
         `\n\n${reasons.join('\n')}`,
       published: null,
+      code,
       solver: null,
     };
   }

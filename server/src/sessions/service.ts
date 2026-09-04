@@ -189,6 +189,23 @@ export interface CreateSessionRequest {
   readonly codeReview?: boolean;
 }
 
+/**
+ * The statuses the code review flag is frozen in, and why (US-007).
+ *
+ * Every one of them is a session whose pull request exists: `reviewing` and
+ * `fixing` are the review chain itself, `pr-open` and `merged` are after it,
+ * and `finished` is a delivery that is over — with a pull request, or with the
+ * decision not to review one already made. Turning the flag on or off in any
+ * of them would change nothing that has not already happened.
+ */
+const CODE_REVIEW_LOCKED: Partial<Record<SessionStatus, string>> = {
+  reviewing: 'its pull request is open and the review is running.',
+  fixing: 'its pull request is open and the review feedback is being fixed.',
+  finished: 'this session has finished, so its pull request has already been opened.',
+  'pr-open': 'its pull request is already open and any review of it has run.',
+  merged: 'its pull request has already been merged.',
+};
+
 export class SessionService {
   /** Setups in flight, so two clicks cannot clone the same session twice. */
   private readonly running = new Map<string, Promise<SessionSetupView>>();
@@ -423,17 +440,21 @@ export class SessionService {
   /**
    * Turns the automatic code review on or off (US-003).
    *
-   * Allowed for every status but `finished`: that is the one that means the
-   * pull request has already been opened and delivered, so the moment the flag
-   * decides anything has passed and flipping it would only mislead.
+   * Allowed until the delivery reaches the point the flag decides something,
+   * which is the moment the pull request is opened. From there on the answer
+   * is already being acted on — the review is running, its feedback run is
+   * running, or both are over — and a toggle would say something about this
+   * session that is not true of it, so every post-delivery status refuses
+   * (US-007).
    */
   setCodeReview(id: string, codeReview: boolean): SessionView {
     const session = this.requireSession(id);
-    if (session.status === 'finished') {
+    const locked = CODE_REVIEW_LOCKED[session.status];
+    if (locked !== undefined) {
       throw new SessionError(
         409,
-        'session_finished',
-        `"${session.name}" has finished, so its code review can no longer be changed.`,
+        'code_review_locked',
+        `The code review of "${session.name}" can no longer be changed: ${locked}`,
       );
     }
 

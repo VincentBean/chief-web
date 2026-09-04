@@ -1372,6 +1372,34 @@ describe('concurrency and the build queue', () => {
     await fleet.finish(billing);
   });
 
+  it('counts a session whose code review is running against the cap (US-002)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    // What the delivery does while it reviews the draft pull request: the
+    // session leaves `building`, but its review is an agent in its container
+    // and the slot that agent is in is not free.
+    updateSession(fleet.world.db, login.id, { status: 'reviewing' });
+    assert.equal(fleet.builds.freeSlots(), 0);
+
+    const queued = await fleet.builds.start(billing.id);
+    assert.equal(queued.queued, true);
+    assert.equal(queued.activeBuilds, 1);
+    assert.deepEqual(fleet.world.containerStarts, []);
+  });
+
+  it('does not count a session waiting on its feedback run a second time (US-005)', () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+
+    // A `fixing` session is waiting on a feedback run, and that run holds a
+    // slot of its own through the `pr_runs` table. Counting the session too
+    // would spend two slots on one agent.
+    updateSession(fleet.world.db, login.id, { status: 'fixing' });
+    assert.equal(fleet.builds.freeSlots(), 1);
+  });
+
   it('counts a running conflict fix against the cap, as it does a feedback run', async () => {
     const fleet = new Fleet(1, []);
     const login = fleet.named('add-login');

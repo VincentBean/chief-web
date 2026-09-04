@@ -21,9 +21,24 @@ export const SESSION_STATUSES = [
   /** The build ran to the end; terminal for a session that opened no PR. */
   'finished',
   /**
+   * The draft pull request is open and the automatic code review is running
+   * over it (US-002). `pr_url` is set, and the pull request stays a draft
+   * for as long as the session is anywhere in this chain.
+   */
+  'reviewing',
+  /**
+   * The review found something and the feedback run is pushing fixes for it
+   * and replying to the threads (US-002). Still a draft pull request; the
+   * next stop is `pr-open` once that run is over.
+   */
+  'fixing',
+  /**
    * The build is done and its pull request is open on GitHub, not merged yet
    * (US-001). `pr_url` is set. The sync leaves the session here until GitHub
    * reports the PR merged (`merged`) or closed unmerged (back to `finished`).
+   *
+   * Reached from `reviewing`/`fixing` once the pull request has been marked
+   * ready for review, or straight from delivery when no review was asked for.
    */
   'pr-open',
   /**
@@ -44,8 +59,9 @@ export type PrTargetBranch = (typeof PR_TARGET_BRANCHES)[number];
  * Every path to `failed` records one of these next to the human-readable
  * `last_error`, because the stage is what decides how a retry resumes: an
  * `agent`, `prd` or `container_lost` failure is retried by starting the loop
- * again at the first story that is not done, while `push`, `pull_request`
- * and `review` re-run only the delivery of work that is already committed.
+ * again at the first story that is not done, while `push`, `pull_request`,
+ * `review` and `feedback` re-run only the delivery of work that is already
+ * committed.
  *
  * A clone or setup failure is deliberately not in this list: it leaves the
  * session `pending` with a "Retry setup" action (US-010), never `failed`.
@@ -65,6 +81,13 @@ export const FAILURE_STAGES = [
    * delivery stage: a retry re-runs the review and nothing else.
    */
   'review',
+  /**
+   * The feedback run the review's findings were handed to (US-006). The pull
+   * request is open and reviewed by the time it runs, so it is a delivery
+   * stage like the review before it: a retry re-runs the delivery, never a
+   * story.
+   */
+  'feedback',
   /** The session's container disappeared while it was building (US-009). */
   'container_lost',
 ] as const;
@@ -83,6 +106,8 @@ export function failureStageLabel(stage: FailureStage): string {
       return 'the pull request';
     case 'review':
       return 'the code review';
+    case 'feedback':
+      return 'the feedback run';
     case 'container_lost':
       return 'the container';
   }
@@ -94,8 +119,10 @@ export function failureStageLabel(stage: FailureStage): string {
  */
 export function isDeliveryStage(
   stage: FailureStage | null,
-): stage is 'push' | 'pull_request' | 'review' {
-  return stage === 'push' || stage === 'pull_request' || stage === 'review';
+): stage is 'push' | 'pull_request' | 'review' | 'feedback' {
+  return (
+    stage === 'push' || stage === 'pull_request' || stage === 'review' || stage === 'feedback'
+  );
 }
 
 /** Session names are slugs: letters, numbers, hyphens and underscores. */

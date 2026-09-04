@@ -222,9 +222,21 @@ interface PrdSnapshot {
  * its loop resumes in the same place once the hold lifts. Counting it as an
  * active build is what stops a fourth session from starting into a limit that
  * has already refused the other three.
+ *
+ * A `reviewing` one (US-002) is running the delivery's code review, which is
+ * an agent in the session's own container just as a build iteration is. The
+ * session was counted for that review back when it stayed `building` through
+ * it, and it has to stay counted now that it does not, or the cap would hand
+ * the slot it is still using to a queued build. `fixing` is deliberately not
+ * here: the feedback run the session is waiting on holds a slot of its own
+ * through {@link countActivePrRuns}, and counting both would spend two.
  */
 function countActiveBuilds(db: Database): number {
-  return countSessionsByStatus(db, 'building') + countSessionsByStatus(db, 'waiting');
+  return (
+    countSessionsByStatus(db, 'building') +
+    countSessionsByStatus(db, 'waiting') +
+    countSessionsByStatus(db, 'reviewing')
+  );
 }
 
 export class BuildService {
@@ -438,13 +450,16 @@ export class BuildService {
    *
    * A `waiting` session is already counted against the cap (US-003) — it never
    * gave its slot back — so the sessions being resumed must not be counted
-   * against a cap they are already inside. Only what is actually working is.
+   * against a cap they are already inside. Only what is actually working is:
+   * `reviewing` is in here for the same reason it is an active build (US-002),
+   * because the review it names is an agent running right now.
    */
   private resumeSlots(): number {
     const max = getMaxConcurrentSessions(this.db, this.config);
     return (
       max -
       (countSessionsByStatus(this.db, 'building') +
+        countSessionsByStatus(this.db, 'reviewing') +
         this.launching.size +
         countActivePrRuns(this.db) +
         countActivePrReviews(this.db) +
