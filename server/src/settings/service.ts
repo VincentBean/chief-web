@@ -32,6 +32,16 @@ export const MIN_PR_SYNC_INTERVAL_MINUTES = 1;
 export const MAX_PR_SYNC_INTERVAL_MINUTES = 1440;
 
 /**
+ * Bounds for the merge conflict scan interval, in minutes (US-004). The same
+ * reasoning and the same bounds as the pull request sync above: the scan costs
+ * one listing per repository plus one request per candidate pull request, so
+ * the floor is what keeps the GitHub budget in hand, and past a day a scan is
+ * no longer a scan.
+ */
+export const MIN_PR_CONFLICT_INTERVAL_MINUTES = 1;
+export const MAX_PR_CONFLICT_INTERVAL_MINUTES = 1440;
+
+/**
  * Models an agent may be run on, as Claude Code's own `--model` values.
  *
  * These are the CLI's *aliases* rather than pinned ids (`claude-opus-5`), so
@@ -89,6 +99,10 @@ export interface AppSettings {
   readonly agentTimeoutMinutes: number;
   /** How often the pull request sync asks GitHub about open PRs, in minutes. */
   readonly prSyncIntervalMinutes: number;
+  /** How often open pull requests are scanned for merge conflicts, in minutes. */
+  readonly prConflictIntervalMinutes: number;
+  /** Whether the merge conflict fixer may scan and push at all. */
+  readonly conflictFixEnabled: boolean;
   /** Model the planning terminal runs on; `null` leaves the CLI to choose. */
   readonly planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` leaves the CLI to choose. */
@@ -107,6 +121,8 @@ export interface AppSettingsUpdate {
   readonly maxConcurrentSessions?: number;
   readonly agentTimeoutMinutes?: number;
   readonly prSyncIntervalMinutes?: number;
+  readonly prConflictIntervalMinutes?: number;
+  readonly conflictFixEnabled?: boolean;
   /** `null` hands the choice back to the CLI; omitted leaves the stored value. */
   readonly planningModel?: AgentModel | null;
   readonly buildModel?: AgentModel | null;
@@ -205,6 +221,44 @@ export function getPrSyncIntervalMs(
 }
 
 /**
+ * How long the merge conflict scan waits between passes (US-004).
+ *
+ * Same shape as {@link getPrSyncIntervalMs}: `PR_CONFLICT_INTERVAL_MS` is only
+ * the default (30 minutes), the settings row wins once the operator has saved
+ * one, and the scan re-reads it before arming every wait — so a change applies
+ * to the next tick with no restart. Only a *stored* value is clamped; the
+ * environment keeps its own floor, checked when the config is loaded.
+ */
+export function getPrConflictIntervalMs(
+  db: Database,
+  config: Pick<Config, 'prConflictIntervalMs'>,
+): number {
+  const stored = getSettingNumber(db, 'pr_conflict_interval_minutes', 0);
+  if (stored <= 0) return config.prConflictIntervalMs;
+  return (
+    Math.min(
+      MAX_PR_CONFLICT_INTERVAL_MINUTES,
+      Math.max(MIN_PR_CONFLICT_INTERVAL_MINUTES, stored),
+    ) * MS_PER_MINUTE
+  );
+}
+
+/**
+ * Whether the merge conflict fixer may run (US-004).
+ *
+ * An absent row reads as enabled, so the feature works out of the box; only a
+ * deliberate `0` turns it off. That is the opposite default to
+ * {@link getCodeReviewDefault}, which is why the two do not share a helper.
+ *
+ * Read by the scan on every tick, so switching it off stops the next tick
+ * before a single GitHub request is made — nothing has to be restarted, and an
+ * agent already mid-fix is left to finish.
+ */
+export function getConflictFixEnabled(db: Database): boolean {
+  return getSetting(db, 'conflict_fix_enabled') !== '0';
+}
+
+/**
  * Which model the interactive planning `claude` runs on, or `null` to pass no
  * `--model` at all and let the CLI apply its own default.
  *
@@ -268,6 +322,8 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     ),
     agentTimeoutMinutes: Math.round(getAgentTimeoutMs(db, config) / MS_PER_MINUTE),
     prSyncIntervalMinutes: Math.round(getPrSyncIntervalMs(db, config) / MS_PER_MINUTE),
+    prConflictIntervalMinutes: Math.round(getPrConflictIntervalMs(db, config) / MS_PER_MINUTE),
+    conflictFixEnabled: getConflictFixEnabled(db),
     planningModel: getPlanningModel(db),
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
@@ -296,6 +352,16 @@ export function updateAppSettings(
 
     if (update.prSyncIntervalMinutes !== undefined) {
       setSettingNumber(db, 'pr_sync_interval_minutes', update.prSyncIntervalMinutes);
+    }
+
+    if (update.prConflictIntervalMinutes !== undefined) {
+      setSettingNumber(db, 'pr_conflict_interval_minutes', update.prConflictIntervalMinutes);
+    }
+
+    // Written both ways rather than cleared on `true`, so "on" is a recorded
+    // choice and not just the absence of one.
+    if (update.conflictFixEnabled !== undefined) {
+      setSetting(db, 'conflict_fix_enabled', update.conflictFixEnabled ? '1' : '0');
     }
 
     // For every model `null` clears the row, which is what "let the CLI

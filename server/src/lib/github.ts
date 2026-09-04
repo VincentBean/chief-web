@@ -146,6 +146,72 @@ export async function fetchPullRequestState(
   return state;
 }
 
+/**
+ * GitHub's answer to "can this be merged?", which is three-valued (US-001).
+ *
+ * `unknown` is not a polite way of saying "clean": GitHub computes mergeability
+ * lazily, and answers `mergeable: null` until the background job has run. The
+ * caller has to be able to tell "there is no conflict" from "nobody has looked
+ * yet", because acting on the second as if it were the first would either skip
+ * a conflicted pull request forever or start a fix run against a branch that
+ * merges fine.
+ */
+export type Mergeability = 'conflicted' | 'clean' | 'unknown';
+
+/** What the conflict fixer needs to know about one pull request. */
+export interface PullRequestMergeability {
+  readonly number: number;
+  readonly mergeable: Mergeability;
+  /**
+   * `mergeable_state` verbatim — `dirty`, `clean`, `blocked`, `behind`,
+   * `unknown`, … It is undocumented and open-ended, so it is carried as a
+   * string for logging and never branched on; {@link mergeable} is the
+   * decision. `unknown` when the body did not carry one.
+   */
+  readonly mergeableState: string;
+  readonly headSha: string;
+  readonly baseSha: string;
+  /** Head branch, unqualified — what a fix run would check out. */
+  readonly headRef: string;
+  /** Branch the pull request targets, the one that gets merged in. */
+  readonly baseRef: string;
+  /**
+   * The pull request description, verbatim; empty when it has none.
+   *
+   * Carried because an agent resolving a conflict has to know what the pull
+   * request was trying to do — the diff alone does not say which side of a
+   * conflicting hunk is the point of the change (US-005).
+   */
+  readonly body: string;
+}
+
+/**
+ * `GET /repos/{slug}/pulls/{number}` — the same call as
+ * {@link fetchPullRequestState}, read for mergeability instead of open/merged.
+ *
+ * It is a separate function rather than more fields on `PullRequestState`
+ * because the two have different callers with different needs: the sync only
+ * ever wants open/merged, and widening its type would make every one of its
+ * stubs carry SHAs it does not use.
+ */
+export async function fetchPullRequestMergeability(
+  token: string,
+  baseUrl: string,
+  slug: string,
+  number: number,
+): Promise<PullRequestMergeability> {
+  const response = await githubFetch(token, url(baseUrl, `/repos/${slug}/pulls/${String(number)}`), {
+    method: 'GET',
+  });
+  if (!response.ok) throw await failureOf(response);
+
+  const mergeability = toPullRequestMergeability(await response.json().catch(() => null));
+  if (mergeability === null) {
+    throw new GithubApiError('github_error', 'GitHub returned an unexpected pull request body.');
+  }
+  return mergeability;
+}
+
 /** The open pull request for `head` → `base`, or null when there is none. */
 export async function findPullRequest(
   token: string,
@@ -321,6 +387,57 @@ function toPullRequestState(value: unknown): PullRequestState | null {
     state: typeof body.state === 'string' ? body.state : 'open',
     merged: body.merged === true || typeof body.merged_at === 'string',
   };
+}
+
+/**
+ * A body counts as usable only when it carries the identity of both sides —
+ * number, head ref/SHA and base ref/SHA. Missing `mergeable` is *not* malformed:
+ * that is precisely how GitHub says "still computing".
+ */
+function toPullRequestMergeability(value: unknown): PullRequestMergeability | null {
+  const body = asRecord(value);
+  const head = body === null ? null : asRecord(body['head']);
+  const base = body === null ? null : asRecord(body['base']);
+  if (body === null || head === null || base === null) return null;
+  if (typeof body['number'] !== 'number') return null;
+
+  const headRef = readField(head, 'ref');
+  const headSha = readField(head, 'sha');
+  const baseRef = readField(base, 'ref');
+  const baseSha = readField(base, 'sha');
+  if (headRef === null || headSha === null || baseRef === null || baseSha === null) return null;
+
+  return {
+    number: body['number'],
+    mergeable: toMergeability(body['mergeable']),
+    mergeableState: readField(body, 'mergeable_state') ?? 'unknown',
+    headSha,
+    baseSha,
+    headRef,
+    baseRef,
+    body: readField(body, 'body') ?? '',
+  };
+}
+
+/**
+ * Anything that is not literally `true` or `false` — `null`, a missing key, or
+ * a value of some other shape — is "GitHub has not decided", never "clean".
+ */
+function toMergeability(value: unknown): Mergeability {
+  if (value === true) return 'clean';
+  if (value === false) return 'conflicted';
+  return 'unknown';
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readField(record: Record<string, unknown>, key: string): string | null {
+  const found = record[key];
+  return typeof found === 'string' && found !== '' ? found : null;
 }
 
 async function readLogin(response: Response): Promise<string | null> {

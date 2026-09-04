@@ -473,6 +473,56 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
+    id: '0010_pr_conflict_fixes',
+    sql: `
+      -- Merge-conflict resolutions the fixer ran on an open pull request.
+      -- One row per pull request, like \`pr_reviews\`: the row is the *live*
+      -- record of the last fix, and starting a fix for a pull request that
+      -- already has one replaces it rather than piling up history.
+      --
+      -- The two SHAs are what make the "don't retry until the pull request
+      -- changes" rule survive a restart: a \`failed\` row blocks further
+      -- attempts only while the pull request still sits on the same head and
+      -- base commits. Both are known before a run starts — the mergeability
+      -- fetch returns them — so neither is nullable.
+      CREATE TABLE IF NOT EXISTS pr_conflict_fixes (
+        id            TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL
+                        REFERENCES repositories (id) ON DELETE CASCADE,
+        pr_number     INTEGER NOT NULL,
+        pr_url        TEXT NOT NULL,
+        pr_title      TEXT NOT NULL,
+        head_branch   TEXT NOT NULL,
+        base_branch   TEXT NOT NULL,
+        -- The commits the conflict was seen at; what the fix is for.
+        head_sha      TEXT NOT NULL,
+        base_sha      TEXT NOT NULL,
+        status        TEXT NOT NULL
+                        CHECK (status IN ('running', 'succeeded', 'failed')),
+        -- Attempts spent on this run; after three the fix is \`failed\`.
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        failure_stage TEXT
+                        CHECK (failure_stage IS NULL OR failure_stage IN
+                          ('checkout', 'merge', 'agent', 'verify', 'push',
+                           'container_lost')),
+        last_error    TEXT,
+        container_id  TEXT,
+        -- The merge commit a succeeded fix pushed to the head branch.
+        merge_sha     TEXT,
+        started_at    TEXT,
+        finished_at   TEXT,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        UNIQUE (repository_id, pr_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_conflict_fixes_repository
+        ON pr_conflict_fixes (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_pr_conflict_fixes_status
+        ON pr_conflict_fixes (status);
+    `,
+  },
+  {
     id: '0010_session_review_states',
     sql: `
       -- The two in-flight states of the draft chain (US-002): \`reviewing\`
@@ -486,6 +536,13 @@ export const MIGRATIONS: readonly Migration[] = [
       -- foreign key on \`stories.session_id\` would follow the rename and then
       -- cascade every story away with the old table. No backfill this time --
       -- no existing row can legitimately be in either new state.
+      --
+      -- The \`0010\` prefix is shared with \`0010_pr_conflict_fixes\`, which
+      -- landed on \`main\` while this branch was open. Migrations are matched
+      -- and ordered by their full id, so neither had to be renumbered out from
+      -- under the databases that have already recorded it; the fixer creates a
+      -- table of its own and runs first, which is where an ORDER BY id puts it
+      -- too.
       CREATE TABLE sessions_backup AS SELECT * FROM sessions;
       CREATE TABLE stories_backup AS SELECT * FROM stories;
 
@@ -553,10 +610,11 @@ export const MIGRATIONS: readonly Migration[] = [
       -- review posted, so — like \`review\` before it — a retry re-runs the
       -- delivery from there and never a story.
       --
-      -- The same rebuild dance as 0005, 0007, 0008 and 0010: SQLite cannot
-      -- widen a CHECK in place, and \`sessions\` cannot be renamed out of the
-      -- way because the foreign key on \`stories.session_id\` would follow the
-      -- rename and cascade every story away with the old table.
+      -- The same rebuild dance as 0005, 0007, 0008 and the migration right
+      -- before this one: SQLite cannot widen a CHECK in place, and
+      -- \`sessions\` cannot be renamed out of the way because the foreign key
+      -- on \`stories.session_id\` would follow the rename and cascade every
+      -- story away with the old table.
       CREATE TABLE sessions_backup AS SELECT * FROM sessions;
       CREATE TABLE stories_backup AS SELECT * FROM stories;
 

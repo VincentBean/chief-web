@@ -1,13 +1,15 @@
 import { type Response, Router } from 'express';
 
 import { GithubApiError } from '../lib/github.js';
+import type { ConflictFixLookup } from '../prconflicts/index.js';
 import { PrFeedbackError, type PrFeedbackService } from '../prfeedback/index.js';
 import { PrReviewError, type PrReviewService } from '../prreview/index.js';
 import { PullRequestError, type PullRequestService } from '../pullrequests/index.js';
 
 /**
  * Open pull requests, their review feedback, the runs that answer it (US-021),
- * and the code reviews started on them by hand.
+ * the code reviews started on them by hand, and the merge conflict fixes the
+ * scan started on its own (US-006).
  *
  * Reading is deliberately not behind the Claude guard: listing runs no agent,
  * and a page that refuses to render because Claude Code is signed out would
@@ -18,6 +20,7 @@ export function createPullRequestsRouter(
   pullRequests: PullRequestService,
   prFeedback: PrFeedbackService,
   prReviews: PrReviewService,
+  conflictFixes: ConflictFixLookup,
 ): Router {
   const router = Router();
 
@@ -29,8 +32,11 @@ export function createPullRequestsRouter(
       .list({ refresh })
       .then((view) => {
         // Each pull request carries whatever chief-web knows about running one
-        // against it — the feedback run and the review — so the list renders a
-        // row's state without a second call.
+        // against it — the feedback run, the review, and the merge conflict fix
+        // the scan started by itself — so the list renders a row's state
+        // without a second call. The fix is read here rather than cached with
+        // the GitHub answer because it moves on its own timer: a cached list is
+        // still allowed to show a run that started since it was fetched.
         res.status(200).json({
           ...view,
           repositories: view.repositories.map((repository) => ({
@@ -39,6 +45,7 @@ export function createPullRequestsRouter(
               ...pull,
               run: prFeedback.find(repository.repositoryId, pull.number),
               review: prReviews.find(repository.repositoryId, pull.number),
+              conflictFix: conflictFixes.find(repository.repositoryId, pull.number),
             })),
           })),
         });

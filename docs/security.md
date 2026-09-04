@@ -38,5 +38,12 @@
   runner user, and is staged outside the workspace so it can never end up inside
   the clone or a commit. Inside the container the agent runs as that same user
   and can read the key — it has to, in order to push.
+- **The [merge conflict fixer](merge-conflicts.md) pushes agent-written merge
+  commits to open pull requests with no human in between.** It is limited to
+  branches named `chief/…` on the repository itself (never a fork), it never
+  force-pushes, and it refuses a push that is not a fast-forward — but what it
+  checks before pushing is mechanical: no conflict markers, nothing git still
+  calls unmerged. Nothing is built and nothing is tested. Re-read a pull request
+  it touched before merging, or switch it off in Settings.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.

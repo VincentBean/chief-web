@@ -192,6 +192,12 @@ the `settings` table so it can be changed without a restart:
   `POST /api/sessions` without a `codeReview` field gets. It is only a default:
   sessions that already exist keep the flag they were created with, and any
   session can be toggled on its own page. See [Code review](code-review.md).
+- **Scan for merge conflicts every (minutes)** and **Fix merge conflicts
+  automatically** — how often open `chief/` pull requests are checked for merge
+  conflicts (1–1440, default 30) and whether the fixer runs at all. Both are
+  read on the fly, so a change applies from the next scan; off means no scan, no
+  agent and no GitHub requests. See
+  [The merge conflict fixer](merge-conflicts.md).
 - **Commit author name and email** — the git identity agents commit with inside
   session containers. Blank restores the defaults (`chief-web` /
   `chief-web@localhost`), which are also baked into the runner image. Use an

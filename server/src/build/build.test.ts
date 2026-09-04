@@ -7,6 +7,7 @@ import { after, before, describe, it } from 'node:test';
 import { type Config, loadConfig } from '../config.js';
 import {
   countSessionsByStatus,
+  createPrConflictFix,
   createRepository,
   createSession,
   type Database,
@@ -1397,6 +1398,33 @@ describe('concurrency and the build queue', () => {
     // would spend two slots on one agent.
     updateSession(fleet.world.db, login.id, { status: 'fixing' });
     assert.equal(fleet.builds.freeSlots(), 1);
+  });
+
+  it('counts a running conflict fix against the cap, as it does a feedback run', async () => {
+    const fleet = new Fleet(1, []);
+    const login = fleet.named('add-login');
+
+    // A merge-conflict fix (US-005) is one more agent in one more container on
+    // this host, and its row says `running` for as long as it holds the slot.
+    createPrConflictFix(fleet.world.db, {
+      repositoryId: fleet.world.repositoryId,
+      prNumber: 61,
+      prUrl: 'https://github.com/acme/demo/pull/61',
+      prTitle: 'Booking totals in minor units',
+      headBranch: 'chief/booking-minor-units',
+      baseBranch: 'main',
+      headSha: 'head1111',
+      baseSha: 'base1111',
+    });
+
+    const queued = await fleet.builds.start(login.id);
+
+    // The one slot is taken, so the session waits its turn rather than
+    // oversubscribing the host alongside the fix.
+    assert.equal(queued.queued, true);
+    assert.equal(queued.status, 'ready');
+    assert.deepEqual(fleet.world.containerStarts, []);
+    assert.deepEqual(fleet.entered, []);
   });
 
   it('starts the queue in FIFO order as slots free', async () => {

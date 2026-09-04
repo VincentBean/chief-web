@@ -47,6 +47,8 @@ export function Settings() {
   const [maxSessions, setMaxSessions] = useState('3');
   const [agentTimeout, setAgentTimeout] = useState('30');
   const [prSyncInterval, setPrSyncInterval] = useState('15');
+  const [conflictInterval, setConflictInterval] = useState('30');
+  const [conflictFixEnabled, setConflictFixEnabled] = useState(true);
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
@@ -96,6 +98,8 @@ export function Settings() {
     setMaxSessions(String(loaded.maxConcurrentSessions));
     setAgentTimeout(String(loaded.agentTimeoutMinutes));
     setPrSyncInterval(String(loaded.prSyncIntervalMinutes));
+    setConflictInterval(String(loaded.prConflictIntervalMinutes));
+    setConflictFixEnabled(loaded.conflictFixEnabled);
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
@@ -139,10 +143,19 @@ export function Settings() {
       );
       return;
     }
+    const conflictScan = Number.parseInt(conflictInterval, 10);
+    if (!Number.isInteger(conflictScan) || conflictScan < 1 || conflictScan > 1440) {
+      toast.error(
+        'The merge conflict scan interval must be a whole number of minutes between 1 and 1440.',
+      );
+      return;
+    }
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
       prSyncIntervalMinutes: syncInterval,
+      prConflictIntervalMinutes: conflictScan,
+      conflictFixEnabled,
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
@@ -247,6 +260,8 @@ export function Settings() {
     maxSessions !== String(settings.maxConcurrentSessions) ||
     agentTimeout !== String(settings.agentTimeoutMinutes) ||
     prSyncInterval !== String(settings.prSyncIntervalMinutes) ||
+    conflictInterval !== String(settings.prConflictIntervalMinutes) ||
+    conflictFixEnabled !== settings.conflictFixEnabled ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
@@ -379,6 +394,22 @@ export function Settings() {
             </label>
             <input id="pr-sync-interval" name="pr-sync-interval" type="number" min={1} max={1440} step={1} value={prSyncInterval} onChange={(event) => setPrSyncInterval(event.target.value)} className="field__input field__input--narrow" />
             <p className="field__hint">How often delivered sessions are re-checked, so a merged pull request shows as merged here. Each open pull request costs one API request per interval; a change applies from the next sync.</p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="conflict-interval">
+              Scan for merge conflicts every (minutes)
+            </label>
+            <input id="conflict-interval" name="conflict-interval" type="number" min={1} max={1440} step={1} value={conflictInterval} onChange={(event) => setConflictInterval(event.target.value)} className="field__input field__input--narrow" />
+            <p className="field__hint">How often open <code className="mono">chief/</code> pull requests are checked for merge conflicts. Each scan costs one API request per repository plus one per pull request it checks; a change applies from the next scan.</p>
+          </div>
+
+          <div className="field">
+            <label className="checkbox">
+              <input type="checkbox" checked={conflictFixEnabled} onChange={(event) => setConflictFixEnabled(event.target.checked)} />
+              Fix merge conflicts automatically
+            </label>
+            <p className="field__hint">Off means no scan and no agent: nothing is pushed to your pull requests, and no API budget is spent on looking. A fix already running is left to finish.</p>
           </div>
         </Panel>
 

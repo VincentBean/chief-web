@@ -66,6 +66,10 @@ export interface Settings {
   agentTimeoutMinutes: number;
   /** How often open pull requests are re-checked against GitHub (US-004). */
   prSyncIntervalMinutes: number;
+  /** How often open pull requests are scanned for merge conflicts (US-004). */
+  prConflictIntervalMinutes: number;
+  /** Whether the merge conflict fixer may scan and push at all (US-004). */
+  conflictFixEnabled: boolean;
   /** Model the planning terminal runs on; `null` lets Claude Code choose. */
   planningModel: AgentModel | null;
   /** Model each build iteration runs on; `null` lets Claude Code choose. */
@@ -85,6 +89,8 @@ export interface SettingsUpdate {
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
   prSyncIntervalMinutes?: number;
+  prConflictIntervalMinutes?: number;
+  conflictFixEnabled?: boolean;
   /** `null` hands the choice back to Claude Code's own default. */
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
@@ -823,6 +829,11 @@ export interface PullRequest {
   run: PrRun | null;
   /** The last code review started on it by hand, when there has been one. */
   review: PrReview | null;
+  /**
+   * What the merge conflict fixer has made of it (US-006): null when it has
+   * never conflicted, or nothing has been tried on it yet.
+   */
+  conflictFix: PrConflictFix | null;
 }
 
 /**
@@ -1132,4 +1143,91 @@ export async function stopPrReview(reviewId: string): Promise<PrReview> {
   return api<PrReview>(`/api/pull-requests/reviews/${encodeURIComponent(reviewId)}`, {
     method: 'DELETE',
   });
+}
+
+/* ------------------------------------------------------ conflict fixes */
+
+/** Where a live conflict fix is; null once it is over. */
+export type PrConflictFixPhase =
+  | 'starting'
+  | 'checking-out'
+  | 'merging'
+  | 'resolving'
+  | 'verifying'
+  | 'pushing';
+
+export type PrConflictFixStatus = 'running' | 'succeeded' | 'failed';
+
+export type PrConflictFixFailureStage =
+  | 'checkout'
+  | 'merge'
+  | 'agent'
+  | 'verify'
+  | 'push'
+  | 'container_lost';
+
+/**
+ * Mirrors the server's `PrConflictFixView`: what the merge conflict fixer has
+ * made of one pull request (US-006).
+ *
+ * Nobody starts one of these from the page — the scan does, on its own timer —
+ * so this is read-only, and `failed` is the state the operator has to act on:
+ * three attempts were spent and the conflicts are still there.
+ */
+export interface PrConflictFix {
+  id: string;
+  repositoryId: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string;
+  headBranch: string;
+  baseBranch: string;
+  status: PrConflictFixStatus;
+  /** True while the server is driving it right now. */
+  running: boolean;
+  phase: PrConflictFixPhase | null;
+  /** How many of the three attempts have been started. */
+  attempts: number;
+  failureStage: PrConflictFixFailureStage | null;
+  /** The failing stage in words, from the server; null unless it failed. */
+  failureStageLabel: string | null;
+  lastError: string | null;
+  /** The merge commit that was pushed; null unless it succeeded. */
+  mergeSha: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export function prConflictFixPhaseLabel(phase: PrConflictFixPhase): string {
+  switch (phase) {
+    case 'starting':
+      return 'starting';
+    case 'checking-out':
+      return 'checking out';
+    case 'merging':
+      return 'merging the base';
+    case 'resolving':
+      return 'resolving conflicts';
+    case 'verifying':
+      return 'verifying';
+    case 'pushing':
+      return 'pushing';
+  }
+}
+
+export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage): string {
+  switch (stage) {
+    case 'checkout':
+      return 'the checkout';
+    case 'merge':
+      return 'the merge';
+    case 'agent':
+      return 'the agent';
+    case 'verify':
+      return 'verifying the resolution';
+    case 'push':
+      return 'pushing to GitHub';
+    case 'container_lost':
+      return 'the container';
+  }
 }

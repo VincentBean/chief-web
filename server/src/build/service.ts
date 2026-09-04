@@ -2,6 +2,7 @@ import fs from 'node:fs';
 
 import type { Config } from '../config.js';
 import {
+  countActivePrConflictFixes,
   countActivePrReviews,
   countActivePrRuns,
   countSessionsByStatus,
@@ -350,9 +351,10 @@ export class BuildService {
 
   /** Free build slots right now; zero or negative when the cap is reached. */
   /**
-   * Slots free right now. Public because feedback runs (US-021) share the cap:
-   * they hold a slot each while they run, and a build must not think the last
-   * one is free because the run holding it is not a session.
+   * Slots free right now. Public because feedback runs (US-021), pull request
+   * reviews and conflict fixes (US-005) share the cap: they hold a slot each
+   * while they run, and a build must not think the last one is free because
+   * the run holding it is not a session.
    */
   freeSlots(): number {
     const max = getMaxConcurrentSessions(this.db, this.config);
@@ -363,7 +365,8 @@ export class BuildService {
       (countActiveBuilds(this.db) +
         this.launching.size +
         countActivePrRuns(this.db) +
-        countActivePrReviews(this.db))
+        countActivePrReviews(this.db) +
+        countActivePrConflictFixes(this.db))
     );
   }
 
@@ -459,7 +462,8 @@ export class BuildService {
         countSessionsByStatus(this.db, 'reviewing') +
         this.launching.size +
         countActivePrRuns(this.db) +
-        countActivePrReviews(this.db))
+        countActivePrReviews(this.db) +
+        countActivePrConflictFixes(this.db))
     );
   }
 
