@@ -61,6 +61,14 @@ export type AgentModel = (typeof AGENT_MODELS)[number];
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
+  /** The Sentry auth token, masked the same way (US-002). */
+  sentryToken: { configured: boolean; last4: string | null };
+  /** How often Sentry is polled for new unresolved issues (US-002). */
+  sentryPollIntervalMinutes: number;
+  /** Model the issue classification runs on; never `null`, defaults to haiku. */
+  sentryModel: AgentModel;
+  /** Root of the Sentry API; self-hosted installs point this at themselves. */
+  sentryBaseUrl: string;
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
@@ -86,6 +94,13 @@ export interface Settings {
 export interface SettingsUpdate {
   /** Omit to leave the stored token untouched; `null` removes it. */
   githubToken?: string | null;
+  /** The same rules as `githubToken`, for Sentry (US-002). */
+  sentryToken?: string | null;
+  sentryPollIntervalMinutes?: number;
+  /** No "let Claude Code choose" here — the classifier always has a model. */
+  sentryModel?: AgentModel;
+  /** `null` restores Sentry's own hosted API. */
+  sentryBaseUrl?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
   prSyncIntervalMinutes?: number;

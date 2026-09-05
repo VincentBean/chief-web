@@ -79,6 +79,10 @@ describe('settings api', () => {
     deleteSetting(db, 'git_author_email');
     deleteSetting(db, 'review_model');
     deleteSetting(db, 'code_review_default');
+    deleteSetting(db, 'sentry_token');
+    deleteSetting(db, 'sentry_poll_interval_minutes');
+    deleteSetting(db, 'sentry_model');
+    deleteSetting(db, 'sentry_base_url');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
   });
@@ -167,6 +171,10 @@ describe('settings api', () => {
       prSyncIntervalMinutes: 15,
       prConflictIntervalMinutes: 30,
       conflictFixEnabled: true,
+      sentryToken: { configured: false, last4: null },
+      sentryPollIntervalMinutes: 15,
+      sentryModel: 'haiku',
+      sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -187,6 +195,10 @@ describe('settings api', () => {
       prSyncIntervalMinutes: 15,
       prConflictIntervalMinutes: 30,
       conflictFixEnabled: true,
+      sentryToken: { configured: false, last4: null },
+      sentryPollIntervalMinutes: 15,
+      sentryModel: 'haiku',
+      sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -224,6 +236,10 @@ describe('settings api', () => {
       prSyncIntervalMinutes: 15,
       prConflictIntervalMinutes: 30,
       conflictFixEnabled: true,
+      sentryToken: { configured: false, last4: null },
+      sentryPollIntervalMinutes: 15,
+      sentryModel: 'haiku',
+      sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -245,6 +261,10 @@ describe('settings api', () => {
       prSyncIntervalMinutes: 15,
       prConflictIntervalMinutes: 30,
       conflictFixEnabled: true,
+      sentryToken: { configured: false, last4: null },
+      sentryPollIntervalMinutes: 15,
+      sentryModel: 'haiku',
+      sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
       reviewModel: null,
@@ -565,5 +585,75 @@ describe('settings api', () => {
     assert.equal(getMaxConcurrentSessions(db, config), 1);
     setSetting(db, 'max_concurrent_sessions', '9999');
     assert.equal(getMaxConcurrentSessions(db, config), 50);
+  });
+
+  it('masks, keeps and removes the Sentry token the same way as the GitHub one (US-002)', async () => {
+    const saved = (await (await put({ sentryToken: '  sntryu_exampleToken5678  ' })).json()) as
+      Record<string, { configured: boolean; last4: string }>;
+    assert.deepEqual(saved['sentryToken'], { configured: true, last4: '5678' });
+
+    // Omitted keeps it; the whole token never comes back out.
+    const untouched = await put({ maxConcurrentSessions: 5 });
+    const raw = await untouched.text();
+    assert.ok(!raw.includes('sntryu_exampleToken5678'), `token leaked in: ${raw}`);
+    assert.match(raw, /"last4":"5678"/);
+
+    const cleared = (await (await put({ sentryToken: null })).json()) as Record<string, unknown>;
+    assert.deepEqual(cleared['sentryToken'], { configured: false, last4: null });
+
+    for (const value of ['', '   ', 3, true]) {
+      const response = await put({ sentryToken: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_sentry_token');
+    }
+  });
+
+  it('validates the Sentry poll interval, model and base URL (US-002)', async () => {
+    const saved = (await (
+      await put({
+        sentryPollIntervalMinutes: 5,
+        sentryModel: 'sonnet',
+        sentryBaseUrl: '  https://sentry.internal.example/api/0/  ',
+      })
+    ).json()) as Record<string, unknown>;
+    assert.equal(saved['sentryPollIntervalMinutes'], 5);
+    assert.equal(saved['sentryModel'], 'sonnet');
+    assert.equal(saved['sentryBaseUrl'], 'https://sentry.internal.example/api/0/');
+
+    const tooShort = await put({ sentryPollIntervalMinutes: 0 });
+    assert.equal(tooShort.status, 400);
+    const body = (await tooShort.json()) as { error: string; message: string };
+    assert.equal(body.error, 'invalid_sentry_poll_interval_minutes');
+    assert.match(body.message, /whole number of minutes between 1 and 1440/);
+
+    for (const value of [-5, 1441, 1.5, '10', null]) {
+      const response = await put({ sentryPollIntervalMinutes: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+    }
+
+    // There is no "let the CLI choose" for the classifier, so null is a 400 too.
+    for (const value of ['gpt-5', 'Haiku', '', null, 3]) {
+      const response = await put({ sentryModel: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_sentry_model');
+    }
+
+    for (const value of ['ftp://sentry.local/api/0/', 'sentry.io/api/0/', 7]) {
+      const response = await put({ sentryBaseUrl: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_sentry_base_url');
+    }
+
+    // Blank and null both mean "back to the hosted API".
+    for (const value of [null, '  ']) {
+      const cleared = (await (await put({ sentryBaseUrl: value })).json()) as Record<string, unknown>;
+      assert.equal(cleared['sentryBaseUrl'], 'https://sentry.io/api/0/');
+      await put({ sentryBaseUrl: 'https://sentry.internal.example/api/0/' });
+    }
+
+    // Nothing a rejected request carried was stored.
+    const current = (await (await get()).json()) as Record<string, unknown>;
+    assert.equal(current['sentryPollIntervalMinutes'], 5);
+    assert.equal(current['sentryModel'], 'sonnet');
   });
 });
