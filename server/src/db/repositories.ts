@@ -24,6 +24,13 @@ export interface Repository {
   /** `SHA256:…` fingerprint of `publicKey`, for matching against GitHub. */
   readonly keyFingerprint: string | null;
   readonly keySource: RepositoryKeySource | null;
+  /**
+   * The Sentry org and project slugs whose issues this repository owns
+   * (US-001). Both are set together or neither is: an org without a project
+   * addresses nothing, and NULL on both is what "not linked" means.
+   */
+  readonly sentryOrg: string | null;
+  readonly sentryProject: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -36,6 +43,8 @@ export interface CreateRepositoryInput {
   readonly publicKey?: string | null;
   readonly keyFingerprint?: string | null;
   readonly keySource?: RepositoryKeySource | null;
+  readonly sentryOrg?: string | null;
+  readonly sentryProject?: string | null;
 }
 
 export interface UpdateRepositoryInput {
@@ -46,6 +55,8 @@ export interface UpdateRepositoryInput {
   readonly publicKey?: string | null;
   readonly keyFingerprint?: string | null;
   readonly keySource?: RepositoryKeySource | null;
+  readonly sentryOrg?: string | null;
+  readonly sentryProject?: string | null;
 }
 
 const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
@@ -56,6 +67,8 @@ const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
   publicKey: 'public_key',
   keyFingerprint: 'key_fingerprint',
   keySource: 'key_source',
+  sentryOrg: 'sentry_org',
+  sentryProject: 'sentry_project',
 };
 
 function keySourceOf(row: Row): RepositoryKeySource | null {
@@ -77,6 +90,8 @@ export function mapRepository(row: Row): Repository {
     publicKey: nullableText(row, 'public_key'),
     keyFingerprint: nullableText(row, 'key_fingerprint'),
     keySource: keySourceOf(row),
+    sentryOrg: nullableText(row, 'sentry_org'),
+    sentryProject: nullableText(row, 'sentry_project'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -93,6 +108,8 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     publicKey: input.publicKey ?? null,
     keyFingerprint: input.keyFingerprint ?? null,
     keySource: input.keySource ?? null,
+    sentryOrg: input.sentryOrg ?? null,
+    sentryProject: input.sentryProject ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -100,8 +117,9 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
   db.prepare(
     `INSERT INTO repositories
        (id, name, ssh_url, github_slug, default_base_branch,
-        public_key, key_fingerprint, key_source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        public_key, key_fingerprint, key_source, sentry_org, sentry_project,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     repository.id,
     repository.name,
@@ -111,6 +129,8 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     repository.publicKey,
     repository.keyFingerprint,
     repository.keySource,
+    repository.sentryOrg,
+    repository.sentryProject,
     repository.createdAt,
     repository.updatedAt,
   );

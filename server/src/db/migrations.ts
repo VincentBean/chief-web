@@ -674,6 +674,80 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE queued_at IS NOT NULL;
     `,
   },
+  {
+    id: '0012_sentry_issues',
+    sql: `
+      -- Which Sentry project a repository's errors come from (US-001). Both
+      -- slugs are set together or not at all: a link needs an org *and* a
+      -- project to address anything, and NULL is what "not linked" means.
+      ALTER TABLE repositories ADD COLUMN sentry_org TEXT;
+      ALTER TABLE repositories ADD COLUMN sentry_project TEXT;
+
+      -- Every Sentry issue chief-web has ever taken an interest in.
+      --
+      -- Modelled on \`pr_runs\`: one durable row per upstream object, carrying
+      -- the whole lifecycle rather than one row per attempt, so a restart --
+      -- or a poll that sees the same issue for the hundredth time -- resumes
+      -- instead of duplicating. The Sentry-side fields are a cache of what the
+      -- last poll saw; the chief-web-side fields (\`status\`, \`explanation\`,
+      -- \`session_id\`, \`attempts\`) are the state machine, and a refresh
+      -- never touches them.
+      CREATE TABLE IF NOT EXISTS sentry_issues (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE CASCADE,
+        -- Sentry's own issue id, as a string. Unique across the install, so it
+        -- is the dedupe key for the poller across every linked project.
+        sentry_issue_id    TEXT NOT NULL UNIQUE,
+        -- The human-facing \`PROJECT-1AB\` id; what session names derive from.
+        short_id           TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        -- Where Sentry thinks the error came from; frequently absent.
+        culprit            TEXT,
+        permalink          TEXT NOT NULL,
+        level              TEXT,
+        event_count        INTEGER NOT NULL DEFAULT 0,
+        first_seen         TEXT NOT NULL,
+        last_seen          TEXT NOT NULL,
+        -- pending    -> fetched, awaiting classification
+        -- queued     -> classified fixable, awaiting session creation
+        -- working    -> session created and linked
+        -- fixed      -> the linked session's pull request was merged
+        -- cannot_fix -> the classifier said no, or the session never landed
+        status             TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (status IN
+                               ('pending', 'queued', 'working', 'fixed', 'cannot_fix')),
+        -- Why an issue is \`cannot_fix\`, in the operator's words. Every
+        -- \`cannot_fix\` row is expected to carry one.
+        explanation        TEXT,
+        -- The build session working on the fix. ON DELETE SET NULL rather than
+        -- CASCADE: deleting a session must not erase the record that chief-web
+        -- ever looked at this issue, or the next poll would ingest it again.
+        session_id         TEXT
+                             REFERENCES sessions (id) ON DELETE SET NULL,
+        -- Whether the "resolve it upstream" call has succeeded yet. Separate
+        -- from \`status\`, because a failed resolve retries on later ticks and
+        -- must never revert \`fixed\`.
+        resolved_in_sentry INTEGER NOT NULL DEFAULT 0,
+        -- Failed tries at the issue's current phase; at three the issue goes
+        -- \`cannot_fix\`. One counter serves both classification and session
+        -- creation because those phases never overlap -- the verdict that ends
+        -- the first is what starts the second, and it resets the counter.
+        attempts           INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_repository
+        ON sentry_issues (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_status
+        ON sentry_issues (status);
+      -- The merge watcher looks issues up by the session that is fixing them.
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_session
+        ON sentry_issues (session_id)
+        WHERE session_id IS NOT NULL;
+    `,
+  },
 ];
 
 /**
