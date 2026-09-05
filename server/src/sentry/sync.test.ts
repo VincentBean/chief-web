@@ -396,4 +396,51 @@ describe('the Sentry issue poller', () => {
       assert.equal(sentry.calls.length, 2);
     });
   });
+
+  describe('the classification pass hung off it (US-006)', () => {
+    it('runs once the poll is done', async () => {
+      const { db, sentry, repository } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const passes: number[] = [];
+      const sync = new SentrySyncService(db, () => sentry, {
+        classifyPending: () => {
+          // Whatever the poll inserted is already there to be judged.
+          passes.push(listSentryIssues(db).length);
+          return Promise.resolve(1);
+        },
+      });
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.deepEqual(passes, [1]);
+      assert.equal(repository.sentryOrg, 'acme');
+    });
+
+    it('is skipped when there was nothing to poll', async () => {
+      const { db, sentry } = world({ link: false });
+      let passes = 0;
+      const sync = new SentrySyncService(db, () => sentry, {
+        classifyPending: () => {
+          passes += 1;
+          return Promise.resolve(0);
+        },
+      });
+
+      await sync.tick();
+
+      assert.equal(passes, 0);
+    });
+
+    it('never fails the poll', async () => {
+      const { db, sentry } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const sync = new SentrySyncService(db, () => sentry, {
+        classifyPending: () => Promise.reject(new Error('the container is on fire')),
+      });
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.equal(listSentryIssues(db).length, 1);
+    });
+  });
 });

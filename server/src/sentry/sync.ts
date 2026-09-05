@@ -8,6 +8,7 @@ import {
 import { logger } from '../lib/logger.js';
 import { getSentryPollIntervalMs } from '../settings/index.js';
 
+import type { SentryClassifier } from './classify.js';
 import { createSentryClient, SentryApiError, type SentryIssueSummary } from './client.js';
 
 /**
@@ -90,6 +91,16 @@ export class SentrySyncService implements SentrySync {
   constructor(
     private readonly db: Database,
     private readonly clients: SentryGatewayFactory = createSentryClient,
+    /**
+     * What is done with the `pending` rows a tick leaves behind (US-006).
+     *
+     * Hung off the poller rather than given a timer of its own because the two
+     * are the same beat: an issue is worth classifying exactly once it has
+     * arrived, and a second timer would either race this one or idle behind
+     * it. Null for a chief-web without one, and for every test that is about
+     * the polling rather than the judging.
+     */
+    private readonly classifier: SentryClassifier | null = null,
   ) {}
 
   start(): void {
@@ -167,7 +178,26 @@ export class SentrySyncService implements SentrySync {
     // one project at a time is the gentlest thing to do to a shared budget.
     let inserted = 0;
     for (const repository of linked) inserted += await this.syncRepository(repository, client);
+
+    // After the poll rather than during it: an issue this pass inserted is one
+    // the classifier should see in the same beat, and a repository whose list
+    // call failed has left nothing new to judge.
+    await this.classify();
     return inserted;
+  }
+
+  /**
+   * The classification pass, which must never be able to fail a poll: the rows
+   * are already written, and a classifier that threw has left every one of
+   * them `pending`, which is exactly where the next tick expects them.
+   */
+  private async classify(): Promise<void> {
+    if (this.classifier === null) return;
+    try {
+      await this.classifier.classifyPending();
+    } catch (cause) {
+      logger.error('the Sentry issue classification pass failed', { error: describe(cause) });
+    }
   }
 
   /** One repository's issues. Returns how many of them were new here. */
@@ -261,8 +291,9 @@ export class SentrySyncService implements SentrySync {
 export function createSentrySync(
   db: Database,
   clients: SentryGatewayFactory = createSentryClient,
+  classifier: SentryClassifier | null = null,
 ): SentrySyncService {
-  return new SentrySyncService(db, clients);
+  return new SentrySyncService(db, clients, classifier);
 }
 
 function describe(cause: unknown): string {

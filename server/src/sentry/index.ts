@@ -1,4 +1,17 @@
 export {
+  CLASSIFICATION_FAILED,
+  CLASSIFY_TIMEOUT_MS,
+  classifyCheckoutSpec,
+  classifyRunId,
+  createSentryClassifier,
+  MAX_CLASSIFY_ATTEMPTS,
+  MAX_ISSUES_PER_TICK,
+  type SentryClassifier,
+  SentryClassifyService,
+  type SentryDetailsFactory,
+  type SentryDetailsGateway,
+} from './classify.js';
+export {
   createSentryClient,
   failureOf,
   ISSUES_PER_PAGE,
@@ -17,6 +30,19 @@ export {
   type SentryStackFrame,
   type SentryTag,
 } from './client.js';
+export {
+  type Classification,
+  classificationPrompt,
+  type ClassificationPromptInput,
+  MAX_BREADCRUMBS,
+  MAX_EXCEPTIONS,
+  MAX_FIELD_CHARS,
+  MAX_FRAMES,
+  MAX_TAGS,
+  parseClassification,
+  SENTRY_DATA_BEGIN,
+  SENTRY_DATA_END,
+} from './prompts.js';
 export {
   createSentrySync,
   type SentryGatewayFactory,

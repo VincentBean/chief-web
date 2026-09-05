@@ -42,7 +42,7 @@ import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
-import { createSentrySync, type SentrySync } from './sentry/index.js';
+import { createSentryClassifier, createSentrySync, type SentrySync } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -287,7 +287,18 @@ export function createApp(
   // the first tick is the catch-up on everything that fired while the stack
   // was down. A tick costs nothing at all until a repository is linked to a
   // Sentry project and a token is saved on the settings page.
-  const sentrySync = deps.sentrySync ?? createSentrySync(db);
+  // What the poller's `pending` rows are worth (US-006): one cheap agent per
+  // issue, in a container of its own holding a checkout of the base branch,
+  // asked whether the error can be fixed here at all. Only a yes costs a build
+  // session; everything else is closed with an explanation.
+  const sentryClassifier = createSentryClassifier(
+    config,
+    db,
+    sessionOrchestrator,
+    exec,
+    createAgentRunner(exec),
+  );
+  const sentrySync = deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier);
   sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
