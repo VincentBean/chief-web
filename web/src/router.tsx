@@ -84,6 +84,18 @@ export function sessionIdFromPath(pathname: string): string | null {
 }
 
 /**
+ * `/recurring-tasks/<id>` → the id, or null for any other path (US-009).
+ *
+ * `/recurring-tasks/new` is the create form and `/recurring-tasks/<id>/edit`
+ * has a segment too many, so neither is mistaken for a task id here.
+ */
+export function recurringTaskIdFromPath(pathname: string): string | null {
+  const match = /^\/recurring-tasks\/([^/]+)\/?$/.exec(pathname);
+  if (match === null || match[1] === 'new') return null;
+  return decodeURIComponent(match[1] ?? '');
+}
+
+/**
  * `/recurring-tasks/<id>/edit` → the id, or null for any other path (US-008).
  *
  * The edit form is a page rather than a dialog for the same reason the new

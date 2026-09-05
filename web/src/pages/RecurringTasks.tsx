@@ -4,6 +4,7 @@ import {
   deleteRecurringTask,
   type RecurringTask,
   fetchRecurringTasks,
+  recurringTaskPath,
   updateRecurringTask,
 } from '../api.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
@@ -211,7 +212,9 @@ function TaskRow({
       <td className="table__cell--lead">
         <div className="cell-stack">
           <span className="cell-stack__title">
-            <strong>{task.name}</strong>
+            <Link className="link link--strong" href={recurringTaskPath(task.id)}>
+              {task.name}
+            </Link>
             {task.paused ? (
               <Badge tone="wait" title="Paused: no occurrence is scheduled">
                 paused

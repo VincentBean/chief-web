@@ -923,6 +923,53 @@ export async function fetchRecurringTask(id: string, signal?: AbortSignal): Prom
   );
 }
 
+/** Mirrors the server's `RecurringTaskRunView` (US-003): the session a run made. */
+export interface RecurringTaskRun {
+  id: string;
+  name: string;
+  status: Session['status'];
+  prUrl: string | null;
+}
+
+/**
+ * Mirrors the server's `RecurringTaskOccurrenceView` (US-003): one row of a
+ * task's history.
+ *
+ * `session` is null for an occurrence that never made one — a skip, a failure
+ * to fire — and for a run whose session has since been deleted. `detail` is
+ * the reason in the server's words: why it was skipped, why it could not
+ * start, what it failed on, or (for `pr-opened`) the pull request's URL.
+ */
+export interface RecurringTaskOccurrence {
+  id: number;
+  occurredAt: string;
+  outcome: RecurringTaskOutcome;
+  outcomeLabel: string;
+  detail: string | null;
+  session: RecurringTaskRun | null;
+}
+
+/** Mirrors the server's `RecurringTaskDetailView`: the task plus its history. */
+export interface RecurringTaskDetail extends RecurringTask {
+  occurrences: RecurringTaskOccurrence[];
+}
+
+/** One task with its run history, for the detail page (US-009). */
+export async function fetchRecurringTaskDetail(
+  id: string,
+  signal?: AbortSignal,
+): Promise<RecurringTaskDetail> {
+  return api<RecurringTaskDetail>(
+    `/api/recurring-tasks/${encodeURIComponent(id)}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** The recurring task detail page, which is where its run history lives. */
+export function recurringTaskPath(id: string): string {
+  return `/recurring-tasks/${encodeURIComponent(id)}`;
+}
+
 /**
  * Mirrors the server's `CronPreview` (US-008): an expression judged without
  * anything being stored, so the form can say what a schedule means while it is

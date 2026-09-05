@@ -7,7 +7,12 @@ import './index.css';
 import { Login } from './pages/Login.tsx';
 import { Overview } from './pages/Overview.tsx';
 import { Sessions } from './pages/Sessions.tsx';
-import { editedRecurringTaskIdFromPath, sessionIdFromPath, useLocation } from './router.tsx';
+import {
+  editedRecurringTaskIdFromPath,
+  recurringTaskIdFromPath,
+  sessionIdFromPath,
+  useLocation,
+} from './router.tsx';
 import { ToastProvider } from './toast.tsx';
 import { Skeleton } from './ui.tsx';
 
@@ -23,6 +28,7 @@ const PullRequests = lazy(() => import('./pages/PullRequests.tsx').then((m) => (
 const Repositories = lazy(() => import('./pages/Repositories.tsx').then((m) => ({ default: m.Repositories })));
 const NewSession = lazy(() => import('./pages/NewSession.tsx').then((m) => ({ default: m.NewSession })));
 const RecurringTasks = lazy(() => import('./pages/RecurringTasks.tsx').then((m) => ({ default: m.RecurringTasks })));
+const RecurringTask = lazy(() => import('./pages/RecurringTask.tsx').then((m) => ({ default: m.RecurringTask })));
 const RecurringTaskForm = lazy(() =>
   import('./pages/RecurringTaskForm.tsx').then((m) => ({ default: m.RecurringTaskForm })),
 );
@@ -51,6 +57,7 @@ function resolve(pathname: string): ComponentType {
   if (page !== undefined) return page;
   if (sessionIdFromPath(trimmed) !== null) return Session;
   if (editedRecurringTaskIdFromPath(trimmed) !== null) return RecurringTaskForm;
+  if (recurringTaskIdFromPath(trimmed) !== null) return RecurringTask;
   // An unknown URL lands on the overview rather than on a blank screen.
   return Overview;
 }
