@@ -1,8 +1,8 @@
 import { Router } from 'express';
 
 import type { BuildPoolView, BuildSlotUse, QueuedBuildView } from '../build/index.js';
-import type { Database, Stats } from '../db/index.js';
-import { readStats } from '../db/index.js';
+import { type Database, readStats, type Stats } from '../db/index.js';
+import { type HostLoad, readHostLoad } from '../lib/host.js';
 import type { UsageLimitHold } from '../limits/index.js';
 
 /**
@@ -35,6 +35,8 @@ export interface StatsView extends Stats {
   };
   /** Claude's usage-limit hold, if one is in force. */
   readonly hold: { readonly until: string | null };
+  /** CPU and memory of the machine chief-web runs on. */
+  readonly host: HostLoad;
 }
 
 /**
@@ -68,6 +70,7 @@ export function createStatsRouter(
         queue: pool.queue,
       },
       hold: { until: hold.until() },
+      host: readHostLoad(),
     };
     res.status(200).json(view);
   });

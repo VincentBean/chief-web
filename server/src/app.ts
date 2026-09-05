@@ -42,9 +42,19 @@ import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
+import {
+  createSentryClassifier,
+  createSentryCompleter,
+  createSentryFixer,
+  createSentrySync,
+  type SentrySync,
+} from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
+import { createRecurringTaskRunner } from './recurringtasks/index.js';
+import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
+import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createStatsRouter } from './routes/stats.js';
@@ -54,6 +64,7 @@ import {
   createSessionService,
   type SessionContainers,
   type SessionExecutor,
+  type SessionService,
 } from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
@@ -144,6 +155,12 @@ export interface AppDependencies {
    * built on a stub gateway so they never reach the network.
    */
   readonly prConflicts?: ConflictScan;
+  /**
+   * The Sentry issue poller (US-005). Defaults to a service polling every
+   * linked project for its unresolved issues; tests pass one built on a stub
+   * gateway so they never reach the network.
+   */
+  readonly sentrySync?: SentrySync;
 }
 
 /**
@@ -183,6 +200,10 @@ export function createApp(
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
+  // Recurring task definitions (US-003). Database only — nothing here starts a
+  // session, which is the scheduler's job (US-004) — so it needs none of the
+  // collaborators built below.
+  api.use(createRecurringTasksRouter(db));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));
   const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
@@ -244,10 +265,18 @@ export function createApp(
   const builds =
     deps.builds ??
     createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
+  // Recurring tasks (US-004): the scheduler's other due-query. It fires each
+  // task into an ordinary session, which means it needs the session service —
+  // built further down, because *that* needs the scheduler. The thunk is what
+  // breaks the circle; nothing reads it before the first tick, by which point
+  // both exist.
+  let sessions: SessionService | null = null;
+  const recurringRuns = createRecurringTaskRunner(config, db, () => sessions, builds);
   // Scheduled starts (US-017). The schedules live in the database, so starting
   // it here — before the first request — is also the catch-up on everything
-  // that came due while the stack was down.
-  const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
+  // that came due while the stack was down, recurring tasks included.
+  const scheduler =
+    deps.scheduler ?? createScheduler(config, db, builds, undefined, recurringRuns);
   scheduler.start();
   // The pull request sync (US-003), started for the same reason: a merge that
   // happens overnight has to be noticed whether or not anyone opens the UI,
@@ -278,6 +307,46 @@ export function createApp(
   );
   const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db, prConflictFixes);
   prConflicts.start();
+  // The Sentry issue poller (US-005), started here for the same reason as the
+  // two above: production errors arrive whether or not anyone is looking, and
+  // the first tick is the catch-up on everything that fired while the stack
+  // was down. A tick costs nothing at all until a repository is linked to a
+  // Sentry project and a token is saved on the settings page.
+  // What the poller's `pending` rows are worth (US-006): one cheap agent per
+  // issue, in a container of its own holding a checkout of the base branch,
+  // asked whether the error can be fixed here at all. Only a yes costs a build
+  // session; everything else is closed with an explanation.
+  const sentryClassifier = createSentryClassifier(
+    config,
+    db,
+    sessionOrchestrator,
+    exec,
+    createAgentRunner(exec),
+  );
+  // And what a "yes" is worth (US-007): a real build session on the base
+  // branch, seeded with a generated PRD holding the whole Sentry report, code
+  // review on, marked ready and handed to `builds.start` exactly as the Start
+  // button would — from there the ordinary queue, delivery and review pipeline
+  // take it the rest of the way to a pull request.
+  // Which needs the session service, so it is built here rather than beside
+  // its router: the fixer starts sessions through it, and the recurring task
+  // runner's thunk above resolves to this same one. Deleting a session (US-015)
+  // has to unwind whatever is running in its container first, which is why it
+  // takes the orchestrator and the executor along with the three services.
+  sessions = createSessionService(config, db, orchestrator, exec, {
+    builds,
+    planning,
+    scheduler,
+  });
+  const sentryFixer = createSentryFixer(config, db, sessions, builds);
+  // And how it ends (US-008): a merged pull request marks its issue fixed and
+  // resolves it in Sentry, while a session that failed or whose pull request
+  // was closed unmerged closes the issue with what happened written on it.
+  const sentryCompleter = createSentryCompleter(db);
+  const sentrySync =
+    deps.sentrySync ??
+    createSentrySync(db, undefined, sentryClassifier, sentryFixer, sentryCompleter);
+  sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap, and
   // since US-004 its queue as well: a pass asked for while every slot is taken
   // waits its turn instead of being refused, whether an operator asked for it
@@ -315,13 +384,12 @@ export function createApp(
       prConflicts,
     ),
   );
-  // Deleting a session (US-015) has to unwind whatever is running in its
-  // container first, so the session service is built last and given all three.
-  api.use(
-    createSessionsRouter(
-      createSessionService(config, db, orchestrator, exec, { builds, planning, scheduler }),
-    ),
-  );
+  // What the poller, the classifier and the fixer above have made of every
+  // issue they have seen (US-009). A read over the database, mounted here
+  // rather than beside the settings router so it sits next to the pipeline it
+  // reports on.
+  api.use(createSentryRouter(db));
+  api.use(createSessionsRouter(sessions));
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));

@@ -61,6 +61,14 @@ export type AgentModel = (typeof AGENT_MODELS)[number];
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
+  /** The Sentry auth token, masked the same way (US-002). */
+  sentryToken: { configured: boolean; last4: string | null };
+  /** How often Sentry is polled for new unresolved issues (US-002). */
+  sentryPollIntervalMinutes: number;
+  /** Model the issue classification runs on; never `null`, defaults to haiku. */
+  sentryModel: AgentModel;
+  /** Root of the Sentry API; self-hosted installs point this at themselves. */
+  sentryBaseUrl: string;
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
@@ -86,6 +94,13 @@ export interface Settings {
 export interface SettingsUpdate {
   /** Omit to leave the stored token untouched; `null` removes it. */
   githubToken?: string | null;
+  /** The same rules as `githubToken`, for Sentry (US-002). */
+  sentryToken?: string | null;
+  sentryPollIntervalMinutes?: number;
+  /** No "let Claude Code choose" here — the classifier always has a model. */
+  sentryModel?: AgentModel;
+  /** `null` restores Sentry's own hosted API. */
+  sentryBaseUrl?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
   prSyncIntervalMinutes?: number;
@@ -178,6 +193,9 @@ export interface Repository {
   keyFingerprint: string | null;
   keySource: 'generated' | 'imported' | null;
   keyConfigured: boolean;
+  /** The linked Sentry project; both slugs are set, or both are null. */
+  sentryOrg: string | null;
+  sentryProject: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -190,6 +208,9 @@ export interface RepositoryInput {
   defaultBaseBranch?: string;
   /** Omit on create to have the server generate an ed25519 keypair. */
   privateKey?: string;
+  /** `null` unlinks Sentry; both slugs are set together or not at all. */
+  sentryOrg?: string | null;
+  sentryProject?: string | null;
 }
 
 export interface ConnectionTestResult {
@@ -276,6 +297,10 @@ export interface Session {
   /** 1-based place in the FIFO build queue (US-018); null when not waiting. */
   queuePosition: number | null;
   containerId: string | null;
+  /** The recurring task this session is a run of; null for a hand-made one. */
+  recurringTaskId: string | null;
+  /** That task's name, for the link back to it; null whenever the id is. */
+  recurringTaskName: string | null;
   prUrl: string | null;
   lastError: string | null;
   /** Which step a failed session failed at (US-019); null when it has not. */
@@ -746,6 +771,12 @@ export interface Stats {
     queue: QueuedBuild[];
   };
   hold: { until: string | null };
+  /**
+   * The machine the server runs on. `cpu` is the busy fraction (0–1) since the
+   * previous poll, and is null on the first read after a restart, when there is
+   * no earlier sample to measure against. Memory is in bytes.
+   */
+  host: { cpu: number | null; cores: number; memory: { used: number; total: number } };
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];
@@ -861,6 +892,204 @@ export async function retrySession(id: string): Promise<Retry> {
 /** The session detail page, which is where planning happens. */
 export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;
+}
+
+/* --------------------------------------------------------- recurring tasks */
+
+/**
+ * Mirrors the server's `RECURRING_TASK_OUTCOMES` (US-001): how a task's most
+ * recent occurrence ended. `started` is a run that is still going.
+ */
+export const RECURRING_TASK_OUTCOMES = [
+  'started',
+  'skipped',
+  'fire-failed',
+  'pr-opened',
+  'clean',
+  'failed',
+] as const;
+
+export type RecurringTaskOutcome = (typeof RECURRING_TASK_OUTCOMES)[number];
+
+/** Mirrors the server's `RecurringTaskView` (US-003): one task definition. */
+export interface RecurringTask {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  name: string;
+  prompt: string;
+  cronExpression: string;
+  /**
+   * The schedule in words — "At 03:00, only on Monday". The server owns cron
+   * semantics, so nothing here parses the expression; `null` only for a row
+   * whose expression stopped being valid, which the API refuses to store.
+   */
+  scheduleDescription: string | null;
+  baseBranch: string;
+  prTarget: PrTargetBranch;
+  runCodeReview: boolean;
+  paused: boolean;
+  /** UTC ISO-8601 of the next occurrence; null while the task is paused. */
+  nextRunAt: string | null;
+  lastOutcome: RecurringTaskOutcome | null;
+  /** The outcome in the operator's words, straight from the server. */
+  lastOutcomeLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Every editable field, all optional: `PUT` is one endpoint for edits and for
+ * pause/resume, and the server recomputes `nextRunAt` when the schedule or
+ * `paused` actually changed.
+ */
+export interface RecurringTaskInput {
+  name?: string;
+  prompt?: string;
+  cronExpression?: string;
+  baseBranch?: string;
+  prTarget?: PrTargetBranch;
+  runCodeReview?: boolean;
+  paused?: boolean;
+}
+
+export async function fetchRecurringTasks(signal?: AbortSignal): Promise<RecurringTask[]> {
+  const body = await api<{ recurringTasks: RecurringTask[] }>(
+    '/api/recurring-tasks',
+    signal ? { signal } : {},
+  );
+  return body.recurringTasks;
+}
+
+export async function updateRecurringTask(
+  id: string,
+  input: RecurringTaskInput,
+): Promise<RecurringTask> {
+  return api<RecurringTask>(`/api/recurring-tasks/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteRecurringTask(id: string): Promise<void> {
+  await api<void>(`/api/recurring-tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * Everything `POST /api/recurring-tasks` insists on, plus the fields it will
+ * default. Separate from `RecurringTaskInput` — whose fields are all optional
+ * because `PUT` is edits *and* pause/resume — so the create form cannot
+ * compile without a repository, a name, a prompt and a schedule.
+ */
+export interface CreateRecurringTaskInput {
+  repositoryId: string;
+  name: string;
+  prompt: string;
+  cronExpression: string;
+  baseBranch?: string;
+  prTarget?: PrTargetBranch;
+  runCodeReview?: boolean;
+  paused?: boolean;
+}
+
+export async function createRecurringTask(input: CreateRecurringTaskInput): Promise<RecurringTask> {
+  return api<RecurringTask>('/api/recurring-tasks', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/**
+ * One task, for the edit form. The server also sends the occurrence history
+ * from this endpoint; the form has no use for it, and US-009's detail page is
+ * where that half gets a type.
+ */
+export async function fetchRecurringTask(id: string, signal?: AbortSignal): Promise<RecurringTask> {
+  return api<RecurringTask>(
+    `/api/recurring-tasks/${encodeURIComponent(id)}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Mirrors the server's `RecurringTaskRunView` (US-003): the session a run made. */
+export interface RecurringTaskRun {
+  id: string;
+  name: string;
+  status: Session['status'];
+  prUrl: string | null;
+}
+
+/**
+ * Mirrors the server's `RecurringTaskOccurrenceView` (US-003): one row of a
+ * task's history.
+ *
+ * `session` is null for an occurrence that never made one — a skip, a failure
+ * to fire — and for a run whose session has since been deleted. `detail` is
+ * the reason in the server's words: why it was skipped, why it could not
+ * start, what it failed on, or (for `pr-opened`) the pull request's URL.
+ */
+export interface RecurringTaskOccurrence {
+  id: number;
+  occurredAt: string;
+  outcome: RecurringTaskOutcome;
+  outcomeLabel: string;
+  detail: string | null;
+  session: RecurringTaskRun | null;
+}
+
+/**
+ * Mirrors the server's `RECURRING_TASK_HISTORY_LIMIT`: how many occurrences the
+ * detail endpoint returns, so the page can say when it is showing a window of a
+ * longer history rather than the whole of it.
+ */
+export const RECURRING_TASK_HISTORY_LIMIT = 100;
+
+/**
+ * Mirrors the server's `RecurringTaskDetailView`: the task plus the newest
+ * {@link RECURRING_TASK_HISTORY_LIMIT} of its occurrences.
+ */
+export interface RecurringTaskDetail extends RecurringTask {
+  occurrences: RecurringTaskOccurrence[];
+}
+
+/** One task with its run history, for the detail page (US-009). */
+export async function fetchRecurringTaskDetail(
+  id: string,
+  signal?: AbortSignal,
+): Promise<RecurringTaskDetail> {
+  return api<RecurringTaskDetail>(
+    `/api/recurring-tasks/${encodeURIComponent(id)}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** The recurring task detail page, which is where its run history lives. */
+export function recurringTaskPath(id: string): string {
+  return `/recurring-tasks/${encodeURIComponent(id)}`;
+}
+
+/**
+ * Mirrors the server's `CronPreview` (US-008): an expression judged without
+ * anything being stored, so the form can say what a schedule means while it is
+ * still being typed. The server owns cron semantics; nothing here parses one.
+ */
+export interface CronPreview {
+  /** Echoed back, so a late answer can be matched against what is in the box. */
+  expression: string;
+  valid: boolean;
+  /** "At 03:00, only on Monday"; null when the expression is not valid. */
+  description: string | null;
+  /** UTC ISO-8601, shown on the visitor's own clock; null when invalid. */
+  nextRunAt: string | null;
+  /** Why it was rejected, in the cron module's words; null when it was not. */
+  message: string | null;
+}
+
+export async function previewCron(expression: string, signal?: AbortSignal): Promise<CronPreview> {
+  return api<CronPreview>(
+    `/api/cron/preview?expression=${encodeURIComponent(expression)}`,
+    signal ? { signal } : {},
+  );
 }
 
 /* ------------------------------------------------------------ pull requests */
@@ -1296,5 +1525,75 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
       return 'pushing to GitHub';
     case 'container_lost':
       return 'the container';
+  }
+}
+
+/* ------------------------------------------------------------------ sentry */
+
+/** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
+export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+
+export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
+
+/** Mirrors the server's `SentryIssueView`: one tracked Sentry issue. */
+export interface SentryIssue {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  sentryIssueId: string;
+  /** The human-facing `PROJECT-1AB` id. */
+  shortId: string;
+  title: string;
+  culprit: string | null;
+  /** Where the issue lives in Sentry; the external link on every row. */
+  permalink: string;
+  level: string | null;
+  eventCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  status: SentryIssueStatus;
+  /** Why the issue cannot be fixed; shown inline on every `cannot_fix` row. */
+  explanation: string | null;
+  sessionId: string | null;
+  /** Null when there is no session, or it has been deleted. */
+  sessionName: string | null;
+  resolvedInSentry: boolean;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Mirrors the server's `SentryIssueList`. */
+export interface SentryIssueList {
+  issues: SentryIssue[];
+  /** Without a token nothing is ever polled, so an empty list means nothing. */
+  tokenConfigured: boolean;
+  generatedAt: string;
+}
+
+/**
+ * Every Sentry issue chief-web is tracking.
+ *
+ * A database read, so it is cheap — but the pipeline behind it moves on a
+ * fifteen-minute tick, so the page loads it once and refreshes on demand
+ * rather than joining the global poll.
+ */
+export async function fetchSentryIssues(signal?: AbortSignal): Promise<SentryIssueList> {
+  return api<SentryIssueList>('/api/sentry/issues', signal ? { signal } : {});
+}
+
+/** What the operator reads for each pipeline state. */
+export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
+  switch (status) {
+    case 'pending':
+      return 'awaiting classification';
+    case 'queued':
+      return 'queued';
+    case 'working':
+      return 'session running';
+    case 'fixed':
+      return 'fixed';
+    case 'cannot_fix':
+      return 'cannot fix';
   }
 }

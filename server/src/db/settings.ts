@@ -50,6 +50,27 @@ export const SETTING_KEYS = [
    */
   'conflict_fix_enabled',
   /**
+   * Sentry auth token used to poll issues and resolve them again (US-002).
+   * Write-only over the API, exactly like `github_token`.
+   */
+  'sentry_token',
+  /**
+   * How often Sentry is polled for new unresolved issues, in minutes (US-002).
+   * An absent row means the built-in 15 minute default.
+   */
+  'sentry_poll_interval_minutes',
+  /**
+   * `--model` for the one-shot "can this be fixed?" classification (US-002).
+   * Unlike the other model rows an absent one is not "let the CLI choose" but
+   * the built-in `haiku` — the classifier is a cheap pass by design.
+   */
+  'sentry_model',
+  /**
+   * Base URL of the Sentry API, for self-hosted installations (US-002). An
+   * absent row means `https://sentry.io/api/0/`.
+   */
+  'sentry_base_url',
+  /**
    * ISO timestamp until which agent work is held after a Claude usage-limit
    * refusal (US-002). Written and read through `limits/hold.ts`; a value in
    * the past means no hold, so nothing has to sweep the row.

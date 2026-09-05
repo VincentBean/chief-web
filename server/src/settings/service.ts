@@ -42,6 +42,20 @@ export const MIN_PR_CONFLICT_INTERVAL_MINUTES = 1;
 export const MAX_PR_CONFLICT_INTERVAL_MINUTES = 1440;
 
 /**
+ * Bounds for the Sentry poll interval, in minutes (US-002). The same reasoning
+ * as the pull request sync above — a floor that keeps the Sentry rate budget in
+ * hand, and a ceiling past which a poll is no longer a poll.
+ */
+export const MIN_SENTRY_POLL_INTERVAL_MINUTES = 1;
+export const MAX_SENTRY_POLL_INTERVAL_MINUTES = 1440;
+
+/** How often Sentry is polled when the operator has not chosen (US-002). */
+export const DEFAULT_SENTRY_POLL_INTERVAL_MINUTES = 15;
+
+/** Sentry's own hosted API; overridden per install for self-hosted Sentry. */
+export const DEFAULT_SENTRY_BASE_URL = 'https://sentry.io/api/0/';
+
+/**
  * Models an agent may be run on, as Claude Code's own `--model` values.
  *
  * These are the CLI's *aliases* rather than pinned ids (`claude-opus-5`), so
@@ -60,6 +74,14 @@ export type AgentModel = (typeof AGENT_MODELS)[number];
 export function isAgentModel(value: string): value is AgentModel {
   return (AGENT_MODELS as readonly string[]).includes(value);
 }
+
+/**
+ * Which model classifies a Sentry issue as fixable or not (US-002). One cheap
+ * one-shot call per issue, so this defaults to the cheapest family rather than
+ * to "let the CLI choose" — a classification pass accidentally running on Opus
+ * is the expensive mistake this default exists to prevent.
+ */
+export const DEFAULT_SENTRY_MODEL: AgentModel = 'haiku';
 
 const MS_PER_MINUTE = 60_000;
 
@@ -94,6 +116,14 @@ export interface GithubTokenView {
 
 export interface AppSettings {
   readonly githubToken: GithubTokenView;
+  /** The Sentry auth token, masked the same way the GitHub one is (US-002). */
+  readonly sentryToken: GithubTokenView;
+  /** How often Sentry is polled for new unresolved issues, in minutes. */
+  readonly sentryPollIntervalMinutes: number;
+  /** Model the one-shot issue classification runs on; never `null`. */
+  readonly sentryModel: AgentModel;
+  /** Root of the Sentry API; a self-hosted install points this at itself. */
+  readonly sentryBaseUrl: string;
   readonly maxConcurrentSessions: number;
   /** Cap on one headless agent iteration of the build loop, in minutes. */
   readonly agentTimeoutMinutes: number;
@@ -118,6 +148,13 @@ export interface AppSettings {
 export interface AppSettingsUpdate {
   /** A new token, or `null` to remove the stored one. Omitted leaves it alone. */
   readonly githubToken?: string | null;
+  /** The same rules as `githubToken` above, for Sentry (US-002). */
+  readonly sentryToken?: string | null;
+  readonly sentryPollIntervalMinutes?: number;
+  /** There is no "let the CLI choose" for the classifier, so no `null`. */
+  readonly sentryModel?: AgentModel;
+  /** `null` restores Sentry's own hosted API. */
+  readonly sentryBaseUrl?: string | null;
   readonly maxConcurrentSessions?: number;
   readonly agentTimeoutMinutes?: number;
   readonly prSyncIntervalMinutes?: number;
@@ -147,6 +184,30 @@ export function isValidGitAuthorEmail(value: string): boolean {
   return value.length <= MAX_GIT_IDENTITY_CHARS && /^[^\s<>@]+@[^\s<>@]+$/.test(value);
 }
 
+/**
+ * A Sentry API root chief-web is willing to call: an absolute `http(s)` URL
+ * (US-002). Self-hosted Sentry lives on any host, so the only thing worth
+ * checking is the scheme — anything else here would lock those installs out.
+ */
+export function isValidSentryBaseUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+/** A poll interval the operator is allowed to save (US-002). */
+export function isValidSentryPollIntervalMinutes(value: number): boolean {
+  return (
+    Number.isInteger(value) &&
+    value >= MIN_SENTRY_POLL_INTERVAL_MINUTES &&
+    value <= MAX_SENTRY_POLL_INTERVAL_MINUTES
+  );
+}
+
 /** Everything but the last four characters is unrecoverable from this view. */
 export function maskToken(token: string): GithubTokenView {
   return { configured: true, last4: token.slice(-VISIBLE_TOKEN_CHARS) };
@@ -157,6 +218,53 @@ const NO_TOKEN: GithubTokenView = { configured: false, last4: null };
 /** The stored PAT, for the code that talks to GitHub on the operator's behalf. */
 export function getGithubToken(db: Database): string | null {
   return getSetting(db, 'github_token');
+}
+
+/** The stored Sentry auth token, for the poller and the resolve call (US-002). */
+export function getSentryToken(db: Database): string | null {
+  return getSetting(db, 'sentry_token');
+}
+
+/**
+ * How long the Sentry poll waits between passes (US-002).
+ *
+ * Unlike the pull request intervals there is no environment default behind
+ * this one — the integration is configured entirely from the settings page —
+ * so an absent or unparseable row reads as
+ * {@link DEFAULT_SENTRY_POLL_INTERVAL_MINUTES} and a stored value is clamped.
+ */
+export function getSentryPollIntervalMinutes(db: Database): number {
+  const stored = getSettingNumber(db, 'sentry_poll_interval_minutes', 0);
+  if (stored <= 0) return DEFAULT_SENTRY_POLL_INTERVAL_MINUTES;
+  return Math.min(
+    MAX_SENTRY_POLL_INTERVAL_MINUTES,
+    Math.max(MIN_SENTRY_POLL_INTERVAL_MINUTES, stored),
+  );
+}
+
+/** The same interval the poller actually arms its timer with. */
+export function getSentryPollIntervalMs(db: Database): number {
+  return getSentryPollIntervalMinutes(db) * MS_PER_MINUTE;
+}
+
+/**
+ * Which model the issue classifier runs on (US-002). A hand-edited row naming
+ * a model chief-web does not offer reads as the default, the same fail-safe as
+ * {@link getPlanningModel} — except that here the fallback is a real model,
+ * because the classifier always has to run on something.
+ */
+export function getSentryModel(db: Database): AgentModel {
+  const stored = getSetting(db, 'sentry_model');
+  return stored !== null && isAgentModel(stored) ? stored : DEFAULT_SENTRY_MODEL;
+}
+
+/**
+ * The Sentry API root (US-002). Absent — or hand-edited to something that is
+ * not an http(s) URL — reads as Sentry's own hosted API.
+ */
+export function getSentryBaseUrl(db: Database): string {
+  const stored = getSetting(db, 'sentry_base_url');
+  return stored !== null && isValidSentryBaseUrl(stored) ? stored : DEFAULT_SENTRY_BASE_URL;
 }
 
 /**
@@ -312,8 +420,13 @@ export function getGitIdentity(db: Database): GitIdentity {
 export function readAppSettings(db: Database, config: Config): AppSettings {
   const token = getGithubToken(db);
   const identity = getGitIdentity(db);
+  const sentryToken = getSentryToken(db);
   return {
     githubToken: token === null ? NO_TOKEN : maskToken(token),
+    sentryToken: sentryToken === null ? NO_TOKEN : maskToken(sentryToken),
+    sentryPollIntervalMinutes: getSentryPollIntervalMinutes(db),
+    sentryModel: getSentryModel(db),
+    sentryBaseUrl: getSentryBaseUrl(db),
     // The env var is only the default: once saved, the settings row wins.
     maxConcurrentSessions: getSettingNumber(
       db,
@@ -341,6 +454,22 @@ export function updateAppSettings(
   withTransaction(db, () => {
     if (update.githubToken === null) deleteSetting(db, 'github_token');
     else if (update.githubToken !== undefined) setSetting(db, 'github_token', update.githubToken);
+
+    // Stored, masked and removed exactly like the GitHub token above.
+    if (update.sentryToken === null) deleteSetting(db, 'sentry_token');
+    else if (update.sentryToken !== undefined) setSetting(db, 'sentry_token', update.sentryToken);
+
+    if (update.sentryPollIntervalMinutes !== undefined) {
+      setSettingNumber(db, 'sentry_poll_interval_minutes', update.sentryPollIntervalMinutes);
+    }
+
+    if (update.sentryModel !== undefined) setSetting(db, 'sentry_model', update.sentryModel);
+
+    // `null` clears the row, which makes the hosted Sentry API apply again.
+    if (update.sentryBaseUrl === null) deleteSetting(db, 'sentry_base_url');
+    else if (update.sentryBaseUrl !== undefined) {
+      setSetting(db, 'sentry_base_url', update.sentryBaseUrl);
+    }
 
     if (update.maxConcurrentSessions !== undefined) {
       setSettingNumber(db, 'max_concurrent_sessions', update.maxConcurrentSessions);

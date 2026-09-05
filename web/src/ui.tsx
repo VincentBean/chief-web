@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import type { Session, Story } from './api.ts';
+import type { RecurringTaskOutcome, Session, Story } from './api.ts';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link } from './router.tsx';
 
@@ -37,6 +37,21 @@ export const STORY_TONE: Record<Story['status'], Tone> = {
   todo: 'neutral',
   'in-progress': 'active',
   done: 'done',
+};
+
+/**
+ * How a recurring task's last run ended (US-007). It reads as the same
+ * vocabulary as a session, because that is what an occurrence is: `started` is
+ * a build in flight, a pull request is the purple the session list uses for
+ * one, and a run that came back with nothing to change is finished-green.
+ */
+export const RECURRING_OUTCOME_TONE: Record<RecurringTaskOutcome, Tone> = {
+  started: 'active',
+  skipped: 'wait',
+  'fire-failed': 'danger',
+  'pr-opened': 'review',
+  clean: 'done',
+  failed: 'danger',
 };
 
 /** What the operator reads for each state. */
@@ -172,6 +187,32 @@ export function Progress({
       <span className="progress__label mono">
         {total === 0 ? '—' : `${String(done)}/${String(total)}`}
       </span>
+    </div>
+  );
+}
+
+/**
+ * A fraction of something continuous — host CPU, host memory — as a short bar.
+ *
+ * `Meter` counts whole build slots and `Progress` carries its own label; this
+ * is the one for a ratio that sits at the end of a status row, where the number
+ * beside it is already spelled out.
+ */
+export function Gauge({ value, label }: { readonly value: number; readonly label: string }) {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  // The colour is the warning: quiet while there is room, amber as it fills,
+  // red once the machine has nothing left to give.
+  const tone: Tone = percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active';
+  return (
+    <div
+      className={`gauge gauge--${tone}`}
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent}
+      aria-label={label}
+    >
+      <div className="gauge__fill" style={{ width: `${String(percent)}%` }} />
     </div>
   );
 }

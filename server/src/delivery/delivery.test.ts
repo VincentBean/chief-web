@@ -6,6 +6,7 @@ import { after, before, describe, it } from 'node:test';
 import { type Config, loadConfig } from '../config.js';
 import {
   createPrRun,
+  createRecurringTask,
   createRepository,
   createSession,
   type Database,
@@ -35,6 +36,7 @@ import type {
   ReviewTarget,
 } from '../review/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
+import { COMMIT_COUNT_SCRIPT, type CommitCount, commitCountExecSpec, countBranchCommits } from './commits.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { PUSH_SCRIPT, pushExecSpec } from './push.js';
 import { type FeedbackSolver, ReviewStep, type SessionReviewer } from './review-step.js';
@@ -315,9 +317,11 @@ class World {
   readonly execs: ExecSpec[] = [];
   /** What the push exec answers with. */
   push: ExecOutput = { exitCode: 0, stdout: '', stderr: 'Branch set up to track origin.', timedOut: false };
+  /** What `git rev-list --count` answers with; two commits by default. */
+  commits: ExecOutput = { exitCode: 0, stdout: '2\n', stderr: '', timedOut: false };
   containerFailure: Error | null = null;
 
-  constructor(options: { slug?: string; publicUrl?: string } = {}) {
+  constructor(options: { slug?: string; publicUrl?: string; recurring?: boolean } = {}) {
     this.config = loadConfig(
       options.publicUrl === undefined ? {} : { PUBLIC_URL: options.publicUrl },
     );
@@ -327,6 +331,19 @@ class World {
       sshUrl: 'git@github.com:acme/demo.git',
       githubSlug: options.slug ?? 'acme/demo',
     });
+    // A run of a recurring task (US-006) is the one session that may finish
+    // without a pull request, so it is the one this can create either way.
+    const task =
+      options.recurring === true
+        ? createRecurringTask(this.db, {
+            repositoryId: repository.id,
+            name: 'nightly-rector',
+            prompt: 'Run rector and fix what it reports.',
+            cronExpression: '0 3 * * *',
+            baseBranch: 'main',
+            prTarget: 'develop',
+          })
+        : null;
     this.session =
       updateSession(
         this.db,
@@ -335,6 +352,7 @@ class World {
           name: 'add-login',
           baseBranch: 'main',
           prTargetBranch: 'develop',
+          recurringTaskId: task?.id ?? null,
         }).id,
         { status: 'building' },
       ) ?? (undefined as never);
@@ -362,7 +380,7 @@ class World {
     return {
       runExec: (_container: string, spec: ExecSpec): Promise<ExecOutput> => {
         this.execs.push(spec);
-        return Promise.resolve(this.push);
+        return Promise.resolve(spec.cmd[2] === COMMIT_COUNT_SCRIPT ? this.commits : this.push);
       },
     };
   }
@@ -1917,5 +1935,192 @@ describe('the draft/undraft chain', () => {
     assert.equal(failed.status, 'failed');
     assert.equal(failed.failureStage, 'pull_request');
     assert.match(failed.lastError ?? '', /GitHub is having a moment\./);
+  });
+});
+
+/* ------------------------------------------------- a run that changed nothing */
+
+describe('counting what a run committed', () => {
+  it('counts the feature branch over the remote base branch, with the branches in the environment', () => {
+    const spec = commitCountExecSpec('main', 'chief/nightly; rm -rf /');
+    assert.deepEqual(spec.cmd, ['/bin/sh', '-c', COMMIT_COUNT_SCRIPT]);
+    assert.equal(spec.workingDir, CONTAINER_REPO_DIR);
+    assert.deepEqual(
+      [...(spec.env ?? [])],
+      [
+        'CHIEF_BASE_BRANCH=main',
+        'CHIEF_FEATURE_BRANCH=chief/nightly; rm -rf /',
+        `CHIEF_REPO_DIR=${CONTAINER_REPO_DIR}`,
+      ],
+    );
+    assert.match(
+      COMMIT_COUNT_SCRIPT,
+      /git rev-list --count "origin\/\$CHIEF_BASE_BRANCH\.\.\$CHIEF_FEATURE_BRANCH"/,
+    );
+    assert.doesNotMatch(COMMIT_COUNT_SCRIPT, /rm -rf/);
+  });
+
+  const counted = (output: ExecOutput): Promise<CommitCount> =>
+    countBranchCommits(
+      { runExec: (): Promise<ExecOutput> => Promise.resolve(output) },
+      'container-1',
+      { baseBranch: 'main', featureBranch: 'chief/nightly', timeoutMs: 1000 },
+    );
+
+  it('reads the number git answered with', async () => {
+    assert.deepEqual(await counted({ exitCode: 0, stdout: '0\n', stderr: '', timedOut: false }), {
+      known: true,
+      commits: 0,
+      message: '',
+    });
+    assert.equal(
+      (await counted({ exitCode: 0, stdout: '4\n', stderr: '', timedOut: false })).commits,
+      4,
+    );
+  });
+
+  it('never guesses: a git failure, a timeout and unreadable output are all unknown', async () => {
+    for (const output of [
+      { exitCode: 128, stdout: '', stderr: "fatal: bad revision 'origin/main..x'", timedOut: false },
+      { exitCode: 0, stdout: '', stderr: '', timedOut: true },
+      { exitCode: 0, stdout: 'lots\n', stderr: '', timedOut: false },
+    ]) {
+      const count = await counted(output);
+      assert.equal(count.known, false, JSON.stringify(output));
+      assert.equal(count.commits, 0);
+    }
+    assert.match(
+      (
+        await counted({ exitCode: 128, stdout: '', stderr: 'fatal: bad revision', timedOut: false })
+      ).message,
+      /git exited 128 .*fatal: bad revision/s,
+    );
+  });
+});
+
+describe('delivering a scheduled run that changed nothing (US-006)', () => {
+  /** Runs the automatic delivery of `world`'s session and answers its opener. */
+  const deliver = async (world: World): Promise<FakeOpener> => {
+    const opener = new FakeOpener();
+    const delivery = createDeliveryService(world.config, world.db, world.containers, world.exec, opener);
+    await delivery.complete(world.session, world.stories());
+    return opener;
+  };
+
+  it('skips the push, the pull request and the review, and finishes the session clean', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 0, stdout: '0\n', stderr: '', timedOut: false };
+    // The task asked for a code review; there is nothing to review, so the
+    // step must not be reached at all.
+    const reviewed = updateSession(world.db, world.session.id, { codeReview: true });
+    assert.equal(reviewed?.codeReview, true);
+    const opener = new FakeOpener();
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+      new ReviewStep(
+        { review: (): never => assert.fail('the code review must not run for a clean run') },
+        { publish: (): never => assert.fail('nothing must be published for a clean run') },
+      ),
+    );
+
+    await delivery.complete(reviewed ?? world.session, world.stories());
+
+    assert.deepEqual(
+      world.execs.map((spec) => spec.cmd[2]),
+      [COMMIT_COUNT_SCRIPT],
+      'the count is the only thing that ran: nothing was pushed',
+    );
+    assert.equal(opener.calls.length, 0, 'no pull request was opened');
+    assert.equal(opener.ready.length, 0, 'and nothing was undrafted');
+
+    const finished = world.reload();
+    assert.equal(finished.status, 'finished');
+    assert.equal(finished.prUrl, null);
+    assert.equal(finished.lastError, null);
+    assert.equal(finished.failureStage, null);
+  });
+
+  it('answers the clean code and says what happened, so a retry reports it too', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 0, stdout: '0\n', stderr: '', timedOut: false };
+    // "Retry push & PR" on a run that is already over: the answer must be the
+    // same clean one rather than a pull request GitHub would refuse.
+    updateSession(world.db, world.session.id, { status: 'finished' });
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      new FakeOpener(),
+    );
+
+    const result = await delivery.retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.code, 'clean');
+    assert.equal(result.status, 'finished');
+    assert.equal(result.prUrl, null);
+    assert.match(result.message, /committed nothing on "chief\/add-login"/);
+  });
+
+  it('does not publish the branch after a story either', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 0, stdout: '0\n', stderr: '', timedOut: false };
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      new FakeOpener(),
+    );
+
+    await delivery.push(world.session);
+
+    assert.deepEqual(
+      world.execs.map((spec) => spec.cmd[2]),
+      [COMMIT_COUNT_SCRIPT],
+    );
+  });
+
+  it('delivers a scheduled run that did commit exactly as it always has', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 0, stdout: '3\n', stderr: '', timedOut: false };
+
+    const opener = await deliver(world);
+
+    assert.deepEqual(world.execs.map((spec) => spec.cmd[2]), [COMMIT_COUNT_SCRIPT, PUSH_SCRIPT]);
+    assert.equal(opener.calls.length, 1);
+    assert.equal(world.reload().status, 'pr-open');
+    assert.equal(world.reload().prUrl, 'https://github.com/acme/demo/pull/7');
+  });
+
+  it('delivers as usual when git could not say how far ahead the branch is', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 128, stdout: '', stderr: 'fatal: bad revision', timedOut: false };
+
+    const opener = await deliver(world);
+
+    assert.deepEqual(world.execs.map((spec) => spec.cmd[2]), [COMMIT_COUNT_SCRIPT, PUSH_SCRIPT]);
+    assert.equal(opener.calls.length, 1, 'a count nobody could read never skips a pull request');
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('never asks the question of a session somebody created by hand', async () => {
+    const world = new World();
+    world.commits = { exitCode: 0, stdout: '0\n', stderr: '', timedOut: false };
+
+    const opener = await deliver(world);
+
+    assert.deepEqual(
+      world.execs.map((spec) => spec.cmd[2]),
+      [PUSH_SCRIPT],
+      'an interactive session pushes and opens its pull request as before',
+    );
+    assert.equal(opener.calls.length, 1);
+    assert.equal(world.reload().status, 'pr-open');
   });
 });

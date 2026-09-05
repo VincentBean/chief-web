@@ -44,6 +44,12 @@ export interface RepositoryView {
   readonly keySource: RepositoryKeySource | null;
   /** Whether a usable private key exists on the data volume. */
   readonly keyConfigured: boolean;
+  /**
+   * The linked Sentry project (US-003). Both slugs are set or both are null;
+   * null/null means this repository is not watched for Sentry issues.
+   */
+  readonly sentryOrg: string | null;
+  readonly sentryProject: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -67,6 +73,9 @@ export interface CreateRepositoryRequest {
   readonly defaultBaseBranch: string;
   /** An existing key to import; omitted means "generate an ed25519 keypair". */
   readonly privateKey?: string;
+  /** The Sentry link; both slugs together, or neither. */
+  readonly sentryOrg?: string | null;
+  readonly sentryProject?: string | null;
 }
 
 export interface UpdateRepositoryRequest {
@@ -76,6 +85,9 @@ export interface UpdateRepositoryRequest {
   readonly defaultBaseBranch?: string;
   /** Replaces the stored key; omitted leaves the existing one alone. */
   readonly privateKey?: string;
+  /** `null` unlinks; omitted leaves the stored slug alone. */
+  readonly sentryOrg?: string | null;
+  readonly sentryProject?: string | null;
 }
 
 interface KeyMaterial {
@@ -96,6 +108,8 @@ export function toRepositoryView(config: Config, repository: Repository): Reposi
     keyFingerprint: repository.keyFingerprint,
     keySource: repository.keySource,
     keyConfigured: hasPrivateKey(config, repository.id),
+    sentryOrg: repository.sentryOrg,
+    sentryProject: repository.sentryProject,
     createdAt: repository.createdAt,
     updatedAt: repository.updatedAt,
   };
@@ -141,6 +155,21 @@ function keyMaterialFor(name: string, privateKey: string | undefined): KeyMateri
   };
 }
 
+/**
+ * Half a link addresses nothing: an org slug on its own has no project to poll
+ * and a project slug on its own has no org to poll it under. The check lives
+ * here rather than in the route because an edit can clear one of the two and
+ * leave the other behind in the stored row.
+ */
+function assertSentryLinkIsComplete(org: string | null, project: string | null): void {
+  if ((org === null) === (project === null)) return;
+  throw new RepositoryError(
+    400,
+    'sentry_link_incomplete',
+    'A Sentry link needs both an org slug and a project slug. Fill in both, or clear both to unlink.',
+  );
+}
+
 function isUniqueNameViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed: repositories\.name/.test(error.message);
 }
@@ -150,6 +179,10 @@ export function createRepositoryWithKey(
   config: Config,
   request: CreateRepositoryRequest,
 ): RepositoryView {
+  const sentryOrg = request.sentryOrg ?? null;
+  const sentryProject = request.sentryProject ?? null;
+  assertSentryLinkIsComplete(sentryOrg, sentryProject);
+
   const key = keyMaterialFor(request.name, request.privateKey);
 
   let repository: Repository;
@@ -162,6 +195,8 @@ export function createRepositoryWithKey(
       publicKey: key.publicKey,
       keyFingerprint: key.keyFingerprint,
       keySource: key.keySource,
+      sentryOrg,
+      sentryProject,
     });
   } catch (cause) {
     if (isUniqueNameViolation(cause)) {
@@ -216,11 +251,22 @@ export function updateRepositoryWithKey(
     publicKey?: string | null;
     keyFingerprint?: string | null;
     keySource?: RepositoryKeySource;
+    sentryOrg?: string | null;
+    sentryProject?: string | null;
   } = {};
   if (request.name !== undefined) patch.name = request.name;
   if (request.sshUrl !== undefined) patch.sshUrl = request.sshUrl;
   if (request.githubSlug !== undefined) patch.githubSlug = request.githubSlug;
   if (request.defaultBaseBranch !== undefined) patch.defaultBaseBranch = request.defaultBaseBranch;
+
+  // `undefined` keeps the stored slug, `null` clears it — so the pair has to be
+  // checked against what the row will hold afterwards, not against the request.
+  const sentryOrg = request.sentryOrg === undefined ? existing.sentryOrg : request.sentryOrg;
+  const sentryProject =
+    request.sentryProject === undefined ? existing.sentryProject : request.sentryProject;
+  assertSentryLinkIsComplete(sentryOrg, sentryProject);
+  if (request.sentryOrg !== undefined) patch.sentryOrg = request.sentryOrg;
+  if (request.sentryProject !== undefined) patch.sentryProject = request.sentryProject;
 
   if (request.privateKey !== undefined) {
     const inspected = inspect(request.privateKey);

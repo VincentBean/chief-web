@@ -18,6 +18,14 @@ import {
   getPlanningModel,
   getPrConflictIntervalMs,
   getReviewModel,
+  getSentryBaseUrl,
+  getSentryModel,
+  getSentryPollIntervalMinutes,
+  getSentryPollIntervalMs,
+  getSentryToken,
+  isAgentModel,
+  isValidSentryBaseUrl,
+  isValidSentryPollIntervalMinutes,
   readAppSettings,
   updateAppSettings,
 } from './index.js';
@@ -197,5 +205,166 @@ describe('merge conflict scan interval and switch (US-004)', () => {
     setSetting(db, 'conflict_fix_enabled', 'nonsense');
 
     assert.equal(getConflictFixEnabled(db), true);
+  });
+});
+
+describe('sentry settings (US-002)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'sentry_token');
+    deleteSetting(db, 'sentry_poll_interval_minutes');
+    deleteSetting(db, 'sentry_model');
+    deleteSetting(db, 'sentry_base_url');
+  });
+
+  it('reports no token until one is stored', () => {
+    assert.deepEqual(readAppSettings(db, config).sentryToken, { configured: false, last4: null });
+    assert.equal(getSentryToken(db), null);
+  });
+
+  it('masks a stored token to its last four characters', () => {
+    const saved = updateAppSettings(db, config, { sentryToken: 'sntryu_exampleToken9876' });
+
+    assert.deepEqual(saved.sentryToken, { configured: true, last4: '9876' });
+    // Only the server ever sees the whole thing.
+    assert.equal(getSentryToken(db), 'sntryu_exampleToken9876');
+    assert.equal(readAppSettings(db, config).sentryToken.last4, '9876');
+  });
+
+  it('leaves the stored token alone when the field is omitted', () => {
+    updateAppSettings(db, config, { sentryToken: 'sntryu_keepMe0001' });
+
+    const other = updateAppSettings(db, config, { sentryPollIntervalMinutes: 30 });
+
+    assert.equal(other.sentryToken.configured, true);
+    assert.equal(getSentryToken(db), 'sntryu_keepMe0001');
+  });
+
+  it('deletes the token on null', () => {
+    updateAppSettings(db, config, { sentryToken: 'sntryu_removeMe0002' });
+
+    const cleared = updateAppSettings(db, config, { sentryToken: null });
+
+    assert.deepEqual(cleared.sentryToken, { configured: false, last4: null });
+    assert.equal(getSetting(db, 'sentry_token'), null);
+  });
+
+  it('is independent of the GitHub token', () => {
+    updateAppSettings(db, config, { githubToken: 'ghp_stayPut1111', sentryToken: 'sntryu_2222' });
+
+    const cleared = updateAppSettings(db, config, { sentryToken: null });
+
+    assert.equal(cleared.sentryToken.configured, false);
+    assert.equal(cleared.githubToken.last4, '1111');
+  });
+
+  it('polls every fifteen minutes until an interval is stored', () => {
+    assert.equal(getSentryPollIntervalMinutes(db), 15);
+    assert.equal(getSentryPollIntervalMs(db), 15 * 60_000);
+    assert.equal(readAppSettings(db, config).sentryPollIntervalMinutes, 15);
+  });
+
+  it('stores an interval and reads it back', () => {
+    const saved = updateAppSettings(db, config, { sentryPollIntervalMinutes: 5 });
+
+    assert.equal(saved.sentryPollIntervalMinutes, 5);
+    assert.equal(getSentryPollIntervalMs(db), 5 * 60_000);
+    assert.equal(getSetting(db, 'sentry_poll_interval_minutes'), '5');
+  });
+
+  it('rejects an interval below one minute, and clamps a hand-edited row', () => {
+    assert.equal(isValidSentryPollIntervalMinutes(0), false);
+    assert.equal(isValidSentryPollIntervalMinutes(-5), false);
+    assert.equal(isValidSentryPollIntervalMinutes(1.5), false);
+    assert.equal(isValidSentryPollIntervalMinutes(1), true);
+    assert.equal(isValidSentryPollIntervalMinutes(1441), false);
+
+    setSetting(db, 'sentry_poll_interval_minutes', '0');
+    assert.equal(getSentryPollIntervalMinutes(db), 15, 'non-positive falls back to the default');
+
+    setSetting(db, 'sentry_poll_interval_minutes', '9999');
+    assert.equal(getSentryPollIntervalMinutes(db), 1440);
+
+    setSetting(db, 'sentry_poll_interval_minutes', 'not a number');
+    assert.equal(getSentryPollIntervalMinutes(db), 15);
+  });
+
+  it('classifies on haiku until another model is chosen', () => {
+    assert.equal(getSentryModel(db), 'haiku');
+    assert.equal(readAppSettings(db, config).sentryModel, 'haiku');
+  });
+
+  it('stores a chosen model and reads it back', () => {
+    const saved = updateAppSettings(db, config, { sentryModel: 'sonnet' });
+
+    assert.equal(saved.sentryModel, 'sonnet');
+    assert.equal(getSentryModel(db), 'sonnet');
+    assert.equal(getSetting(db, 'sentry_model'), 'sonnet');
+  });
+
+  it('reads a hand-edited unknown model as the default rather than passing it through', () => {
+    setSetting(db, 'sentry_model', 'gpt-5');
+
+    assert.equal(isAgentModel('gpt-5'), false);
+    assert.equal(getSentryModel(db), 'haiku');
+    assert.equal(readAppSettings(db, config).sentryModel, 'haiku');
+  });
+
+  it('talks to the hosted API until a base URL is stored', () => {
+    assert.equal(getSentryBaseUrl(db), 'https://sentry.io/api/0/');
+    assert.equal(readAppSettings(db, config).sentryBaseUrl, 'https://sentry.io/api/0/');
+  });
+
+  it('stores a self-hosted base URL and reads it back', () => {
+    const saved = updateAppSettings(db, config, {
+      sentryBaseUrl: 'https://sentry.internal.example/api/0/',
+    });
+
+    assert.equal(saved.sentryBaseUrl, 'https://sentry.internal.example/api/0/');
+    assert.equal(getSentryBaseUrl(db), 'https://sentry.internal.example/api/0/');
+  });
+
+  it('restores the hosted API on null', () => {
+    updateAppSettings(db, config, { sentryBaseUrl: 'http://sentry.local:9000/api/0/' });
+
+    const cleared = updateAppSettings(db, config, { sentryBaseUrl: null });
+
+    assert.equal(cleared.sentryBaseUrl, 'https://sentry.io/api/0/');
+    assert.equal(getSetting(db, 'sentry_base_url'), null);
+  });
+
+  it('accepts only http(s) URLs, so a self-hosted host is fine but a scheme is not', () => {
+    assert.equal(isValidSentryBaseUrl('https://sentry.io/api/0/'), true);
+    assert.equal(isValidSentryBaseUrl('http://sentry.local:9000/api/0/'), true);
+    assert.equal(isValidSentryBaseUrl('ftp://sentry.local/api/0/'), false);
+    assert.equal(isValidSentryBaseUrl('file:///etc/passwd'), false);
+    assert.equal(isValidSentryBaseUrl('sentry.io/api/0/'), false);
+    assert.equal(isValidSentryBaseUrl(''), false);
+  });
+
+  it('reads a hand-edited base URL that is not http(s) as the hosted API', () => {
+    setSetting(db, 'sentry_base_url', 'javascript:alert(1)');
+
+    assert.equal(getSentryBaseUrl(db), 'https://sentry.io/api/0/');
+  });
+
+  it('leaves interval, model and base URL alone when the fields are omitted', () => {
+    updateAppSettings(db, config, {
+      sentryPollIntervalMinutes: 45,
+      sentryModel: 'opus',
+      sentryBaseUrl: 'https://sentry.internal.example/api/0/',
+    });
+
+    const other = updateAppSettings(db, config, { maxConcurrentSessions: 4 });
+
+    assert.equal(other.sentryPollIntervalMinutes, 45);
+    assert.equal(other.sentryModel, 'opus');
+    assert.equal(other.sentryBaseUrl, 'https://sentry.internal.example/api/0/');
   });
 });

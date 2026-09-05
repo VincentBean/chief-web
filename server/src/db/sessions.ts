@@ -154,6 +154,12 @@ export interface Session {
    * feature existed.
    */
   readonly codeReview: boolean;
+  /**
+   * The recurring task this session is a run of (US-001), and null for every
+   * session a human started. Nulled if that task is deleted; the run itself is
+   * an ordinary session and outlives it.
+   */
+  readonly recurringTaskId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -169,6 +175,8 @@ export interface CreateSessionInput {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false: a session asks for a review only when it says so. */
   readonly codeReview?: boolean;
+  /** Set only by the scheduler when firing a recurring task (US-001). */
+  readonly recurringTaskId?: string | null;
 }
 
 export interface UpdateSessionInput {
@@ -184,6 +192,7 @@ export interface UpdateSessionInput {
   readonly failureStage?: FailureStage | null;
   readonly waitingUntil?: string | null;
   readonly codeReview?: boolean;
+  readonly recurringTaskId?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -204,6 +213,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   failureStage: 'failure_stage',
   waitingUntil: 'waiting_until',
   codeReview: 'code_review',
+  recurringTaskId: 'recurring_task_id',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -252,6 +262,7 @@ export function mapSession(row: Row): Session {
     failureStage: failureStageOf(row),
     waitingUntil: nullableText(row, 'waiting_until'),
     codeReview: integer(row, 'code_review') === 1,
+    recurringTaskId: nullableText(row, 'recurring_task_id'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -276,6 +287,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     failureStage: null,
     waitingUntil: null,
     codeReview: input.codeReview ?? false,
+    recurringTaskId: input.recurringTaskId ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -284,8 +296,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
-        waiting_until, code_review, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, code_review, recurring_task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -301,6 +313,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.failureStage,
     session.waitingUntil,
     sqlBoolean(session.codeReview),
+    session.recurringTaskId,
     session.createdAt,
     session.updatedAt,
   );

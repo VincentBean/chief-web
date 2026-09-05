@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "cron-parser": "^5.10.0",
+    "cronstrue": "^3.24.0",
     "express": "^5.2.1",
     "ws": "^8.21.3"
   },

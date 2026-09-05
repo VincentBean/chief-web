@@ -34,6 +34,35 @@ stored on the session, and a **Retry setup** action. The container of a failed
 setup is removed; the workspace is not, so a retry reuses an existing clone
 instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
 
+## Sessions a recurring task started
+
+Not every session is created by hand. A [recurring
+task](scheduling.md#recurring-tasks) — a stored prompt plus a cron expression —
+spawns a fresh session of its own on every occurrence that comes due, named
+`<task name>-<YYYYMMDD-HHmm>`, stamped in UTC. It is an ordinary session in
+every way that matters: its own container, its own clone, its own branch, the
+same setup steps above, the same [build loop](build-loop.md), the same queue and
+the same delivery. Three things are different:
+
+- **nobody plans it.** There is no browser terminal and no PRD conversation:
+  chief-web writes a single-story PRD from the task's prompt and marks the
+  session ready itself, so it goes from `pending` to `ready` to building without
+  anyone touching it.
+- **it may finish without a pull request.** When the run committed nothing —
+  the usual outcome of a nightly "fix what the linter reports" task — the push,
+  the pull request and the code review are all skipped and the session goes
+  straight to `finished`, showing *nothing to deliver* instead of a PR link.
+  Only recurring runs do this; an interactive session with an empty branch still
+  goes through delivery.
+- **it is one occurrence of a schedule.** The session page links back to the
+  task, the task's history records what became of this run, and the next
+  occurrence is skipped for as long as this one is unfinished or its pull
+  request is still open.
+
+Deleting a recurring task does not delete the sessions it ran; they stay exactly
+where they are, with their branches and pull requests, and simply stop belonging
+to a task.
+
 ## Session states
 
 A session is in exactly one of six states, and the badge on the
@@ -46,7 +75,7 @@ A session is in exactly one of six states, and the badge on the
 | `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
 | `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires, **Resume now**, or **Stop build** |
 | `failed` | A stage gave up and stored why (see [Failure and recovery](build-loop.md#failure-and-recovery)) | **Retry**, which resumes at the stage that failed |
-| `finished` | Every story is `done`, the pull request is open and the [code review](code-review.md), if it was on, has been posted | Nothing — the session's work is on `origin` |
+| `finished` | Every story is `done`, the pull request is open and the [code review](code-review.md), if it was on, has been posted — or, for a [recurring run](#sessions-a-recurring-task-started) that changed nothing, there was nothing to deliver at all | Nothing — the session's work is on `origin` |
 
 A queued session is `ready` with a `queued_at` timestamp, not a state of its
 own, so leaving the queue costs nothing.

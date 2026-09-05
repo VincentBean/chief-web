@@ -30,6 +30,7 @@ export {
 } from './service.js';
 export {
   ensureSessionWorkspace,
+  giveToRunner,
   removeSessionKey,
   removeSessionWorkspace,
   sessionKeyPath,
@@ -37,4 +38,5 @@ export {
   sessionRepoDir,
   sessionWorkspaceDir,
   stageSessionKey,
+  writeSessionFile,
 } from './workspace.js';

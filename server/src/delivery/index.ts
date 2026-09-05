@@ -1,4 +1,11 @@
 export {
+  COMMIT_COUNT_SCRIPT,
+  type CommitCount,
+  commitCountExecSpec,
+  type CommitCountInput,
+  countBranchCommits,
+} from './commits.js';
+export {
   pullRequestBody,
   type PullRequestBodyInput,
   pullRequestNumber,

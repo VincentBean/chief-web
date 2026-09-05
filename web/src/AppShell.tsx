@@ -5,12 +5,13 @@ import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
 import { countdown } from './schedule.ts';
-import { Kbd, Meter } from './ui.tsx';
+import { Gauge, Kbd, Meter } from './ui.tsx';
 
 /**
- * The frame around every authenticated page: a sidebar with the six places
- * the app has, and the two facts an operator wants at all times — whether
- * Claude Code is signed in, and how many build slots are busy.
+ * The frame around every authenticated page: a sidebar with the seven places
+ * the app has, and the facts an operator wants at all times — whether Claude
+ * Code is signed in, how many build slots are busy, and what that is costing
+ * the machine in CPU and memory.
  *
  * The sidebar collapses to a top bar below `lg`, where a drawer takes its
  * place; the same list, the same shortcuts.
@@ -29,10 +30,18 @@ const NAV: readonly NavItem[] = [
   { href: '/', label: 'Overview', icon: 'home', key: 'o', match: ['/'] },
   { href: '/sessions', label: 'Sessions', icon: 'rocket', key: 's', match: ['/sessions'] },
   { href: '/pull-requests', label: 'Pull requests', icon: 'git-pull-request', key: 'p', match: ['/pull-requests'] },
+  { href: '/recurring-tasks', label: 'Recurring tasks', icon: 'clock', key: 'c', match: ['/recurring-tasks'] },
   { href: '/repositories', label: 'Repositories', icon: 'repo', key: 'r', match: ['/repositories'] },
+  { href: '/sentry', label: 'Sentry', icon: 'alert', key: 'y', match: ['/sentry'] },
   { href: '/terminal', label: 'Terminals', icon: 'terminal', key: 't', match: ['/terminal'] },
   { href: '/settings', label: 'Settings', icon: 'gear', key: ',', match: ['/settings'] },
 ];
+
+/** Bytes as gigabytes, one decimal below 10 GB and whole numbers above it. */
+function gigabytes(bytes: number): string {
+  const value = bytes / 1024 ** 3;
+  return value >= 10 ? String(Math.round(value)) : value.toFixed(1);
+}
 
 function isCurrent(item: NavItem, pathname: string): boolean {
   if (item.href === '/') return pathname === '/';
@@ -117,6 +126,31 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
         </span>
         {stats !== null && (
           <Meter value={stats.builds.active} max={stats.builds.max} label={describeBuildSlots(stats.builds)} />
+        )}
+      </div>
+      <div
+        className="status-row"
+        title={
+          stats === null
+            ? 'Host CPU'
+            : `Host CPU across ${String(stats.host.cores)} core${stats.host.cores === 1 ? '' : 's'}`
+        }
+      >
+        <Icon name="pulse" />
+        <span className="status-row__label">CPU</span>
+        <span className="status-row__value">
+          {stats === null || stats.host.cpu === null ? '…' : `${String(Math.round(stats.host.cpu * 100))}%`}
+        </span>
+        {stats !== null && stats.host.cpu !== null && <Gauge value={stats.host.cpu} label="Host CPU" />}
+      </div>
+      <div className="status-row" title="Host memory in use">
+        <Icon name="package" />
+        <span className="status-row__label">RAM</span>
+        <span className="status-row__value">
+          {stats === null ? '…' : `${gigabytes(stats.host.memory.used)}/${gigabytes(stats.host.memory.total)} GB`}
+        </span>
+        {stats !== null && stats.host.memory.total > 0 && (
+          <Gauge value={stats.host.memory.used / stats.host.memory.total} label="Host memory" />
         )}
       </div>
       <Link
