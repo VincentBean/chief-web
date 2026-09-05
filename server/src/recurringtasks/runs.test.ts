@@ -352,6 +352,28 @@ describe('skipping an occurrence the previous run is in the way of', () => {
     assert.equal(skipReasonFor(session({ status: 'failed', lastError: 'boom' })), null);
   });
 
+  it('lets it through when the previous firing failed halfway', () => {
+    // Nothing will ever move these two on: the scheduler does not retry setup,
+    // and settling only follows runs that started. Read as unfinished runs they
+    // would skip every occurrence from now on.
+    assert.equal(
+      skipReasonFor(session({ status: 'pending', lastError: 'clone refused' }), 'fire-failed'),
+      null,
+    );
+    assert.equal(skipReasonFor(session({ status: 'ready' }), 'fire-failed'), null);
+
+    // But the session still has the last word: a run somebody retried by hand
+    // is a run like any other, whatever the occurrence that fired it says.
+    assert.match(skipReasonFor(session({ status: 'building' }), 'fire-failed') ?? '', /building/);
+    assert.match(
+      skipReasonFor(session({ status: 'ready', queuedAt: '2026-09-05T03:00:00.000Z' }), 'fire-failed') ??
+        '',
+      /queued for a slot/,
+    );
+    // And a run that started is held back exactly as before.
+    assert.match(skipReasonFor(session({ status: 'pending' }), 'started') ?? '', /being set up/);
+  });
+
   it('writes a skipped occurrence, and moves the schedule on, while a run is building', async () => {
     const f = await fixture();
     const task = f.task();
@@ -422,6 +444,46 @@ describe('skipping an occurrence the previous run is in the way of', () => {
     });
 
     updateRecurringTask(f.db, task.id, { nextRunAt: PAST });
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
+    assert.equal(listSessions(f.db, {}).length, 2);
+    assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'started');
+  });
+
+  it('fires again after a firing that failed before the run began', async () => {
+    const f = await fixture();
+    const task = f.task();
+    // The clone is refused, which leaves a pending session with the reason on
+    // it and nothing that will ever pick it up again.
+    f.script((exec) =>
+      (exec.cmd[2] ?? '').includes('ls-remote')
+        ? { exitCode: 0, stdout: 'abc123\trefs/heads/chief/rector-20260905-0300\n' }
+        : { exitCode: 1, stderr: 'should not run' },
+    );
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 5, 3, 0).toISOString()), 0);
+    assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'fire-failed');
+    assert.equal(listSessions(f.db, {})[0]?.status, 'pending');
+
+    // Tomorrow's occurrence is not skipped by that wreckage: one 3am network
+    // blip costs the task an occurrence, not the schedule.
+    f.script(clonesInto(f.config, f.db));
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
+    assert.equal(listSessions(f.db, {}).length, 2);
+    assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'started');
+  });
+
+  it('fires again after a firing whose build was refused outright', async () => {
+    const f = await fixture();
+    const task = f.task();
+    // Refused for a reason that is not the queue: the session is left `ready`
+    // and never queued, so nothing starts it either.
+    f.builds.refusal = new Error('the container is gone');
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 5, 3, 0).toISOString()), 0);
+    const [stranded] = listSessions(f.db, {});
+    assert.ok(stranded);
+    assert.equal(stranded.status, 'ready');
+    assert.equal(stranded.queuedAt, null);
+
+    f.builds.refusal = null;
     assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
     assert.equal(listSessions(f.db, {}).length, 2);
     assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'started');

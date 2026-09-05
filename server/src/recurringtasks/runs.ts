@@ -10,6 +10,7 @@ import {
   type RecurringTaskOccurrence,
   type RecurringTaskOutcome,
   recordRecurringTaskOccurrence,
+  recurringTaskOccurrenceForSession,
   type Session,
   type SessionStatus,
   updateRecurringTask,
@@ -253,7 +254,10 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
    */
   private skipReason(task: RecurringTask): string | null {
     try {
-      return skipReasonFor(latestRecurringTaskRunSession(this.db, task.id));
+      const previous = latestRecurringTaskRunSession(this.db, task.id);
+      const occurrence =
+        previous === null ? null : recurringTaskOccurrenceForSession(this.db, previous.id);
+      return skipReasonFor(previous, occurrence?.outcome ?? null);
     } catch (cause) {
       logger.warn('could not read the previous run of a recurring task', {
         task: task.id,
@@ -408,16 +412,22 @@ const RUN_IN_PROGRESS = [
 
 /**
  * Why the task's next occurrence must not fire, or null when nothing is in
- * the way. `session` is the task's most recent run, or null if it has none.
+ * the way. `session` is the task's most recent run, or null if it has none,
+ * and `outcome` is what its occurrence recorded of the firing that made it.
  *
  * Only two things hold an occurrence back, and both are read off that one
  * session: a run that is still going, and a run whose pull request nobody has
  * merged or closed yet. Everything else — a failed run, a merged or closed
- * pull request, a run that changed nothing, a run somebody deleted, a task
- * that has never run — lets the occurrence through.
+ * pull request, a run that changed nothing, a run somebody deleted, a run
+ * whose firing failed, a task that has never run — lets the occurrence
+ * through.
  */
-export function skipReasonFor(session: Session | null): string | null {
+export function skipReasonFor(
+  session: Session | null,
+  outcome: RecurringTaskOutcome | null = null,
+): string | null {
   if (session === null) return null;
+  if (wasAbandonedByAFailedFiring(session, outcome)) return null;
 
   const phrase = inProgressPhrase(session);
   if (phrase !== null) return `The previous run “${session.name}” is ${phrase}.`;
@@ -429,6 +439,31 @@ export function skipReasonFor(session: Session | null): string | null {
   }
 
   return null;
+}
+
+/**
+ * Whether this run is the wreckage of a firing that failed, rather than a run
+ * anything is still going to move.
+ *
+ * A `fire-failed` occurrence can leave a session behind — `pending` with the
+ * clone error on it, or `ready` and never queued when the build was refused —
+ * and nothing ever picks it up again: setup is not retried by the scheduler,
+ * and `settle()` only follows the runs that started. Read as an ordinary
+ * unfinished run it would answer “still being set up” to every occurrence from
+ * then on, so one 3am network blip would stop a nightly task for good. It is
+ * therefore not in the way: the next occurrence fires, and the failed session
+ * is left exactly where it is for whoever wants to retry or delete it.
+ *
+ * The session's own state still has the last word. If somebody retried the
+ * setup and the run is building or queued now, it is a run like any other and
+ * the next occurrence waits for it.
+ */
+function wasAbandonedByAFailedFiring(
+  session: Session,
+  outcome: RecurringTaskOutcome | null,
+): boolean {
+  if (outcome !== 'fire-failed') return false;
+  return session.status === 'pending' || (session.status === 'ready' && session.queuedAt === null);
 }
 
 /** How a run that has not finished is described, or null once it has. */

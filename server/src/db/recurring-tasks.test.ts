@@ -3,7 +3,6 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import {
   closeDatabase,
-  countRecurringTasksForRepository,
   createRecurringTask,
   createRepository,
   createSession,
@@ -20,6 +19,7 @@ import {
   listRecurringTaskOccurrences,
   listRecurringTasks,
   listUnsettledRecurringTaskOccurrences,
+  recurringTaskOccurrenceForSession,
   openDatabase,
   recordRecurringTaskOccurrence,
   RECURRING_TASK_OUTCOMES,
@@ -130,7 +130,7 @@ describe('recurring tasks', () => {
       baseBranch: 'main',
       prTarget: 'main',
     });
-    assert.equal(countRecurringTasksForRepository(db, other.id), 1);
+    assert.equal(listRecurringTasks(db, { repositoryId: other.id }).length, 1);
   });
 
   it('lists tasks by repository and paused state', () => {
@@ -257,6 +257,36 @@ describe('recurring tasks', () => {
       listUnsettledRecurringTaskOccurrences(db).map((row) => row.id),
       [second.id],
     );
+  });
+
+  it('reads back the occurrence a run belongs to', () => {
+    const task = taskFor('rector');
+    const session = createSession(db, {
+      repositoryId: repository.id,
+      name: 'rector-20260101-0300',
+      baseBranch: 'develop',
+      prTargetBranch: 'develop',
+      recurringTaskId: task.id,
+    });
+    const occurrence = recordRecurringTaskOccurrence(db, {
+      recurringTaskId: task.id,
+      outcome: 'fire-failed',
+      detail: 'the clone was refused',
+      sessionId: session.id,
+      occurredAt: '2026-01-01T03:00:00.000Z',
+    });
+    // The skip that follows it belongs to the task, not to any session.
+    recordRecurringTaskOccurrence(db, {
+      recurringTaskId: task.id,
+      outcome: 'skipped',
+      occurredAt: '2026-01-02T03:00:00.000Z',
+    });
+
+    const found = recurringTaskOccurrenceForSession(db, session.id);
+    assert.equal(found?.id, occurrence.id);
+    assert.equal(found?.outcome, 'fire-failed');
+    // A session nothing fired has no occurrence to find.
+    assert.equal(recurringTaskOccurrenceForSession(db, 'no-such-session'), null);
   });
 
   it('has a label for every outcome', () => {

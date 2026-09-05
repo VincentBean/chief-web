@@ -9,6 +9,7 @@ import {
   deleteSession,
   type FailureStage,
   featureBranchFor,
+  getRecurringTask,
   getRepository,
   getSession,
   isScheduleMissed,
@@ -119,9 +120,15 @@ export interface SessionView {
   /**
    * The recurring task this session is a run of (US-004), or `null` for a
    * session somebody created by hand. The UI reads it to explain a run that
-   * finished without a pull request because it changed nothing (US-006).
+   * finished without a pull request because it changed nothing (US-006), and
+   * to link the run back to the schedule it came from.
    */
   readonly recurringTaskId: string | null;
+  /**
+   * That task's name, denormalised so the session page can name the schedule
+   * it links to without a second call. `null` whenever the id is.
+   */
+  readonly recurringTaskName: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
   /**
@@ -670,6 +677,10 @@ export class SessionService {
       queuePosition: queuePosition(this.db, session),
       containerId: session.containerId,
       recurringTaskId: session.recurringTaskId,
+      recurringTaskName:
+        session.recurringTaskId === null
+          ? null
+          : (getRecurringTask(this.db, session.recurringTaskId)?.name ?? null),
       prUrl: session.prUrl,
       lastError: session.lastError,
       failureStage: session.failureStage,

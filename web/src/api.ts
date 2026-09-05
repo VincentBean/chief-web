@@ -278,6 +278,8 @@ export interface Session {
   containerId: string | null;
   /** The recurring task this session is a run of; null for a hand-made one. */
   recurringTaskId: string | null;
+  /** That task's name, for the link back to it; null whenever the id is. */
+  recurringTaskName: string | null;
   prUrl: string | null;
   lastError: string | null;
   /** Which step a failed session failed at (US-019); null when it has not. */

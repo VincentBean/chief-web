@@ -103,11 +103,12 @@ recent run:
 - the run's **pull request is still open** — nobody has merged or closed it yet.
 
 Everything else lets the occurrence through: a failed run, a merged or a closed
-pull request, a run that changed nothing, a task that has never run. A skip is a
-row in the task's history naming the run that blocked it, and it **spends the
-occurrence**: the schedule has already moved on to the next moment the
-expression names, rather than trying again every half minute. Merge or close the
-pull request and the next occurrence runs.
+pull request, a run that changed nothing, a run whose firing never got off the
+ground, a task that has never run. A skip is a row in the task's history naming
+the run that blocked it, and it **spends the occurrence**: the schedule has
+already moved on to the next moment the expression names, rather than trying
+again every half minute. Merge or close the pull request and the next occurrence
+runs.
 
 ### The hold, and coming back from downtime
 
@@ -131,6 +132,12 @@ three hours, is skipped, or is refused a container outright. A firing that fails
 before the build starts is a **could not start** row in the history with git's
 or Docker's own reason on it, and the half-created session is left `pending`
 with the usual **Retry setup**; nothing is retried before the next occurrence.
+That session is not in the way of the occurrences after it either — nothing
+will ever move it on its own, so treating it as a run still on its way would
+stop the task for good over one bad night. It is left where it is, and the next
+occurrence fires as usual. Retry it and it counts again: a run that is building
+or queued because somebody picked it up by hand holds the next occurrence back
+like any other.
 
 ### The run history
 

@@ -286,13 +286,6 @@ export function listDueRecurringTasks(db: Database, now: string = nowIso()): Rec
     .map(mapRecurringTask);
 }
 
-export function countRecurringTasksForRepository(db: Database, repositoryId: string): number {
-  const row = db
-    .prepare('SELECT COUNT(*) AS count FROM recurring_tasks WHERE repository_id = ?')
-    .get(repositoryId);
-  return row ? integer(row, 'count') : 0;
-}
-
 /** Applies the provided fields only; returns the updated row, or null if absent. */
 export function updateRecurringTask(
   db: Database,
@@ -338,7 +331,10 @@ export interface RecurringTaskOccurrence {
   readonly outcome: RecurringTaskOutcome;
   /** The skip reason, the failure, or the pull request link. */
   readonly detail: string | null;
-  /** The session this occurrence spawned; null for a skip or a fire failure. */
+  /**
+   * The session this occurrence spawned; null for a skip, and for a firing
+   * that failed before it created one.
+   */
   readonly sessionId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -514,6 +510,31 @@ export function latestRecurringTaskRunSession(
     )
     .get(recurringTaskId);
   return row ? mapSession(row) : null;
+}
+
+/**
+ * The occurrence that spawned this run, or null when the history has none —
+ * a session created by hand, or one whose row was written before the outcome
+ * could be recorded.
+ *
+ * The skip decision of US-005 reads it beside the session itself: the session
+ * says how far the run got, and this says whether the firing that produced it
+ * succeeded at all. A firing that failed halfway leaves a session behind that
+ * no scheduler will ever move again, and only the occurrence knows that.
+ */
+export function recurringTaskOccurrenceForSession(
+  db: Database,
+  sessionId: string,
+): RecurringTaskOccurrence | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM recurring_task_occurrences
+        WHERE session_id = ?
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 1`,
+    )
+    .get(sessionId);
+  return row ? mapRecurringTaskOccurrence(row) : null;
 }
 
 /** The newest occurrence, which is what `last_outcome` mirrors. */
