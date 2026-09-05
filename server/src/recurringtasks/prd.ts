@@ -30,18 +30,28 @@ import type { RecurringTask } from '../db/index.js';
 /** The one story every generated PRD has. */
 export const GENERATED_STORY_ID = 'US-001';
 
-/** `YYYYMMDD-HHmm` in the server's timezone — the same clock cron is read in. */
+/**
+ * `YYYYMMDD-HHmm` in UTC.
+ *
+ * Cron is read in the server’s timezone, so the obvious thing would be to stamp
+ * the run with the same local clock the schedule was written in. UTC instead,
+ * because a name has one job the local clock cannot do: be unique. Local wall
+ * time repeats an hour every autumn, so a sub-daily task fires twice at the
+ * same `YYYYMMDD-HHmm`, and the second of those runs is refused the session
+ * name the first one took — one occurrence lost to the clock, once a year, on
+ * every deployment that is not already running in UTC.
+ */
 export function runTimestamp(at: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0');
   return (
-    `${String(at.getFullYear())}${pad(at.getMonth() + 1)}${pad(at.getDate())}` +
-    `-${pad(at.getHours())}${pad(at.getMinutes())}`
+    `${String(at.getUTCFullYear())}${pad(at.getUTCMonth() + 1)}${pad(at.getUTCDate())}` +
+    `-${pad(at.getUTCHours())}${pad(at.getUTCMinutes())}`
   );
 }
 
 /**
- * `<task-name>-<YYYYMMDD-HHmm>`: the name of one run, and the reason a task
- * name is capped at `MAX_RECURRING_TASK_NAME_LENGTH`. The timestamp is
+ * `<task-name>-<YYYYMMDD-HHmm>` in UTC: the name of one run, and the reason a
+ * task name is capped at `MAX_RECURRING_TASK_NAME_LENGTH`. The timestamp is
  * what makes every occurrence a fresh session on a branch `origin` has never
  * seen — which is the guarantee the setup's "that branch is taken" check is
  * the safety net for.

@@ -168,8 +168,9 @@ describe('firing a recurring task', () => {
     const f = await fixture();
     const task = f.task({ runCodeReview: true, prTarget: 'main' });
 
-    // A fixed "now" so the run's name is the one this test can name too.
-    const now = new Date(2026, 8, 5, 3, 0).toISOString();
+    // A fixed "now" so the run's name is the one this test can name too. In
+    // UTC, because that is the clock the name is stamped from.
+    const now = new Date(Date.UTC(2026, 8, 5, 3, 0)).toISOString();
     assert.equal(await f.runner.fireDue(now), 1);
 
     const [session] = listSessions(f.db, {});

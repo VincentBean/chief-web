@@ -39,10 +39,10 @@ instead of starting over. `SESSION_SETUP_TIMEOUT_MS` caps each git command.
 Not every session is created by hand. A [recurring
 task](scheduling.md#recurring-tasks) — a stored prompt plus a cron expression —
 spawns a fresh session of its own on every occurrence that comes due, named
-`<task name>-<YYYYMMDD-HHmm>`. It is an ordinary session in every way that
-matters: its own container, its own clone, its own branch, the same setup steps
-above, the same [build loop](build-loop.md), the same queue and the same
-delivery. Three things are different:
+`<task name>-<YYYYMMDD-HHmm>`, stamped in UTC. It is an ordinary session in
+every way that matters: its own container, its own clone, its own branch, the
+same setup steps above, the same [build loop](build-loop.md), the same queue and
+the same delivery. Three things are different:
 
 - **nobody plans it.** There is no browser terminal and no PRD conversation:
   chief-web writes a single-story PRD from the task's prompt and marks the

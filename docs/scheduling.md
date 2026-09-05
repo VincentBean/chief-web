@@ -52,11 +52,13 @@ expression**, a base branch, a PR target and the [code review](code-review.md)
 flag — the same fields a session has, minus the planning. The name is capped at
 46 characters because every run is a session named
 **`<task name>-<YYYYMMDD-HHmm>`**, which is what gives each occurrence a branch
-`origin` has never seen. The expression is read in the **server's timezone**,
-described in English as you type it (`0 3 * * 1` → *At 03:00, only on Monday*)
-and previewed with the moment it next names, so a schedule is never saved on
-trust. **Pause** stops a task without deleting it: a paused task has no next run
-at all, and resuming it schedules the next occurrence from now.
+`origin` has never seen. That stamp is **UTC**, not the server's local clock,
+because local wall time repeats an hour every autumn and two runs of one task
+cannot share a session name. The expression itself is read in the **server's
+timezone**, described in English as you type it (`0 3 * * 1` → *At 03:00, only
+on Monday*) and previewed with the moment it next names, so a schedule is never
+saved on trust. **Pause** stops a task without deleting it: a paused task has no
+next run at all, and resuming it schedules the next occurrence from now.
 
 ### The generated PRD
 
@@ -141,12 +143,15 @@ like any other.
 
 ### The run history
 
-Each task has a page of its own listing every occurrence: when it happened, what
-became of it, and the session it ran as. The outcomes are *running*, *pull
-request opened*, *nothing to change*, *skipped*, *could not start* and *failed*,
-and the newest of them is also the badge on the task list. A run's session is an
-ordinary one, so its log, its stories and its pull request are one click away —
-and deleting a task leaves the sessions it already ran behind.
+Each task has a page of its own listing its occurrences: when each one happened,
+what became of it, and the session it ran as. The page shows the newest hundred
+of them — a task that fires every quarter of an hour writes some 35,000 rows a
+year, and the page re-reads its history every few seconds. The outcomes are
+*running*, *pull request opened*, *nothing to change*, *skipped*, *could not
+start* and *failed*, and the newest of them is also the badge on the task list.
+A run's session is an ordinary one, so its log, its stories and its pull request
+are one click away — and deleting a task leaves the sessions it already ran
+behind.
 
 ## The usage-limit hold
 

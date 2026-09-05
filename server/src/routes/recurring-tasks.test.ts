@@ -24,6 +24,7 @@ import {
   recordRecurringTaskOccurrence,
   type Repository,
 } from '../db/index.js';
+import { RECURRING_TASK_HISTORY_LIMIT } from '../recurringtasks/index.js';
 import type {
   CronPreview,
   RecurringTaskDetailView,
@@ -233,6 +234,27 @@ describe('recurring tasks api', () => {
     assert.equal(body.occurrences[1]?.detail, 'PR #12 still open');
     // A skip creates no session, so there is nothing to link to.
     assert.equal(body.occurrences[1]?.session, null);
+  });
+
+  it('returns only the newest occurrences of a long history', async () => {
+    const { body: task } = await create();
+    // Well past the cap: a busy task accrues one row per due moment, and the
+    // page that polls this endpoint must not grow with the history.
+    for (let index = 0; index < RECURRING_TASK_HISTORY_LIMIT + 20; index += 1) {
+      recordRecurringTaskOccurrence(db, {
+        recurringTaskId: task.id,
+        outcome: 'skipped',
+        detail: `skip ${String(index)}`,
+        occurredAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      });
+    }
+
+    const response = await call('GET', `/api/recurring-tasks/${task.id}`);
+    const body = (await response.json()) as RecurringTaskDetailView;
+
+    assert.equal(body.occurrences.length, RECURRING_TASK_HISTORY_LIMIT);
+    // Newest first, so the cap drops the oldest rows and not the interesting ones.
+    assert.equal(body.occurrences[0]?.detail, `skip ${String(RECURRING_TASK_HISTORY_LIMIT + 19)}`);
   });
 
   it('answers an unknown task with 404', async () => {

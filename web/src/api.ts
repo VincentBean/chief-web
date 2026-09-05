@@ -957,7 +957,17 @@ export interface RecurringTaskOccurrence {
   session: RecurringTaskRun | null;
 }
 
-/** Mirrors the server's `RecurringTaskDetailView`: the task plus its history. */
+/**
+ * Mirrors the server's `RECURRING_TASK_HISTORY_LIMIT`: how many occurrences the
+ * detail endpoint returns, so the page can say when it is showing a window of a
+ * longer history rather than the whole of it.
+ */
+export const RECURRING_TASK_HISTORY_LIMIT = 100;
+
+/**
+ * Mirrors the server's `RecurringTaskDetailView`: the task plus the newest
+ * {@link RECURRING_TASK_HISTORY_LIMIT} of its occurrences.
+ */
 export interface RecurringTaskDetail extends RecurringTask {
   occurrences: RecurringTaskOccurrence[];
 }

@@ -25,17 +25,29 @@ function task(overrides: Partial<RecurringTask> = {}): RecurringTask {
 }
 
 describe('the generated run name', () => {
-  it('stamps the task name with the local date and time, to the minute', () => {
-    // Built from local parts on purpose: cron is read in the server's timezone,
-    // so the name has to say what the schedule said.
-    const at = new Date(2026, 8, 5, 3, 7);
+  it('stamps the task name with the UTC date and time, to the minute', () => {
+    const at = new Date(Date.UTC(2026, 8, 5, 3, 7));
 
     assert.equal(runTimestamp(at), '20260905-0307');
     assert.equal(runSessionName('rector', at), 'rector-20260905-0307');
   });
 
   it('pads every field so two runs of a task sort by their moment', () => {
-    assert.equal(runSessionName('code_style', new Date(2026, 0, 2, 0, 4)), 'code_style-20260102-0004');
+    const at = new Date(Date.UTC(2026, 0, 2, 0, 4));
+
+    assert.equal(runSessionName('code_style', at), 'code_style-20260102-0004');
+  });
+
+  it('gives the two passes of a DST fall-back hour different names', () => {
+    // 2026-10-25 in Europe/Amsterdam: 02:00 CEST goes back to 02:00 CET, so
+    // local 02:30 happens twice. In UTC they are an hour apart, which is what
+    // keeps the second run from being refused the first one's session name.
+    const first = new Date('2026-10-25T00:30:00.000Z');
+    const second = new Date('2026-10-25T01:30:00.000Z');
+
+    assert.equal(runSessionName('rector', first), 'rector-20261025-0030');
+    assert.equal(runSessionName('rector', second), 'rector-20261025-0130');
+    assert.notEqual(runSessionName('rector', first), runSessionName('rector', second));
   });
 });
 

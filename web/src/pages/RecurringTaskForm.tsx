@@ -293,8 +293,8 @@ export function RecurringTaskForm() {
                     {String(MAX_TASK_NAME_LENGTH)} characters. Each run is a session named{' '}
                     <code className="mono">
                       {trimmedName === '' ? '<name>' : trimmedName}-YYYYMMDD-HHmm
-                    </code>
-                    .
+                    </code>{' '}
+                    in UTC.
                   </p>
                 </div>
 

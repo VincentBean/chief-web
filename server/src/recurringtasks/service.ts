@@ -37,6 +37,12 @@ const RUN_NAME_SUFFIX_LENGTH = '-YYYYMMDD-HHmm'.length;
 const MAX_SESSION_NAME_LENGTH = 60;
 export const MAX_RECURRING_TASK_NAME_LENGTH = MAX_SESSION_NAME_LENGTH - RUN_NAME_SUFFIX_LENGTH;
 
+/**
+ * How many occurrences {@link getRecurringTaskDetailView} returns — the newest
+ * ones, which is what the run-history panel shows.
+ */
+export const RECURRING_TASK_HISTORY_LIMIT = 100;
+
 /** A failure with the HTTP status and error code the route should answer with. */
 export class RecurringTaskError extends Error {
   constructor(
@@ -149,7 +155,17 @@ export function listRecurringTaskViews(db: Database, repositoryId?: string): Rec
   return listRecurringTasks(db, filter).map((task) => toRecurringTaskView(db, task));
 }
 
-/** The task plus its occurrence history, newest first; `null` if there is no such task. */
+/**
+ * The task plus its most recent occurrences, newest first; `null` if there is
+ * no such task.
+ *
+ * The history is capped at {@link RECURRING_TASK_HISTORY_LIMIT}: a task writes
+ * one row per due moment, skips included — an every-15-minutes task some 35,000
+ * a year — and the detail page polls this view every few seconds. Reading and
+ * serialising the whole history on every poll is a cost that grows for as long
+ * as the task exists, for rows nobody scrolls to. The rows are all still in the
+ * database; this is only what the page is handed.
+ */
 export function getRecurringTaskDetailView(
   db: Database,
   id: string,
@@ -157,25 +173,27 @@ export function getRecurringTaskDetailView(
   const task = getRecurringTask(db, id);
   if (task === null) return null;
 
-  const occurrences = listRecurringTaskOccurrences(db, id).map((occurrence) => {
-    const session = occurrence.sessionId === null ? null : getSession(db, occurrence.sessionId);
-    return {
-      id: occurrence.id,
-      occurredAt: occurrence.occurredAt,
-      outcome: occurrence.outcome,
-      outcomeLabel: recurringTaskOutcomeLabel(occurrence.outcome),
-      detail: occurrence.detail,
-      session:
-        session === null
-          ? null
-          : {
-              id: session.id,
-              name: session.name,
-              status: session.status,
-              prUrl: session.prUrl,
-            },
-    };
-  });
+  const occurrences = listRecurringTaskOccurrences(db, id, RECURRING_TASK_HISTORY_LIMIT).map(
+    (occurrence) => {
+      const session = occurrence.sessionId === null ? null : getSession(db, occurrence.sessionId);
+      return {
+        id: occurrence.id,
+        occurredAt: occurrence.occurredAt,
+        outcome: occurrence.outcome,
+        outcomeLabel: recurringTaskOutcomeLabel(occurrence.outcome),
+        detail: occurrence.detail,
+        session:
+          session === null
+            ? null
+            : {
+                id: session.id,
+                name: session.name,
+                status: session.status,
+                prUrl: session.prUrl,
+              },
+      };
+    },
+  );
 
   return { ...toRecurringTaskView(db, task), occurrences };
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import {
   fetchRecurringTaskDetail,
+  RECURRING_TASK_HISTORY_LIMIT,
   type RecurringTaskDetail,
   type RecurringTaskOccurrence,
   sessionPath,
@@ -31,6 +32,11 @@ import {
  * or failed to start are as visible as the nights it opened a pull request —
  * so every occurrence gets a row, including the skips, which have no session
  * to click through to at all.
+ *
+ * Only the newest `RECURRING_TASK_HISTORY_LIMIT` of them, though: a task that
+ * fires every quarter of an hour has tens of thousands of rows within the year,
+ * and this page re-reads its history every few seconds. The panel says so when
+ * it is full, so a window of the history is never mistaken for all of it.
  *
  * Polled on the dashboard's cadence for the same reason the list is: a run
  * that is `running` when the page opens settles without anybody touching this
@@ -135,7 +141,17 @@ export function RecurringTask() {
       {loadError !== null && <Notice kind="warn">Could not refresh: {loadError}</Notice>}
 
       <div className="grid grid--main-aside">
-        <Panel title="Run history" icon="history" meta={<span className="panel__meta">{task.occurrences.length}</span>}>
+        <Panel
+          title="Run history"
+          icon="history"
+          meta={
+            <span className="panel__meta">
+              {task.occurrences.length < RECURRING_TASK_HISTORY_LIMIT
+                ? task.occurrences.length
+                : `newest ${String(RECURRING_TASK_HISTORY_LIMIT)}`}
+            </span>
+          }
+        >
           {task.occurrences.length === 0 ? (
             <EmptyState icon="clock" title="No runs yet">
               {task.paused

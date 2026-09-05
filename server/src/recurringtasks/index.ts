@@ -24,6 +24,7 @@ export {
   listRecurringTaskViews,
   MAX_RECURRING_TASK_NAME_LENGTH,
   previewCron,
+  RECURRING_TASK_HISTORY_LIMIT,
   type RecurringTaskDetailView,
   RecurringTaskError,
   type RecurringTaskOccurrenceView,
