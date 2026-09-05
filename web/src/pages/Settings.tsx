@@ -55,7 +55,11 @@ export function Settings() {
   const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
-  const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | null>(null);
+  const [sentryToken, setSentryToken] = useState('');
+  const [sentryInterval, setSentryInterval] = useState('15');
+  const [sentryModel, setSentryModel] = useState<AgentModel>('haiku');
+  const [sentryBaseUrl, setSentryBaseUrl] = useState('');
+  const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | null>(null);
   const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
@@ -106,6 +110,9 @@ export function Settings() {
     setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
+    setSentryInterval(String(loaded.sentryPollIntervalMinutes));
+    setSentryModel(loaded.sentryModel);
+    setSentryBaseUrl(loaded.sentryBaseUrl);
   }
 
   const run = (kind: NonNullable<typeof busy>, action: () => Promise<string>): void => {
@@ -150,6 +157,16 @@ export function Settings() {
       );
       return;
     }
+    const sentryPoll = Number.parseInt(sentryInterval, 10);
+    if (!Number.isInteger(sentryPoll) || sentryPoll < 1 || sentryPoll > 1440) {
+      toast.error('The Sentry poll interval must be a whole number of minutes between 1 and 1440.');
+      return;
+    }
+    const baseUrl = sentryBaseUrl.trim();
+    if (baseUrl !== '' && !/^https?:\/\//i.test(baseUrl)) {
+      toast.error('The Sentry base URL must start with http:// or https://.');
+      return;
+    }
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
@@ -162,12 +179,19 @@ export function Settings() {
       codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
+      sentryPollIntervalMinutes: sentryPoll,
+      sentryModel,
+      // Blank restores the hosted API, the same way a blank identity field
+      // restores the built-in commit author.
+      sentryBaseUrl: baseUrl === '' ? null : baseUrl,
     };
     // An untouched (empty) token field must not wipe the stored token.
     if (token.trim() !== '') update.githubToken = token.trim();
+    if (sentryToken.trim() !== '') update.sentryToken = sentryToken.trim();
     run('save', async () => {
       applyLoaded(await saveSettings(update));
       setToken('');
+      setSentryToken('');
       return 'Settings saved.';
     });
   };
@@ -185,6 +209,14 @@ export function Settings() {
       applyLoaded(await saveSettings({ githubToken: null }));
       setToken('');
       return 'GitHub token removed.';
+    });
+  };
+
+  const onRemoveSentryToken = (): void => {
+    run('remove-sentry', async () => {
+      applyLoaded(await saveSettings({ sentryToken: null }));
+      setSentryToken('');
+      return 'Sentry token removed.';
     });
   };
 
@@ -255,6 +287,7 @@ export function Settings() {
   }
 
   const stored = settings.githubToken;
+  const storedSentry = settings.sentryToken;
   const dirty =
     token.trim() !== '' ||
     maxSessions !== String(settings.maxConcurrentSessions) ||
@@ -267,7 +300,11 @@ export function Settings() {
     reviewModel !== (settings.reviewModel ?? '') ||
     codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
-    authorEmail !== settings.gitAuthorEmail;
+    authorEmail !== settings.gitAuthorEmail ||
+    sentryToken.trim() !== '' ||
+    sentryInterval !== String(settings.sentryPollIntervalMinutes) ||
+    sentryModel !== settings.sentryModel ||
+    sentryBaseUrl !== settings.sentryBaseUrl;
   const claudeStatus = claude?.status ?? null;
 
   return (
@@ -484,6 +521,71 @@ export function Settings() {
               Run code review on new sessions
             </label>
             <p className="field__hint">Only the starting value of the checkbox on a new session; sessions that already exist keep whatever they were created with.</p>
+          </div>
+        </Panel>
+
+        <Panel
+          title="Sentry"
+          icon="alert"
+          id="sentry"
+          meta={storedSentry.configured ? <Badge tone="done">token ····{storedSentry.last4 ?? ''}</Badge> : <Badge tone="danger">no token</Badge>}
+        >
+          <div className="field">
+            <label className="field__label" htmlFor="sentry-token">
+              Auth token
+            </label>
+            <div className="field__pair">
+              <input
+                id="sentry-token"
+                name="sentry-token"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={storedSentry.configured ? 'Leave blank to keep the current token' : 'sntryu_…'}
+                value={sentryToken}
+                onChange={(event) => setSentryToken(event.target.value)}
+                className="field__input mono"
+              />
+              {storedSentry.configured && (
+                <button type="button" className="button button--quiet button--danger" onClick={onRemoveSentryToken} disabled={busy !== null}>
+                  {busy === 'remove-sentry' ? 'Removing…' : 'Remove'}
+                </button>
+              )}
+            </div>
+            <p className="field__hint">
+              Reads unresolved issues of linked projects and resolves them once a fix is merged. A user auth token needs <code className="mono">event:read</code> and <code className="mono">event:write</code>. Stored write-only. Without a token nothing is polled.
+            </p>
+          </div>
+
+          <div className="field__row">
+            <div className="field">
+              <label className="field__label" htmlFor="sentry-interval">
+                Poll every (minutes)
+              </label>
+              <input id="sentry-interval" name="sentry-interval" type="number" min={1} max={1440} step={1} value={sentryInterval} onChange={(event) => setSentryInterval(event.target.value)} className="field__input field__input--narrow" />
+              <p className="field__hint">How often linked projects are checked for new unresolved issues; a change applies from the next poll.</p>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="sentry-model">
+                Classification model
+              </label>
+              <select id="sentry-model" name="sentry-model" value={sentryModel} onChange={(event) => setSentryModel(event.target.value as AgentModel)} className="field__input">
+                {AGENT_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {MODEL_LABELS[model]}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">One short call per new issue, deciding whether it can be fixed with a code change. The fix itself runs on the build model.</p>
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="sentry-base-url">
+              API base URL
+            </label>
+            <input id="sentry-base-url" name="sentry-base-url" type="text" autoComplete="off" spellCheck={false} placeholder="https://sentry.io/api/0/" value={sentryBaseUrl} onChange={(event) => setSentryBaseUrl(event.target.value)} className="field__input mono" />
+            <p className="field__hint">Only for self-hosted Sentry. Blank restores the hosted API.</p>
           </div>
         </Panel>
 

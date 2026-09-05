@@ -32,6 +32,7 @@ const NAV: readonly NavItem[] = [
   { href: '/pull-requests', label: 'Pull requests', icon: 'git-pull-request', key: 'p', match: ['/pull-requests'] },
   { href: '/recurring-tasks', label: 'Recurring tasks', icon: 'clock', key: 'c', match: ['/recurring-tasks'] },
   { href: '/repositories', label: 'Repositories', icon: 'repo', key: 'r', match: ['/repositories'] },
+  { href: '/sentry', label: 'Sentry', icon: 'alert', key: 'y', match: ['/sentry'] },
   { href: '/terminal', label: 'Terminals', icon: 'terminal', key: 't', match: ['/terminal'] },
   { href: '/settings', label: 'Settings', icon: 'gear', key: ',', match: ['/settings'] },
 ];

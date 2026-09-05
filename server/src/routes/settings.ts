@@ -11,14 +11,18 @@ import {
   isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
+  isValidSentryBaseUrl,
+  isValidSentryPollIntervalMinutes,
   MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
   MAX_PR_CONFLICT_INTERVAL_MINUTES,
   MAX_PR_SYNC_INTERVAL_MINUTES,
+  MAX_SENTRY_POLL_INTERVAL_MINUTES,
   MIN_AGENT_TIMEOUT_MINUTES,
   MIN_CONCURRENT_SESSIONS,
   MIN_PR_CONFLICT_INTERVAL_MINUTES,
   MIN_PR_SYNC_INTERVAL_MINUTES,
+  MIN_SENTRY_POLL_INTERVAL_MINUTES,
   readAppSettings,
   updateAppSettings,
 } from '../settings/index.js';
@@ -98,6 +102,10 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   const input = body as Record<string, unknown>;
   const update: {
     githubToken?: string | null;
+    sentryToken?: string | null;
+    sentryPollIntervalMinutes?: number;
+    sentryModel?: AgentModel;
+    sentryBaseUrl?: string | null;
     maxConcurrentSessions?: number;
     agentTimeoutMinutes?: number;
     prSyncIntervalMinutes?: number;
@@ -127,6 +135,71 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
         };
       }
       update.githubToken = token;
+    }
+  }
+
+  // The Sentry token follows the GitHub one exactly: omitted keeps, `null`
+  // removes, and an empty string is a mistake rather than a removal (US-002).
+  if ('sentryToken' in input && input['sentryToken'] !== undefined) {
+    const raw = input['sentryToken'];
+    if (raw === null) {
+      update.sentryToken = null;
+    } else if (typeof raw !== 'string') {
+      return { error: 'invalid_sentry_token', message: 'The token must be a string.' };
+    } else {
+      const token = raw.trim();
+      if (token === '') {
+        return {
+          error: 'invalid_sentry_token',
+          message: 'The token must not be empty. Send null to remove the stored token.',
+        };
+      }
+      update.sentryToken = token;
+    }
+  }
+
+  if ('sentryPollIntervalMinutes' in input && input['sentryPollIntervalMinutes'] !== undefined) {
+    const raw = input['sentryPollIntervalMinutes'];
+    if (typeof raw !== 'number' || !isValidSentryPollIntervalMinutes(raw)) {
+      return {
+        error: 'invalid_sentry_poll_interval_minutes',
+        message: `The Sentry poll interval must be a whole number of minutes between ${MIN_SENTRY_POLL_INTERVAL_MINUTES} and ${MAX_SENTRY_POLL_INTERVAL_MINUTES}.`,
+      };
+    }
+    update.sentryPollIntervalMinutes = raw;
+  }
+
+  // Unlike the three model fields below there is no `null` here: the classifier
+  // always runs on a model chief-web chose, defaulting to the cheapest.
+  if ('sentryModel' in input && input['sentryModel'] !== undefined) {
+    const raw = input['sentryModel'];
+    if (typeof raw !== 'string' || !isAgentModel(raw)) {
+      return {
+        error: 'invalid_sentry_model',
+        message: `The model must be one of ${AGENT_MODELS.join(', ')}.`,
+      };
+    }
+    update.sentryModel = raw;
+  }
+
+  if ('sentryBaseUrl' in input && input['sentryBaseUrl'] !== undefined) {
+    const raw = input['sentryBaseUrl'];
+    if (raw === null) {
+      update.sentryBaseUrl = null;
+    } else if (typeof raw !== 'string') {
+      return { error: 'invalid_sentry_base_url', message: 'The base URL must be a string.' };
+    } else {
+      const url = raw.trim();
+      // Blank reads as "back to the hosted API", which is what the empty field
+      // on the settings page means.
+      if (url === '') update.sentryBaseUrl = null;
+      else if (!isValidSentryBaseUrl(url)) {
+        return {
+          error: 'invalid_sentry_base_url',
+          message:
+            'The Sentry base URL must be an http:// or https:// URL, for example https://sentry.io/api/0/. Leave it blank for the hosted API.',
+        };
+      } else update.sentryBaseUrl = url;
     }
   }
 

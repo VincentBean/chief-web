@@ -61,6 +61,14 @@ export type AgentModel = (typeof AGENT_MODELS)[number];
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
+  /** The Sentry auth token, masked the same way (US-002). */
+  sentryToken: { configured: boolean; last4: string | null };
+  /** How often Sentry is polled for new unresolved issues (US-002). */
+  sentryPollIntervalMinutes: number;
+  /** Model the issue classification runs on; never `null`, defaults to haiku. */
+  sentryModel: AgentModel;
+  /** Root of the Sentry API; self-hosted installs point this at themselves. */
+  sentryBaseUrl: string;
   maxConcurrentSessions: number;
   /** Cap on one headless agent iteration, in minutes (US-019). */
   agentTimeoutMinutes: number;
@@ -86,6 +94,13 @@ export interface Settings {
 export interface SettingsUpdate {
   /** Omit to leave the stored token untouched; `null` removes it. */
   githubToken?: string | null;
+  /** The same rules as `githubToken`, for Sentry (US-002). */
+  sentryToken?: string | null;
+  sentryPollIntervalMinutes?: number;
+  /** No "let Claude Code choose" here — the classifier always has a model. */
+  sentryModel?: AgentModel;
+  /** `null` restores Sentry's own hosted API. */
+  sentryBaseUrl?: string | null;
   maxConcurrentSessions?: number;
   agentTimeoutMinutes?: number;
   prSyncIntervalMinutes?: number;
@@ -178,6 +193,9 @@ export interface Repository {
   keyFingerprint: string | null;
   keySource: 'generated' | 'imported' | null;
   keyConfigured: boolean;
+  /** The linked Sentry project; both slugs are set, or both are null. */
+  sentryOrg: string | null;
+  sentryProject: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -190,6 +208,9 @@ export interface RepositoryInput {
   defaultBaseBranch?: string;
   /** Omit on create to have the server generate an ed25519 keypair. */
   privateKey?: string;
+  /** `null` unlinks Sentry; both slugs are set together or not at all. */
+  sentryOrg?: string | null;
+  sentryProject?: string | null;
 }
 
 export interface ConnectionTestResult {
@@ -1437,5 +1458,75 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
       return 'pushing to GitHub';
     case 'container_lost':
       return 'the container';
+  }
+}
+
+/* ------------------------------------------------------------------ sentry */
+
+/** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
+export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+
+export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
+
+/** Mirrors the server's `SentryIssueView`: one tracked Sentry issue. */
+export interface SentryIssue {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  sentryIssueId: string;
+  /** The human-facing `PROJECT-1AB` id. */
+  shortId: string;
+  title: string;
+  culprit: string | null;
+  /** Where the issue lives in Sentry; the external link on every row. */
+  permalink: string;
+  level: string | null;
+  eventCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  status: SentryIssueStatus;
+  /** Why the issue cannot be fixed; shown inline on every `cannot_fix` row. */
+  explanation: string | null;
+  sessionId: string | null;
+  /** Null when there is no session, or it has been deleted. */
+  sessionName: string | null;
+  resolvedInSentry: boolean;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Mirrors the server's `SentryIssueList`. */
+export interface SentryIssueList {
+  issues: SentryIssue[];
+  /** Without a token nothing is ever polled, so an empty list means nothing. */
+  tokenConfigured: boolean;
+  generatedAt: string;
+}
+
+/**
+ * Every Sentry issue chief-web is tracking.
+ *
+ * A database read, so it is cheap — but the pipeline behind it moves on a
+ * fifteen-minute tick, so the page loads it once and refreshes on demand
+ * rather than joining the global poll.
+ */
+export async function fetchSentryIssues(signal?: AbortSignal): Promise<SentryIssueList> {
+  return api<SentryIssueList>('/api/sentry/issues', signal ? { signal } : {});
+}
+
+/** What the operator reads for each pipeline state. */
+export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
+  switch (status) {
+    case 'pending':
+      return 'awaiting classification';
+    case 'queued':
+      return 'queued';
+    case 'working':
+      return 'session running';
+    case 'fixed':
+      return 'fixed';
+    case 'cannot_fix':
+      return 'cannot fix';
   }
 }

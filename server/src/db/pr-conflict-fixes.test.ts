@@ -325,13 +325,16 @@ describe('the pr_conflict_fixes migration', () => {
       );
     }
 
-    const repository = createRepository(db, {
-      name: 'chief-web',
-      sshUrl: 'git@github.com:minicodemonkey/chief-web.git',
-      githubSlug: 'minicodemonkey/chief-web',
-      defaultBaseBranch: 'develop',
-    });
+    // Inserted by hand rather than through `createRepository`, which writes
+    // today's column set: this database is stopped part-way through history.
     const at = '2026-09-03T00:00:00.000Z';
+    const repository = { id: 'repo1' };
+    db.prepare(
+      `INSERT INTO repositories
+         (id, name, ssh_url, github_slug, default_base_branch, created_at, updated_at)
+       VALUES (?, 'chief-web', 'git@github.com:minicodemonkey/chief-web.git',
+               'minicodemonkey/chief-web', 'develop', ?, ?)`,
+    ).run(repository.id, at, at);
     db.prepare(
       `INSERT INTO pr_reviews
          (id, repository_id, pr_number, pr_url, pr_title, head_branch, base_branch, status,

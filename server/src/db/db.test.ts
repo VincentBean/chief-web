@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -65,6 +66,23 @@ function seedRepository(db: Database): Repository {
   });
 }
 
+/**
+ * A repository with only the columns migration 0001 created, for the tests that
+ * walk the schema up to one migration: `createRepository` writes today's
+ * column set, which a database stopped part-way through history has not got yet.
+ */
+function seedLegacyRepository(db: Database): { readonly id: string } {
+  const at = '2026-08-30T00:00:00.000Z';
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO repositories
+       (id, name, ssh_url, github_slug, default_base_branch, created_at, updated_at)
+     VALUES (?, 'chief-web', 'git@github.com:minicodemonkey/chief-web.git',
+             'minicodemonkey/chief-web', 'develop', ?, ?)`,
+  ).run(id, at, at);
+  return { id };
+}
+
 describe('migrations', () => {
   it('creates every table on a fresh database', () => {
     const db = freshDb();
@@ -120,7 +138,7 @@ describe('migrations', () => {
       );
     }
 
-    const repository = seedRepository(db);
+    const repository = seedLegacyRepository(db);
     db.prepare(
       `INSERT INTO sessions
          (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
@@ -185,7 +203,7 @@ describe('migrations', () => {
       );
     }
 
-    const repository = seedRepository(db);
+    const repository = seedLegacyRepository(db);
     // Inserted by hand, like the walks above it: `createSession` writes the
     // columns the schema has *today*, which is more than it had here.
     const at = '2026-09-01T00:00:00.000Z';
@@ -254,7 +272,7 @@ describe('migrations', () => {
       );
     }
 
-    const repository = seedRepository(db);
+    const repository = seedLegacyRepository(db);
     const at = '2026-09-01T00:00:00.000Z';
     const insert = db.prepare(
       `INSERT INTO sessions
@@ -318,7 +336,7 @@ describe('migrations', () => {
       );
     }
 
-    const repository = seedRepository(db);
+    const repository = seedLegacyRepository(db);
     const at = '2026-09-01T00:00:00.000Z';
     db.prepare(
       `INSERT INTO sessions
@@ -373,7 +391,7 @@ describe('migrations', () => {
       );
     }
 
-    const repository = seedRepository(db);
+    const repository = seedLegacyRepository(db);
     const at = '2026-09-01T00:00:00.000Z';
     db.prepare(
       `INSERT INTO sessions

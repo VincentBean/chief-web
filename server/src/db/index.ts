@@ -5,6 +5,7 @@ export * from './pr-reviews.js';
 export * from './pr-runs.js';
 export * from './recurring-tasks.js';
 export * from './repositories.js';
+export * from './sentry-issues.js';
 export * from './sessions.js';
 export * from './settings.js';
 export * from './stats.js';

@@ -67,6 +67,38 @@ const DESCRIPTION_LINE = /^\*\*Description:\*\*\s*(.+)$/;
 const CHECKBOX = /^-\s+\[([ xX])\]\s+(.+)$/;
 const PROJECT_HEADING = /^#\s+(?:PRD:\s+)?(.+)$/;
 
+/**
+ * Fenced code blocks (\`\`\` or ~~~): text nobody wrote as PRD structure.
+ *
+ * A generated PRD (US-007) embeds a Sentry stack trace verbatim, and a stack
+ * trace can contain any line at all — `### US-002: …`, `**Status:** done`,
+ * `- [ ] …`. Inside a fence those are characters rather than structure, so both
+ * this parser and the writer next door skip them; anything else would let the
+ * text of a production error message invent stories or move their status.
+ */
+export class CodeFenceScanner {
+  private marker: { char: string; length: number } | null = null;
+
+  /** Feeds one raw line. True when it is fence syntax, or inside a fence. */
+  consume(raw: string): boolean {
+    const run = FENCE_LINE.exec(raw.trim())?.[1] ?? null;
+    if (this.marker === null) {
+      if (run === null) return false;
+      this.marker = { char: run[0] ?? '`', length: run.length };
+      return true;
+    }
+    // A fence is closed only by its own character, and never by a run shorter
+    // than the one that opened it.
+    if (run !== null && run[0] === this.marker.char && run.length >= this.marker.length) {
+      this.marker = null;
+    }
+    return true;
+  }
+}
+
+/** The opening or closing run of a fenced block; any info string is ignored. */
+const FENCE_LINE = /^(`{3,}|~{3,})/;
+
 const DONE_STATUSES = new Set(['done', 'complete', 'completed', 'passed']);
 const IN_PROGRESS_STATUSES = new Set(['in-progress', 'in progress', 'started']);
 const TODO_STATUSES = new Set(['todo', 'to-do', 'to do', 'pending', 'not started', 'open']);
@@ -132,7 +164,12 @@ export function parsePrd(content: string): ParsedPrd {
     });
   };
 
+  const fences = new CodeFenceScanner();
+
   lines.forEach((raw, index) => {
+    // Nothing inside a fenced code block is structure; see CodeFenceScanner.
+    if (fences.consume(raw)) return;
+
     const lineNumber = index + 1;
     const trimmed = raw.trim();
 
