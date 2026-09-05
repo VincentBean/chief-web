@@ -12,6 +12,7 @@ import {
   findSentryIssueBySession,
   IN_MEMORY,
   listSentryIssues,
+  listSentryIssuesAwaitingResolve,
   listSentryIssuesByStatus,
   listSentryIssuesForRepository,
   openDatabase,
@@ -218,6 +219,24 @@ describe('sentry issues', () => {
     assert.deepEqual(
       listed.map((issue) => issue.sentryIssueId),
       [newer.sentryIssueId, older.sentryIssueId],
+    );
+  });
+
+  it('queues the fixed issues Sentry has not been told about, oldest first', () => {
+    const older = issueFor('4021');
+    const newer = issueFor('4022');
+    const reported = issueFor('4023');
+    updateSentryIssue(db, newer.id, { status: 'fixed' });
+    updateSentryIssue(db, older.id, { status: 'fixed' });
+    updateSentryIssue(db, reported.id, { status: 'fixed', resolvedInSentry: true });
+
+    const awaiting = listSentryIssuesAwaitingResolve(db).filter(
+      (issue) => issue.repositoryId === repository.id,
+    );
+
+    assert.deepEqual(
+      awaiting.map((issue) => issue.sentryIssueId),
+      [older.sentryIssueId, newer.sentryIssueId],
     );
   });
 

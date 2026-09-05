@@ -44,6 +44,7 @@ import { createPrReviewService, type PrReviewService } from './prreview/index.js
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
 import {
   createSentryClassifier,
+  createSentryCompleter,
   createSentryFixer,
   createSentrySync,
   type SentrySync,
@@ -313,8 +314,13 @@ export function createApp(
     scheduler,
   });
   const sentryFixer = createSentryFixer(config, db, sessions);
+  // And how it ends (US-008): a merged pull request marks its issue fixed and
+  // resolves it in Sentry, while a session that failed or whose pull request
+  // was closed unmerged closes the issue with what happened written on it.
+  const sentryCompleter = createSentryCompleter(db);
   const sentrySync =
-    deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier, sentryFixer);
+    deps.sentrySync ??
+    createSentrySync(db, undefined, sentryClassifier, sentryFixer, sentryCompleter);
   sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of

@@ -498,4 +498,68 @@ describe('the Sentry issue poller', () => {
       assert.equal(listSentryIssues(db).length, 1);
     });
   });
+
+  describe('the completion pass hung off it (US-008)', () => {
+    it('runs before the poll, so a merge is recorded first', async () => {
+      const { db, sentry } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const order: string[] = [];
+      const sync = new SentrySyncService(
+        db,
+        () => {
+          order.push('poll');
+          return sentry;
+        },
+        null,
+        null,
+        {
+          trackCompletions: () => {
+            order.push('complete');
+            return Promise.resolve(1);
+          },
+        },
+      );
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.deepEqual(order, ['complete', 'poll']);
+    });
+
+    it('runs even when there is nothing to poll', async () => {
+      // Unlike the two passes before it, this one is local work: a session that
+      // merged has to be recorded whether or not Sentry can be reached, or is
+      // even still linked.
+      const { db, sentry } = world({ link: false });
+      let passes = 0;
+      const sync = new SentrySyncService(db, () => sentry, null, null, {
+        trackCompletions: () => {
+          passes += 1;
+          return Promise.resolve(0);
+        },
+      });
+
+      await sync.tick();
+      const noToken = world({ token: null });
+      await new SentrySyncService(noToken.db, () => null, null, null, {
+        trackCompletions: () => {
+          passes += 1;
+          return Promise.resolve(0);
+        },
+      }).tick();
+
+      assert.equal(passes, 2);
+    });
+
+    it('never fails the poll', async () => {
+      const { db, sentry } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const sync = new SentrySyncService(db, () => sentry, null, null, {
+        trackCompletions: () => Promise.reject(new Error('Sentry is on fire')),
+      });
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.equal(listSentryIssues(db).length, 1);
+    });
+  });
 });

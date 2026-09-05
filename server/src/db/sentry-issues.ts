@@ -273,3 +273,20 @@ export function updateSentryIssue(
 export function deleteSentryIssue(db: Database, id: string): boolean {
   return changeCount(db.prepare('DELETE FROM sentry_issues WHERE id = ?').run(id)) > 0;
 }
+
+/**
+ * The `fixed` issues Sentry has not been told about yet, oldest first (US-008).
+ *
+ * `resolved_in_sentry` is deliberately a flag rather than a status: the fix
+ * landed whatever Sentry says, so a resolve call that failed must leave the
+ * issue `fixed` and merely stay on this list until a later tick gets through.
+ */
+export function listSentryIssuesAwaitingResolve(db: Database): SentryIssue[] {
+  return db
+    .prepare(
+      "SELECT * FROM sentry_issues WHERE status = 'fixed' AND resolved_in_sentry = 0 " +
+        'ORDER BY created_at ASC',
+    )
+    .all()
+    .map(mapSentryIssue);
+}

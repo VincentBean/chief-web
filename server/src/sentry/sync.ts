@@ -10,6 +10,7 @@ import { getSentryPollIntervalMs } from '../settings/index.js';
 
 import type { SentryClassifier } from './classify.js';
 import { createSentryClient, SentryApiError, type SentryIssueSummary } from './client.js';
+import type { SentryCompleter } from './complete.js';
 import type { SentryFixer } from './fix.js';
 
 /**
@@ -110,6 +111,16 @@ export class SentrySyncService implements SentrySync {
      * ago in this very tick.
      */
     private readonly fixer: SentryFixer | null = null,
+    /**
+     * What is done with the `working` rows the fixer leaves behind (US-008):
+     * a look at what became of each fix session, and a resolve call to Sentry
+     * for every fix that landed. Same beat again — a merge is worth noticing
+     * exactly as often as an error is worth polling for — but unlike the two
+     * above it runs *before* the poll and outside the idle checks, because it
+     * is local work until something needs reporting: a session that merged
+     * must be recorded even on an install whose token was just removed.
+     */
+    private readonly completer: SentryCompleter | null = null,
   ) {}
 
   start(): void {
@@ -163,6 +174,13 @@ export class SentrySyncService implements SentrySync {
   }
 
   private async runTick(): Promise<number> {
+    // Before anything is asked of Sentry: what became of the fix sessions
+    // already in flight, and the resolve calls still owed for the ones that
+    // merged. It reads three local tables when there is nothing to do, and
+    // running it first is what keeps a finished fix one tick away from being
+    // recorded even when the poll below cannot run at all.
+    await this.trackCompletions();
+
     let linked: Repository[];
     try {
       linked = listSentryLinkedRepositories(this.db);
@@ -224,6 +242,20 @@ export class SentrySyncService implements SentrySync {
       await this.fixer.createFixSessions();
     } catch (cause) {
       logger.error('the Sentry fix session pass failed', { error: describe(cause) });
+    }
+  }
+
+  /**
+   * The completion pass, which must never be able to fail a poll either: every
+   * row it did not get to is exactly where the next tick expects it, because
+   * the whole pass is derived from the session statuses rather than remembered.
+   */
+  private async trackCompletions(): Promise<void> {
+    if (this.completer === null) return;
+    try {
+      await this.completer.trackCompletions();
+    } catch (cause) {
+      logger.error('the Sentry issue completion pass failed', { error: describe(cause) });
     }
   }
 
@@ -320,8 +352,9 @@ export function createSentrySync(
   clients: SentryGatewayFactory = createSentryClient,
   classifier: SentryClassifier | null = null,
   fixer: SentryFixer | null = null,
+  completer: SentryCompleter | null = null,
 ): SentrySyncService {
-  return new SentrySyncService(db, clients, classifier, fixer);
+  return new SentrySyncService(db, clients, classifier, fixer, completer);
 }
 
 function describe(cause: unknown): string {

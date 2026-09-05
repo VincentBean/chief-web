@@ -31,6 +31,16 @@ export {
   type SentryTag,
 } from './client.js';
 export {
+  closedPullRequestExplanation,
+  createSentryCompleter,
+  failedSessionExplanation,
+  type SentryCompleter,
+  SentryCompletionService,
+  type SentryResolveFactory,
+  type SentryResolveGateway,
+  SESSION_DELETED,
+} from './complete.js';
+export {
   createSentryFixer,
   DEFAULT_PR_TARGET_BRANCH,
   type FixSessionService,
