@@ -43,6 +43,7 @@ export {
 export {
   createSentryFixer,
   DEFAULT_PR_TARGET_BRANCH,
+  type FixBuildService,
   type FixSessionService,
   fixSessionFailedExplanation,
   MAX_FIX_ATTEMPTS,

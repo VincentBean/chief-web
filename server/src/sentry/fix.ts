@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { BuildError } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   type Database,
@@ -28,10 +29,20 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
  * Runs after the classification pass, over the `queued` rows it left behind.
  * Each one becomes a real session: the repository's default base branch, code
  * review on so the existing review + PR-feedback pipeline runs, a generated
- * `prd.md` holding everything Sentry knows about the error, and "Mark ready",
- * which is what puts it in the ordinary build queue. From that point on nothing
- * about it is special — the scheduler, the slot cap, the delivery and the pull
- * request are the ones every other session gets.
+ * `prd.md` holding everything Sentry knows about the error, "Mark ready", and
+ * then the very call the Start button makes. From that point on nothing about
+ * it is special — the slot cap, the queue, the delivery and the pull request
+ * are the ones every other session gets.
+ *
+ * ## Why the start is made here
+ *
+ * Because nothing else would ever make it. "Mark ready" only fires a schedule
+ * the session slept through, and these sessions are created without one; the
+ * scheduler's tick only fires sessions that have a `scheduled_start_at`; and
+ * the build queue only drains sessions that have a `queued_at`, which nothing
+ * but `BuildService.start` sets. A fix session that was merely marked ready
+ * would sit at `ready` for good, with its issue stuck on `working` and the
+ * completion pass waiting on a build that never began.
  *
  * ## Why there is no cap here
  *
@@ -75,6 +86,17 @@ export interface FixSessionService {
   create(request: CreateSessionRequest): Promise<SessionSetupView>;
   markReady(id: string): Promise<ReadyResult>;
   delete(id: string): Promise<void>;
+}
+
+/**
+ * The slice of the build loop (US-013) a ready fix session is handed to.
+ *
+ * Exactly what the Start button calls, so everything after it — the slot cap,
+ * the FIFO queue, the usage-limit hold — treats a fix session on the same terms
+ * as one an operator started by hand.
+ */
+export interface FixBuildService {
+  start(sessionId: string): Promise<unknown>;
 }
 
 /** What the poller calls once the classification pass is done. */
@@ -135,6 +157,7 @@ export class SentryFixService implements SentryFixer {
     private readonly config: Pick<Config, 'workspacesDir'>,
     private readonly db: Database,
     private readonly sessions: FixSessionService,
+    private readonly builds: FixBuildService,
     private readonly clients: SentryDetailsFactory = createSentryClient,
   ) {}
 
@@ -259,6 +282,26 @@ export class SentryFixService implements SentryFixer {
       return false;
     }
 
+    // The one thing "Mark ready" does not do: put the session in the build
+    // queue. This is the Start button's own call, so the cap, the queue and the
+    // hold answer it exactly as they answer a hand-started session.
+    try {
+      await this.builds.start(session.id);
+    } catch (cause) {
+      if (!queuedForHold(cause)) {
+        await this.discard(session.id);
+        this.failed(issue, `the fix session could not be started: ${describe(cause)}`);
+        return false;
+      }
+      // Claude's usage limit is on (US-005). The refusal came *after* the
+      // session was put in the queue, and the pump hands it a slot the moment
+      // the hold lifts, so there is nothing to undo and nothing to retry.
+      logger.info('a Sentry fix session is waiting behind Claude’s usage limit', {
+        issue: issue.shortId,
+        session: session.id,
+      });
+    }
+
     // Only here, and in one write: from now on the issue is `working` and no
     // tick will look at it again.
     updateSentryIssue(this.db, issue.id, {
@@ -332,6 +375,17 @@ export class SentryFixService implements SentryFixer {
 }
 
 /**
+ * Did the start refuse only because Claude's usage limit is being served?
+ *
+ * That is not a failure of the session: `BuildService.start` enqueues it
+ * before it throws, so it is already exactly where a full server would have
+ * left it, and the pump starts it from there.
+ */
+function queuedForHold(cause: unknown): boolean {
+  return cause instanceof BuildError && cause.code === 'usage_limit_hold';
+}
+
+/**
  * Is this a Sentry failure that says nothing about the issue? Same reasoning as
  * the classifier's: an hour of Sentry trouble must not burn three attempts.
  */
@@ -346,9 +400,10 @@ export function createSentryFixer(
   config: Pick<Config, 'workspacesDir'>,
   db: Database,
   sessions: FixSessionService,
+  builds: FixBuildService,
   clients: SentryDetailsFactory = createSentryClient,
 ): SentryFixService {
-  return new SentryFixService(config, db, sessions, clients);
+  return new SentryFixService(config, db, sessions, builds, clients);
 }
 
 function describe(cause: unknown): string {

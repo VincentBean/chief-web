@@ -159,7 +159,7 @@ pending ──► queued ──► working ──► fixed
 | --- | --- | --- | --- |
 | **`pending`** | *awaiting classification* | The poller has seen the issue and written it down. Nothing has been spent on it yet. | The classification pass, up to 2 issues per tick, oldest first. |
 | **`queued`** | *queued* | Classified **fixable**. | The next pass creates the build session — usually the same tick. |
-| **`working`** | *session running* | A build session exists, is marked ready and is in the normal build queue. | The session's own outcome. |
+| **`working`** | *session running* | A build session exists, has been marked ready and started, and is building or waiting in the normal build queue. | The session's own outcome. |
 | **`fixed`** | Fixed | The session's pull request was **merged**. | Nothing. It is terminal. |
 | **`cannot_fix`** | Cannot fix | Either the classifier said no, or the attempt died. Always carries a written explanation. | Nothing. It is terminal, and deliberately final. |
 
@@ -209,11 +209,14 @@ worth being explicit about:
   Sentry report (title, culprit, level, permalink, message, platform, stack
   trace, tags, breadcrumbs, counts, and the classifier's triage note) fenced
   below it. The planning templates are not used and no terminal is opened.
-- **The session marks itself ready.** It is created on the repository's default
-  base branch, the PRD is written into the workspace, and `markReady` is called
-  immediately. From there it is in the [ordinary build queue](scheduling.md#concurrency-and-the-build-queue),
-  competing for the same slots as the sessions you started by hand, with no
-  dedicated concurrency cap of its own.
+- **The session marks itself ready and starts itself.** It is created on the
+  repository's default base branch, the PRD is written into the workspace,
+  `markReady` is called immediately, and then the session is started exactly as
+  the **Start** button starts one by hand. From there it is in the
+  [ordinary build queue](scheduling.md#concurrency-and-the-build-queue),
+  competing for the same slots as the sessions you started yourself, with no
+  dedicated concurrency cap of its own — a full server, or Claude's usage limit,
+  simply leaves it waiting in that queue until a slot frees.
 - **Code review is on**, always, whatever the *Run code review on new sessions*
   default happens to be. The [automatic review](code-review.md) posts to the
   pull request, and the feedback solver answers it, exactly as for a

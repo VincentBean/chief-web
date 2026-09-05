@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
+import { BuildError } from '../build/index.js';
 import {
   closeDatabase,
   createRepository,
@@ -37,7 +38,12 @@ import { sessionPrdFile, storyInputOf } from '../sessions/index.js';
 
 import { SentryApiError, type SentryIssueDetails, type SentryIssueSummary } from './client.js';
 import type { SentryDetailsGateway } from './classify.js';
-import { type FixSessionService, MAX_FIX_ATTEMPTS, SentryFixService } from './fix.js';
+import {
+  type FixBuildService,
+  type FixSessionService,
+  MAX_FIX_ATTEMPTS,
+  SentryFixService,
+} from './fix.js';
 
 const databases: Database[] = [];
 const workspaces: string[] = [];
@@ -183,6 +189,32 @@ class FakeSessions implements FixSessionService {
   }
 }
 
+/**
+ * Stands in for the build loop: what a session start would do to the row,
+ * without a container. `failure` is thrown exactly as `BuildService.start`
+ * throws — including the usage-limit refusal, which comes *after* the session
+ * has been queued.
+ */
+class FakeBuilds implements FixBuildService {
+  readonly started: string[] = [];
+  failure: Error | null = null;
+  queueBeforeFailing = false;
+
+  constructor(private readonly db: Database) {}
+
+  start(sessionId: string): Promise<unknown> {
+    this.started.push(sessionId);
+    if (this.failure !== null) {
+      if (this.queueBeforeFailing) {
+        updateSession(this.db, sessionId, { queuedAt: new Date().toISOString() });
+      }
+      return Promise.reject(this.failure);
+    }
+    updateSession(this.db, sessionId, { status: 'building' });
+    return Promise.resolve({});
+  }
+}
+
 /** Only `id` and `name` are read by the fixer; the rest is the row as it is. */
 function view(session: Session): SessionView {
   return {
@@ -200,6 +232,7 @@ interface World {
   readonly config: { workspacesDir: string };
   readonly sentry: FakeSentry;
   readonly sessions: FakeSessions;
+  readonly builds: FakeBuilds;
   readonly fixer: SentryFixService;
   readonly repository: Repository;
   issue(fields?: { shortId?: string; attempts?: number }): SentryIssue;
@@ -226,7 +259,8 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
 
   const sentry = new FakeSentry();
   const sessions = new FakeSessions(config, db);
-  const fixer = new SentryFixService(config, db, sessions, (database) =>
+  const builds = new FakeBuilds(db);
+  const fixer = new SentryFixService(config, db, sessions, builds, (database) =>
     hasToken(database) ? sentry : null,
   );
 
@@ -236,6 +270,7 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
     config,
     sentry,
     sessions,
+    builds,
     fixer,
     repository,
     issue(fields = {}) {
@@ -281,7 +316,7 @@ function hasToken(db: Database): boolean {
 
 describe('the Sentry fix session builder', () => {
   describe('creating the session', () => {
-    it('names it after the short id and marks it ready', async () => {
+    it('names it after the short id, marks it ready and starts it', async () => {
       const w = world();
       const issue = w.issue({ shortId: 'PROJ-123' });
 
@@ -299,7 +334,10 @@ describe('the Sentry fix session builder', () => {
       const session = listSessions(w.db, {})[0];
       assert.ok(session !== undefined);
       assert.deepEqual(w.sessions.readied, [session.id]);
-      assert.equal(session.status, 'ready');
+      // Nothing else would ever start it: it has no schedule, and the queue is
+      // only ever fed by `builds.start`.
+      assert.deepEqual(w.builds.started, [session.id]);
+      assert.equal(session.status, 'building');
       assert.equal(session.codeReview, true);
       assert.equal(session.baseBranch, 'trunk');
 
@@ -411,6 +449,64 @@ describe('the Sentry fix session builder', () => {
 
       assert.equal(w.sessions.created.length, 0);
       assert.equal(w.reload(issue).status, 'queued');
+    });
+  });
+
+  describe('starting the session', () => {
+    it('leaves it queued, and the issue working, when Claude’s usage limit is on', async () => {
+      const w = world();
+      const issue = w.issue();
+      w.builds.queueBeforeFailing = true;
+      w.builds.failure = new BuildError(429, 'usage_limit_hold', 'Queued behind the hold.');
+
+      assert.equal(await w.fixer.createFixSessions(), 1);
+
+      // The refusal came after the queueing, so there is nothing to undo: the
+      // pump starts it when the hold lifts.
+      const session = listSessions(w.db, {})[0];
+      assert.ok(session !== undefined);
+      assert.equal(session.status, 'ready');
+      assert.notEqual(session.queuedAt, null);
+      assert.equal(w.sessions.deleted.length, 0);
+
+      const row = w.reload(issue);
+      assert.equal(row.status, 'working');
+      assert.equal(row.sessionId, session.id);
+    });
+
+    it('throws the session away and retries when the start really failed', async () => {
+      const w = world();
+      const issue = w.issue();
+      w.builds.failure = new BuildError(409, 'session_not_ready', 'The session is finished.');
+
+      assert.equal(await w.fixer.createFixSessions(), 0);
+
+      assert.equal(w.sessions.deleted.length, 1);
+      assert.equal(listSessions(w.db, {}).length, 0);
+      const row = w.reload(issue);
+      assert.equal(row.status, 'queued');
+      assert.equal(row.attempts, 1);
+      assert.equal(row.sessionId, null);
+
+      w.builds.failure = null;
+      assert.equal(await w.fixer.createFixSessions(), 1);
+      assert.equal(w.reload(issue).status, 'working');
+    });
+
+    it('gives up after three failed starts, naming the failure', async () => {
+      const w = world();
+      const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
+      w.builds.failure = new BuildError(500, 'container_failed', 'no docker daemon');
+
+      assert.equal(await w.fixer.createFixSessions(), 0);
+
+      const row = w.reload(issue);
+      assert.equal(row.status, 'cannot_fix');
+      assert.equal(
+        row.explanation,
+        'No fix session could be created for this issue: ' +
+          'the fix session could not be started: no docker daemon',
+      );
     });
   });
 

@@ -307,14 +307,15 @@ export function createApp(
   );
   // And what a "yes" is worth (US-007): a real build session on the base
   // branch, seeded with a generated PRD holding the whole Sentry report, code
-  // review on, and marked ready — from there the ordinary queue, delivery and
-  // review pipeline take it the rest of the way to a pull request.
+  // review on, marked ready and handed to `builds.start` exactly as the Start
+  // button would — from there the ordinary queue, delivery and review pipeline
+  // take it the rest of the way to a pull request.
   const sessions = createSessionService(config, db, orchestrator, exec, {
     builds,
     planning,
     scheduler,
   });
-  const sentryFixer = createSentryFixer(config, db, sessions);
+  const sentryFixer = createSentryFixer(config, db, sessions, builds);
   // And how it ends (US-008): a merged pull request marks its issue fixed and
   // resolves it in Sentry, while a session that failed or whose pull request
   // was closed unmerged closes the issue with what happened written on it.
