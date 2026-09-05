@@ -8,6 +8,7 @@ import {
   deleteRecurringTaskById,
   getRecurringTaskDetailView,
   listRecurringTaskViews,
+  previewCron,
   RecurringTaskError,
   type UpdateRecurringTaskRequest,
   updateRecurringTaskFromRequest,
@@ -34,6 +35,26 @@ const MAX_PROMPT_LENGTH = 10_000;
  */
 export function createRecurringTasksRouter(db: Database): Router {
   const router = Router();
+
+  /*
+   * Judging an expression without storing one. Its own path rather than
+   * `/recurring-tasks/cron-preview`, so it can never be mistaken for a task id
+   * by the `:id` route below.
+   *
+   * A rejected expression is a 200 with `valid: false`, not a 400: the create
+   * form calls this on every keystroke and most of what it sends is a
+   * half-typed expression, which is a question rather than a failed request.
+   */
+  router.get('/cron/preview', (req, res) => {
+    const expression = req.query['expression'];
+    if (typeof expression !== 'string') {
+      res
+        .status(400)
+        .json({ error: 'invalid_cron_expression', message: 'expression must be a string.' });
+      return;
+    }
+    res.status(200).json(previewCron(expression));
+  });
 
   router.get('/recurring-tasks', (req, res) => {
     const repositoryId = req.query['repositoryId'];

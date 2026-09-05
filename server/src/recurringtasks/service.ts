@@ -327,3 +327,47 @@ export function deleteRecurringTaskById(db: Database, id: string): void {
     throw new RecurringTaskError(404, 'recurring_task_not_found', 'No such recurring task.');
   }
 }
+
+/**
+ * What `GET /api/cron/preview` answers with: an expression judged, without
+ * anything being stored.
+ *
+ * Deliberately not an error response. The form calls this on every keystroke,
+ * and half of what it sends is a half-typed expression; "0 3 * *" is a
+ * question, not a failed request. `valid` is the answer, `message` is the
+ * cron module's own words for why not, and both descriptions come from the
+ * same place the stored task's `scheduleDescription` does.
+ */
+export interface CronPreview {
+  /** Echoed back, so a late response can be matched to what was typed. */
+  readonly expression: string;
+  readonly valid: boolean;
+  /** "At 03:00, only on Monday"; null when the expression is not valid. */
+  readonly description: string | null;
+  /** The next occurrence as a UTC ISO string, for the visitor's own clock. */
+  readonly nextRunAt: string | null;
+  /** Why the expression was rejected; null when it was not. */
+  readonly message: string | null;
+}
+
+export function previewCron(expression: string, from: Date = new Date()): CronPreview {
+  const validation = validateCron(expression);
+  if (!validation.ok) {
+    return {
+      expression,
+      valid: false,
+      description: null,
+      nextRunAt: null,
+      message: validation.message,
+    };
+  }
+  return {
+    expression,
+    valid: true,
+    description: validation.description,
+    // A valid expression with no further occurrence is possible (`0 0 30 2 *`
+    // is refused, but a date-bound one need not recur), so this stays nullable.
+    nextRunAt: firstRunAt(expression, from),
+    message: null,
+  };
+}

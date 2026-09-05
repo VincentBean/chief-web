@@ -24,7 +24,11 @@ import {
   recordRecurringTaskOccurrence,
   type Repository,
 } from '../db/index.js';
-import type { RecurringTaskDetailView, RecurringTaskView } from '../recurringtasks/index.js';
+import type {
+  CronPreview,
+  RecurringTaskDetailView,
+  RecurringTaskView,
+} from '../recurringtasks/index.js';
 
 const PASSWORD = 'correct horse battery staple';
 
@@ -345,5 +349,42 @@ describe('recurring tasks api', () => {
 
     const missing = await call('DELETE', `/api/recurring-tasks/${task.id}`);
     assert.equal(missing.status, 404);
+  });
+
+  it('describes a valid expression, with the next run as a UTC instant', async () => {
+    const response = await call('GET', '/api/cron/preview?expression=' + encodeURIComponent('0 3 * * 1'));
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as CronPreview;
+    assert.equal(body.expression, '0 3 * * 1');
+    assert.equal(body.valid, true);
+    assert.equal(body.description, 'At 03:00, only on Monday');
+    assert.equal(body.message, null);
+    assert.ok(body.nextRunAt !== null);
+    const next = new Date(body.nextRunAt);
+    assert.ok(next.getTime() > Date.now());
+    // Read in the server's timezone, handed over as UTC for the browser.
+    assert.equal(next.getHours(), 3);
+    assert.equal(next.getDay(), 1);
+  });
+
+  it('answers a half-typed expression with the reason, not an error status', async () => {
+    const response = await call('GET', '/api/cron/preview?expression=' + encodeURIComponent('0 3 * *'));
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as CronPreview;
+    assert.equal(body.valid, false);
+    assert.equal(body.description, null);
+    assert.equal(body.nextRunAt, null);
+    assert.match(body.message ?? '', /5 fields/);
+  });
+
+  it('rejects a preview with no expression at all', async () => {
+    const response = await call('GET', '/api/cron/preview');
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as ErrorBody).error, 'invalid_cron_expression');
+  });
+
+  it('needs a session cookie for a preview too', async () => {
+    const response = await fetch(baseUrl + '/api/cron/preview?expression=0+3+*+*+*');
+    assert.equal(response.status, 401);
   });
 });

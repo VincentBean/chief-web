@@ -18,10 +18,12 @@ export {
 export {
   type CreateRecurringTaskRequest,
   createRecurringTaskFromRequest,
+  type CronPreview,
   deleteRecurringTaskById,
   getRecurringTaskDetailView,
   listRecurringTaskViews,
   MAX_RECURRING_TASK_NAME_LENGTH,
+  previewCron,
   type RecurringTaskDetailView,
   RecurringTaskError,
   type RecurringTaskOccurrenceView,

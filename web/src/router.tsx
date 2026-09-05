@@ -3,7 +3,7 @@ import { type AnchorHTMLAttributes, type MouseEvent, useSyncExternalStore } from
 /**
  * A history-API router small enough to read in one sitting.
  *
- * The app has eight entry points and one parameterised route. What it needs
+ * The app has nine entry points and two parameterised routes. What it needs
  * from a router is exactly three things — the current path as React state, a
  * `navigate()` that does not reload the page, and an `<a>` that calls it — and
  * nothing a library adds on top (nested outlets, loaders, data APIs) would be
@@ -80,5 +80,17 @@ export function Link({
 export function sessionIdFromPath(pathname: string): string | null {
   const match = /^\/sessions\/([^/]+)\/?$/.exec(pathname);
   if (match === null || match[1] === 'new') return null;
+  return decodeURIComponent(match[1] ?? '');
+}
+
+/**
+ * `/recurring-tasks/<id>/edit` → the id, or null for any other path (US-008).
+ *
+ * The edit form is a page rather than a dialog for the same reason the new
+ * session form is: the URL can be handed out, and a reload keeps you on it.
+ */
+export function editedRecurringTaskIdFromPath(pathname: string): string | null {
+  const match = /^\/recurring-tasks\/([^/]+)\/edit\/?$/.exec(pathname);
+  if (match === null) return null;
   return decodeURIComponent(match[1] ?? '');
 }

@@ -887,6 +887,66 @@ export async function deleteRecurringTask(id: string): Promise<void> {
   await api<void>(`/api/recurring-tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/**
+ * Everything `POST /api/recurring-tasks` insists on, plus the fields it will
+ * default. Separate from `RecurringTaskInput` — whose fields are all optional
+ * because `PUT` is edits *and* pause/resume — so the create form cannot
+ * compile without a repository, a name, a prompt and a schedule.
+ */
+export interface CreateRecurringTaskInput {
+  repositoryId: string;
+  name: string;
+  prompt: string;
+  cronExpression: string;
+  baseBranch?: string;
+  prTarget?: PrTargetBranch;
+  runCodeReview?: boolean;
+  paused?: boolean;
+}
+
+export async function createRecurringTask(input: CreateRecurringTaskInput): Promise<RecurringTask> {
+  return api<RecurringTask>('/api/recurring-tasks', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/**
+ * One task, for the edit form. The server also sends the occurrence history
+ * from this endpoint; the form has no use for it, and US-009's detail page is
+ * where that half gets a type.
+ */
+export async function fetchRecurringTask(id: string, signal?: AbortSignal): Promise<RecurringTask> {
+  return api<RecurringTask>(
+    `/api/recurring-tasks/${encodeURIComponent(id)}`,
+    signal ? { signal } : {},
+  );
+}
+
+/**
+ * Mirrors the server's `CronPreview` (US-008): an expression judged without
+ * anything being stored, so the form can say what a schedule means while it is
+ * still being typed. The server owns cron semantics; nothing here parses one.
+ */
+export interface CronPreview {
+  /** Echoed back, so a late answer can be matched against what is in the box. */
+  expression: string;
+  valid: boolean;
+  /** "At 03:00, only on Monday"; null when the expression is not valid. */
+  description: string | null;
+  /** UTC ISO-8601, shown on the visitor's own clock; null when invalid. */
+  nextRunAt: string | null;
+  /** Why it was rejected, in the cron module's words; null when it was not. */
+  message: string | null;
+}
+
+export async function previewCron(expression: string, signal?: AbortSignal): Promise<CronPreview> {
+  return api<CronPreview>(
+    `/api/cron/preview?expression=${encodeURIComponent(expression)}`,
+    signal ? { signal } : {},
+  );
+}
+
 /* ------------------------------------------------------------ pull requests */
 
 /** Mirrors the server's `PullRequestView`: one open pull request. */

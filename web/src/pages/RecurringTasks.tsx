@@ -9,6 +9,7 @@ import {
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { DASHBOARD_POLL_MS, describeError, redirectIfUnauthorised } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
+import { Link } from '../router.tsx';
 import { localTime, nextRunIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
 import { Badge, EmptyState, Notice, PageHeader, RECURRING_OUTCOME_TONE, Skeleton } from '../ui.tsx';
@@ -102,6 +103,12 @@ export function RecurringTasks() {
       <PageHeader
         title="Recurring tasks"
         subtitle="A saved prompt on a schedule. Each run gets its own session, container and branch, and opens a pull request only when it produced commits."
+        actions={
+          <Link className="button button--primary" href="/recurring-tasks/new">
+            <Icon name="plus" />
+            New task
+          </Link>
+        }
       />
 
       {loadError !== null && <Notice kind="error">Could not read recurring tasks: {loadError}</Notice>}
@@ -113,7 +120,16 @@ export function RecurringTasks() {
           </div>
         </div>
       ) : tasks.length === 0 ? (
-        <EmptyState icon="clock" title="No recurring tasks yet">
+        <EmptyState
+          icon="clock"
+          title="No recurring tasks yet"
+          action={
+            <Link className="button button--primary" href="/recurring-tasks/new">
+              <Icon name="plus" />
+              New task
+            </Link>
+          }
+        >
           A recurring task runs unattended: chief-web starts a session for it on every occurrence,
           builds the prompt as a one-story PRD, and leaves a pull request when there is something to
           review.
@@ -244,6 +260,14 @@ function TaskRow({
             <Icon name={task.paused ? 'play' : 'pause'} />
             {busy ? 'Working…' : task.paused ? 'Resume' : 'Pause'}
           </button>
+          <Link
+            className="button button--small button--quiet button--icon"
+            href={`/recurring-tasks/${encodeURIComponent(task.id)}/edit`}
+            aria-label={`Edit ${task.name}`}
+            title="Edit"
+          >
+            <Icon name="pencil" />
+          </Link>
           <button
             type="button"
             className="button button--small button--quiet button--danger button--icon"
