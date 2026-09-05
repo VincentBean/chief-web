@@ -299,6 +299,9 @@ export function createApp(
       builds,
       () => prFeedback,
     );
+  // A review asked for while every slot is taken waits in the unified queue
+  // instead of being refused (US-003); this is how the pump starts it again.
+  builds.registerStart('pr-review', prReviews.starter());
   api.use(
     createPullRequestsRouter(
       deps.pullRequests ?? createPullRequestService(config, db),

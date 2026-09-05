@@ -59,6 +59,7 @@ export {
   type BuildView,
   createBuildService,
   MarkSessionFinished,
+  type QueuedStart,
 } from './service.js';
 export {
   BUILD_LOG_WS_PATH,

@@ -1079,6 +1079,10 @@ export interface PrReview {
   /** Which of the three passes of this start is running; null once over. */
   pass: number | null;
   failureStage: PrReviewFailureStage | null;
+  /** True while it is waiting in the build queue for a slot. */
+  queued: boolean;
+  /** Its 1-based place in that queue; null when it is not in it. */
+  queuePosition: number | null;
   lastError: string | null;
   /** The commit the review was read at. */
   headSha: string | null;

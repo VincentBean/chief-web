@@ -7,6 +7,8 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { AgentInvocation, AgentResult, AgentRunner } from '../build/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
+  type BuildQueueEntry,
+  type BuildQueueKind,
   closeDatabase,
   createRepository,
   type Database,
@@ -145,6 +147,26 @@ class StubSlots implements BuildSlots {
   holdAll(until: string): Promise<void> {
     this.heldUntil.push(until);
     return Promise.resolve();
+  }
+
+  /** The unified queue, in memory: nothing here joins it, so it stays empty. */
+  readonly queued: string[] = [];
+
+  enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry {
+    const key = `${kind}:${refId}`;
+    if (!this.queued.includes(key)) this.queued.push(key);
+    return { id: this.queued.indexOf(key) + 1, kind, refId, queuedAt: new Date().toISOString() };
+  }
+
+  leaveQueue(kind: BuildQueueKind, refId: string): boolean {
+    const at = this.queued.indexOf(`${kind}:${refId}`);
+    if (at < 0) return false;
+    this.queued.splice(at, 1);
+    return true;
+  }
+
+  claimStart(): () => void {
+    return () => undefined;
   }
 }
 

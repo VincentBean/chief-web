@@ -4,6 +4,8 @@ import path from 'node:path';
 import type { AgentRunner } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
+  type BuildQueueEntry,
+  type BuildQueueKind,
   createPrRun,
   type Database,
   type FeedbackKind,
@@ -72,13 +74,28 @@ export class PrFeedbackError extends Error {
 
 /**
  * The slice of the build loop a PR run drives: the concurrency cap it shares
- * (US-018) and the usage-limit hold it can trigger for it (US-007).
+ * (US-018), the unified queue it waits in when that cap is reached (US-003),
+ * and the usage-limit hold it can trigger for it (US-007).
+ *
+ * Narrow on purpose: the services above the build loop depend on this
+ * interface rather than on `BuildService`, so the dependency keeps pointing
+ * one way now that they queue as well as count.
  */
 export interface BuildSlots {
   freeSlots(): number;
   pump(): Promise<void>;
   /** Parks every building session on `until` after this run was refused. */
   holdAll(until: string): Promise<void>;
+  /** Puts work at the back of the unified FIFO queue, or leaves it where it is. */
+  enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry;
+  /** Takes work back out of that queue; false when it was not in it. */
+  leaveQueue(kind: BuildQueueKind, refId: string): boolean;
+  /**
+   * Counts a start that has not reached the database yet against the cap until
+   * the returned function is called. Every start path claims here first, so two
+   * of them cannot hand the same free slot to two agents.
+   */
+  claimStart(kind: BuildQueueKind, refId: string): () => void;
 }
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
