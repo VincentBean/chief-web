@@ -52,6 +52,7 @@ import {
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
+import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createStatsRouter } from './routes/stats.js';
@@ -354,6 +355,11 @@ export function createApp(
       prConflicts,
     ),
   );
+  // What the poller, the classifier and the fixer above have made of every
+  // issue they have seen (US-009). A read over the database, mounted here
+  // rather than beside the settings router so it sits next to the pipeline it
+  // reports on.
+  api.use(createSentryRouter(db));
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.
   api.use(createSessionsRouter(sessions));

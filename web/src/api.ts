@@ -1258,3 +1258,73 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
       return 'the container';
   }
 }
+
+/* ------------------------------------------------------------------ sentry */
+
+/** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
+export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+
+export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
+
+/** Mirrors the server's `SentryIssueView`: one tracked Sentry issue. */
+export interface SentryIssue {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  sentryIssueId: string;
+  /** The human-facing `PROJECT-1AB` id. */
+  shortId: string;
+  title: string;
+  culprit: string | null;
+  /** Where the issue lives in Sentry; the external link on every row. */
+  permalink: string;
+  level: string | null;
+  eventCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  status: SentryIssueStatus;
+  /** Why the issue cannot be fixed; shown inline on every `cannot_fix` row. */
+  explanation: string | null;
+  sessionId: string | null;
+  /** Null when there is no session, or it has been deleted. */
+  sessionName: string | null;
+  resolvedInSentry: boolean;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Mirrors the server's `SentryIssueList`. */
+export interface SentryIssueList {
+  issues: SentryIssue[];
+  /** Without a token nothing is ever polled, so an empty list means nothing. */
+  tokenConfigured: boolean;
+  generatedAt: string;
+}
+
+/**
+ * Every Sentry issue chief-web is tracking.
+ *
+ * A database read, so it is cheap — but the pipeline behind it moves on a
+ * fifteen-minute tick, so the page loads it once and refreshes on demand
+ * rather than joining the global poll.
+ */
+export async function fetchSentryIssues(signal?: AbortSignal): Promise<SentryIssueList> {
+  return api<SentryIssueList>('/api/sentry/issues', signal ? { signal } : {});
+}
+
+/** What the operator reads for each pipeline state. */
+export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
+  switch (status) {
+    case 'pending':
+      return 'awaiting classification';
+    case 'queued':
+      return 'queued';
+    case 'working':
+      return 'session running';
+    case 'fixed':
+      return 'fixed';
+    case 'cannot_fix':
+      return 'cannot fix';
+  }
+}

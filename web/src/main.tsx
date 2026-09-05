@@ -21,6 +21,7 @@ const Session = lazy(() => import('./pages/Session.tsx').then((m) => ({ default:
 const Settings = lazy(() => import('./pages/Settings.tsx').then((m) => ({ default: m.Settings })));
 const PullRequests = lazy(() => import('./pages/PullRequests.tsx').then((m) => ({ default: m.PullRequests })));
 const Repositories = lazy(() => import('./pages/Repositories.tsx').then((m) => ({ default: m.Repositories })));
+const Sentry = lazy(() => import('./pages/Sentry.tsx').then((m) => ({ default: m.Sentry })));
 const NewSession = lazy(() => import('./pages/NewSession.tsx').then((m) => ({ default: m.NewSession })));
 
 /**
@@ -32,6 +33,7 @@ const PAGES: Record<string, ComponentType> = {
   '/': Overview,
   '/pull-requests': PullRequests,
   '/repositories': Repositories,
+  '/sentry': Sentry,
   '/sessions': Sessions,
   '/sessions/new': NewSession,
   '/settings': Settings,
