@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import type { Session, Story } from './api.ts';
+import type { RecurringTaskOutcome, Session, Story } from './api.ts';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link } from './router.tsx';
 
@@ -37,6 +37,21 @@ export const STORY_TONE: Record<Story['status'], Tone> = {
   todo: 'neutral',
   'in-progress': 'active',
   done: 'done',
+};
+
+/**
+ * How a recurring task's last run ended (US-007). It reads as the same
+ * vocabulary as a session, because that is what an occurrence is: `started` is
+ * a build in flight, a pull request is the purple the session list uses for
+ * one, and a run that came back with nothing to change is finished-green.
+ */
+export const RECURRING_OUTCOME_TONE: Record<RecurringTaskOutcome, Tone> = {
+  started: 'active',
+  skipped: 'wait',
+  'fire-failed': 'danger',
+  'pr-opened': 'review',
+  clean: 'done',
+  failed: 'danger',
 };
 
 /** What the operator reads for each state. */

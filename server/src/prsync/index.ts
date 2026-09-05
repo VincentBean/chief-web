@@ -1,6 +1,7 @@
 export {
   createPrSync,
   GithubPullRequestStates,
+  hasOpenPullRequest,
   PrSyncService,
   pullRequestNumberOf,
   type PullRequestStateGateway,

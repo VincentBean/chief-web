@@ -9,6 +9,7 @@ import {
   deleteSession,
   type FailureStage,
   featureBranchFor,
+  getRecurringTask,
   getRepository,
   getSession,
   isScheduleMissed,
@@ -116,6 +117,18 @@ export interface SessionView {
    */
   readonly queuePosition: number | null;
   readonly containerId: string | null;
+  /**
+   * The recurring task this session is a run of (US-004), or `null` for a
+   * session somebody created by hand. The UI reads it to explain a run that
+   * finished without a pull request because it changed nothing (US-006), and
+   * to link the run back to the schedule it came from.
+   */
+  readonly recurringTaskId: string | null;
+  /**
+   * That task's name, denormalised so the session page can name the schedule
+   * it links to without a second call. `null` whenever the id is.
+   */
+  readonly recurringTaskName: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
   /**
@@ -187,6 +200,12 @@ export interface CreateSessionRequest {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false. */
   readonly codeReview?: boolean;
+  /**
+   * The recurring task this session is a run of (US-004), when it is one.
+   * Only the scheduler passes it; a session created from the API is never a
+   * run of anything.
+   */
+  readonly recurringTaskId?: string | null;
 }
 
 /**
@@ -278,6 +297,7 @@ export class SessionService {
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
         codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
+        recurringTaskId: request.recurringTaskId ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -656,6 +676,11 @@ export class SessionService {
       queuedAt: session.queuedAt,
       queuePosition: queuePosition(this.db, session),
       containerId: session.containerId,
+      recurringTaskId: session.recurringTaskId,
+      recurringTaskName:
+        session.recurringTaskId === null
+          ? null
+          : (getRecurringTask(this.db, session.recurringTaskId)?.name ?? null),
       prUrl: session.prUrl,
       lastError: session.lastError,
       failureStage: session.failureStage,

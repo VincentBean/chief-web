@@ -31,7 +31,12 @@ import {
  * running its own. A hidden tab polls nothing; coming back re-reads at once.
  */
 
-const SESSIONS_POLL_MS = 3000;
+/**
+ * The dashboard's cadence. Exported because pages that poll a list of their
+ * own (the recurring tasks page, US-007) refresh on the same beat rather than
+ * inventing a second one.
+ */
+export const DASHBOARD_POLL_MS = 3000;
 const STATS_POLL_MS = 5000;
 
 export interface AppData {
@@ -114,7 +119,7 @@ export function AppDataProvider({ children }: { readonly children: ReactNode }) 
     void loadStats(controller.signal);
     const sessionsTimer = window.setInterval(() => {
       if (visible()) void load(controller.signal);
-    }, SESSIONS_POLL_MS);
+    }, DASHBOARD_POLL_MS);
     const statsTimer = window.setInterval(() => {
       if (visible()) void loadStats(controller.signal);
     }, STATS_POLL_MS);
@@ -172,6 +177,20 @@ export function needsAttention(session: Session): boolean {
  */
 export function isEnded(session: Pick<Session, 'status'>): boolean {
   return session.status === 'finished' || session.status === 'pr-open' || session.status === 'merged';
+}
+
+/**
+ * A run of a recurring task that changed nothing (US-006).
+ *
+ * It reached the end of its build and committed nothing, so chief-web pushed
+ * no branch and opened no pull request — the point of a nightly check that
+ * finds nothing. That makes it the one ended session with no pull request that
+ * is not missing one, so it says so on screen and is offered no retry.
+ */
+export function isCleanRun(
+  session: Pick<Session, 'status' | 'prUrl' | 'recurringTaskId'>,
+): boolean {
+  return session.status === 'finished' && session.prUrl === null && session.recurringTaskId !== null;
 }
 
 /**

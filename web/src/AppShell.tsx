@@ -8,7 +8,7 @@ import { countdown } from './schedule.ts';
 import { Gauge, Kbd, Meter } from './ui.tsx';
 
 /**
- * The frame around every authenticated page: a sidebar with the six places
+ * The frame around every authenticated page: a sidebar with the seven places
  * the app has, and the facts an operator wants at all times — whether Claude
  * Code is signed in, how many build slots are busy, and what that is costing
  * the machine in CPU and memory.
@@ -30,6 +30,7 @@ const NAV: readonly NavItem[] = [
   { href: '/', label: 'Overview', icon: 'home', key: 'o', match: ['/'] },
   { href: '/sessions', label: 'Sessions', icon: 'rocket', key: 's', match: ['/sessions'] },
   { href: '/pull-requests', label: 'Pull requests', icon: 'git-pull-request', key: 'p', match: ['/pull-requests'] },
+  { href: '/recurring-tasks', label: 'Recurring tasks', icon: 'clock', key: 'c', match: ['/recurring-tasks'] },
   { href: '/repositories', label: 'Repositories', icon: 'repo', key: 'r', match: ['/repositories'] },
   { href: '/terminal', label: 'Terminals', icon: 'terminal', key: 't', match: ['/terminal'] },
   { href: '/settings', label: 'Settings', icon: 'gear', key: ',', match: ['/settings'] },

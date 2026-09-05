@@ -9,6 +9,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { UsageLimitHold } from '../limits/index.js';
+import type { RecurringTaskFiring } from '../recurringtasks/index.js';
 
 /**
  * Scheduled session starts (US-017).
@@ -49,6 +50,16 @@ export interface ScheduledBuilds {
   pump(): Promise<unknown>;
 }
 
+/**
+ * The recurring tasks the tick fires (US-004), when the stack has any.
+ *
+ * A recurring task is a `next_run_at` column exactly as a scheduled start is a
+ * `scheduled_start_at` one, so the two are due-queried by the same tick rather
+ * than by a second timer — which is also what gives recurring tasks the same
+ * catch-up after a restart, for free.
+ */
+export type SchedulerRecurringTasks = RecurringTaskFiring;
+
 /** What a scheduler offers its callers; `SchedulerService` is the real one. */
 export interface SessionScheduler {
   /** Catches up on anything already due, then polls. Idempotent. */
@@ -71,6 +82,8 @@ export class SchedulerService implements SessionScheduler {
     private readonly builds: ScheduledBuilds,
     /** The global usage-limit hold (US-002), read before anything is fired. */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Recurring tasks (US-004); `null` in the tests that have none. */
+    private readonly tasks: SchedulerRecurringTasks | null = null,
   ) {}
 
   start(): void {
@@ -146,7 +159,43 @@ export class SchedulerService implements SessionScheduler {
     } catch (cause) {
       logger.warn('could not start the next queued build', { error: describe(cause) });
     }
+
+    await this.runRecurringTasks(now);
     return started;
+  }
+
+  /**
+   * The recurring half of the tick (US-004), after the one-shot half: the runs
+   * that have ended are read off their sessions, and every task that is due
+   * fires into a session of its own.
+   *
+   * The hold stops the firing and nothing else. A due task left due is exactly
+   * what a scheduled start does under the hold — the occurrence is not spent on
+   * a refusal, and the first tick after the hold lifts honours it — while the
+   * settling pass only reads what is already over.
+   */
+  private async runRecurringTasks(now: string): Promise<void> {
+    if (this.tasks === null) return;
+
+    try {
+      this.tasks.settle();
+    } catch (cause) {
+      logger.warn('could not settle the finished recurring task runs', {
+        error: describe(cause),
+      });
+    }
+
+    const until = this.hold.until();
+    if (until !== null) {
+      logger.debug('recurring tasks held by Claude’s usage limit', { until });
+      return;
+    }
+
+    try {
+      await this.tasks.fireDue(now);
+    } catch (cause) {
+      logger.warn('could not fire the due recurring tasks', { error: describe(cause) });
+    }
   }
 
   private async startSession(session: Session): Promise<boolean> {
@@ -198,8 +247,9 @@ export function createScheduler(
   db: Database,
   builds: ScheduledBuilds,
   hold: UsageLimitHold = new UsageLimitHold(db),
+  tasks: SchedulerRecurringTasks | null = null,
 ): SchedulerService {
-  return new SchedulerService(config, db, builds, hold);
+  return new SchedulerService(config, db, builds, hold, tasks);
 }
 
 function describe(cause: unknown): string {

@@ -25,6 +25,8 @@ const WORKSPACE_FALLBACK_MODE = 0o777;
 const SESSION_KEY_MODE = 0o400;
 const SESSION_KEY_FALLBACK_MODE = 0o444;
 const SESSION_KEYS_DIR_MODE = 0o700;
+/** Widened only when the server cannot chown a file it wrote into a clone. */
+const FILE_FALLBACK_MODE = 0o666;
 
 export function sessionWorkspaceDir(config: Pick<Config, 'workspacesDir'>, sessionId: string): string {
   return path.join(config.workspacesDir, sessionId);
@@ -87,6 +89,39 @@ export function stageSessionKey(
 /** Best effort; a key that was never staged is not an error. */
 export function removeSessionKey(config: Pick<Config, 'sshKeysDir'>, sessionId: string): void {
   fs.rmSync(sessionKeyPath(config, sessionId), { force: true });
+}
+
+/**
+ * Writes a file into a session's clone, on a path relative to its root, and
+ * hands it — and every directory created along the way — to the runner user.
+ *
+ * The server is root inside Docker while the agent is uid {@link RUNNER_UID},
+ * so a file created here would otherwise be one the agent can read and not
+ * write. That matters for the generated PRD of a recurring-task run (US-004):
+ * the agent ticks its acceptance criteria and writes its `**Status:**` line
+ * into that very file, and a run whose PRD it cannot edit could never finish
+ * its story.
+ */
+export function writeSessionFile(
+  config: Pick<Config, 'workspacesDir'>,
+  sessionId: string,
+  relativePath: string,
+  content: string,
+): string {
+  const segments = relativePath.split('/').filter((segment) => segment !== '');
+  const file = path.join(sessionRepoDir(config, sessionId), ...segments);
+
+  let dir = sessionRepoDir(config, sessionId);
+  for (const segment of segments.slice(0, -1)) {
+    dir = path.join(dir, segment);
+    if (fs.existsSync(dir)) continue;
+    fs.mkdirSync(dir, { mode: WORKSPACE_MODE });
+    giveToRunner(dir, WORKSPACE_FALLBACK_MODE);
+  }
+
+  fs.writeFileSync(file, content);
+  giveToRunner(file, FILE_FALLBACK_MODE);
+  return file;
 }
 
 /**

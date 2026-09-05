@@ -674,6 +674,96 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE queued_at IS NOT NULL;
     `,
   },
+  {
+    id: '0012_recurring_tasks',
+    sql: `
+      -- Recurring tasks (US-001): a stored prompt plus a cron expression, from
+      -- which the scheduler spawns one ordinary session per due occurrence.
+      --
+      -- \`next_run_at\` is a column, not a timer: the scheduler's due-query is
+      -- the only thing that fires a task, so a restart or an hour of downtime
+      -- resumes exactly where it left off — the same property scheduled starts
+      -- already have.
+      CREATE TABLE IF NOT EXISTS recurring_tasks (
+        id               TEXT PRIMARY KEY,
+        repository_id    TEXT NOT NULL
+                           REFERENCES repositories (id) ON DELETE CASCADE,
+        -- Slug, and the same alphabet as a session name: every run is named
+        -- \`<name>-<YYYYMMDD-HHmm>\`, which has to stay a legal session name.
+        name             TEXT NOT NULL
+                           CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        -- What the run is asked to do; embedded verbatim in the generated PRD.
+        prompt           TEXT NOT NULL CHECK (prompt <> ''),
+        -- Five-field cron, evaluated in the server's timezone.
+        cron_expression  TEXT NOT NULL,
+        base_branch      TEXT NOT NULL,
+        pr_target        TEXT NOT NULL CHECK (pr_target IN ('develop', 'main')),
+        run_code_review  INTEGER NOT NULL DEFAULT 0 CHECK (run_code_review IN (0, 1)),
+        paused           INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+        -- UTC ISO moment the next occurrence is due. NULL means "never fires"
+        -- — where a paused task is left until it is resumed.
+        next_run_at      TEXT,
+        -- Denormalized mirror of the newest \`recurring_task_occurrences\` row,
+        -- so the task list can show an outcome without a per-row subquery.
+        last_outcome     TEXT
+                           CHECK (last_outcome IS NULL OR last_outcome IN
+                             ('started', 'skipped', 'fire-failed', 'pr-opened',
+                              'clean', 'failed')),
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recurring_tasks_repository
+        ON recurring_tasks (repository_id);
+      -- Backs the due-tasks query; NULLs are not indexed by SQLite, so a task
+      -- with no next occurrence costs nothing to skip.
+      CREATE INDEX IF NOT EXISTS idx_recurring_tasks_next_run_at
+        ON recurring_tasks (next_run_at)
+        WHERE next_run_at IS NOT NULL;
+
+      -- One row per occurrence, including the ones that create no session: a
+      -- skip because yesterday's pull request is still open is as much a part
+      -- of the history as a run that opened one.
+      CREATE TABLE IF NOT EXISTS recurring_task_occurrences (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        recurring_task_id TEXT NOT NULL
+                            REFERENCES recurring_tasks (id) ON DELETE CASCADE,
+        occurred_at       TEXT NOT NULL,
+        outcome           TEXT NOT NULL
+                            CHECK (outcome IN
+                              ('started', 'skipped', 'fire-failed', 'pr-opened',
+                               'clean', 'failed')),
+        -- Why, in the operator's words: the skip reason, the failure, or the
+        -- pull request link.
+        detail            TEXT,
+        -- The session this occurrence spawned, when it spawned one. Nulled
+        -- rather than cascaded if that session is deleted by hand, so the
+        -- history keeps the row.
+        session_id        TEXT REFERENCES sessions (id) ON DELETE SET NULL,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recurring_task_occurrences_task
+        ON recurring_task_occurrences (recurring_task_id, occurred_at DESC, id DESC);
+
+      -- Which task a run came from; NULL for every session a human started.
+      -- Deleting a task nulls this rather than touching the session: the runs
+      -- it already produced are ordinary sessions and outlive it.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK the way
+      -- 0005/0007/0008/0010/0011 did: this column has to be carried across, and
+      -- the occurrence rows set aside the way the stories are, or dropping the
+      -- old table nulls every \`session_id\` in the history.
+      ALTER TABLE sessions ADD COLUMN recurring_task_id TEXT
+        REFERENCES recurring_tasks (id) ON DELETE SET NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_recurring_task
+        ON sessions (recurring_task_id)
+        WHERE recurring_task_id IS NOT NULL;
+    `,
+  },
 ];
 
 /**
