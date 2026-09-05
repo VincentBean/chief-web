@@ -56,6 +56,7 @@ export {
   type BuildCompletion,
   BuildError,
   BuildService,
+  type BuildSlotKind,
   type BuildView,
   createBuildService,
   MarkSessionFinished,

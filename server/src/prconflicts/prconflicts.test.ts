@@ -9,9 +9,11 @@ import {
   createPrRun,
   createRepository,
   type Database,
+  enqueueBuild,
   findPrConflictFix,
   IN_MEMORY,
   openDatabase,
+  removeQueuedBuild,
   updatePrConflictFix,
   updatePrReview,
   updatePrRun,
@@ -484,6 +486,37 @@ describe('pull request conflict scan', () => {
 
     assert.equal(await scan.tick(), 0);
     assert.equal(starter.started.length, 1);
+  });
+
+  it('yields to anything waiting in the build queue, and goes on the next tick', async () => {
+    const { db, github, scan, starter } = world();
+    github.open('acme/demo', [{ number: 12, headRef: 'chief/tidy-invoices' }]);
+    github.says('acme/demo', 12, { mergeable: 'conflicted' });
+    // Somebody queued a build explicitly; the fixer is on a timer and nobody
+    // is waiting on it, so it must not take the slot in front of them.
+    enqueueBuild(db, { kind: 'session', refId: 'session-1' });
+
+    assert.equal(await scan.tick(), 0);
+    assert.equal(starter.started.length, 0);
+    // The conflict was still found — nothing about the pull request is
+    // remembered, so the yield costs only this tick.
+    assert.deepEqual(github.mergeabilityCalls, [{ slug: 'acme/demo', number: 12 }]);
+
+    removeQueuedBuild(db, 'session', 'session-1');
+
+    assert.equal(await scan.tick(), 1);
+    assert.equal(starter.started.length, 1);
+    assert.equal(starter.started[0]?.prNumber, 12);
+  });
+
+  it('yields to a queue of any kind, not just to sessions', async () => {
+    const { db, github, scan, starter } = world();
+    github.open('acme/demo', [{ number: 13 }]);
+    github.says('acme/demo', 13, { mergeable: 'conflicted' });
+    enqueueBuild(db, { kind: 'pr-review', refId: 'repo-1:44' });
+
+    assert.equal(await scan.tick(), 0);
+    assert.deepEqual(starter.started, []);
   });
 
   it('joins a tick that is already running rather than starting a second one', async () => {

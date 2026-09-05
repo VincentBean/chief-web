@@ -1,5 +1,6 @@
 import type { Config } from '../config.js';
 import {
+  countQueuedBuilds,
   type Database,
   deletePrConflictFix,
   findPrConflictFix,
@@ -62,6 +63,14 @@ import { getConflictFixEnabled, getGithubToken, getPrConflictIntervalMs } from '
  * A tick with no connected repository, or one whose repositories have no open
  * pull requests, costs nothing beyond the listing — and with no repositories at
  * all, not even the token lookup.
+ *
+ * ## Yielding to the queue
+ *
+ * A conflict fix is the only agent chief-web starts that nobody asked for, so
+ * it never joins the unified build queue and never takes a slot in front of
+ * it: a tick that finds `build_queue` non-empty leaves the conflict where it
+ * is and the next one asks again. Work a user queued explicitly therefore
+ * keeps strict FIFO, and the fixer only ever fills the gaps between.
  *
  * ## Failure
  *
@@ -419,6 +428,22 @@ export class PrConflictService implements ConflictScan {
     });
 
     if (this.starter === null) return true;
+
+    // Nobody asked for this fix, and somebody asked for everything in
+    // `build_queue` (US-005). Taking a slot in front of them would break the
+    // FIFO order the queue exists to keep, so the fixer waits for it to empty
+    // — which costs it nothing, because a tick remembers nothing and the next
+    // one finds the same conflict.
+    const waiting = countQueuedBuilds(this.db);
+    if (waiting > 0) {
+      logger.debug('a conflict fix yields its slot to the build queue', {
+        repository: repository.id,
+        prNumber: pull.number,
+        queued: waiting,
+      });
+      return false;
+    }
+
     try {
       await this.starter.start(conflicted);
     } catch (cause) {

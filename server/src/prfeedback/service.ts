@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { AgentRunner, QueuedStart } from '../build/index.js';
+import type { AgentRunner, BuildSlotKind, QueuedStart } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   type BuildQueueEntry,
@@ -99,8 +99,11 @@ export interface BuildSlots {
    * Counts a start that has not reached the database yet against the cap until
    * the returned function is called. Every start path claims here first, so two
    * of them cannot hand the same free slot to two agents.
+   *
+   * Wider than {@link BuildQueueKind}: a conflict fix never joins the queue
+   * (US-005), but its start is counted in flight exactly like every other.
    */
-  claimStart(kind: BuildQueueKind, refId: string): () => void;
+  claimStart(kind: BuildSlotKind, refId: string): () => void;
 }
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
