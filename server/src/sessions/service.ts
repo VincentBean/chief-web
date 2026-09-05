@@ -187,6 +187,12 @@ export interface CreateSessionRequest {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false. */
   readonly codeReview?: boolean;
+  /**
+   * The recurring task this session is a run of (US-004), when it is one.
+   * Only the scheduler passes it; a session created from the API is never a
+   * run of anything.
+   */
+  readonly recurringTaskId?: string | null;
 }
 
 /**
@@ -278,6 +284,7 @@ export class SessionService {
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
         codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
+        recurringTaskId: request.recurringTaskId ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index

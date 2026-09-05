@@ -19,6 +19,7 @@ import {
   listDueRecurringTasks,
   listRecurringTaskOccurrences,
   listRecurringTasks,
+  listUnsettledRecurringTaskOccurrences,
   openDatabase,
   recordRecurringTaskOccurrence,
   RECURRING_TASK_OUTCOMES,
@@ -226,6 +227,36 @@ describe('recurring tasks', () => {
 
     // The mirror follows the newest row, not the one that was just written.
     assert.equal(getRecurringTask(db, task.id)?.lastOutcome, 'skipped');
+  });
+
+  it('lists the occurrences whose runs are still going, oldest first', () => {
+    const task = taskFor('rector');
+    const other = taskFor('code-style');
+    const first = recordRecurringTaskOccurrence(db, {
+      recurringTaskId: task.id,
+      outcome: 'started',
+      occurredAt: '2026-01-01T03:00:00.000Z',
+    });
+    const second = recordRecurringTaskOccurrence(db, {
+      recurringTaskId: other.id,
+      outcome: 'started',
+      occurredAt: '2026-01-02T03:00:00.000Z',
+    });
+    // Neither of these is a run in flight: one never started, one is over.
+    recordRecurringTaskOccurrence(db, { recurringTaskId: task.id, outcome: 'fire-failed' });
+    recordRecurringTaskOccurrence(db, { recurringTaskId: task.id, outcome: 'pr-opened' });
+
+    assert.deepEqual(
+      listUnsettledRecurringTaskOccurrences(db).map((row) => row.id),
+      [first.id, second.id],
+    );
+
+    // Settling one takes it out of the list, whichever task it belongs to.
+    updateRecurringTaskOccurrence(db, first.id, { outcome: 'clean' });
+    assert.deepEqual(
+      listUnsettledRecurringTaskOccurrences(db).map((row) => row.id),
+      [second.id],
+    );
   });
 
   it('has a label for every outcome', () => {

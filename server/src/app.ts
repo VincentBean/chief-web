@@ -43,6 +43,7 @@ import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/in
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
+import { createRecurringTaskRunner } from './recurringtasks/index.js';
 import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -55,6 +56,7 @@ import {
   createSessionService,
   type SessionContainers,
   type SessionExecutor,
+  type SessionService,
 } from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
@@ -246,10 +248,18 @@ export function createApp(
   const builds =
     deps.builds ??
     createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
+  // Recurring tasks (US-004): the scheduler's other due-query. It fires each
+  // task into an ordinary session, which means it needs the session service —
+  // built further down, because *that* needs the scheduler. The thunk is what
+  // breaks the circle; nothing reads it before the first tick, by which point
+  // both exist.
+  let sessions: SessionService | null = null;
+  const recurringRuns = createRecurringTaskRunner(config, db, () => sessions, builds);
   // Scheduled starts (US-017). The schedules live in the database, so starting
   // it here — before the first request — is also the catch-up on everything
-  // that came due while the stack was down.
-  const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
+  // that came due while the stack was down, recurring tasks included.
+  const scheduler =
+    deps.scheduler ?? createScheduler(config, db, builds, undefined, recurringRuns);
   scheduler.start();
   // The pull request sync (US-003), started for the same reason: a merge that
   // happens overnight has to be noticed whether or not anyone opens the UI,
@@ -314,11 +324,8 @@ export function createApp(
   );
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.
-  api.use(
-    createSessionsRouter(
-      createSessionService(config, db, orchestrator, exec, { builds, planning, scheduler }),
-    ),
-  );
+  sessions = createSessionService(config, db, orchestrator, exec, { builds, planning, scheduler });
+  api.use(createSessionsRouter(sessions));
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));

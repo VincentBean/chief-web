@@ -461,6 +461,27 @@ export function listRecurringTaskOccurrences(
     .map(mapRecurringTaskOccurrence);
 }
 
+/**
+ * Every occurrence whose run is still on its way: the `started` rows a firing
+ * wrote and nothing has settled yet (US-004).
+ *
+ * A run ends in its own time — minutes or hours after the tick that fired it,
+ * and possibly on the other side of a restart — so nothing can be remembered
+ * in memory about it. The outcome is read back off the session instead, by the
+ * same tick that fires tasks, which is why this query exists: it is the "still
+ * open" half of the history, oldest first so a settling pass works forwards.
+ */
+export function listUnsettledRecurringTaskOccurrences(db: Database): RecurringTaskOccurrence[] {
+  return db
+    .prepare(
+      `SELECT * FROM recurring_task_occurrences
+        WHERE outcome = 'started'
+        ORDER BY occurred_at ASC, id ASC`,
+    )
+    .all()
+    .map(mapRecurringTaskOccurrence);
+}
+
 /** The newest occurrence, which is what `last_outcome` mirrors. */
 export function latestRecurringTaskOccurrence(
   db: Database,

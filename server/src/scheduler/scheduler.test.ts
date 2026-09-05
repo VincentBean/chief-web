@@ -17,7 +17,11 @@ import {
   updateSession,
 } from '../db/index.js';
 import { UsageLimitHold } from '../limits/index.js';
-import { type ScheduledBuilds, SchedulerService } from './service.js';
+import {
+  type ScheduledBuilds,
+  type SchedulerRecurringTasks,
+  SchedulerService,
+} from './service.js';
 
 const databases: Database[] = [];
 
@@ -67,10 +71,29 @@ class FakeBuilds implements ScheduledBuilds {
   }
 }
 
+/** Stands in for the recurring task runner (US-004). */
+class FakeRecurringTasks implements SchedulerRecurringTasks {
+  /** The `now` of every tick that asked for the due tasks, in order. */
+  readonly fired: string[] = [];
+  /** How often the finished runs were read off their sessions. */
+  settled = 0;
+
+  fireDue(now: string = ''): Promise<number> {
+    this.fired.push(now);
+    return Promise.resolve(this.fired.length);
+  }
+
+  settle(): number {
+    this.settled += 1;
+    return 0;
+  }
+}
+
 interface World {
   readonly config: Config;
   readonly db: Database;
   readonly builds: FakeBuilds;
+  readonly tasks: FakeRecurringTasks;
   readonly scheduler: SchedulerService;
   session(input: { status?: SessionStatus; at?: string | null; name?: string }): Session;
 }
@@ -85,13 +108,15 @@ function world(env: Record<string, string> = {}): World {
     githubSlug: 'acme/demo',
   });
   const builds = new FakeBuilds(db);
+  const tasks = new FakeRecurringTasks();
   let created = 0;
 
   return {
     config,
     db,
     builds,
-    scheduler: new SchedulerService(config, db, builds),
+    tasks,
+    scheduler: new SchedulerService(config, db, builds, new UsageLimitHold(db), tasks),
     session({ status = 'ready', at = null, name }) {
       created += 1;
       return createSession(db, {
@@ -258,6 +283,44 @@ describe('the session scheduler', () => {
     assert.equal(getSession(w.db, stillHeld.id)?.status, 'waiting');
     // And the tick still did everything else it does.
     assert.equal(w.builds.pumps, 1);
+  });
+
+  it('fires the due recurring tasks after its own work (US-004)', async () => {
+    const w = world();
+    w.session({ at: PAST });
+
+    await w.scheduler.tick('2026-09-05T03:00:00.000Z');
+
+    // The tick's own work first — a scheduled start and the queue — and then
+    // the recurring half, with the same moment it read everything else at.
+    assert.deepEqual(w.builds.started.length, 1);
+    assert.equal(w.builds.pumps, 1);
+    assert.deepEqual(w.tasks.fired, ['2026-09-05T03:00:00.000Z']);
+    // Exactly one pass per tick: a task can fire at most once in it.
+    assert.equal(w.tasks.settled, 1);
+
+    await w.scheduler.tick('2026-09-05T03:00:30.000Z');
+    assert.deepEqual(w.tasks.fired, [
+      '2026-09-05T03:00:00.000Z',
+      '2026-09-05T03:00:30.000Z',
+    ]);
+  });
+
+  it('leaves due recurring tasks due while the usage-limit hold is on (US-004)', async () => {
+    const w = world();
+    const hold = new UsageLimitHold(w.db);
+    hold.arm();
+
+    await w.scheduler.tick('2026-09-05T03:00:00.000Z');
+
+    // Not fired — the occurrence is not spent on a refusal — but the runs that
+    // ended while the hold was on are still read off their sessions.
+    assert.deepEqual(w.tasks.fired, []);
+    assert.equal(w.tasks.settled, 1);
+
+    hold.clear();
+    await w.scheduler.tick('2026-09-05T04:00:00.000Z');
+    assert.deepEqual(w.tasks.fired, ['2026-09-05T04:00:00.000Z']);
   });
 
   it('refuses an interval that would break the 30 second promise', () => {
