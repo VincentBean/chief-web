@@ -21,6 +21,7 @@ import {
   type RecurringTask,
   type Session,
   type Repository,
+  updateRecurringTask,
   updateSession,
 } from '../db/index.js';
 import { type ExecScript, FakeDockerDaemon, type FakeExec } from '../docker/fake-daemon.js';
@@ -30,7 +31,12 @@ import { parsePrd, prdParses, prdPathFor } from '../prd/index.js';
 import { SessionService } from '../sessions/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import { GENERATED_STORY_ID } from './prd.js';
-import { type RecurringTaskBuilds, RecurringTaskRunner, settlementOf } from './runs.js';
+import {
+  type RecurringTaskBuilds,
+  RecurringTaskRunner,
+  settlementOf,
+  skipReasonFor,
+} from './runs.js';
 
 const PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----';
 
@@ -300,6 +306,138 @@ describe('firing a recurring task', () => {
 
     assert.equal(await f.runner.fireDue(), 1);
     assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'started');
+  });
+});
+
+describe('skipping an occurrence the previous run is in the way of', () => {
+  it('holds the occurrence back while the previous run is still going', () => {
+    assert.match(skipReasonFor(session({ status: 'pending' })) ?? '', /is still being set up\.$/);
+    assert.match(skipReasonFor(session({ status: 'ready' })) ?? '', /still waiting to be built/);
+    assert.match(
+      skipReasonFor(session({ status: 'ready', queuedAt: '2026-09-05T03:00:00.000Z' })) ?? '',
+      /still queued for a slot/,
+    );
+    assert.equal(
+      skipReasonFor(session({ status: 'building' })),
+      'The previous run “rector-20260905-0300” is still building.',
+    );
+    assert.match(skipReasonFor(session({ status: 'waiting' })) ?? '', /usage limit/);
+  });
+
+  it('holds it back while the previous run’s pull request is still open', () => {
+    const prUrl = 'https://github.com/acme/demo/pull/12';
+    assert.equal(
+      skipReasonFor(session({ status: 'pr-open', prUrl })),
+      'PR #12 from the previous run “rector-20260905-0300” is still open.',
+    );
+    // The draft opened before the review is as open as the one after it.
+    assert.match(skipReasonFor(session({ status: 'reviewing', prUrl })) ?? '', /PR #12/);
+    assert.match(skipReasonFor(session({ status: 'fixing', prUrl })) ?? '', /PR #12/);
+    // A URL no number can be read out of still names something to look at.
+    assert.match(
+      skipReasonFor(session({ status: 'pr-open', prUrl: 'https://example.invalid/x' })) ?? '',
+      /^The pull request from the previous run/,
+    );
+  });
+
+  it('lets it through once the previous run is out of the way', () => {
+    const prUrl = 'https://github.com/acme/demo/pull/12';
+    // No previous run at all.
+    assert.equal(skipReasonFor(null), null);
+    // Merged, and closed unmerged — which the sync writes back as `finished`.
+    assert.equal(skipReasonFor(session({ status: 'merged', prUrl })), null);
+    assert.equal(skipReasonFor(session({ status: 'finished', prUrl })), null);
+    // Finished without a pull request, and failed outright.
+    assert.equal(skipReasonFor(session({ status: 'finished' })), null);
+    assert.equal(skipReasonFor(session({ status: 'failed', lastError: 'boom' })), null);
+  });
+
+  it('writes a skipped occurrence, and moves the schedule on, while a run is building', async () => {
+    const f = await fixture();
+    const task = f.task();
+    const first = new Date(2026, 8, 5, 3, 0).toISOString();
+    assert.equal(await f.runner.fireDue(first), 1);
+    assert.equal(getSession(f.db, listSessions(f.db, {})[0]?.id ?? '')?.status, 'building');
+
+    // Due again an hour later, with that run still going.
+    updateRecurringTask(f.db, task.id, { nextRunAt: PAST });
+    const second = new Date(2026, 8, 5, 4, 0).toISOString();
+    assert.equal(await f.runner.fireDue(second), 0);
+
+    // No second session, no second container: nothing was started.
+    assert.equal(listSessions(f.db, {}).length, 1);
+    assert.equal(f.daemon.listContainers().length, 1);
+
+    const occurrence = latestRecurringTaskOccurrence(f.db, task.id);
+    assert.equal(occurrence?.outcome, 'skipped');
+    assert.match(occurrence?.detail ?? '', /is still building\.$/);
+    assert.equal(occurrence?.sessionId, null);
+    assert.equal(getRecurringTask(f.db, task.id)?.lastOutcome, 'skipped');
+
+    // The occurrence was spent: the schedule points at the next one, not at
+    // the moment that was just skipped.
+    assert.equal(
+      getRecurringTask(f.db, task.id)?.nextRunAt,
+      new Date(2026, 8, 6, 3, 0).toISOString(),
+    );
+
+    // Both moments are in the history, newest first.
+    assert.deepEqual(
+      listRecurringTaskOccurrences(f.db, task.id).map((row) => row.outcome),
+      ['skipped', 'started'],
+    );
+  });
+
+  it('skips while the previous run’s pull request is still open', async () => {
+    const f = await fixture();
+    const task = f.task();
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 5, 3, 0).toISOString()), 1);
+    const run = listSessions(f.db, {})[0];
+    assert.ok(run);
+
+    updateSession(f.db, run.id, {
+      status: 'pr-open',
+      prUrl: 'https://github.com/acme/demo/pull/12',
+    });
+    assert.equal(f.runner.settle(), 1);
+
+    updateRecurringTask(f.db, task.id, { nextRunAt: PAST });
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 0);
+
+    assert.equal(listSessions(f.db, {}).length, 1);
+    const occurrence = latestRecurringTaskOccurrence(f.db, task.id);
+    assert.equal(occurrence?.outcome, 'skipped');
+    assert.match(occurrence?.detail ?? '', /^PR #12 from the previous run/);
+  });
+
+  it('fires again once that pull request has been merged', async () => {
+    const f = await fixture();
+    const task = f.task();
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 5, 3, 0).toISOString()), 1);
+    const run = listSessions(f.db, {})[0];
+    assert.ok(run);
+    updateSession(f.db, run.id, {
+      status: 'merged',
+      prUrl: 'https://github.com/acme/demo/pull/12',
+    });
+
+    updateRecurringTask(f.db, task.id, { nextRunAt: PAST });
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
+    assert.equal(listSessions(f.db, {}).length, 2);
+    assert.equal(latestRecurringTaskOccurrence(f.db, task.id)?.outcome, 'started');
+  });
+
+  it('fires again after a run that failed', async () => {
+    const f = await fixture();
+    const task = f.task();
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 5, 3, 0).toISOString()), 1);
+    const run = listSessions(f.db, {})[0];
+    assert.ok(run);
+    updateSession(f.db, run.id, { status: 'failed', lastError: 'The agent stalled.' });
+
+    updateRecurringTask(f.db, task.id, { nextRunAt: PAST });
+    assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
+    assert.equal(listSessions(f.db, {}).length, 2);
   });
 });
 

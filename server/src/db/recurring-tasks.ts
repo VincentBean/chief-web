@@ -11,7 +11,13 @@ import {
   text,
   withTransaction,
 } from './sqlite.js';
-import { isValidSessionName, PR_TARGET_BRANCHES, type PrTargetBranch } from './sessions.js';
+import {
+  isValidSessionName,
+  mapSession,
+  PR_TARGET_BRANCHES,
+  type PrTargetBranch,
+  type Session,
+} from './sessions.js';
 
 /**
  * Recurring tasks (US-001): a stored prompt plus a cron expression, from which
@@ -480,6 +486,34 @@ export function listUnsettledRecurringTaskOccurrences(db: Database): RecurringTa
     )
     .all()
     .map(mapRecurringTaskOccurrence);
+}
+
+/**
+ * The newest session a task spawned, or null when it has never spawned one.
+ *
+ * This is "the previous run" the skip decision of US-005 is made against, and
+ * it is read off `sessions` rather than off the history because the session is
+ * where the answer actually lives: its status says both whether the run is
+ * still on its way and whether its pull request is still open. A run somebody
+ * deleted by hand is therefore simply not in the way any more.
+ *
+ * `created_at` orders it — the moment the run was fired, which no later status
+ * change can move — with the id as the tie-break so every reader agrees on
+ * which run is the previous one.
+ */
+export function latestRecurringTaskRunSession(
+  db: Database,
+  recurringTaskId: string,
+): Session | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM sessions
+        WHERE recurring_task_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+    )
+    .get(recurringTaskId);
+  return row ? mapSession(row) : null;
 }
 
 /** The newest occurrence, which is what `last_outcome` mirrors. */

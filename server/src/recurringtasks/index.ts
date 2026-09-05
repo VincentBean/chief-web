@@ -13,6 +13,7 @@ export {
   RecurringTaskRunner,
   type RecurringTaskSessions,
   settlementOf,
+  skipReasonFor,
 } from './runs.js';
 export {
   type CreateRecurringTaskRequest,

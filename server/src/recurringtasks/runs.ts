@@ -2,6 +2,7 @@ import type { Config } from '../config.js';
 import {
   type Database,
   getSession,
+  latestRecurringTaskRunSession,
   listDueRecurringTasks,
   listUnsettledRecurringTaskOccurrences,
   nowIso,
@@ -10,6 +11,7 @@ import {
   type RecurringTaskOutcome,
   recordRecurringTaskOccurrence,
   type Session,
+  type SessionStatus,
   updateRecurringTask,
   updateRecurringTaskOccurrence,
 } from '../db/index.js';
@@ -17,6 +19,7 @@ import { nextCronRun } from '../lib/cron.js';
 import { logger } from '../lib/logger.js';
 import { writeSessionFile } from '../orchestrator/index.js';
 import { prdPathFor } from '../prd/index.js';
+import { hasOpenPullRequest, pullRequestNumberOf } from '../prsync/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView } from '../sessions/index.js';
 import { generatedPrd, runSessionName } from './prd.js';
 
@@ -28,6 +31,13 @@ import { generatedPrd, runSessionName } from './prd.js';
  * would have driven by hand. Everything this class adds sits either side of
  * that pipeline — the generated PRD that replaces the planning step in front of
  * it, and the occurrence row that follows the run to its end behind it.
+ *
+ * An occurrence that would overlap the previous one is not fired at all
+ * (US-005): while the last run is still on its way, or still has a pull
+ * request nobody has merged or closed, the moment passes as a `skipped` row
+ * in the history instead. That is what keeps an hourly task whose runs take
+ * two hours from stacking sessions, and unreviewed pull requests from the
+ * same task from piling up behind each other.
  *
  * `next_run_at` is spent the moment a task fires, before anything can fail.
  * That is what makes a run that takes three hours, or a firing that is refused
@@ -160,6 +170,11 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
     const firedAt = new Date(now);
     if (!this.reschedule(task, firedAt)) return false;
 
+    // Asked after the reschedule, so a skipped occurrence costs the task the
+    // same one slot a fired one does and the next one is already booked.
+    const skip = this.skipReason(task);
+    if (skip !== null) return this.skipped(task, now, skip);
+
     const name = runSessionName(task.name, firedAt);
     logger.info('recurring task firing', { task: task.id, name: task.name, run: name });
 
@@ -227,6 +242,42 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
 
     logger.info('recurring task fired', { task: task.id, session: run.id, run: run.name });
     return true;
+  }
+
+  /**
+   * Why this occurrence must not fire, or null when it may.
+   *
+   * A database that cannot be read is not an answer either way, and refusing
+   * to run a task because of it would quietly stop the schedule; the task is
+   * fired, exactly as it would be with no previous run at all.
+   */
+  private skipReason(task: RecurringTask): string | null {
+    try {
+      return skipReasonFor(latestRecurringTaskRunSession(this.db, task.id));
+    } catch (cause) {
+      logger.warn('could not read the previous run of a recurring task', {
+        task: task.id,
+        error: describe(cause),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Records an occurrence that never became a run.
+   *
+   * There is no session to point at — the whole point is that the previous
+   * one is still the current one — so the run that is in the way is named in
+   * the reason instead, which is what the task's history shows.
+   */
+  private skipped(task: RecurringTask, now: string, reason: string): boolean {
+    logger.info('recurring task occurrence skipped', {
+      task: task.id,
+      name: task.name,
+      reason,
+    });
+    this.record(task, now, 'skipped', reason, null);
+    return false;
   }
 
   /**
@@ -336,6 +387,62 @@ export function settlementOf(
         : { outcome: 'pr-opened', detail: session.prUrl };
     default:
       return null;
+  }
+}
+
+/**
+ * The statuses a run has not reached an outcome in yet (US-005).
+ *
+ * A task whose runs take longer than the gap between its occurrences would
+ * otherwise stack sessions on top of each other — an hourly task with
+ * two-hour runs ending up with two containers, two clones and two branches of
+ * the same work in flight. `waiting` is in here because a run held by Claude's
+ * usage limit has kept its container and its slot: it is paused, not over.
+ */
+const RUN_IN_PROGRESS = [
+  'pending',
+  'ready',
+  'building',
+  'waiting',
+] as const satisfies readonly SessionStatus[];
+
+/**
+ * Why the task's next occurrence must not fire, or null when nothing is in
+ * the way. `session` is the task's most recent run, or null if it has none.
+ *
+ * Only two things hold an occurrence back, and both are read off that one
+ * session: a run that is still going, and a run whose pull request nobody has
+ * merged or closed yet. Everything else — a failed run, a merged or closed
+ * pull request, a run that changed nothing, a run somebody deleted, a task
+ * that has never run — lets the occurrence through.
+ */
+export function skipReasonFor(session: Session | null): string | null {
+  if (session === null) return null;
+
+  const phrase = inProgressPhrase(session);
+  if (phrase !== null) return `The previous run “${session.name}” is ${phrase}.`;
+
+  if (hasOpenPullRequest(session)) {
+    const number = session.prUrl === null ? null : pullRequestNumberOf(session.prUrl);
+    const pr = number === null ? 'The pull request' : `PR #${number}`;
+    return `${pr} from the previous run “${session.name}” is still open.`;
+  }
+
+  return null;
+}
+
+/** How a run that has not finished is described, or null once it has. */
+function inProgressPhrase(session: Session): string | null {
+  if (!(RUN_IN_PROGRESS as readonly SessionStatus[]).includes(session.status)) return null;
+  switch (session.status) {
+    case 'pending':
+      return 'still being set up';
+    case 'ready':
+      return session.queuedAt === null ? 'still waiting to be built' : 'still queued for a slot';
+    case 'waiting':
+      return 'still held by Claude’s usage limit';
+    default:
+      return 'still building';
   }
 }
 
