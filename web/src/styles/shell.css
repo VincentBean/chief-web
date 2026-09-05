@@ -279,6 +279,12 @@
     flex: 1;
   }
 
+  .status-row__note {
+    color: var(--color-status-wait);
+    font-size: var(--text-xs);
+    margin-left: 0.375rem;
+  }
+
   .status-row__value {
     color: var(--color-fg-default);
     font-variant-numeric: tabular-nums;

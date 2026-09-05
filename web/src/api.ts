@@ -697,6 +697,38 @@ export interface QueuedBuild {
   queuedAt: string;
 }
 
+/** What kind of work is holding a build slot, in the operator's words. */
+export function buildSlotKindLabel(kind: BuildSlot['kind']): string {
+  switch (kind) {
+    case 'session':
+      return 'Session';
+    case 'pr-review':
+      return 'PR review';
+    case 'pr-feedback':
+      return 'PR feedback';
+    case 'pr-conflict-fix':
+      return 'Conflict fix';
+  }
+}
+
+/**
+ * The whole pool as one tooltip: the count, every occupied slot, and whatever
+ * is waiting behind them. The meter in the sidebar and the one on the overview
+ * both hang this off `title`, so hovering answers "why is nothing starting?".
+ */
+export function describeBuildSlots(builds: Stats['builds']): string {
+  const lines = [`${String(builds.active)} of ${String(builds.max)} build slots in use`];
+  for (const slot of builds.slots) lines.push(`• ${buildSlotKindLabel(slot.kind)}: ${slot.label}`);
+  if (builds.slots.length === 0) lines.push('• nothing is building');
+  if (builds.queue.length > 0) {
+    lines.push(`${String(builds.queue.length)} queued, in the order they were asked for`);
+    for (const entry of builds.queue) {
+      lines.push(`• #${String(entry.position)} ${buildSlotKindLabel(entry.kind)}: ${entry.label}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 /** Mirrors the server's `StatsView`: everything the overview page shows. */
 export interface Stats {
   generatedAt: string;

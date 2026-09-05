@@ -1,6 +1,9 @@
 import { useState } from 'react';
 
 import {
+  type BuildSlot,
+  buildSlotKindLabel,
+  describeBuildSlots,
   failureStageLabel,
   retrySession,
   type Session,
@@ -8,7 +11,7 @@ import {
   type Stats,
 } from '../api.ts';
 import { describeError, isActive, isEnded, needsAttention, useAppData } from '../data.tsx';
-import { Icon } from '../Icon.tsx';
+import { Icon, type IconName } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { localTime, since, startsIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
@@ -24,6 +27,7 @@ import {
   Skeleton,
   StatusBadge,
   StatusDot,
+  type Tone,
 } from '../ui.tsx';
 
 /**
@@ -146,8 +150,8 @@ export function Overview() {
           icon="pulse"
           meta={
             stats !== null && (
-              <span className="panel__meta">
-                <Meter value={stats.builds.active} max={stats.builds.max} label="Build slots" />
+              <span className="panel__meta" title={describeBuildSlots(stats.builds)}>
+                <Meter value={stats.builds.active} max={stats.builds.max} label={describeBuildSlots(stats.builds)} />
                 <span className="mono">
                   {stats.builds.active}/{stats.builds.max}
                 </span>
@@ -160,6 +164,7 @@ export function Overview() {
             </Link>
           }
         >
+          {stats !== null && <BuildSlotBreakdown builds={stats.builds} />}
           {sessions === null ? (
             <Skeleton lines={3} />
           ) : running.length === 0 ? (
@@ -304,6 +309,93 @@ export function Overview() {
           )}
         </Panel>
       </div>
+    </div>
+  );
+}
+
+const SLOT_ICON: Record<BuildSlot['kind'], IconName> = {
+  session: 'rocket',
+  'pr-review': 'search',
+  'pr-feedback': 'comment',
+  'pr-conflict-fix': 'git-branch',
+};
+
+const SLOT_TONE: Record<BuildSlot['kind'], Tone> = {
+  session: 'active',
+  'pr-review': 'review',
+  'pr-feedback': 'active',
+  'pr-conflict-fix': 'neutral',
+};
+
+/** A session slot links to its session; a pull-request slot to the PR list. */
+function slotHref(kind: BuildSlot['kind'], refId: string): string {
+  return kind === 'session' ? sessionPath(refId) : '/pull-requests';
+}
+
+/**
+ * What is holding the build slots, and what is waiting for one (US-007).
+ *
+ * The meter alone says "3 of 3"; this says which three and why the fourth
+ * thing has not started, including the kinds the session list below can never
+ * show: PR reviews, PR feedback runs and merge-conflict fixes. It opens by
+ * itself when something is queued, because that is the moment the answer
+ * matters.
+ */
+function BuildSlotBreakdown({ builds }: { readonly builds: Stats['builds'] }) {
+  const [open, setOpen] = useState(builds.queue.length > 0);
+  const listId = 'build-slot-breakdown';
+  return (
+    <div className="slots">
+      <button
+        type="button"
+        className="button button--small button--quiet slots__toggle"
+        aria-expanded={open}
+        aria-controls={listId}
+        onClick={() => setOpen((current) => !current)}
+        title={describeBuildSlots(builds)}
+      >
+        <Icon name="zap" />
+        {builds.active} of {builds.max} build slots in use
+        {builds.queued > 0 && ` · ${String(builds.queued)} queued`}
+        <Icon name="chevron-down" />
+      </button>
+      {open && (
+        <ul className="rows rows--tight" id={listId}>
+          {builds.slots.map((slot) => (
+            <li className="row" key={`${slot.kind}:${slot.refId}`}>
+              <Icon name={SLOT_ICON[slot.kind]} className="text-muted" />
+              <div className="row__main">
+                <Link className="row__title" href={slotHref(slot.kind, slot.refId)}>
+                  {slot.label}
+                </Link>
+                <span className="row__meta">{buildSlotKindLabel(slot.kind)}</span>
+              </div>
+              <Badge tone={SLOT_TONE[slot.kind]} pulse>
+                in progress
+              </Badge>
+            </li>
+          ))}
+          {builds.queue.map((entry) => (
+            <li className="row" key={`queued:${entry.kind}:${entry.refId}`}>
+              <Icon name={SLOT_ICON[entry.kind]} className="text-muted" />
+              <div className="row__main">
+                <Link className="row__title" href={slotHref(entry.kind, entry.refId)}>
+                  {entry.label}
+                </Link>
+                <span className="row__meta">
+                  {buildSlotKindLabel(entry.kind)} · asked for {since(entry.queuedAt)}
+                </span>
+              </div>
+              <Badge tone="wait">queued #{entry.position}</Badge>
+            </li>
+          ))}
+          {builds.slots.length === 0 && builds.queue.length === 0 && (
+            <li className="row">
+              <span className="muted">Every build slot is free.</span>
+            </li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }
