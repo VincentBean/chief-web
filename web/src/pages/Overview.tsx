@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   type BuildSlot,
@@ -338,11 +338,21 @@ function slotHref(kind: BuildSlot['kind'], refId: string): string {
  * The meter alone says "3 of 3"; this says which three and why the fourth
  * thing has not started, including the kinds the session list below can never
  * show: PR reviews, PR feedback runs and merge-conflict fixes. It opens by
- * itself when something is queued, because that is the moment the answer
- * matters.
+ * itself the moment a queue forms, because that is when the answer matters.
  */
 function BuildSlotBreakdown({ builds }: { readonly builds: Stats['builds'] }) {
-  const [open, setOpen] = useState(builds.queue.length > 0);
+  const queued = builds.queue.length;
+  const [open, setOpen] = useState(queued > 0);
+  // The panel almost always mounts on the first poll, when nothing is queued
+  // yet, and later polls only re-render it — so the initial state above cannot
+  // be what opens it for a queue that forms while the operator is watching.
+  // The empty -> non-empty edge is: while a queue stays non-empty, closing the
+  // panel sticks, and it opens again the next time one forms from nothing.
+  const wasQueued = useRef(queued);
+  useEffect(() => {
+    if (wasQueued.current === 0 && queued > 0) setOpen(true);
+    wasQueued.current = queued;
+  }, [queued]);
   const listId = 'build-slot-breakdown';
   return (
     <div className="slots">

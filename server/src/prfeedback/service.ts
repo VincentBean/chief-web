@@ -78,6 +78,20 @@ export class PrFeedbackError extends Error {
 }
 
 /**
+ * Refusals that mean "there is nothing left to do here", as opposed to "this
+ * could not be run": the feedback was resolved by hand, or the pull request
+ * closed, while the pass sat in the queue. Started by hand they are the 409
+ * the operator asked for; reached by the pump they are simply the end of the
+ * story, and are recorded as such rather than as a failure.
+ */
+const SETTLED_CODES = new Set(['no_unresolved_feedback', 'pull_request_not_open']);
+
+/** True when a start was refused because the work had already been done. */
+function isSettled(cause: unknown): cause is PrFeedbackError {
+  return cause instanceof PrFeedbackError && SETTLED_CODES.has(cause.code);
+}
+
+/**
  * The slice of the build loop a PR run drives: the concurrency cap it shares
  * (US-018), the unified queue it waits in when that cap is reached (US-003),
  * and the usage-limit hold it can trigger for it (US-007).
@@ -416,11 +430,22 @@ export class PrFeedbackService {
         if (ref === null) {
           throw new Error(`"${entry.refId}" no longer names a pull request that can be worked on.`);
         }
-        // The same call that was made when it was queued, with the same
-        // parameters: the feedback is read afresh, so the pass answers whatever
-        // is still unresolved rather than what was unresolved an hour ago.
-        await this.start(ref.repositoryId, ref.prNumber);
+        try {
+          // The same call that was made when it was queued, with the same
+          // parameters: the feedback is read afresh, so the pass answers
+          // whatever is still unresolved rather than what was unresolved an
+          // hour ago.
+          await this.start(ref.repositoryId, ref.prNumber);
+        } catch (cause) {
+          if (!isSettled(cause)) throw cause;
+          // Reading it afresh is exactly what found this: there is nothing
+          // left to answer. That is the queue arriving late, not a run that
+          // could not be started, so it must not surface as a failure.
+          this.settle(entry, cause.message);
+        }
       },
+      // Only the starts that genuinely could not run reach this; see
+      // {@link isSettled} for the ones that had nothing left to do.
       onFailed: (entry, message) => {
         const run = this.queuedRun(entry);
         // Somewhere the operator will see it: the run's own row on the pull
@@ -459,6 +484,29 @@ export class PrFeedbackService {
       queuedAt: entry.queuedAt,
     });
     return this.view(waiting);
+  }
+
+  /**
+   * A queued pass the queue reached too late: the feedback had been resolved
+   * by hand, or the pull request closed, while it waited (US-004).
+   *
+   * Recorded the way a cancellation is — back to `pending`, with a line
+   * saying why — rather than as a failed run. `DeliveryService` already
+   * treats `no_unresolved_feedback` as a success; a pass that queues first
+   * must not turn the same answer into something the UI flags for attention.
+   */
+  private settle(entry: BuildQueueEntry, reason: string): void {
+    logger.info('a queued pull request feedback run had nothing left to do', {
+      ref: entry.refId,
+      reason,
+    });
+    const run = this.queuedRun(entry);
+    if (run === null) return;
+    updatePrRun(this.db, run.id, {
+      status: 'pending',
+      failureStage: null,
+      lastError: `The queue reached this run, but there was nothing left to do: ${reason}`,
+    });
   }
 
   /** Takes a run that has not started out of the queue; a no-op otherwise. */

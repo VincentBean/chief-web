@@ -678,20 +678,58 @@ describe('answering pull request feedback', () => {
     assert.equal(serviceWith().starter().exists?.(entry), false);
   });
 
-  it('says on the run why a queued start could not be made', async () => {
+  it('drops a queued run whose feedback was answered while it waited', async () => {
     slots.free = 0;
     const service = serviceWith();
     const queued = await service.start(repository.id, 61);
 
-    // Answered by a human while it waited: there is nothing left to work on.
+    // Answered by a human while it waited: there is nothing left to work on,
+    // which is the pass getting what it wanted rather than a run that broke.
     github.result = feedbackFixture({ threads: [], reviews: [] });
     slots.free = 1;
     await pump(service);
 
     const view = service.status(queued.id);
-    assert.equal(view.status, 'failed');
-    assert.match(view.lastError ?? '', /left the queue/);
+    assert.equal(view.status, 'pending');
+    assert.equal(view.failureStage, null);
+    assert.match(view.lastError ?? '', /nothing left to do/i);
     assert.match(view.lastError ?? '', /no unresolved/i);
+    assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
+  });
+
+  it('drops a queued run whose pull request was merged while it waited', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    github.result = feedbackFixture({ state: 'MERGED' });
+    slots.free = 1;
+    await pump(service);
+
+    const view = service.status(queued.id);
+    assert.equal(view.status, 'pending');
+    assert.equal(view.failureStage, null);
+    assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
+  });
+
+  it('says on the run why a queued start could not be made', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    // Nothing to do with the feedback itself: the pass could not be started at
+    // all, and that is what the operator has to be told about.
+    github.feedbackError = new Error('github is unreachable');
+    slots.free = 1;
+    await pump(service);
+
+    const view = service.status(queued.id);
+    assert.equal(view.status, 'failed');
+    assert.equal(view.failureStage, 'feedback');
+    assert.match(view.lastError ?? '', /left the queue/);
+    assert.match(view.lastError ?? '', /unreachable/);
     assert.deepEqual(listBuildQueue(db), []);
     assert.deepEqual(containersStarted, []);
   });

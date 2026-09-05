@@ -609,21 +609,43 @@ describe('reviewing an open pull request by hand', () => {
     assert.equal(serviceWith().starter().exists?.(entry), false);
   });
 
+  it('drops a queued review whose pull request was merged while it waited', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    // Merged while it waited: there is nothing left to review, which is not a
+    // review that failed and not something the operator has to act on.
+    github.result = pullFixture({ state: 'MERGED' });
+    slots.free = 1;
+    await pump(service);
+
+    const view = service.status(queued.id);
+    assert.equal(view.status, 'pending');
+    assert.equal(view.failureStage, null);
+    assert.match(view.lastError ?? '', /nothing left to review/i);
+    assert.match(view.lastError ?? '', /merged/);
+    assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
+  });
+
   it('says on the review why a queued start could not be made', async () => {
     slots.free = 0;
     const service = serviceWith();
     const queued = await service.start(repository.id, 61);
 
-    // Merged while it waited: there is nothing left to review.
-    github.result = pullFixture({ state: 'MERGED' });
+    // Nothing to do with the pull request: the review could not be started at
+    // all, and that is what the operator has to be told about.
+    github.error = new Error('github is unreachable');
     slots.free = 1;
     await pump(service);
 
     const view = service.status(queued.id);
     assert.equal(view.status, 'failed');
     assert.match(view.lastError ?? '', /left the queue/);
-    assert.match(view.lastError ?? '', /merged/);
+    assert.match(view.lastError ?? '', /unreachable/);
     assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
   });
 
   it('refuses without a GitHub token', async () => {

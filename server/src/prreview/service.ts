@@ -66,6 +66,20 @@ export class PrReviewError extends Error {
   }
 }
 
+/**
+ * Refusals that mean "there is nothing left to review", as opposed to "this
+ * could not be run": the pull request was merged or closed while the review
+ * sat in the queue. Started by hand they are the 409 the operator asked for;
+ * reached by the pump they are simply the end of the story, and are recorded
+ * as such rather than as a failure.
+ */
+const SETTLED_CODES = new Set(['pull_request_not_open']);
+
+/** True when a start was refused because there was nothing left to review. */
+function isSettled(cause: unknown): cause is PrReviewError {
+  return cause instanceof PrReviewError && SETTLED_CODES.has(cause.code);
+}
+
 /** The slice of the review pass this run drives; tests pass a stub. */
 export interface PrReviewer {
   reviewInContainer(subject: ReviewSubject): Promise<ReviewPassResult>;
@@ -350,11 +364,21 @@ export class PrReviewService {
         if (ref === null) {
           throw new Error(`"${entry.refId}" no longer names a pull request that can be reviewed.`);
         }
-        // The same call the operator made, with the same parameters: the pull
-        // request is read afresh, so the review runs against whatever has been
-        // pushed to it since it was asked for.
-        await this.start(ref.repositoryId, ref.prNumber);
+        try {
+          // The same call the operator made, with the same parameters: the
+          // pull request is read afresh, so the review runs against whatever
+          // has been pushed to it since it was asked for.
+          await this.start(ref.repositoryId, ref.prNumber);
+        } catch (cause) {
+          if (!isSettled(cause)) throw cause;
+          // Reading it afresh is exactly what found this: the pull request was
+          // merged or closed while the review waited. Nothing could be
+          // reviewed, but nothing went wrong either.
+          this.settle(entry, cause.message);
+        }
       },
+      // Only the starts that genuinely could not run reach this; see
+      // {@link isSettled} for the ones that had nothing left to review.
       onFailed: (entry, message) => {
         const review = this.queuedReview(entry);
         // Somewhere the operator will see it: the review's own row on the pull
@@ -392,6 +416,28 @@ export class PrReviewService {
       queuedAt: entry.queuedAt,
     });
     return this.view(waiting);
+  }
+
+  /**
+   * A queued review the queue reached too late: the pull request was merged or
+   * closed while it waited (US-003).
+   *
+   * Recorded the way a cancellation is — back to `pending`, with a line
+   * saying why — rather than as a failed review, because there is nothing here
+   * for the operator to fix or retry.
+   */
+  private settle(entry: BuildQueueEntry, reason: string): void {
+    logger.info('a queued pull request review had nothing left to review', {
+      ref: entry.refId,
+      reason,
+    });
+    const review = this.queuedReview(entry);
+    if (review === null) return;
+    updatePrReview(this.db, review.id, {
+      status: 'pending',
+      failureStage: null,
+      lastError: `The queue reached this review, but there was nothing left to review: ${reason}`,
+    });
   }
 
   /** Takes a review that has not started out of the queue; a no-op otherwise. */
