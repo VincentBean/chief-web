@@ -43,6 +43,7 @@ import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/in
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
+import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
 import { createSessionsRouter } from './routes/sessions.js';
@@ -180,6 +181,10 @@ export function createApp(
   api.use(requireApiAuth(auth));
   api.use(createSettingsRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
+  // Recurring task definitions (US-003). Database only — nothing here starts a
+  // session, which is the scheduler's job (US-004) — so it needs none of the
+  // collaborators built below.
+  api.use(createRecurringTasksRouter(db));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));
   const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
