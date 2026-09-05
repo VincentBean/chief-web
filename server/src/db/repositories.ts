@@ -155,6 +155,25 @@ export function listRepositories(db: Database): Repository[] {
     .map(mapRepository);
 }
 
+/**
+ * The repositories a Sentry project is linked to — what the issue poller walks
+ * (US-005).
+ *
+ * Both columns are required rather than either: the pair is the link, and the
+ * repository service refuses to store half of one, so a row with only an org
+ * on it could only come from a hand edit and has nothing pollable in it.
+ */
+export function listSentryLinkedRepositories(db: Database): Repository[] {
+  return db
+    .prepare(
+      `SELECT * FROM repositories
+        WHERE sentry_org IS NOT NULL AND sentry_project IS NOT NULL
+        ORDER BY name COLLATE NOCASE ASC`,
+    )
+    .all()
+    .map(mapRepository);
+}
+
 /** Applies the provided fields only; returns the updated row, or null if absent. */
 export function updateRepository(
   db: Database,

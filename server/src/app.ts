@@ -42,6 +42,7 @@ import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
+import { createSentrySync, type SentrySync } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -144,6 +145,12 @@ export interface AppDependencies {
    * built on a stub gateway so they never reach the network.
    */
   readonly prConflicts?: ConflictScan;
+  /**
+   * The Sentry issue poller (US-005). Defaults to a service polling every
+   * linked project for its unresolved issues; tests pass one built on a stub
+   * gateway so they never reach the network.
+   */
+  readonly sentrySync?: SentrySync;
 }
 
 /**
@@ -275,6 +282,13 @@ export function createApp(
   );
   const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db, prConflictFixes);
   prConflicts.start();
+  // The Sentry issue poller (US-005), started here for the same reason as the
+  // two above: production errors arrive whether or not anyone is looking, and
+  // the first tick is the catch-up on everything that fired while the stack
+  // was down. A tick costs nothing at all until a repository is linked to a
+  // Sentry project and a token is saved on the settings page.
+  const sentrySync = deps.sentrySync ?? createSentrySync(db);
+  sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
   // stories, so a full server refuses the run instead of holding it.

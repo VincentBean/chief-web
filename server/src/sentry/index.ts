@@ -17,3 +17,10 @@ export {
   type SentryStackFrame,
   type SentryTag,
 } from './client.js';
+export {
+  createSentrySync,
+  type SentryGatewayFactory,
+  type SentryIssueGateway,
+  type SentrySync,
+  SentrySyncService,
+} from './sync.js';

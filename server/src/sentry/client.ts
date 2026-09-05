@@ -49,6 +49,13 @@ export interface SentryIssueSummary {
   readonly culprit: string | null;
   readonly permalink: string;
   readonly level: string | null;
+  /**
+   * Sentry’s own status — `unresolved`, `resolved` or `ignored` — or null when the
+   * payload carried none. The list endpoint already asks for unresolved issues
+   * only, so this is what lets the poller state that guarantee itself rather
+   * than inherit it from a query string.
+   */
+  readonly status: string | null;
   /** How many times the issue has been seen. Sentry sends it as a string. */
   readonly count: number;
   readonly firstSeen: string;
@@ -450,6 +457,7 @@ function toIssueSummary(value: unknown): SentryIssueSummary | null {
     culprit: readString(record, 'culprit'),
     permalink: readString(record, 'permalink') ?? '',
     level: readString(record, 'level'),
+    status: readString(record, 'status'),
     // Sentry sends `count` as a decimal string ("1043"), not a number.
     count: readNumber(record, 'count') ?? 0,
     firstSeen,
