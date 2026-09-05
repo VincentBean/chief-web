@@ -34,6 +34,9 @@ function deriveSlugPreview(raw: string): string | null {
   return segments.length === 2 ? segments.join('/') : null;
 }
 
+/** Mirrors `isValidSentrySlug` on the server, so the form catches a typo first. */
+const SENTRY_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 /**
  * Repository management (US-005): register a git remote, get an ed25519 deploy
  * key to paste into GitHub, and prove the key works with `git ls-remote`.
@@ -157,11 +160,19 @@ export function Repositories() {
                 title={repository.name}
                 icon="repo"
                 meta={
-                  repository.keyConfigured ? (
-                    <Badge tone="done">key stored</Badge>
-                  ) : (
-                    <Badge tone="danger">no key</Badge>
-                  )
+                  <>
+                    {repository.keyConfigured ? (
+                      <Badge tone="done">key stored</Badge>
+                    ) : (
+                      <Badge tone="danger">no key</Badge>
+                    )}
+                    {repository.sentryOrg !== null && repository.sentryProject !== null && (
+                      <Badge tone="review" title={`Sentry: ${repository.sentryOrg}/${repository.sentryProject}`}>
+                        <Icon name="alert" />
+                        Sentry
+                      </Badge>
+                    )}
+                  </>
                 }
                 actions={
                   <>
@@ -329,6 +340,8 @@ function RepositoryForm({
   const [sshUrl, setSshUrl] = useState(initial?.sshUrl ?? '');
   const [githubSlug, setGithubSlug] = useState(initial?.githubSlug ?? '');
   const [baseBranch, setBaseBranch] = useState(initial?.defaultBaseBranch ?? 'main');
+  const [sentryOrg, setSentryOrg] = useState(initial?.sentryOrg ?? '');
+  const [sentryProject, setSentryProject] = useState(initial?.sentryProject ?? '');
   const [keyMode, setKeyMode] = useState<'generate' | 'paste'>('generate');
   const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -345,10 +358,23 @@ function RepositoryForm({
       setError('Paste a private key, or switch back to generating one.');
       return;
     }
+    const org = sentryOrg.trim();
+    const project = sentryProject.trim();
+    if ((org === '') !== (project === '')) {
+      setError('A Sentry link needs both an org slug and a project slug. Fill in both, or clear both to unlink.');
+      return;
+    }
+    if ((org !== '' && !SENTRY_SLUG_PATTERN.test(org)) || (project !== '' && !SENTRY_SLUG_PATTERN.test(project))) {
+      setError('Sentry slugs are lowercase letters, digits and hyphens, exactly as they appear in the Sentry URL.');
+      return;
+    }
     const input: RepositoryInput = {
       name: name.trim(),
       sshUrl: sshUrl.trim(),
       defaultBaseBranch: baseBranch.trim() === '' ? 'main' : baseBranch.trim(),
+      // Always sent, so emptying a field unlinks instead of being ignored.
+      sentryOrg: org === '' ? null : org,
+      sentryProject: project === '' ? null : project,
     };
     if (githubSlug.trim() !== '') input.githubSlug = githubSlug.trim();
     if (keyMode === 'paste') input.privateKey = privateKey;
@@ -396,6 +422,41 @@ function RepositoryForm({
           <input id={`slug-${mode}`} className="field__input mono" value={githubSlug} onChange={(event) => setGithubSlug(event.target.value)} placeholder={derived ?? 'owner/repo'} autoComplete="off" spellCheck={false} />
           <p className="field__hint">Used to open pull requests. Leave blank to derive it from the URL{derived === null ? '.' : ` (${derived}).`}</p>
         </div>
+
+        <div className="field__row">
+          <div className="field">
+            <label className="field__label" htmlFor={`sentry-org-${mode}`}>
+              Sentry org slug <span className="muted">(optional)</span>
+            </label>
+            <input
+              id={`sentry-org-${mode}`}
+              className="field__input mono"
+              value={sentryOrg}
+              onChange={(event) => setSentryOrg(event.target.value)}
+              placeholder="my-org"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor={`sentry-project-${mode}`}>
+              Sentry project slug <span className="muted">(optional)</span>
+            </label>
+            <input
+              id={`sentry-project-${mode}`}
+              className="field__input mono"
+              value={sentryProject}
+              onChange={(event) => setSentryProject(event.target.value)}
+              placeholder="my-app"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+        </div>
+        <p className="field__hint">
+          Set both to have chief-web poll this Sentry project for issues to fix; clear both to unlink. They are the two slugs in a
+          Sentry URL: <span className="mono">sentry.io/organizations/&lt;org&gt;/projects/&lt;project&gt;</span>.
+        </p>
 
         <div className="field">
           <span className="field__label">SSH key</span>

@@ -193,6 +193,9 @@ export interface Repository {
   keyFingerprint: string | null;
   keySource: 'generated' | 'imported' | null;
   keyConfigured: boolean;
+  /** The linked Sentry project; both slugs are set, or both are null. */
+  sentryOrg: string | null;
+  sentryProject: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -205,6 +208,9 @@ export interface RepositoryInput {
   defaultBaseBranch?: string;
   /** Omit on create to have the server generate an ed25519 keypair. */
   privateKey?: string;
+  /** `null` unlinks Sentry; both slugs are set together or not at all. */
+  sentryOrg?: string | null;
+  sentryProject?: string | null;
 }
 
 export interface ConnectionTestResult {

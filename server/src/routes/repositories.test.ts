@@ -29,6 +29,8 @@ interface RepositoryBody {
   keyFingerprint: string | null;
   keySource: string | null;
   keyConfigured: boolean;
+  sentryOrg: string | null;
+  sentryProject: string | null;
 }
 
 describe('repositories api', () => {
@@ -148,6 +150,10 @@ describe('repositories api', () => {
       [{ githubSlug: 'nope' }, 'invalid_github_slug'],
       [{ defaultBaseBranch: 'bad branch' }, 'invalid_base_branch'],
       [{ privateKey: 'garbage' }, 'invalid_private_key'],
+      [{ sentryOrg: 'Not A Slug', sentryProject: 'web' }, 'invalid_sentry_org'],
+      [{ sentryOrg: 'acme', sentryProject: 'Web_App' }, 'invalid_sentry_project'],
+      [{ sentryOrg: 'acme' }, 'sentry_link_incomplete'],
+      [{ sentryProject: 'web' }, 'sentry_link_incomplete'],
     ];
 
     for (const [overrides, code] of cases) {
@@ -161,6 +167,79 @@ describe('repositories api', () => {
       assert.equal(body.error, code);
       assert.ok(body.message.length > 0);
     }
+  });
+
+  it('leaves a repository unlinked from Sentry by default', async () => {
+    const { body } = await create();
+
+    assert.equal(body.sentryOrg, null);
+    assert.equal(body.sentryProject, null);
+  });
+
+  it('links a Sentry project on add', async () => {
+    const { status, body } = await create({ sentryOrg: 'acme', sentryProject: 'acme-web-2' });
+
+    assert.equal(status, 201);
+    assert.equal(body.sentryOrg, 'acme');
+    assert.equal(body.sentryProject, 'acme-web-2');
+
+    const listed = (await (await call('GET', '/api/repositories')).json()) as {
+      repositories: RepositoryBody[];
+    };
+    assert.equal(listed.repositories[0]?.sentryOrg, 'acme');
+    assert.equal(listed.repositories[0]?.sentryProject, 'acme-web-2');
+  });
+
+  it('links, relinks and unlinks a Sentry project from the edit form', async () => {
+    const { body: created } = await create();
+
+    const linked = (await (
+      await call('PUT', `/api/repositories/${created.id}`, {
+        sentryOrg: 'acme',
+        sentryProject: 'web',
+      })
+    ).json()) as RepositoryBody;
+    assert.equal(linked.sentryOrg, 'acme');
+    assert.equal(linked.sentryProject, 'web');
+
+    const moved = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { sentryProject: 'api' })
+    ).json()) as RepositoryBody;
+    assert.equal(moved.sentryOrg, 'acme');
+    assert.equal(moved.sentryProject, 'api');
+
+    // The form sends the emptied fields, which is what unlinks.
+    const unlinked = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { sentryOrg: '', sentryProject: '' })
+    ).json()) as RepositoryBody;
+    assert.equal(unlinked.sentryOrg, null);
+    assert.equal(unlinked.sentryProject, null);
+  });
+
+  it('refuses to leave half a Sentry link behind on edit', async () => {
+    const { body: created } = await create({ sentryOrg: 'acme', sentryProject: 'web' });
+
+    const response = await call('PUT', `/api/repositories/${created.id}`, { sentryProject: '' });
+    const error = (await response.json()) as { error: string; message: string };
+
+    assert.equal(response.status, 400);
+    assert.equal(error.error, 'sentry_link_incomplete');
+    assert.match(error.message, /org slug and a project slug/);
+
+    // The stored link is untouched by the rejected edit.
+    const current = (await (await call('GET', `/api/repositories/${created.id}`)).json()) as RepositoryBody;
+    assert.equal(current.sentryProject, 'web');
+  });
+
+  it('keeps the Sentry link when an edit does not mention it', async () => {
+    const { body: created } = await create({ sentryOrg: 'acme', sentryProject: 'web' });
+
+    const updated = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { name: 'renamed' })
+    ).json()) as RepositoryBody;
+
+    assert.equal(updated.sentryOrg, 'acme');
+    assert.equal(updated.sentryProject, 'web');
   });
 
   it('asks for the slug when it cannot be derived', async () => {

@@ -3,6 +3,7 @@ import { type Response, Router } from 'express';
 import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
 import { deriveGithubSlug, isValidGithubSlug, isValidGitUrl } from '../lib/git-url.js';
+import { isValidSentrySlug } from '../lib/sentry-slug.js';
 import {
   type CreateRepositoryRequest,
   createRepositoryWithKey,
@@ -119,6 +120,24 @@ function invalidBody(body: unknown): Invalid | null {
   return null;
 }
 
+/**
+ * Like `optionalString`, but keeps the difference between "absent" and
+ * "cleared": a field set to `null` or an empty string reads as `null`, which is
+ * how the form unlinks a Sentry project.
+ */
+function clearableString(
+  input: Record<string, unknown>,
+  field: string,
+  code: string,
+): string | null | undefined | Invalid {
+  if (!(field in input) || input[field] === undefined) return undefined;
+  const raw = input[field];
+  if (raw === null) return null;
+  if (typeof raw !== 'string') return { error: code, message: `${field} must be a string.` };
+  const value = raw.trim();
+  return value === '' ? null : value;
+}
+
 /** `undefined` when the field is absent; an `Invalid` when it is the wrong shape. */
 function optionalString(
   input: Record<string, unknown>,
@@ -167,6 +186,49 @@ function validateBranch(branch: string): Invalid | null {
   return null;
 }
 
+function validateSentrySlug(slug: string, field: 'org' | 'project'): Invalid | null {
+  if (!isValidSentrySlug(slug)) {
+    return {
+      error: `invalid_sentry_${field}`,
+      message: `The Sentry ${field} slug must be lowercase letters, digits and hyphens, as it appears in the Sentry URL.`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Reads the Sentry link out of a body. Both fields are optional and clearable;
+ * whether the resulting *pair* makes sense is the domain layer's call, since an
+ * edit only sees half of it.
+ */
+function parseSentryLink(
+  input: Record<string, unknown>,
+): { sentryOrg?: string | null; sentryProject?: string | null } | Invalid {
+  const link: { sentryOrg?: string | null; sentryProject?: string | null } = {};
+
+  const org = clearableString(input, 'sentryOrg', 'invalid_sentry_org');
+  if (typeof org === 'object' && org !== null) return org;
+  if (org !== undefined) {
+    if (org !== null) {
+      const bad = validateSentrySlug(org, 'org');
+      if (bad) return bad;
+    }
+    link.sentryOrg = org;
+  }
+
+  const project = clearableString(input, 'sentryProject', 'invalid_sentry_project');
+  if (typeof project === 'object' && project !== null) return project;
+  if (project !== undefined) {
+    if (project !== null) {
+      const bad = validateSentrySlug(project, 'project');
+      if (bad) return bad;
+    }
+    link.sentryProject = project;
+  }
+
+  return link;
+}
+
 function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -206,11 +268,15 @@ function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const privateKey = optionalString(input, 'privateKey', 'invalid_private_key');
   if (typeof privateKey === 'object') return privateKey;
 
+  const sentry = parseSentryLink(input);
+  if ('error' in sentry) return sentry;
+
   return {
     name,
     sshUrl,
     githubSlug,
     defaultBaseBranch,
+    ...sentry,
     // Omitted (not `undefined`) so `exactOptionalPropertyTypes` is satisfied
     // and the service can generate a keypair instead.
     ...(privateKey === undefined ? {} : { privateKey }),
@@ -228,6 +294,8 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
     githubSlug?: string;
     defaultBaseBranch?: string;
     privateKey?: string;
+    sentryOrg?: string | null;
+    sentryProject?: string | null;
   } = {};
 
   const name = optionalString(input, 'name', 'invalid_name');
@@ -265,6 +333,11 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
   const privateKey = optionalString(input, 'privateKey', 'invalid_private_key');
   if (typeof privateKey === 'object') return privateKey;
   if (privateKey !== undefined) update.privateKey = privateKey;
+
+  const sentry = parseSentryLink(input);
+  if ('error' in sentry) return sentry;
+  if (sentry.sentryOrg !== undefined) update.sentryOrg = sentry.sentryOrg;
+  if (sentry.sentryProject !== undefined) update.sentryProject = sentry.sentryProject;
 
   return update;
 }
