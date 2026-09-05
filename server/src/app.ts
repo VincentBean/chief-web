@@ -302,6 +302,9 @@ export function createApp(
       prFeedback,
       prReviews,
       prConflictFixes,
+      // Refresh on the page re-runs the scan (US-003): the half-hour timer is
+      // too wide to wait out when an operator is looking at a conflict.
+      prConflicts,
     ),
   );
   // Deleting a session (US-015) has to unwind whatever is running in its

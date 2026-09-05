@@ -20,6 +20,7 @@ import {
 } from '../db/index.js';
 import { GithubApiError } from '../lib/github.js';
 import type { PullRequestFeedback, RepositoryPullRequests } from '../lib/github-review.js';
+import type { ConflictScan } from '../prconflicts/index.js';
 import { createPullRequestService, type PullRequestGateway } from '../pullrequests/index.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -45,6 +46,20 @@ class StubGateway implements PullRequestGateway {
   }
 }
 
+/** A conflict scan that counts its passes; nothing reaches GitHub. */
+class StubScan implements ConflictScan {
+  ticks = 0;
+  failure: unknown = null;
+
+  start(): void {}
+  stop(): void {}
+  tick(): Promise<number> {
+    this.ticks += 1;
+    if (this.failure !== null) return Promise.reject(this.failure);
+    return Promise.resolve(0);
+  }
+}
+
 const pull = (number: number, slug: string) => ({
   number,
   title: `PR ${String(number)}`,
@@ -66,12 +81,14 @@ describe('pull requests api', () => {
   let db: Database;
   let server: http.Server;
   let gateway: StubGateway;
+  let scan: StubScan;
   let repositoryId: string;
 
   before(async () => {
     config = loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD });
     db = openDatabase(IN_MEMORY);
     gateway = new StubGateway();
+    scan = new StubScan();
 
     const repository = createRepository(db, {
       name: 'leo',
@@ -83,6 +100,7 @@ describe('pull requests api', () => {
 
     const app = createApp(config, createAuthService(config, db), db, {
       pullRequests: createPullRequestService(config, db, gateway),
+      prConflicts: scan,
     });
     server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
@@ -106,6 +124,8 @@ describe('pull requests api', () => {
     gateway.listError = null;
     gateway.feedbackError = null;
     gateway.listCalls = 0;
+    scan.ticks = 0;
+    scan.failure = null;
     setSetting(db, 'github_token', 'ghp_token');
   });
 
@@ -277,6 +297,30 @@ describe('pull requests api', () => {
 
     assert.equal(response.status, 404);
     assert.equal(((await response.json()) as { error: string }).error, 'repository_not_found');
+  });
+
+  it('re-scans for merge conflicts on refresh, and only then', async () => {
+    gateway.listResult = [
+      { slug: 'VincentBean/leo', pullRequests: [], error: null, message: null, truncated: false },
+    ];
+
+    await get('/api/pull-requests');
+    assert.equal(scan.ticks, 0, 'a cached read should cost GitHub nothing');
+
+    await get('/api/pull-requests?refresh=1');
+    assert.equal(scan.ticks, 1);
+  });
+
+  it('still serves the listing when the conflict re-scan fails', async () => {
+    gateway.listResult = [
+      { slug: 'VincentBean/leo', pullRequests: [], error: null, message: null, truncated: false },
+    ];
+    scan.failure = new Error('GitHub is having a day');
+
+    const response = await get('/api/pull-requests?refresh=1');
+
+    assert.equal(response.status, 200);
+    assert.equal(scan.ticks, 1);
   });
 
   it('is not behind the Claude guard — listing runs no agent', async () => {

@@ -1,7 +1,8 @@
 import { type Response, Router } from 'express';
 
 import { GithubApiError } from '../lib/github.js';
-import type { ConflictFixLookup } from '../prconflicts/index.js';
+import { logger } from '../lib/logger.js';
+import type { ConflictFixLookup, ConflictScan } from '../prconflicts/index.js';
 import { PrFeedbackError, type PrFeedbackService } from '../prfeedback/index.js';
 import { PrReviewError, type PrReviewService } from '../prreview/index.js';
 import { PullRequestError, type PullRequestService } from '../pullrequests/index.js';
@@ -10,6 +11,10 @@ import { PullRequestError, type PullRequestService } from '../pullrequests/index
  * Open pull requests, their review feedback, the runs that answer it (US-021),
  * the code reviews started on them by hand, and the merge conflict fixes the
  * scan started on its own (US-006).
+ *
+ * The Refresh button also re-runs the merge conflict scan (US-003): its own
+ * timer is half an hour wide, and an operator who came to the page to look at
+ * a conflict should not have to wait it out.
  *
  * Reading is deliberately not behind the Claude guard: listing runs no agent,
  * and a page that refuses to render because Claude Code is signed out would
@@ -21,6 +26,11 @@ export function createPullRequestsRouter(
   prFeedback: PrFeedbackService,
   prReviews: PrReviewService,
   conflictFixes: ConflictFixLookup,
+  /**
+   * The merge conflict scan, re-run by the Refresh button. Optional: a caller
+   * that has no scan — a test, mostly — simply gets the listing on its own.
+   */
+  conflictScan: Pick<ConflictScan, 'tick'> | null = null,
 ): Router {
   const router = Router();
 
@@ -28,8 +38,8 @@ export function createPullRequestsRouter(
     // The page's Refresh button; without it a reload inside the cache window
     // costs GitHub nothing.
     const refresh = req.query['refresh'] === '1';
-    pullRequests
-      .list({ refresh })
+    rescanConflicts(refresh ? conflictScan : null)
+      .then(() => pullRequests.list({ refresh }))
       .then((view) => {
         // Each pull request carries whatever chief-web knows about running one
         // against it — the feedback run, the review, and the merge conflict fix
@@ -159,6 +169,28 @@ export function createPullRequestsRouter(
   });
 
   return router;
+}
+
+/**
+ * One pass of the merge conflict scan, awaited so the fix rows the listing is
+ * decorated with are the ones this pass just wrote. A scan already ticking is
+ * joined rather than doubled — `tick` is idempotent — so leaning on Refresh
+ * costs GitHub nothing extra.
+ *
+ * A scan that throws never costs the operator the listing: the conflicts are
+ * simply as stale as they were before the click, which is what the page showed
+ * a moment ago anyway.
+ */
+function rescanConflicts(scan: Pick<ConflictScan, 'tick'> | null): Promise<void> {
+  if (scan === null) return Promise.resolve();
+  return scan
+    .tick()
+    .then(() => undefined)
+    .catch((cause: unknown) => {
+      logger.warn('could not re-scan for merge conflicts while refreshing the page', {
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    });
 }
 
 function parseNumber(raw: string): number | null {
