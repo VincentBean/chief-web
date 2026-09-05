@@ -6,10 +6,12 @@
 
 Every authenticated page shares one frame: a sidebar with the six places the
 app has — **Overview**, **Sessions**, **Pull requests**, **Repositories**,
-**Terminals**, **Settings** — and, at the bottom, the two facts worth having on
-screen at all times: how many build slots are in use, and whether Claude Code is
-signed in. When Claude's usage limit is holding work, a countdown to the end of
-the hold sits there too. Below a laptop-width viewport the sidebar becomes a
+**Terminals**, **Settings** — and, at the bottom, the facts worth having on
+screen at all times: how many build slots are in use, how hard the host's CPU
+and memory are being worked, and whether Claude Code is signed in. When Claude's
+usage limit is holding work, a countdown to the end of the hold sits there too.
+CPU is the busy fraction since the previous poll, so it reads `…` for the first
+few seconds after a server restart. Below a laptop-width viewport the sidebar becomes a
 drawer behind the menu button.
 
 Navigation is client-side, so moving between pages does not reload the app.
@@ -42,8 +44,9 @@ lately:
   finished and failed counts.
 - **Recently finished** — with a link to each pull request.
 
-The numbers come from `GET /api/stats`, an aggregate over the database (no
-Docker or GitHub calls), polled every five seconds while the tab is visible.
+The numbers come from `GET /api/stats`, an aggregate over the database plus the
+host's own CPU and memory counters (no Docker or GitHub calls), polled every
+five seconds while the tab is visible.
 `?days=` widens or narrows the activity window (1–90, default 14).
 
 ## Sessions

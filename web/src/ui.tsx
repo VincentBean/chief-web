@@ -176,6 +176,32 @@ export function Progress({
   );
 }
 
+/**
+ * A fraction of something continuous — host CPU, host memory — as a short bar.
+ *
+ * `Meter` counts whole build slots and `Progress` carries its own label; this
+ * is the one for a ratio that sits at the end of a status row, where the number
+ * beside it is already spelled out.
+ */
+export function Gauge({ value, label }: { readonly value: number; readonly label: string }) {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  // The colour is the warning: quiet while there is room, amber as it fills,
+  // red once the machine has nothing left to give.
+  const tone: Tone = percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active';
+  return (
+    <div
+      className={`gauge gauge--${tone}`}
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent}
+      aria-label={label}
+    >
+      <div className="gauge__fill" style={{ width: `${String(percent)}%` }} />
+    </div>
+  );
+}
+
 /** Build slots as one cell per slot. */
 export function Meter({
   value,

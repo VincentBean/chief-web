@@ -282,6 +282,35 @@
     margin-left: 0.125rem;
   }
 
+  /* ----------------------------------------------------------------- gauge */
+  .gauge {
+    --gauge-color: var(--color-status-active);
+
+    background-color: var(--color-surface-control);
+    border-radius: 9999px;
+    flex: none;
+    height: 0.3125rem;
+    overflow: hidden;
+    width: 3.25rem;
+  }
+
+  .gauge--wait {
+    --gauge-color: var(--color-status-wait);
+  }
+
+  .gauge--danger {
+    --gauge-color: var(--color-status-danger);
+  }
+
+  .gauge__fill {
+    background-color: var(--gauge-color);
+    border-radius: inherit;
+    height: 100%;
+    transition:
+      width var(--motion-slow) var(--ease-out-quart),
+      background-color var(--motion-slow) var(--ease-standard);
+  }
+
   /* --------------------------------------------------------------- figures */
   .figures {
     display: grid;
