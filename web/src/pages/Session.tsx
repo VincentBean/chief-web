@@ -33,6 +33,7 @@ import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import {
   DESKTOP_QUERY,
   describeError,
+  isCleanRun,
   isEnded,
   redirectIfUnauthorised,
   useAppData,
@@ -297,6 +298,9 @@ export function Session() {
   const done = stories.filter((story) => story.status === 'done').length;
   const complete = stories.length > 0 && done === stories.length;
   const retryIsDelivery = isDeliveryStage(build.failureStage) || (build.failureStage === null && complete);
+  // A scheduled run that committed nothing: it finished on purpose without a
+  // pull request, so there is nothing to retry and nothing missing.
+  const cleanRun = isCleanRun(session);
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -354,7 +358,7 @@ export function Session() {
           <Icon name="link-external" />
         </a>
       )}
-      {status === 'finished' && session.prUrl === null && complete && (
+      {status === 'finished' && session.prUrl === null && complete && !cleanRun && (
         <button type="button" className="button button--primary" onClick={onRetryDelivery} disabled={busy !== null}>
           <Icon name="sync" />
           {busy === 'delivery' ? 'Retrying…' : 'Retry push & PR'}
@@ -403,6 +407,13 @@ export function Session() {
       )}
       {status === 'waiting' && <HoldPanel until={session.waitingUntil} />}
       {(status === 'reviewing' || status === 'fixing') && <DraftPanel status={status} prUrl={session.prUrl} />}
+      {cleanRun && (
+        <Notice kind="ok">
+          <strong>Nothing to deliver.</strong> This scheduled run committed nothing on{' '}
+          <span className="mono">{session.featureBranch}</span>, so the branch was not pushed and no pull request was
+          opened. The run counts as clean.
+        </Notice>
+      )}
       {session.scheduleMissed && (
         <Notice kind="warn">
           <strong>Missed its scheduled start.</strong> The session was still being planned at{' '}
@@ -624,7 +635,9 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
             : session.prUrl !== null
               ? 'pull request open'
               : status === 'finished'
-                ? 'no pull request'
+                ? isCleanRun(session)
+                  ? 'nothing to deliver'
+                  : 'no pull request'
                 : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };

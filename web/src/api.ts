@@ -276,6 +276,8 @@ export interface Session {
   /** 1-based place in the FIFO build queue (US-018); null when not waiting. */
   queuePosition: number | null;
   containerId: string | null;
+  /** The recurring task this session is a run of; null for a hand-made one. */
+  recurringTaskId: string | null;
   prUrl: string | null;
   lastError: string | null;
   /** Which step a failed session failed at (US-019); null when it has not. */

@@ -116,6 +116,12 @@ export interface SessionView {
    */
   readonly queuePosition: number | null;
   readonly containerId: string | null;
+  /**
+   * The recurring task this session is a run of (US-004), or `null` for a
+   * session somebody created by hand. The UI reads it to explain a run that
+   * finished without a pull request because it changed nothing (US-006).
+   */
+  readonly recurringTaskId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
   /**
@@ -663,6 +669,7 @@ export class SessionService {
       queuedAt: session.queuedAt,
       queuePosition: queuePosition(this.db, session),
       containerId: session.containerId,
+      recurringTaskId: session.recurringTaskId,
       prUrl: session.prUrl,
       lastError: session.lastError,
       failureStage: session.failureStage,

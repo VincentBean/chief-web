@@ -175,6 +175,20 @@ export function isEnded(session: Pick<Session, 'status'>): boolean {
 }
 
 /**
+ * A run of a recurring task that changed nothing (US-006).
+ *
+ * It reached the end of its build and committed nothing, so chief-web pushed
+ * no branch and opened no pull request — the point of a nightly check that
+ * finds nothing. That makes it the one ended session with no pull request that
+ * is not missing one, so it says so on screen and is offered no retry.
+ */
+export function isCleanRun(
+  session: Pick<Session, 'status' | 'prUrl' | 'recurringTaskId'>,
+): boolean {
+  return session.status === 'finished' && session.prUrl === null && session.recurringTaskId !== null;
+}
+
+/**
  * A session with work of its own in flight: a build slot, a queue place, or —
  * once the build is over — the review and feedback runs the draft pull request
  * waits on (US-002). Everything that is still moving, in other words, which is
