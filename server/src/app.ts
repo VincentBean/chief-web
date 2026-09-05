@@ -50,6 +50,8 @@ import {
   type SentrySync,
 } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
+import { createRecurringTaskRunner } from './recurringtasks/index.js';
+import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
 import { createSentryRouter } from './routes/sentry.js';
@@ -62,6 +64,7 @@ import {
   createSessionService,
   type SessionContainers,
   type SessionExecutor,
+  type SessionService,
 } from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
@@ -194,6 +197,10 @@ export function createApp(
   api.use(requireApiAuth(auth));
   api.use(createSettingsRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
+  // Recurring task definitions (US-003). Database only — nothing here starts a
+  // session, which is the scheduler's job (US-004) — so it needs none of the
+  // collaborators built below.
+  api.use(createRecurringTasksRouter(db));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));
   const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
@@ -255,10 +262,18 @@ export function createApp(
   const builds =
     deps.builds ??
     createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
+  // Recurring tasks (US-004): the scheduler's other due-query. It fires each
+  // task into an ordinary session, which means it needs the session service —
+  // built further down, because *that* needs the scheduler. The thunk is what
+  // breaks the circle; nothing reads it before the first tick, by which point
+  // both exist.
+  let sessions: SessionService | null = null;
+  const recurringRuns = createRecurringTaskRunner(config, db, () => sessions, builds);
   // Scheduled starts (US-017). The schedules live in the database, so starting
   // it here — before the first request — is also the catch-up on everything
-  // that came due while the stack was down.
-  const scheduler = deps.scheduler ?? createScheduler(config, db, builds);
+  // that came due while the stack was down, recurring tasks included.
+  const scheduler =
+    deps.scheduler ?? createScheduler(config, db, builds, undefined, recurringRuns);
   scheduler.start();
   // The pull request sync (US-003), started for the same reason: a merge that
   // happens overnight has to be noticed whether or not anyone opens the UI,
@@ -310,7 +325,12 @@ export function createApp(
   // review on, marked ready and handed to `builds.start` exactly as the Start
   // button would — from there the ordinary queue, delivery and review pipeline
   // take it the rest of the way to a pull request.
-  const sessions = createSessionService(config, db, orchestrator, exec, {
+  // Which needs the session service, so it is built here rather than beside
+  // its router: the fixer starts sessions through it, and the recurring task
+  // runner's thunk above resolves to this same one. Deleting a session (US-015)
+  // has to unwind whatever is running in its container first, which is why it
+  // takes the orchestrator and the executor along with the three services.
+  sessions = createSessionService(config, db, orchestrator, exec, {
     builds,
     planning,
     scheduler,
@@ -361,8 +381,6 @@ export function createApp(
   // rather than beside the settings router so it sits next to the pipeline it
   // reports on.
   api.use(createSentryRouter(db));
-  // Deleting a session (US-015) has to unwind whatever is running in its
-  // container first, so the session service is built last and given all three.
   api.use(createSessionsRouter(sessions));
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));

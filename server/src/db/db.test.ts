@@ -204,13 +204,16 @@ describe('migrations', () => {
     }
 
     const repository = seedLegacyRepository(db);
-    const session = createSession(db, {
-      repositoryId: repository.id,
-      name: 'legacy',
-      baseBranch: 'main',
-      prTargetBranch: 'main',
-      codeReview: true,
-    });
+    // Inserted by hand, like the walks above it: `createSession` writes the
+    // columns the schema has *today*, which is more than it had here.
+    const at = '2026-09-01T00:00:00.000Z';
+    const session = { id: 'legacy' };
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          code_review, created_at, updated_at)
+       VALUES (?, ?, 'legacy', 'pending', 'main', 'chief/legacy', 'main', 1, ?, ?)`,
+    ).run(session.id, repository.id, at, at);
     failSession(db, session.id, 'push', 'Permission denied (publickey).');
     syncStories(db, session.id, [
       { storyId: 'US-001', title: 'First', priority: 1, status: 'done' },

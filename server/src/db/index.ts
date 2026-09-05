@@ -3,6 +3,7 @@ export { MIGRATIONS, type Migration, runMigrations } from './migrations.js';
 export * from './pr-conflict-fixes.js';
 export * from './pr-reviews.js';
 export * from './pr-runs.js';
+export * from './recurring-tasks.js';
 export * from './repositories.js';
 export * from './sentry-issues.js';
 export * from './sessions.js';

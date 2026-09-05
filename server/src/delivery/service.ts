@@ -30,6 +30,7 @@ import { UsageLimitHold } from '../limits/index.js';
 import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
+import { type CommitCount, countBranchCommits } from './commits.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { type PushResult, runPush } from './push.js';
 import type { ReviewStep, SolverOutcome } from './review-step.js';
@@ -43,6 +44,12 @@ import type { ReviewStep, SolverOutcome } from './review-step.js';
  * the remote or at GitHub is retried on its own, without rerunning a single
  * story, because the work is already committed and nothing about it needs
  * doing again.
+ *
+ * A recurring task's run (US-006) is the one session that can end here without
+ * a pull request at all: when it committed nothing, there is no branch worth
+ * publishing and nothing GitHub would open a pull request for, so the session
+ * finishes `finished` with no `pr_url` and the occurrence records it as
+ * `clean`. Every other session delivers exactly as it always has.
  *
  * The loop additionally calls {@link DeliveryService.push} after every story it
  * completes, so `origin` is never more than one story behind what the container
@@ -123,6 +130,12 @@ export interface DeliveryResult {
 
 export type DeliveryCode =
   | 'ok'
+  /**
+   * The run committed nothing, so it finished without a push, a pull request
+   * or a review (US-006). A success, and a different one from `ok`: there is
+   * no pull request to link to and nothing for anyone to look at.
+   */
+  | 'clean'
   | 'container_unavailable'
   | 'push_failed'
   | 'github_token_missing'
@@ -139,7 +152,10 @@ export type DeliveryCode =
  * the operator is told which part to go and fix — the remote, GitHub, or the
  * review — and a `review` failure is the one that re-runs *only* the review.
  */
-const FAILURE_STAGE_OF: Record<Exclude<DeliveryCode, 'ok' | 'usage_limit_hold'>, FailureStage> = {
+/** The codes that really are a failure: not `ok`, `clean` or the hold. */
+type DeliveryFailureCode = Exclude<DeliveryCode, 'ok' | 'clean' | 'usage_limit_hold'>;
+
+const FAILURE_STAGE_OF: Record<DeliveryFailureCode, FailureStage> = {
   container_unavailable: 'push',
   push_failed: 'push',
   github_token_missing: 'pull_request',
@@ -185,6 +201,18 @@ export class DeliveryService implements BuildCompletion {
    * costs the run nothing — the next story pushes the same commits again.
    */
   async push(session: Session): Promise<void> {
+    // A scheduled run that has committed nothing so far must not create the
+    // branch on `origin` either (US-006): `git push -u` publishes the ref even
+    // when it is still the base commit, and a nightly check that found nothing
+    // would leave a branch behind every night.
+    if (await this.committedNothing(session)) {
+      logger.info('nothing committed yet on the scheduled run, so nothing to push', {
+        session: session.id,
+        branch: session.featureBranch,
+      });
+      return;
+    }
+
     let result: PushResult;
     try {
       result = await this.pushBranch(session);
@@ -273,6 +301,12 @@ export class DeliveryService implements BuildCompletion {
    * stderr or GitHub's own message — so "Retry" always has something to show.
    */
   private async deliver(session: Session, stories: readonly Story[]): Promise<DeliveryResult> {
+    // A run that committed nothing has nothing to deliver (US-006): no branch
+    // worth pushing, no pull request GitHub would accept, and nothing to
+    // review. It finishes here, clean.
+    const clean = await this.cleanRun(session);
+    if (clean !== null) return clean;
+
     let push: PushResult;
     try {
       push = await this.pushBranch(session);
@@ -416,6 +450,97 @@ export class DeliveryService implements BuildCompletion {
     }
 
     return this.finish(session, opened.pullRequest.url, opened.adopted, delivered);
+  }
+
+  /**
+   * The delivery of a run that changed nothing, or `null` when there is real
+   * work to deliver (US-006).
+   *
+   * Only asked of a recurring task's run: a session a person planned and
+   * watched build is theirs to finish, and an empty branch there is a
+   * surprise they should see as the "No commits between …" failure GitHub
+   * answers with. A scheduled run is the opposite — nobody is watching, a
+   * nightly check that finds nothing is the *expected* result, and pushing a
+   * branch and opening an empty pull request for it every night is exactly
+   * the noise this feature exists to avoid.
+   *
+   * Nothing is skipped on a guess. A count git could not give, a container
+   * that would not start, and a session that somehow already has a pull
+   * request all fall through to the ordinary delivery, where a real failure is
+   * reported as one.
+   */
+  private async cleanRun(session: Session): Promise<DeliveryResult | null> {
+    if (session.prUrl !== null) return null;
+    if (!(await this.committedNothing(session))) return null;
+
+    logger.info('scheduled run finished clean: nothing was committed, so no pull request', {
+      session: session.id,
+      name: session.name,
+      branch: session.featureBranch,
+      base: session.baseBranch,
+    });
+
+    const message =
+      `"${session.name}" committed nothing on "${session.featureBranch}", so the branch was not ` +
+      'pushed and no pull request was opened.';
+    const updated = updateSession(this.db, session.id, {
+      status: 'finished',
+      lastError: null,
+      failureStage: null,
+    });
+
+    return {
+      ok: true,
+      sessionId: session.id,
+      status: updated?.status ?? 'finished',
+      prUrl: null,
+      adopted: false,
+      code: 'clean',
+      message,
+      stderr: '',
+    };
+  }
+
+  /**
+   * Whether this is a scheduled run whose feature branch is still exactly its
+   * base branch (US-006).
+   *
+   * Asked of nothing else: an interactive session pushes and opens its pull
+   * request the way it always has, and this question is not even put to git
+   * for one. Anything git could not answer — a refused container, a range it
+   * could not resolve, output that is not a number — is `false`, so the only
+   * thing that skips a push is a count that really came back zero.
+   */
+  private async committedNothing(session: Session): Promise<boolean> {
+    if (session.recurringTaskId === null) return false;
+
+    let count: CommitCount;
+    try {
+      const container = await this.containers.start(session);
+      count = await countBranchCommits(this.exec, container.id, {
+        baseBranch: session.baseBranch,
+        featureBranch: session.featureBranch,
+        timeoutMs: this.config.pushTimeoutMs,
+      });
+    } catch (cause) {
+      // The push this precedes starts the same container and reports the same
+      // failure properly, so there is nothing to add here.
+      logger.warn('could not count the commits of a scheduled run', {
+        session: session.id,
+        error: describe(cause),
+      });
+      return false;
+    }
+
+    if (!count.known) {
+      logger.warn('the commits of a scheduled run could not be counted; delivering it as usual', {
+        session: session.id,
+        branch: session.featureBranch,
+        error: count.message,
+      });
+      return false;
+    }
+    return count.commits === 0;
   }
 
   /**
@@ -799,7 +924,7 @@ export class DeliveryService implements BuildCompletion {
 
   private failed(
     session: Session,
-    code: Exclude<DeliveryCode, 'ok' | 'usage_limit_hold'>,
+    code: DeliveryFailureCode,
     detail: { message: string; stderr: string },
   ): DeliveryResult {
     const merged = this.takenOver(session);

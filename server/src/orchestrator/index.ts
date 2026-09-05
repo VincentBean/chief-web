@@ -38,4 +38,5 @@ export {
   sessionRepoDir,
   sessionWorkspaceDir,
   stageSessionKey,
+  writeSessionFile,
 } from './workspace.js';

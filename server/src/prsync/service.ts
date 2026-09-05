@@ -376,6 +376,23 @@ export class PrSyncService implements PullRequestSync {
 }
 
 /**
+ * Whether this session's pull request is open right now.
+ *
+ * The status column is the whole answer, and it is {@link PrSyncService} that
+ * makes it one: a merged pull request is moved to `merged` and one closed
+ * without merging back to `finished`, so a session still sitting in one of
+ * the synced statuses with a `pr_url` on it has a pull request nobody has
+ * dealt with yet. Recurring tasks (US-005) hold their next occurrence back on
+ * exactly this, rather than asking GitHub a second time.
+ */
+export function hasOpenPullRequest(session: Session): boolean {
+  return (
+    session.prUrl !== null &&
+    (SYNCED_STATUSES as readonly SessionStatus[]).includes(session.status)
+  );
+}
+
+/**
  * The number in `https://github.com/owner/repo/pull/123`, or null when the URL
  * is not one. Enterprise hosts and a trailing `/files` or `#discussion_r…` are
  * all tolerated: only the `/pull/<number>` segment is looked for.

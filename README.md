@@ -33,6 +33,15 @@ workspace and branch — instead of one terminal I have to keep open per feature
 So sessions here are queued and run in parallel, they survive a closed tab or a
 restart, and they can be started on a schedule.
 
+**Recurring sessions.** A repository can also be given
+[recurring tasks](docs/scheduling.md#recurring-tasks): a stored prompt ("run
+rector and fix what it reports", "check the code style against the guide") plus
+a cron expression. Every time one comes due, chief-web spawns a fresh session
+for it with a PRD it generates itself, builds it with nobody in the loop, and
+opens a pull request — or finishes clean with no pull request when the run found
+nothing to change. While the previous run's pull request is still open the next
+occurrence is skipped, so nothing stacks up.
+
 Installation requires nothing but Docker.
 
 **New here?** [Prerequisites](#prerequisites) → [Setup](#setup) →
@@ -142,10 +151,10 @@ signed in; enter the password from step 1. There are no user accounts — the
 password *is* the operator — and the session cookie lasts 7 days.
 
 The home page is the [overview](docs/interface.md#overview); the sidebar links
-to **Sessions**, **Pull requests**, **Repositories**, **Terminals** and
-**Settings**. Until setup is complete the overview shows a checklist of what is
-still missing — Claude Code not signed in, no repository yet — which is steps
-4–6.
+to **Sessions**, **Pull requests**, **Recurring tasks**, **Repositories**,
+**Terminals** and **Settings**. Until setup is complete the overview shows a
+checklist of what is still missing — Claude Code not signed in, no repository
+yet — which is steps 4–6.
 
 ### 4. Add a GitHub token
 
@@ -245,10 +254,10 @@ The rest of the manual lives in [`docs/`](docs/):
 | [Your first session](docs/first-session.md) | one feature end to end: create, plan a PRD, mark ready, build, pull request, merge |
 | [Architecture](docs/architecture.md) | one container per session, the volumes, the Docker socket, the data layer, the runner image |
 | [Repositories](docs/repositories.md) | registering a remote, deploy keys, testing the connection |
-| [Sessions](docs/sessions.md) | what a session is, setup, planning the PRD, marking it ready, the session states |
+| [Sessions](docs/sessions.md) | what a session is, setup, sessions a recurring task started, planning the PRD, marking it ready, the session states |
 | [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
 | [Code review](docs/code-review.md) | the per-session flag, the review model, what lands on the pull request, the three attempts, the feedback hand-off, reviewing an open pull request by hand |
-| [Scheduling and concurrency](docs/scheduling.md) | scheduled starts and the FIFO build queue |
+| [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the FIFO build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | the conflict scan, the `chief/`-branch rule, the three attempts, and what letting an agent push to your pull requests means |
 | [Sentry auto-fixer](docs/sentry.md) | the auth token and its scopes, linking a project, the status lifecycle, the classification model and the polling interval, and why merging stays the only human act |
 | [Web interface](docs/interface.md) | the layout and shortcuts, the overview, sessions, browser terminals, the settings page |
