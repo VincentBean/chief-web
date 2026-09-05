@@ -17,10 +17,15 @@ import {
   getSession,
   listBuildQueue,
   listDueWaitingSessions,
+  listPrConflictFixes,
+  listPrReviews,
+  listPrRuns,
   listSessions,
   listStories,
   listWaitingSessions,
   nowIso,
+  parsePrRefId,
+  prRefId,
   removeBuildQueueEntry,
   removeQueuedBuild,
   type Session,
@@ -121,7 +126,7 @@ export interface BuildView {
   readonly queued: boolean;
   /** Its 1-based place in the FIFO queue — the "#2" the UI shows — or null. */
   readonly queuePosition: number | null;
-  /** Sessions building right now, across the whole server. */
+  /** Build slots in use right now, of every kind, across the server (US-006). */
   readonly activeBuilds: number;
   /** The cap those builds are counted against (US-004). */
   readonly maxConcurrentBuilds: number;
@@ -221,7 +226,7 @@ interface PrdSnapshot {
 }
 
 /**
- * Sessions occupying a build slot right now.
+ * The session statuses that occupy a build slot.
  *
  * A `waiting` session (US-003) is held by Claude's usage limit rather than
  * working, but it has not given anything back: its container is still up and
@@ -237,13 +242,7 @@ interface PrdSnapshot {
  * here: the feedback run the session is waiting on holds a slot of its own
  * through {@link countActivePrRuns}, and counting both would spend two.
  */
-function countActiveBuilds(db: Database): number {
-  return (
-    countSessionsByStatus(db, 'building') +
-    countSessionsByStatus(db, 'waiting') +
-    countSessionsByStatus(db, 'reviewing')
-  );
-}
+const ACTIVE_BUILD_STATUSES: readonly SessionStatus[] = ['building', 'waiting', 'reviewing'];
 
 /**
  * A kind of work that can hold a build slot (US-001).
@@ -252,6 +251,60 @@ function countActiveBuilds(db: Database): number {
  * pool but keeps its timer-retry instead of joining the queue.
  */
 export type BuildSlotKind = BuildQueueKind | 'pr-conflict-fix';
+/**
+ * One build slot that is in use, and what is using it (US-006).
+ *
+ * The overview page renders these as the meter's breakdown, so `label` is for
+ * a person — a session name, "Review of PR #12" — while `kind` and `refId` are
+ * how the rest of the server names the same work.
+ */
+export interface BuildSlotUse {
+  readonly kind: BuildSlotKind;
+  /** A session id, or `<repositoryId>:<prNumber>` for the pull-request kinds. */
+  readonly refId: string;
+  readonly label: string;
+}
+
+/** One entry of the unified queue, with its 1-based place in it (US-006). */
+export interface QueuedBuildView {
+  readonly kind: BuildQueueKind;
+  readonly refId: string;
+  readonly label: string;
+  /** 1-based FIFO position: the "#2" the UI shows. */
+  readonly position: number;
+  readonly queuedAt: string;
+}
+
+/** The whole build pool in one answer: what holds it, and what waits for it. */
+export interface BuildPoolView {
+  /** Slots in use — always `slots.length`, and exactly what the cap counts. */
+  readonly active: number;
+  readonly max: number;
+  /** `max - active`; negative when the cap was lowered under running work. */
+  readonly free: number;
+  readonly slots: readonly BuildSlotUse[];
+  /** Everything in the unified FIFO queue — always `queue.length`. */
+  readonly queued: number;
+  readonly queue: readonly QueuedBuildView[];
+}
+
+/**
+ * How one piece of work reads to a person.
+ *
+ * A session is its name; a pull-request kind is its number, because the number
+ * is what the operator sees on GitHub and the repository is usually obvious
+ * from the rest of the page. A reference that cannot be parsed is shown raw
+ * rather than hidden — an unreadable label beats a missing slot.
+ */
+function slotLabel(db: Database, kind: BuildSlotKind, refId: string): string {
+  if (kind === 'session') return getSession(db, refId)?.name ?? refId;
+  const pr = parsePrRefId(refId);
+  const number = pr === null ? refId : `#${String(pr.prNumber)}`;
+  if (kind === 'pr-review') return `Review of PR ${number}`;
+  if (kind === 'pr-feedback') return `Feedback on PR ${number}`;
+  return `Conflict fix: PR ${number}`;
+}
+
 
 /**
  * How the pump starts one kind of queued entry.
@@ -285,7 +338,7 @@ export class BuildService {
    * it has to be counted against the cap here or two simultaneous starts —
    * the pump and a conflict-fix scan, say — would both see the same free slot.
    */
-  private readonly starting = new Set<string>();
+  private readonly starting = new Map<string, { kind: BuildSlotKind; refId: string }>();
   /** How the pump starts each kind of queued entry; see {@link registerStart}. */
   private readonly starters = new Map<BuildQueueKind, QueuedStart>();
   /**
@@ -354,7 +407,7 @@ export class BuildService {
    */
   claimStart(kind: BuildSlotKind, refId: string): () => void {
     const key = slotKey(kind, refId);
-    this.starting.add(key);
+    this.starting.set(key, { kind, refId });
     let released = false;
     return () => {
       if (released) return;
@@ -385,6 +438,82 @@ export class BuildService {
   /** The whole queue in FIFO order, every kind together. */
   queue(): BuildQueueEntry[] {
     return listBuildQueue(this.db);
+  }
+
+  /**
+   * Every build slot in use right now, and what is using it (US-006).
+   *
+   * This is the pool's occupancy, and the only definition of it: `freeSlots()`
+   * subtracts its length and the stats page lists its entries, so the meter can
+   * never show capacity the cap will not hand out. It counts exactly what the
+   * cap does — sessions `building`, `waiting` or `reviewing`, starts in flight
+   * here, running feedback runs, running reviews and running conflict fixes.
+   *
+   * Keyed on kind and reference, so work that is both starting here and already
+   * live in the database — the window between a row going `running` and its
+   * claim being released — is the one slot it actually is.
+   */
+  slotsInUse(): BuildSlotUse[] {
+    const uses = new Map<string, BuildSlotUse>();
+    const add = (kind: BuildSlotKind, refId: string, label: string): void => {
+      uses.set(slotKey(kind, refId), { kind, refId, label });
+    };
+
+    for (const status of ACTIVE_BUILD_STATUSES) {
+      for (const session of listSessions(this.db, { status })) {
+        add('session', session.id, session.name);
+      }
+    }
+    for (const run of listPrRuns(this.db)) {
+      if (run.status !== 'running') continue;
+      const refId = prRefId(run.repositoryId, run.prNumber);
+      add('pr-feedback', refId, slotLabel(this.db, 'pr-feedback', refId));
+    }
+    for (const review of listPrReviews(this.db)) {
+      if (review.status !== 'running') continue;
+      const refId = prRefId(review.repositoryId, review.prNumber);
+      add('pr-review', refId, slotLabel(this.db, 'pr-review', refId));
+    }
+    for (const fix of listPrConflictFixes(this.db)) {
+      if (fix.status !== 'running') continue;
+      const refId = prRefId(fix.repositoryId, fix.prNumber);
+      add('pr-conflict-fix', refId, slotLabel(this.db, 'pr-conflict-fix', refId));
+    }
+    // Starts whose work the database cannot see yet: the container is coming
+    // up, so nothing but this set is holding their slot.
+    for (const [key, claim] of this.starting) {
+      if (uses.has(key)) continue;
+      uses.set(key, { ...claim, label: slotLabel(this.db, claim.kind, claim.refId) });
+    }
+    return [...uses.values()];
+  }
+
+  /**
+   * The whole pool for the overview page (US-006): the slots in use with a
+   * label each, and the unified queue in FIFO order.
+   *
+   * One read of the same accounting `freeSlots()` does, so the number on the
+   * meter and the number the cap enforces are the same number by construction
+   * rather than by two places agreeing to count the same way.
+   */
+  pool(): BuildPoolView {
+    const max = getMaxConcurrentSessions(this.db, this.config);
+    const slots = this.slotsInUse();
+    const queue = this.queue().map((entry, index) => ({
+      kind: entry.kind,
+      refId: entry.refId,
+      label: slotLabel(this.db, entry.kind, entry.refId),
+      position: index + 1,
+      queuedAt: entry.queuedAt,
+    }));
+    return {
+      active: slots.length,
+      max,
+      free: max - slots.length,
+      slots,
+      queued: queue.length,
+      queue,
+    };
   }
 
   status(sessionId: string): BuildView {
@@ -471,19 +600,11 @@ export class BuildService {
    * reviews and conflict fixes (US-005) share the cap: they hold a slot each
    * while they run, and a build must not think the last one is free because
    * the run holding it is not a session.
+   *
+   * Counted off {@link slotsInUse}, which is also what the stats page shows.
    */
   freeSlots(): number {
-    const max = getMaxConcurrentSessions(this.db, this.config);
-    // A session whose container is still coming up is not `building` yet, but
-    // its slot is already spoken for.
-    return (
-      max -
-      (countActiveBuilds(this.db) +
-        this.starting.size +
-        countActivePrRuns(this.db) +
-        countActivePrReviews(this.db) +
-        countActivePrConflictFixes(this.db))
-    );
+    return getMaxConcurrentSessions(this.db, this.config) - this.slotsInUse().length;
   }
 
   /**
@@ -1406,7 +1527,7 @@ export class BuildService {
       startedAt: state?.startedAt ?? null,
       queued: getQueuedBuild(this.db, 'session', session.id) !== null,
       queuePosition: buildQueuePosition(this.db, 'session', session.id),
-      activeBuilds: countActiveBuilds(this.db),
+      activeBuilds: this.slotsInUse().length,
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     };
   }

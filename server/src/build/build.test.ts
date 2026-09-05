@@ -8,6 +8,8 @@ import { type Config, loadConfig } from '../config.js';
 import {
   countSessionsByStatus,
   createPrConflictFix,
+  createPrReview,
+  createPrRun,
   createRepository,
   createSession,
   type Database,
@@ -20,11 +22,14 @@ import {
   listSessions,
   listStories,
   openDatabase,
+  prRefId,
   type Session,
   setSetting,
   setSettingNumber,
   type Story,
   syncStories,
+  updatePrReview,
+  updatePrRun,
   updateSession,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
@@ -1435,6 +1440,105 @@ describe('concurrency and the build queue', () => {
     assert.equal(queued.status, 'ready');
     assert.deepEqual(fleet.world.containerStarts, []);
     assert.deepEqual(fleet.entered, []);
+  });
+
+  it('reports every slot the cap counts, with a label for each (US-006)', () => {
+    const fleet = new Fleet(6, ['add-billing', 'add-search']);
+    const db = fleet.world.db;
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const search = fleet.named('add-search');
+
+    // One of every kind of occupant: the three session statuses that hold a
+    // slot, a feedback run, a review, a conflict fix and a start in flight.
+    updateSession(db, login.id, { status: 'building' });
+    updateSession(db, billing.id, { status: 'waiting' });
+    updateSession(db, search.id, { status: 'reviewing' });
+    const pr = (prNumber: number) => ({
+      repositoryId: fleet.world.repositoryId,
+      prNumber,
+      prUrl: `https://github.com/acme/demo/pull/${String(prNumber)}`,
+      prTitle: 'Booking totals in minor units',
+      headBranch: 'chief/booking-minor-units',
+      baseBranch: 'main',
+    });
+    const run = createPrRun(db, pr(12));
+    updatePrRun(db, run.id, { status: 'running' });
+    const review = createPrReview(db, pr(9));
+    updatePrReview(db, review.id, { status: 'running' });
+    createPrConflictFix(db, { ...pr(7), headSha: 'head1111', baseSha: 'base1111' });
+    const release = fleet.builds.claimStart(
+      'pr-review',
+      prRefId(fleet.world.repositoryId, 21),
+    );
+
+    const pool = fleet.builds.pool();
+
+    // The whole point of the story: the meter's number is the cap's number.
+    assert.equal(pool.active, 7);
+    assert.equal(pool.max, 6);
+    assert.equal(pool.free, -1);
+    assert.equal(pool.active, pool.max - fleet.builds.freeSlots());
+    assert.equal(pool.slots.length, pool.active);
+
+    const labels = new Map(pool.slots.map((slot) => [slot.refId, slot]));
+    assert.equal(labels.get(login.id)?.label, 'add-login');
+    assert.equal(labels.get(login.id)?.kind, 'session');
+    assert.equal(labels.get(billing.id)?.label, 'add-billing');
+    assert.equal(labels.get(search.id)?.label, 'add-search');
+    const feedback = labels.get(prRefId(fleet.world.repositoryId, 12));
+    assert.deepEqual([feedback?.kind, feedback?.label], ['pr-feedback', 'Feedback on PR #12']);
+    const reviewing = labels.get(prRefId(fleet.world.repositoryId, 9));
+    assert.deepEqual([reviewing?.kind, reviewing?.label], ['pr-review', 'Review of PR #9']);
+    const fixing = labels.get(prRefId(fleet.world.repositoryId, 7));
+    assert.deepEqual([fixing?.kind, fixing?.label], ['pr-conflict-fix', 'Conflict fix: PR #7']);
+    const starting = labels.get(prRefId(fleet.world.repositoryId, 21));
+    assert.deepEqual([starting?.kind, starting?.label], ['pr-review', 'Review of PR #21']);
+
+    // The in-flight start gives its slot back the moment it is released.
+    release();
+    assert.equal(fleet.builds.pool().active, 6);
+    assert.equal(fleet.builds.freeSlots(), 0);
+  });
+
+  it('counts work that is both starting and running as the one slot it is', () => {
+    const fleet = new Fleet(2, []);
+    const login = fleet.named('add-login');
+    updateSession(fleet.world.db, login.id, { status: 'building' });
+
+    // The window between the row going `building` and the claim being
+    // released: one session, one container, one slot.
+    const release = fleet.builds.claimStart('session', login.id);
+    const pool = fleet.builds.pool();
+    assert.equal(pool.active, 1);
+    assert.equal(pool.slots.length, 1);
+    assert.equal(fleet.builds.freeSlots(), 1);
+    release();
+  });
+
+  it('reports the unified queue in FIFO order, with a label per entry (US-006)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    fleet.builds.enqueue('pr-review', prRefId(fleet.world.repositoryId, 12));
+    fleet.builds.enqueue('pr-feedback', prRefId(fleet.world.repositoryId, 12));
+
+    const pool = fleet.builds.pool();
+    assert.equal(pool.queued, 3);
+    assert.equal(pool.queue.length, pool.queued);
+    assert.deepEqual(
+      pool.queue.map((entry) => [entry.position, entry.kind, entry.label]),
+      [
+        [1, 'session', 'add-billing'],
+        [2, 'pr-review', 'Review of PR #12'],
+        [3, 'pr-feedback', 'Feedback on PR #12'],
+      ],
+    );
+
+    await fleet.finish(login);
   });
 
   it('starts the queue in FIFO order as slots free', async () => {

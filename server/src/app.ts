@@ -331,7 +331,7 @@ export function createApp(
   const hold = new UsageLimitHold(db);
   api.use(createLimitsRouter(hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
-  api.use(createStatsRouter(db, config, hold));
+  api.use(createStatsRouter(db, hold, builds));
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
   // dispatching on the stage the session failed at.
   const retries = createRetryService(db, builds, delivery);

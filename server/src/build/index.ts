@@ -55,11 +55,14 @@ export {
 export {
   type BuildCompletion,
   BuildError,
+  type BuildPoolView,
   BuildService,
   type BuildSlotKind,
+  type BuildSlotUse,
   type BuildView,
   createBuildService,
   MarkSessionFinished,
+  type QueuedBuildView,
   type QueuedStart,
 } from './service.js';
 export {

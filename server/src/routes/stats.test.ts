@@ -8,13 +8,21 @@ import { createAuthService } from '../auth/index.js';
 import { loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createPrConflictFix,
+  createPrReview,
+  createPrRun,
   createRepository,
   createSession,
   type Database,
+  enqueueBuild,
   featureBranchFor,
   IN_MEMORY,
+  listSessions,
   openDatabase,
+  prRefId,
   syncStories,
+  updatePrReview,
+  updatePrRun,
   updateSession,
   updateStory,
 } from '../db/index.js';
@@ -99,7 +107,15 @@ describe('stats api', () => {
 
     assert.deepEqual(body.stories, { total: 4, done: 3, inProgress: 1, todo: 0 });
     assert.equal(body.pullRequestsOpened, 1);
-    assert.deepEqual(body.builds, { active: 1, queued: 0, max: 4 });
+    assert.equal(body.builds.active, 1);
+    assert.equal(body.builds.queued, 0);
+    assert.equal(body.builds.max, 4);
+    assert.equal(body.builds.free, 3);
+    assert.deepEqual(
+      body.builds.slots.map((slot) => [slot.kind, slot.label]),
+      [['session', 'two']],
+    );
+    assert.equal(body.builds.queue.length, 0);
     assert.equal(body.hold.until, null);
 
     assert.equal(body.activity.length, 14);
@@ -162,6 +178,93 @@ describe('stats api', () => {
       // The three ended sessions, not just the one still called `finished`.
       assert.equal(body.repositories[0]?.finished, 3);
       assert.equal(body.activity[body.activity.length - 1]?.sessionsFinished, 3);
+    });
+  });
+
+  /*
+   * Also declared last: it puts a slot of every kind in use, which the totals
+   * the tests above assert would otherwise have to allow for.
+   */
+  describe('build slots and the queue (US-006)', () => {
+    let buildingId: string;
+
+    before(() => {
+      const sessions = listSessions(db);
+      const of = (name: string): string => {
+        const found = sessions.find((session) => session.name === name);
+        if (found === undefined) throw new Error(`no session ${name}`);
+        return found.id;
+      };
+      buildingId = of('two');
+      // `three` was `failed`; `four` had a pull request open. Both of them
+      // holding a slot now is what a full pool looks like.
+      updateSession(db, of('three'), { status: 'waiting' });
+      updateSession(db, of('four'), { status: 'reviewing' });
+
+      const pr = (prNumber: number) => ({
+        repositoryId,
+        prNumber,
+        prUrl: `https://github.com/acme/demo/pull/${String(prNumber)}`,
+        prTitle: 'Booking totals in minor units',
+        headBranch: 'chief/booking-minor-units',
+        baseBranch: 'main',
+      });
+      const run = createPrRun(db, pr(31));
+      updatePrRun(db, run.id, { status: 'running' });
+      const review = createPrReview(db, pr(12));
+      updatePrReview(db, review.id, { status: 'running' });
+      createPrConflictFix(db, { ...pr(7), headSha: 'head1111', baseSha: 'base1111' });
+
+      enqueueBuild(db, { kind: 'session', refId: of('one'), queuedAt: '2026-09-05T10:00:00.000Z' });
+      enqueueBuild(db, {
+        kind: 'pr-review',
+        refId: prRefId(repositoryId, 44),
+        queuedAt: '2026-09-05T10:00:01.000Z',
+      });
+    });
+
+    it('counts every kind of slot the cap counts, and names each one', async () => {
+      const response = await fetch(`${baseUrl}/api/stats`, { headers: { cookie } });
+      const body = (await response.json()) as StatsView;
+
+      // Three sessions, a feedback run, a review and a conflict fix: exactly
+      // what `freeSlots()` subtracts, and more than the cap of 4 allows.
+      assert.equal(body.builds.active, 6);
+      assert.equal(body.builds.max, 4);
+      assert.equal(body.builds.free, -2);
+      assert.equal(body.builds.slots.length, body.builds.active);
+      assert.deepEqual(
+        [...body.builds.slots]
+          .map((slot) => `${slot.kind}/${slot.label}`)
+          .sort((a, b) => a.localeCompare(b)),
+        [
+          'pr-conflict-fix/Conflict fix: PR #7',
+          'pr-feedback/Feedback on PR #31',
+          'pr-review/Review of PR #12',
+          'session/four',
+          'session/three',
+          'session/two',
+        ],
+      );
+      assert.equal(
+        body.builds.slots.find((slot) => slot.label === 'two')?.refId,
+        buildingId,
+      );
+    });
+
+    it('reports the unified queue in FIFO order', async () => {
+      const response = await fetch(`${baseUrl}/api/stats`, { headers: { cookie } });
+      const body = (await response.json()) as StatsView;
+
+      assert.equal(body.builds.queued, 2);
+      assert.equal(body.builds.queue.length, body.builds.queued);
+      assert.deepEqual(
+        body.builds.queue.map((entry) => [entry.position, entry.kind, entry.label]),
+        [
+          [1, 'session', 'one'],
+          [2, 'pr-review', 'Review of PR #44'],
+        ],
+      );
     });
   });
 });

@@ -620,7 +620,7 @@ export interface Build {
   queued: boolean;
   /** Its 1-based place in that queue — shown as "Queued (#2)" — or null. */
   queuePosition: number | null;
-  /** Sessions building right now, across the whole server. */
+  /** Build slots in use right now, of every kind, across the server (US-006). */
   activeBuilds: number;
   /** The cap they are counted against, from the settings page. */
   maxConcurrentBuilds: number;
@@ -678,6 +678,25 @@ export interface RepositoryStats {
   active: number;
 }
 
+/** One build slot in use, and what is holding it (US-006). */
+export interface BuildSlot {
+  kind: 'session' | 'pr-review' | 'pr-feedback' | 'pr-conflict-fix';
+  /** A session id, or `<repositoryId>:<prNumber>` for the pull-request kinds. */
+  refId: string;
+  /** For a person: a session name, "Review of PR #12", "Conflict fix: PR #7". */
+  label: string;
+}
+
+/** One entry of the unified build queue, in FIFO order (US-006). */
+export interface QueuedBuild {
+  kind: 'session' | 'pr-review' | 'pr-feedback';
+  refId: string;
+  label: string;
+  /** 1-based place in the queue: the "#2" the UI shows. */
+  position: number;
+  queuedAt: string;
+}
+
 /** Mirrors the server's `StatsView`: everything the overview page shows. */
 export interface Stats {
   generatedAt: string;
@@ -685,7 +704,15 @@ export interface Stats {
   stories: { total: number; done: number; inProgress: number; todo: number };
   prRuns: { total: number; running: number; finished: number; failed: number };
   pullRequestsOpened: number;
-  builds: { active: number; queued: number; max: number };
+  builds: {
+    /** Build slots in use, of every kind — what the cap actually counts. */
+    active: number;
+    queued: number;
+    max: number;
+    free: number;
+    slots: BuildSlot[];
+    queue: QueuedBuild[];
+  };
   hold: { until: string | null };
   /** Oldest first. */
   activity: DayActivity[];
