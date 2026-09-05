@@ -138,8 +138,6 @@ export interface Session {
   readonly prTargetBranch: PrTargetBranch;
   /** UTC ISO timestamp the build should start at, or null when unscheduled. */
   readonly scheduledStartAt: string | null;
-  /** UTC ISO timestamp the session entered the FIFO build queue (US-018). */
-  readonly queuedAt: string | null;
   readonly containerId: string | null;
   readonly prUrl: string | null;
   readonly lastError: string | null;
@@ -180,7 +178,6 @@ export interface UpdateSessionInput {
   readonly featureBranch?: string;
   readonly prTargetBranch?: PrTargetBranch;
   readonly scheduledStartAt?: string | null;
-  readonly queuedAt?: string | null;
   readonly containerId?: string | null;
   readonly prUrl?: string | null;
   readonly lastError?: string | null;
@@ -201,7 +198,6 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   featureBranch: 'feature_branch',
   prTargetBranch: 'pr_target_branch',
   scheduledStartAt: 'scheduled_start_at',
-  queuedAt: 'queued_at',
   containerId: 'container_id',
   prUrl: 'pr_url',
   lastError: 'last_error',
@@ -250,7 +246,6 @@ export function mapSession(row: Row): Session {
     featureBranch: text(row, 'feature_branch'),
     prTargetBranch: enumeration(row, 'pr_target_branch', PR_TARGET_BRANCHES),
     scheduledStartAt: nullableText(row, 'scheduled_start_at'),
-    queuedAt: nullableText(row, 'queued_at'),
     containerId: nullableText(row, 'container_id'),
     prUrl: nullableText(row, 'pr_url'),
     lastError: nullableText(row, 'last_error'),
@@ -275,7 +270,6 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     featureBranch: input.featureBranch ?? featureBranchFor(input.name),
     prTargetBranch: input.prTargetBranch,
     scheduledStartAt: input.scheduledStartAt ?? null,
-    queuedAt: null,
     containerId: null,
     prUrl: null,
     lastError: null,
@@ -289,9 +283,9 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
   db.prepare(
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
-        scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+        scheduled_start_at, container_id, pr_url, last_error, failure_stage,
         waiting_until, code_review, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -301,7 +295,6 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.featureBranch,
     session.prTargetBranch,
     session.scheduledStartAt,
-    session.queuedAt,
     session.containerId,
     session.prUrl,
     session.lastError,
@@ -341,44 +334,10 @@ export function listSessions(db: Database, filter: ListSessionsFilter = {}): Ses
 }
 
 /**
- * Sessions waiting for a build slot, oldest first — the FIFO queue of US-018.
- *
- * The id is the tie-break, so two sessions queued in the same millisecond still
- * have a total order and every reader agrees on it; {@link queuePosition}
- * counts with exactly the same comparison.
- */
-export function listQueuedSessions(db: Database): Session[] {
-  return db
-    .prepare('SELECT * FROM sessions WHERE queued_at IS NOT NULL ORDER BY queued_at ASC, id ASC')
-    .all()
-    .map(mapSession);
-}
-
-/**
- * Where a session stands in that queue, 1-based — the "#2" the UI shows — or
- * `null` when it is not queued. Counted in SQL rather than from a list, so the
- * dashboard's per-session view costs one row instead of the whole queue.
- */
-export function queuePosition(
-  db: Database,
-  session: Pick<Session, 'id' | 'queuedAt'>,
-): number | null {
-  if (session.queuedAt === null) return null;
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS count FROM sessions
-        WHERE queued_at IS NOT NULL
-          AND (queued_at < :queued_at OR (queued_at = :queued_at AND id <= :id))`,
-    )
-    .get({ ':queued_at': session.queuedAt, ':id': session.id });
-  return row ? integer(row, 'count') : null;
-}
-
-/**
  * Sessions held by Claude's usage limit whose hold has run out (US-006).
  *
  * Ordered the way they will be resumed, and tie-broken on the id exactly as
- * {@link listQueuedSessions} is: a hold parks every session on the same
+ * the build queue is: a hold parks every session on the same
  * expiry, so without the tie-break "their existing order" would be no order
  * at all — and the sessions that do not fit under the concurrency cap go on
  * that very queue, where the same comparison has to agree.

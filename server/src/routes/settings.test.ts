@@ -3,6 +3,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
+import express from 'express';
+
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
 import { loadConfig } from '../config.js';
@@ -14,6 +16,7 @@ import {
   openDatabase,
   setSetting,
 } from '../db/index.js';
+import { createSettingsRouter } from './settings.js';
 import {
   getConflictFixEnabled,
   getMaxConcurrentSessions,
@@ -565,5 +568,40 @@ describe('settings api', () => {
     assert.equal(getMaxConcurrentSessions(db, config), 1);
     setSetting(db, 'max_concurrent_sessions', '9999');
     assert.equal(getMaxConcurrentSessions(db, config), 50);
+  });
+
+  it('drains the build queue the moment the cap is raised (US-001)', async () => {
+    // Raising the cap frees slots nothing else would notice until the
+    // scheduler's next tick — a minute of an idle pool with work waiting in it.
+    const pumps: number[] = [];
+    const bare = express();
+    bare.use(express.json());
+    bare.use(
+      createSettingsRouter(db, loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD }), {
+        pump: () => pumps.push(1),
+      }),
+    );
+    const local = bare.listen(0, '127.0.0.1');
+    await new Promise((resolve) => local.once('listening', resolve));
+    const url = `http://127.0.0.1:${(local.address() as AddressInfo).port}/settings`;
+    const save = (body: unknown): Promise<Response> =>
+      fetch(url, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    assert.equal((await save({ maxConcurrentSessions: 6 })).status, 200);
+    assert.equal(pumps.length, 1);
+
+    // Only the cap matters: saving anything else leaves the queue alone.
+    assert.equal((await save({ agentTimeoutMinutes: 30 })).status, 200);
+    assert.equal(pumps.length, 1);
+
+    // And a rejected save never fires it.
+    assert.equal((await save({ maxConcurrentSessions: 0 })).status, 400);
+    assert.equal(pumps.length, 1);
+
+    await new Promise((resolve) => local.close(resolve));
   });
 });

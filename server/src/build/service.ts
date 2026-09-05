@@ -2,21 +2,27 @@ import fs from 'node:fs';
 
 import type { Config } from '../config.js';
 import {
+  type BuildQueueEntry,
+  type BuildQueueKind,
+  buildQueuePosition,
   countActivePrConflictFixes,
   countActivePrReviews,
   countActivePrRuns,
   countSessionsByStatus,
   type Database,
+  enqueueBuild,
   failSession,
   type FailureStage,
+  getQueuedBuild,
   getSession,
+  listBuildQueue,
   listDueWaitingSessions,
-  listQueuedSessions,
   listSessions,
   listStories,
   listWaitingSessions,
   nowIso,
-  queuePosition,
+  removeBuildQueueEntry,
+  removeQueuedBuild,
   type Session,
   type SessionStatus,
   type Story,
@@ -239,14 +245,49 @@ function countActiveBuilds(db: Database): number {
   );
 }
 
+/**
+ * A kind of work that can hold a build slot (US-001).
+ *
+ * The three queueable kinds plus the merge-conflict fixer, which shares the
+ * pool but keeps its timer-retry instead of joining the queue.
+ */
+export type BuildSlotKind = BuildQueueKind | 'pr-conflict-fix';
+
+/**
+ * How the pump starts one kind of queued entry.
+ *
+ * Registered per kind at composition time rather than imported here, because
+ * the services that start reviews and feedback runs sit *above* this one and
+ * already depend on it for the cap. The pump only ever asks three things: is
+ * it still there, is it already running, and start it.
+ */
+export interface QueuedStart {
+  /** False when the referent is gone; the entry is dropped rather than started. */
+  exists?(entry: BuildQueueEntry): boolean;
+  /** True when this server is already running that work — skip, never start twice. */
+  isRunning?(entry: BuildQueueEntry): boolean;
+  /** Starts the entry. It is already out of the queue by the time this runs. */
+  start(entry: BuildQueueEntry): Promise<void>;
+  /** Puts a start that threw somewhere the operator will see it. */
+  onFailed?(entry: BuildQueueEntry, message: string): void;
+}
+
+/** The in-flight key of one piece of work, so two kinds cannot collide on an id. */
+function slotKey(kind: BuildSlotKind, refId: string): string {
+  return `${kind}:${refId}`;
+}
+
 export class BuildService {
   private readonly runs = new Map<string, RunState>();
   /**
-   * Sessions whose container is being started right now. They are not
-   * `building` in the database yet, so they have to be counted against the cap
-   * here or two simultaneous starts would both see the same free slot.
+   * Work whose container is being started right now, of every kind (US-001).
+   * It is not `building`, `running` or anything else in the database yet, so
+   * it has to be counted against the cap here or two simultaneous starts —
+   * the pump and a conflict-fix scan, say — would both see the same free slot.
    */
-  private readonly launching = new Set<string>();
+  private readonly starting = new Set<string>();
+  /** How the pump starts each kind of queued entry; see {@link registerStart}. */
+  private readonly starters = new Map<BuildQueueKind, QueuedStart>();
   /**
    * The counters of the runs parked on a usage-limit hold (US-006), by session
    * id. Written by {@link park} and spent by the launch that resumes them.
@@ -268,7 +309,83 @@ export class BuildService {
      * is arming and reading the same hold.
      */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
-  ) {}
+  ) {
+    // Sessions are the one kind this service starts itself; reviews and
+    // feedback runs register theirs from above.
+    this.registerStart('session', {
+      exists: (entry) => getSession(this.db, entry.refId) !== null,
+      isRunning: (entry) => this.runs.has(entry.refId),
+      start: async (entry) => {
+        const session = this.requireSession(entry.refId);
+        // Something may have changed while it waited — it went back to
+        // planning, or its stories are all done.
+        this.assertStartable(session);
+        try {
+          await this.launch(session);
+        } catch (cause) {
+          throw new Error(
+            `The queued build could not be started, so the session left the queue: ${describe(cause)}`,
+            { cause },
+          );
+        }
+      },
+      onFailed: (entry, message) => {
+        updateSession(this.db, entry.refId, { lastError: message });
+      },
+    });
+  }
+
+  /**
+   * Teaches the pump how to start one kind of queued entry (US-001).
+   *
+   * Wired at composition time. A kind with nothing registered is not a
+   * deadlock: the pump drops those entries rather than letting one sit at the
+   * head forever with the queue behind it.
+   */
+  registerStart(kind: BuildQueueKind, starter: QueuedStart): void {
+    this.starters.set(kind, starter);
+  }
+
+  /**
+   * Counts an in-flight start of any kind against the cap until the returned
+   * function is called (US-001). Every start path — the pump, a review, a
+   * conflict-fix scan — claims here first, so two of them can never hand the
+   * same free slot to two different agents.
+   */
+  claimStart(kind: BuildSlotKind, refId: string): () => void {
+    const key = slotKey(kind, refId);
+    this.starting.add(key);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.starting.delete(key);
+    };
+  }
+
+  /** True while a start of that work is in flight here. */
+  isStarting(kind: BuildSlotKind, refId: string): boolean {
+    return this.starting.has(slotKey(kind, refId));
+  }
+
+  /**
+   * Puts any kind of work at the back of the queue, or leaves it where it
+   * already is. Idempotent, so an automatic trigger that fires twice does not
+   * queue the same pull request twice.
+   */
+  enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry {
+    return enqueueBuild(this.db, { kind, refId });
+  }
+
+  /** Takes any kind of work back out of the queue; false when it was not in it. */
+  leaveQueue(kind: BuildQueueKind, refId: string): boolean {
+    return removeQueuedBuild(this.db, kind, refId);
+  }
+
+  /** The whole queue in FIFO order, every kind together. */
+  queue(): BuildQueueEntry[] {
+    return listBuildQueue(this.db);
+  }
 
   status(sessionId: string): BuildView {
     return this.toView(this.requireSession(sessionId));
@@ -298,11 +415,11 @@ export class BuildService {
     // once the hold lifts.
     const until = this.hold.until();
     if (until !== null) {
-      this.enqueue(session);
+      this.enqueueSession(session);
       throw new BuildError(429, 'usage_limit_hold', queuedForHoldMessage(session, until));
     }
 
-    if (this.freeSlots() <= 0) return this.toView(this.enqueue(session));
+    if (this.freeSlots() <= 0) return this.toView(this.enqueueSession(session));
     return this.toView(await this.launch(session));
   }
 
@@ -313,7 +430,7 @@ export class BuildService {
    */
   dequeue(sessionId: string): BuildView {
     const session = this.requireSession(sessionId);
-    if (session.queuedAt === null) {
+    if (!removeQueuedBuild(this.db, 'session', session.id)) {
       throw new BuildError(
         409,
         'session_not_queued',
@@ -321,9 +438,8 @@ export class BuildService {
       );
     }
 
-    const updated = updateSession(this.db, session.id, { queuedAt: null }) ?? session;
     logger.info('session left the build queue', { session: session.id, name: session.name });
-    return this.toView(updated);
+    return this.toView(getSession(this.db, session.id) ?? session);
   }
 
   /**
@@ -363,7 +479,7 @@ export class BuildService {
     return (
       max -
       (countActiveBuilds(this.db) +
-        this.launching.size +
+        this.starting.size +
         countActivePrRuns(this.db) +
         countActivePrReviews(this.db) +
         countActivePrConflictFixes(this.db))
@@ -419,10 +535,10 @@ export class BuildService {
   private async resume(sessions: readonly Session[]): Promise<number> {
     let resumed = 0;
     for (const session of sessions) {
-      if (this.runs.has(session.id) || this.launching.has(session.id)) continue;
+      if (this.runs.has(session.id) || this.isStarting('session', session.id)) continue;
 
       if (this.resumeSlots() <= 0) {
-        this.enqueue(session, queuedAfterHoldMessage(session));
+        this.enqueueSession(session, queuedAfterHoldMessage(session));
         continue;
       }
 
@@ -460,7 +576,7 @@ export class BuildService {
       max -
       (countSessionsByStatus(this.db, 'building') +
         countSessionsByStatus(this.db, 'reviewing') +
-        this.launching.size +
+        this.starting.size +
         countActivePrRuns(this.db) +
         countActivePrReviews(this.db) +
         countActivePrConflictFixes(this.db))
@@ -470,35 +586,61 @@ export class BuildService {
   private async drain(): Promise<void> {
     for (;;) {
       // A free slot is no use while the hold is on (US-005). The queue keeps
-      // its order and its sessions; the pump that runs when the hold lifts is
+      // its order and its entries; the pump that runs when the hold lifts is
       // the one that empties it.
       if (this.hold.active()) return;
       if (this.freeSlots() <= 0) return;
 
-      const next = listQueuedSessions(this.db).find(
-        (candidate) => !this.runs.has(candidate.id) && !this.launching.has(candidate.id),
-      );
+      const next = this.queue().find((entry) => !this.isBusy(entry));
       if (next === undefined) return;
 
-      try {
-        this.assertStartable(next);
-      } catch (cause) {
-        // Something changed while it waited — it went back to planning, or its
-        // stories are all done. It leaves the queue with the reason on it and
-        // the session behind it gets the slot.
-        this.leaveQueue(next, describe(cause));
+      const starter = this.starters.get(next.kind);
+      if (starter === undefined) {
+        // Nothing here knows how to start this kind — an entry left by a newer
+        // version, or a service that was not wired up. It must not sit at the
+        // head with the whole queue behind it, so it goes.
+        removeBuildQueueEntry(this.db, next.id);
+        logger.warn('queued entry has no way to be started, so it left the queue', {
+          kind: next.kind,
+          ref: next.refId,
+        });
         continue;
       }
 
+      if (starter.exists?.(next) === false) {
+        // The session was deleted, or the pull request closed, while it
+        // waited. There is nobody left to tell.
+        removeBuildQueueEntry(this.db, next.id);
+        logger.info('queued entry no longer exists, so it left the queue', {
+          kind: next.kind,
+          ref: next.refId,
+        });
+        continue;
+      }
+
+      // Out of the queue *before* it is started, so no start — however it goes
+      // — can leave this entry at the head a second time.
+      removeBuildQueueEntry(this.db, next.id);
       try {
-        await this.launch(next);
+        await starter.start(next);
       } catch (cause) {
-        this.leaveQueue(
-          next,
-          `The queued build could not be started, so the session left the queue: ${describe(cause)}`,
-        );
+        const message = describe(cause);
+        logger.warn('a queued entry could not be started, so it left the queue', {
+          kind: next.kind,
+          ref: next.refId,
+          error: message,
+        });
+        // Somewhere the operator will actually see it — for a session, on the
+        // session itself.
+        starter.onFailed?.(next, message);
       }
     }
+  }
+
+  /** True when the entry's work is already starting or running here. */
+  private isBusy(entry: BuildQueueEntry): boolean {
+    if (this.isStarting(entry.kind, entry.refId)) return true;
+    return this.starters.get(entry.kind)?.isRunning?.(entry) === true;
   }
 
   /** Everything that has to be true before a session can be built at all. */
@@ -543,11 +685,11 @@ export class BuildService {
    * session *did* start, in the only sense the operator asked for, and a
    * timestamp left behind would fire it a second time.
    */
-  private enqueue(session: Session, note?: string): Session {
+  private enqueueSession(session: Session, note?: string): Session {
+    const entry = this.enqueue('session', session.id);
     const queued =
       updateSession(this.db, session.id, {
         status: 'ready',
-        queuedAt: session.queuedAt ?? nowIso(),
         scheduledStartAt: null,
         // A retry that only got as far as the queue has still left `failed`
         // behind, so the stage of that failure goes with it (US-019).
@@ -560,20 +702,11 @@ export class BuildService {
     logger.info('build queued: the concurrency cap is reached', {
       session: session.id,
       name: session.name,
-      position: queuePosition(this.db, queued),
+      queuedAt: entry.queuedAt,
+      position: buildQueuePosition(this.db, 'session', session.id),
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     });
     return queued;
-  }
-
-  /** Drops a queued session out of the queue with the reason on the session. */
-  private leaveQueue(session: Session, message: string): void {
-    updateSession(this.db, session.id, { queuedAt: null, lastError: message });
-    logger.warn('queued session removed from the queue', {
-      session: session.id,
-      name: session.name,
-      error: message,
-    });
   }
 
   /** Brings the container up and puts the session into `building`. */
@@ -585,7 +718,7 @@ export class BuildService {
     // set of counters for the next one.
     const parked = this.parked.get(session.id) ?? null;
     this.parked.delete(session.id);
-    this.launching.add(session.id);
+    const startedSlot = this.claimStart('session', session.id);
     try {
       let containerId: string;
       try {
@@ -599,6 +732,9 @@ export class BuildService {
       }
 
       const stories = listStories(this.db, session.id);
+      // It has a slot now, so it is not waiting for one — whether it came off
+      // the queue or never joined it.
+      removeQueuedBuild(this.db, 'session', session.id);
       // A schedule is spent the moment its session starts building, however
       // that happened (US-017): the scheduler fired it, or someone pressed the
       // button early. Clearing it here — the one place `building` is entered —
@@ -615,7 +751,6 @@ export class BuildService {
           // retry for a failure that is being retried right now.
           failureStage: null,
           scheduledStartAt: null,
-          queuedAt: null,
           // Whether this is a resume or a fresh start, the session is working
           // again and is not waiting for anything (US-006).
           waitingUntil: null,
@@ -654,7 +789,7 @@ export class BuildService {
       });
       return building;
     } finally {
-      this.launching.delete(session.id);
+      startedSlot();
     }
   }
 
@@ -1269,8 +1404,8 @@ export class BuildService {
       agentTimeoutMs: getAgentTimeoutMs(this.db, this.config),
       buildModel: getBuildModel(this.db),
       startedAt: state?.startedAt ?? null,
-      queued: session.queuedAt !== null,
-      queuePosition: queuePosition(this.db, session),
+      queued: getQueuedBuild(this.db, 'session', session.id) !== null,
+      queuePosition: buildQueuePosition(this.db, 'session', session.id),
       activeBuilds: countActiveBuilds(this.db),
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
     };

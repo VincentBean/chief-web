@@ -3,12 +3,14 @@ import path from 'node:path';
 
 import type { Config } from '../config.js';
 import {
+  buildQueuePosition,
   countStories,
   createSession,
   type Database,
   deleteSession,
   type FailureStage,
   featureBranchFor,
+  getQueuedBuild,
   getRepository,
   getSession,
   isScheduleMissed,
@@ -17,7 +19,7 @@ import {
   listStories,
   nowIso,
   type PrTargetBranch,
-  queuePosition,
+  removeQueuedBuild,
   type Session,
   type SessionStatus,
   type Story,
@@ -109,6 +111,7 @@ export interface SessionView {
    * ready starts it there and then.
    */
   readonly scheduleMissed: boolean;
+  /** UTC ISO time the session joined the unified build queue (US-001). */
   readonly queuedAt: string | null;
   /**
    * 1-based place in the FIFO build queue (US-018), or `null` when the session
@@ -520,6 +523,10 @@ export class SessionService {
     }
 
     removeSessionWorkspace(this.config, session.id);
+    // The build queue has no foreign key to lean on (its ref is polymorphic),
+    // so a deleted session takes its place in the queue out by hand. The pump
+    // would drop it anyway, but not before it was counted as waiting.
+    removeQueuedBuild(this.db, 'session', session.id);
     // The stories go with it, by cascade.
     deleteSession(this.db, session.id);
 
@@ -653,8 +660,8 @@ export class SessionService {
       prTargetBranch: session.prTargetBranch,
       scheduledStartAt: session.scheduledStartAt,
       scheduleMissed: isScheduleMissed(session),
-      queuedAt: session.queuedAt,
-      queuePosition: queuePosition(this.db, session),
+      queuedAt: getQueuedBuild(this.db, 'session', session.id)?.queuedAt ?? null,
+      queuePosition: buildQueuePosition(this.db, 'session', session.id),
       containerId: session.containerId,
       prUrl: session.prUrl,
       lastError: session.lastError,

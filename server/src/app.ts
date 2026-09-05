@@ -178,7 +178,10 @@ export function createApp(
   // Guard for every API route added below (and for unknown ones, which must
   // not reveal whether they exist).
   api.use(requireApiAuth(auth));
-  api.use(createSettingsRouter(db, config));
+  // `builds` is created further down, and the settings router only reads it
+  // from inside a request — by which point everything below exists. Raising
+  // the concurrency cap has to drain the queue there and then (US-001).
+  api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));

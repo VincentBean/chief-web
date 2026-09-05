@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
 import type { Config } from '../config.js';
-import { type Database, readStats, type Stats } from '../db/index.js';
+import { countQueuedBuilds, type Database, readStats, type Stats } from '../db/index.js';
 import type { UsageLimitHold } from '../limits/index.js';
 import { getMaxConcurrentSessions } from '../settings/index.js';
 
@@ -11,7 +11,7 @@ export interface StatsView extends Stats {
   readonly builds: {
     /** Sessions holding a build slot: building, or held by the usage limit. */
     readonly active: number;
-    /** Sessions waiting in the FIFO build queue. */
+    /** Everything waiting in the unified FIFO build queue (US-001). */
     readonly queued: number;
     readonly max: number;
   };
@@ -33,15 +33,12 @@ export function createStatsRouter(db: Database, config: Config, hold: UsageLimit
     const raw = req.query['days'];
     const days = typeof raw === 'string' ? Number.parseInt(raw, 10) : 14;
     const stats = readStats(db, Number.isInteger(days) ? Math.min(90, Math.max(1, days)) : 14);
-    const queued = db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE queued_at IS NOT NULL').get() as {
-      n: number | bigint;
-    };
     const view: StatsView = {
       ...stats,
       generatedAt: new Date().toISOString(),
       builds: {
         active: stats.sessions.byStatus.building + stats.sessions.byStatus.waiting,
-        queued: Number(queued.n),
+        queued: countQueuedBuilds(db),
         max: getMaxConcurrentSessions(db, config),
       },
       hold: { until: hold.until() },
