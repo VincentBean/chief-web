@@ -1,4 +1,9 @@
-import { STATUS_LINE_PATTERN, STORY_HEADING_PATTERN, type StoryStatus } from './parse.js';
+import {
+  CodeFenceScanner,
+  STATUS_LINE_PATTERN,
+  STORY_HEADING_PATTERN,
+  type StoryStatus,
+} from './parse.js';
 
 /**
  * Writing a story's status back into `prd.md` (US-012).
@@ -68,7 +73,18 @@ export function setStoryStatuses(
     block = null;
   };
 
+  const fences = new CodeFenceScanner();
+
   for (const line of lines) {
+    // A fenced block is copied through untouched: a Sentry stack trace embedded
+    // in a story (US-007) may contain a line that reads exactly like a heading
+    // or a status, and rewriting one would corrupt the error being reported —
+    // and leave the story's real status behind.
+    if (fences.consume(line)) {
+      out.push(line);
+      continue;
+    }
+
     const trimmed = line.trim();
 
     const heading = STORY_HEADING_PATTERN.exec(trimmed);

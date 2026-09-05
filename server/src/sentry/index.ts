@@ -31,6 +31,27 @@ export {
   type SentryTag,
 } from './client.js';
 export {
+  createSentryFixer,
+  DEFAULT_PR_TARGET_BRANCH,
+  type FixSessionService,
+  fixSessionFailedExplanation,
+  MAX_FIX_ATTEMPTS,
+  prTargetBranchFor,
+  type SentryFixer,
+  SentryFixService,
+  writeSessionPrd,
+} from './fix.js';
+export {
+  FIX_STORY_ID,
+  fixPrd,
+  type FixPrdInput,
+  fixSessionBaseName,
+  MAX_SHORT_ID_SLUG,
+  PRD_FENCE,
+  shortIdSlug,
+  uniqueFixSessionName,
+} from './prd.js';
+export {
   type Classification,
   classificationPrompt,
   type ClassificationPromptInput,
@@ -42,6 +63,7 @@ export {
   parseClassification,
   SENTRY_DATA_BEGIN,
   SENTRY_DATA_END,
+  sentryReport,
 } from './prompts.js';
 export {
   createSentrySync,

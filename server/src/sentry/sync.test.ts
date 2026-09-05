@@ -443,4 +443,59 @@ describe('the Sentry issue poller', () => {
       assert.equal(listSentryIssues(db).length, 1);
     });
   });
+
+  describe('the fix session pass hung off it (US-007)', () => {
+    it('runs after the classification pass, in the same tick', async () => {
+      const { db, sentry } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const order: string[] = [];
+      const sync = new SentrySyncService(
+        db,
+        () => sentry,
+        {
+          classifyPending: () => {
+            order.push('classify');
+            return Promise.resolve(1);
+          },
+        },
+        {
+          createFixSessions: () => {
+            order.push('fix');
+            return Promise.resolve(1);
+          },
+        },
+      );
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.deepEqual(order, ['classify', 'fix']);
+    });
+
+    it('is skipped when there was nothing to poll', async () => {
+      const { db, sentry } = world({ link: false });
+      let passes = 0;
+      const sync = new SentrySyncService(db, () => sentry, null, {
+        createFixSessions: () => {
+          passes += 1;
+          return Promise.resolve(0);
+        },
+      });
+
+      await sync.tick();
+
+      assert.equal(passes, 0);
+    });
+
+    it('never fails the poll', async () => {
+      const { db, sentry } = world();
+      sentry.serve('acme', 'web', [summary()]);
+      const sync = new SentrySyncService(db, () => sentry, null, {
+        createFixSessions: () => Promise.reject(new Error('no deploy key')),
+      });
+
+      assert.equal(await sync.tick(), 1);
+
+      assert.equal(listSentryIssues(db).length, 1);
+    });
+  });
 });

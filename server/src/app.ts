@@ -42,7 +42,12 @@ import { createPrSync, type PullRequestSync } from './prsync/index.js';
 import { createPrFeedbackService, type PrFeedbackService } from './prfeedback/index.js';
 import { createPrReviewService, type PrReviewService } from './prreview/index.js';
 import { createPullRequestService, type PullRequestService } from './pullrequests/index.js';
-import { createSentryClassifier, createSentrySync, type SentrySync } from './sentry/index.js';
+import {
+  createSentryClassifier,
+  createSentryFixer,
+  createSentrySync,
+  type SentrySync,
+} from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -298,7 +303,18 @@ export function createApp(
     exec,
     createAgentRunner(exec),
   );
-  const sentrySync = deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier);
+  // And what a "yes" is worth (US-007): a real build session on the base
+  // branch, seeded with a generated PRD holding the whole Sentry report, code
+  // review on, and marked ready — from there the ordinary queue, delivery and
+  // review pipeline take it the rest of the way to a pull request.
+  const sessions = createSessionService(config, db, orchestrator, exec, {
+    builds,
+    planning,
+    scheduler,
+  });
+  const sentryFixer = createSentryFixer(config, db, sessions);
+  const sentrySync =
+    deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier, sentryFixer);
   sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap rather
   // than its queue: a five-minute pass should not wait behind an hour of
@@ -334,11 +350,7 @@ export function createApp(
   );
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, so the session service is built last and given all three.
-  api.use(
-    createSessionsRouter(
-      createSessionService(config, db, orchestrator, exec, { builds, planning, scheduler }),
-    ),
-  );
+  api.use(createSessionsRouter(sessions));
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));

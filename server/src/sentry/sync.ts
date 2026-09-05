@@ -10,6 +10,7 @@ import { getSentryPollIntervalMs } from '../settings/index.js';
 
 import type { SentryClassifier } from './classify.js';
 import { createSentryClient, SentryApiError, type SentryIssueSummary } from './client.js';
+import type { SentryFixer } from './fix.js';
 
 /**
  * The front of the Sentry pipeline (US-005): every linked project's unresolved
@@ -101,6 +102,14 @@ export class SentrySyncService implements SentrySync {
      * the polling rather than the judging.
      */
     private readonly classifier: SentryClassifier | null = null,
+    /**
+     * What is done with the `queued` rows the classifier leaves behind
+     * (US-007): a build session each, seeded with a generated PRD. Hung off the
+     * same beat for the same reason the classifier is — an issue is worth a
+     * session exactly once it has been judged fixable, which happened moments
+     * ago in this very tick.
+     */
+    private readonly fixer: SentryFixer | null = null,
   ) {}
 
   start(): void {
@@ -183,6 +192,10 @@ export class SentrySyncService implements SentrySync {
     // the classifier should see in the same beat, and a repository whose list
     // call failed has left nothing new to judge.
     await this.classify();
+    // And the rows *that* pass leaves behind: a fixable issue with no session
+    // is one nothing is happening to, whether it was queued a second ago or
+    // three ticks back.
+    await this.createFixSessions();
     return inserted;
   }
 
@@ -197,6 +210,20 @@ export class SentrySyncService implements SentrySync {
       await this.classifier.classifyPending();
     } catch (cause) {
       logger.error('the Sentry issue classification pass failed', { error: describe(cause) });
+    }
+  }
+
+  /**
+   * The fix-session pass, which must never be able to fail a poll either: an
+   * issue whose session could not be created is still `queued`, which is
+   * exactly where the next tick expects it.
+   */
+  private async createFixSessions(): Promise<void> {
+    if (this.fixer === null) return;
+    try {
+      await this.fixer.createFixSessions();
+    } catch (cause) {
+      logger.error('the Sentry fix session pass failed', { error: describe(cause) });
     }
   }
 
@@ -292,8 +319,9 @@ export function createSentrySync(
   db: Database,
   clients: SentryGatewayFactory = createSentryClient,
   classifier: SentryClassifier | null = null,
+  fixer: SentryFixer | null = null,
 ): SentrySyncService {
-  return new SentrySyncService(db, clients, classifier);
+  return new SentrySyncService(db, clients, classifier, fixer);
 }
 
 function describe(cause: unknown): string {

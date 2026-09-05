@@ -30,6 +30,7 @@ export {
 } from './service.js';
 export {
   ensureSessionWorkspace,
+  giveToRunner,
   removeSessionKey,
   removeSessionWorkspace,
   sessionKeyPath,

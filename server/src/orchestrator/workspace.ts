@@ -101,11 +101,15 @@ export function removeSessionWorkspace(
 }
 
 /**
- * Hands ownership to the runner user. Only root can chown; when the server runs
+ * Hands ownership to the runner user. Exported because anything the server
+ * writes into a session workspace — the generated PRD of a fix session (US-007)
+ * among them — has to be readable by the uid the agent runs as.
+ *
+ * Only root can chown; when the server runs
  * unprivileged (local development) the permissions are widened instead, which
  * is the only way uid 1000 inside the container can still use the file.
  */
-function giveToRunner(target: string, fallbackMode: number): void {
+export function giveToRunner(target: string, fallbackMode: number): void {
   try {
     fs.chownSync(target, RUNNER_UID, RUNNER_GID);
   } catch {
