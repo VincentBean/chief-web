@@ -691,6 +691,12 @@ export interface Stats {
   pullRequestsOpened: number;
   builds: { active: number; queued: number; max: number };
   hold: { until: string | null };
+  /**
+   * The machine the server runs on. `cpu` is the busy fraction (0–1) since the
+   * previous poll, and is null on the first read after a restart, when there is
+   * no earlier sample to measure against. Memory is in bytes.
+   */
+  host: { cpu: number | null; cores: number; memory: { used: number; total: number } };
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];

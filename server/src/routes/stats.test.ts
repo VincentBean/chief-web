@@ -102,6 +102,13 @@ describe('stats api', () => {
     assert.deepEqual(body.builds, { active: 1, queued: 0, max: 4 });
     assert.equal(body.hold.until, null);
 
+    // The host row: real numbers from the machine the test runs on. CPU is a
+    // ratio between polls, so the first read has nothing to compare against.
+    assert.ok(body.host.cores >= 1);
+    assert.ok(body.host.memory.total > 0);
+    assert.ok(body.host.memory.used > 0 && body.host.memory.used <= body.host.memory.total);
+    assert.ok(body.host.cpu === null || (body.host.cpu >= 0 && body.host.cpu <= 1));
+
     assert.equal(body.activity.length, 14);
     const today = new Date().toISOString().slice(0, 10);
     const last = body.activity[body.activity.length - 1];
