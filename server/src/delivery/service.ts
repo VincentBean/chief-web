@@ -451,6 +451,13 @@ export class DeliveryService implements BuildCompletion {
       if (solver.code === 'no_unresolved_feedback') return { message: null, failure: null };
       return { message: null, failure: solver.message };
     }
+    // Queued behind a full pool rather than running (US-004). Waiting for it
+    // would hold this session — and the draft — for however long the queue in
+    // front of it takes, which is a wait nobody asked for and one the delivery
+    // has no timeout for. The run is on the queue with the pull request's
+    // findings recorded against it, the review step's message says so, and the
+    // pump starts it without anybody watching.
+    if (solver.queued) return { message: null, failure: null };
 
     updateSession(this.db, session.id, { status: 'fixing' });
     logger.info('waiting for the feedback run on the review findings', {

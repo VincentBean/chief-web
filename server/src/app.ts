@@ -278,12 +278,14 @@ export function createApp(
   );
   const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db, prConflictFixes);
   prConflicts.start();
-  // Pull request feedback (US-021). It shares the build loop's slot cap rather
-  // than its queue: a five-minute pass should not wait behind an hour of
-  // stories, so a full server refuses the run instead of holding it.
+  // Pull request feedback (US-021). It shares the build loop's slot cap, and
+  // since US-004 its queue as well: a pass asked for while every slot is taken
+  // waits its turn instead of being refused, whether an operator asked for it
+  // or a review that just found something handed it over.
   prFeedback =
     deps.prFeedback ??
     createPrFeedbackService(config, db, sessionOrchestrator, exec, createAgentRunner(exec), builds);
+  builds.registerStart('pr-feedback', prFeedback.starter());
   // A code review started by hand on an open pull request: the same pass the
   // delivery runs, in a feedback-run container, handing its findings to the
   // solver above exactly as the delivery's review does.

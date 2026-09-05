@@ -986,6 +986,10 @@ export interface PrRun {
   /** Passes made so far; quoted in the reply footer. */
   attempt: number;
   failureStage: PrFailureStage | null;
+  /** True while it is waiting in the build queue for a slot. */
+  queued: boolean;
+  /** Its 1-based place in that queue; null when it is not in it. */
+  queuePosition: number | null;
   lastError: string | null;
   /** The commit the last successful push delivered. */
   headSha: string | null;

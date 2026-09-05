@@ -73,7 +73,10 @@ export interface PrReviewer {
 
 /** The slice of `PrFeedbackService` the findings are handed to. */
 export interface PrReviewSolver {
-  start(repositoryId: string, prNumber: number): Promise<{ readonly id: string }>;
+  start(
+    repositoryId: string,
+    prNumber: number,
+  ): Promise<{ readonly id: string; readonly queued?: boolean }>;
 }
 
 /** The slice of the GitHub API a review reads; tests pass a stub. */
@@ -585,7 +588,10 @@ export class PrReviewService {
         number: review.prNumber,
         run: run.id,
       });
-      return `A run was started on #${String(review.prNumber)} to work on them.`;
+      return run.queued === true
+        ? `A run was queued on #${String(review.prNumber)} to work on them; it starts as soon as ` +
+            'a build slot frees.'
+        : `A run was started on #${String(review.prNumber)} to work on them.`;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       logger.warn('the pull request review could not start a feedback run', {

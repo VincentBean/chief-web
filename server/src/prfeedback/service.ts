@@ -1,21 +1,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { AgentRunner } from '../build/index.js';
+import type { AgentRunner, QueuedStart } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   type BuildQueueEntry,
   type BuildQueueKind,
+  buildQueuePosition,
   createPrRun,
   type Database,
   type FeedbackKind,
   findPrRun,
   getPrRun,
+  getQueuedBuild,
   getRepository,
   listThreads,
+  parsePrRefId,
   type PrFailureStage,
   type PrFeedbackThread,
   type PrRun,
+  prRefId,
+  type Repository,
   updatePrRun,
   updateThread,
   upsertThread,
@@ -148,6 +153,10 @@ export interface PrRunView {
   readonly phase: PrRunPhase | null;
   readonly attempt: number;
   readonly failureStage: PrFailureStage | null;
+  /** True while it is waiting in the build queue for a slot (US-004). */
+  readonly queued: boolean;
+  /** Its 1-based place in that queue, or `null` when it is not in it. */
+  readonly queuePosition: number | null;
   readonly lastError: string | null;
   readonly headSha: string | null;
   readonly threads: readonly PrThreadView[];
@@ -205,8 +214,15 @@ export class PrFeedbackService {
   }
 
   /**
-   * Starts a pass, after every refusal that can be made without spending
-   * anything: the cheap checks come before a container exists.
+   * Starts a pass, or takes a place in the unified build queue (US-004).
+   *
+   * Every refusal that can be made without spending anything is made first:
+   * the cheap checks come before a container — or even a GitHub read — exists.
+   * A full pool is no longer one of them. The pass is queued instead, and the
+   * pump starts it the moment a slot frees, so nobody has to press the button
+   * a second time. The automatic hand-offs — the delivery's review and the
+   * pull request review's — come through this same door, so they queue on a
+   * full server exactly as a hand-started pass does.
    */
   async start(repositoryId: string, prNumber: number): Promise<PrRunView> {
     const repository = getRepository(this.db, repositoryId);
@@ -234,22 +250,48 @@ export class PrFeedbackService {
     if (existing !== null && this.live.has(existing.id)) {
       throw new PrFeedbackError(409, 'run_already_active', 'That pull request is already running.');
     }
-    if (this.slots.freeSlots() <= 0) {
-      throw new PrFeedbackError(
-        409,
-        'no_free_slot',
-        'Every build slot is in use. Wait for one to free, or raise the cap on the settings page.',
-      );
+    // Already waiting for a slot: this request *is* the one in the queue, not
+    // a second one. Answered before the GitHub read, so leaning on the button
+    // — or a second review handing over the same findings — costs nothing.
+    const refId = prRefId(repositoryId, prNumber);
+    if (existing !== null && getQueuedBuild(this.db, 'pr-feedback', refId) !== null) {
+      return this.view(existing);
     }
     // Starting a pass on a held account would spend a container, a checkout and
     // a GitHub read on an agent that is going to be refused the moment it runs
-    // (US-007). A run has no queue to wait in, so it is refused outright — and
-    // named the moment it is worth asking again.
+    // (US-007). The queue is no help against a hold — the pump would walk into
+    // the same wall — so it is refused outright, and named the moment it is
+    // worth asking again.
     const held = this.hold.until();
     if (held !== null) {
       throw new PrFeedbackError(409, 'usage_limit_hold', heldStartMessage(prNumber, held));
     }
 
+    // Claimed before the feedback is read, so the slot this pass was offered is
+    // still its own when the read comes back, and the pump cannot hand the same
+    // one to the entry behind it in the meantime. `null` means there was
+    // nothing to claim: this pass is going to queue.
+    const slot = this.slots.freeSlots() > 0 ? this.slots.claimStart('pr-feedback', refId) : null;
+    try {
+      return await this.begin(repository, prNumber, token, slot !== null);
+    } finally {
+      // The row says `running` by now, which is what the cap counts; a pass
+      // that queued or was refused never took the slot in the first place.
+      if (slot !== null) slot();
+    }
+  }
+
+  /**
+   * The half of {@link start} that costs something: the feedback is read, and
+   * the pass either starts or joins the queue.
+   */
+  private async begin(
+    repository: Repository,
+    prNumber: number,
+    token: string,
+    hasSlot: boolean,
+  ): Promise<PrRunView> {
+    const repositoryId = repository.id;
     const feedback = await this.readFeedback(token, repository.githubSlug, prNumber);
     if (feedback.state !== 'OPEN') {
       throw new PrFeedbackError(
@@ -293,6 +335,7 @@ export class PrFeedbackService {
     if (this.starting.has(run.id)) {
       throw new PrFeedbackError(409, 'run_already_active', 'That pull request is already running.');
     }
+    if (!hasSlot) return this.queue(run);
     this.starting.add(run.id);
 
     const started = updatePrRun(this.db, run.id, {
@@ -330,10 +373,14 @@ export class PrFeedbackService {
     return this.status(run.id);
   }
 
-  /** Signals the agent. Anything already committed and pushed is kept. */
+  /**
+   * Signals the agent, or — for a pass that is still waiting for a slot —
+   * takes it out of the queue before it ever starts (US-004). Anything already
+   * committed and pushed is kept either way.
+   */
   async stop(runId: string): Promise<PrRunView> {
     const state = this.live.get(runId);
-    if (state === undefined) return this.status(runId);
+    if (state === undefined) return this.cancelQueued(runId);
     state.stopping = true;
     if (state.containerId !== null) await this.runner.stop(runId, state.containerId);
     await settle(state.finished, this.config.buildStopTimeoutMs);
@@ -343,6 +390,106 @@ export class PrFeedbackService {
   /** Resolves when the run is no longer driving anything; used by tests. */
   async whenIdle(runId: string): Promise<void> {
     await this.live.get(runId)?.finished;
+  }
+
+  /**
+   * How the pump starts a queued pass (US-004).
+   *
+   * Handed to `BuildService.registerStart` in `app.ts` rather than imported
+   * there, because the build loop sits below this service: it owns the queue,
+   * this owns what a `pr-feedback` entry means.
+   */
+  starter(): QueuedStart {
+    return {
+      // A repository deleted while the pass waited takes its pull requests with
+      // it; the entry is dropped rather than started.
+      exists: (entry) => this.reference(entry) !== null,
+      isRunning: (entry) => {
+        const run = this.queuedRun(entry);
+        return run !== null && this.live.has(run.id);
+      },
+      start: async (entry) => {
+        const ref = this.reference(entry);
+        if (ref === null) {
+          throw new Error(`"${entry.refId}" no longer names a pull request that can be worked on.`);
+        }
+        // The same call that was made when it was queued, with the same
+        // parameters: the feedback is read afresh, so the pass answers whatever
+        // is still unresolved rather than what was unresolved an hour ago.
+        await this.start(ref.repositoryId, ref.prNumber);
+      },
+      onFailed: (entry, message) => {
+        const run = this.queuedRun(entry);
+        // Somewhere the operator will see it: the run's own row on the pull
+        // requests page. Saying nothing would be a pass that quietly never
+        // happened.
+        if (run !== null) {
+          this.fail(
+            run.id,
+            'feedback',
+            `The queued run could not be started, so it left the queue: ${message}`,
+          );
+        }
+      },
+    };
+  }
+
+  /** Puts the pass in the unified queue and answers with where it stands. */
+  private queue(run: PrRun): PrRunView {
+    const entry = this.slots.enqueue('pr-feedback', prRefId(run.repositoryId, run.prNumber));
+    // Whatever the last pass left behind is history: this run is going to start
+    // again, and `pending` is what the UI reads as "nothing to show yet". The
+    // threads are deliberately kept — they are the record of what earlier
+    // passes already answered, which is what makes a re-run resume.
+    const waiting =
+      updatePrRun(this.db, run.id, {
+        status: 'pending',
+        failureStage: null,
+        lastError: null,
+        startedAt: null,
+        finishedAt: null,
+      }) ?? run;
+    logger.info('pull request feedback run queued: every build slot is in use', {
+      run: run.id,
+      repository: run.repositoryId,
+      number: run.prNumber,
+      queuedAt: entry.queuedAt,
+    });
+    return this.view(waiting);
+  }
+
+  /** Takes a run that has not started out of the queue; a no-op otherwise. */
+  private cancelQueued(runId: string): PrRunView {
+    const run = getPrRun(this.db, runId);
+    if (run === null) throw new PrFeedbackError(404, 'pr_run_not_found', 'No such run.');
+    if (!this.slots.leaveQueue('pr-feedback', prRefId(run.repositoryId, run.prNumber))) {
+      return this.view(run);
+    }
+
+    logger.info('a queued pull request feedback run was cancelled', {
+      run: run.id,
+      repository: run.repositoryId,
+      number: run.prNumber,
+    });
+    return this.view(
+      updatePrRun(this.db, run.id, {
+        status: 'pending',
+        lastError: 'Cancelled before it started.',
+      }) ?? run,
+    );
+  }
+
+  /** The pull request an entry points at, or `null` when it is gone. */
+  private reference(entry: BuildQueueEntry): { repositoryId: string; prNumber: number } | null {
+    const ref = parsePrRefId(entry.refId);
+    if (ref === null) return null;
+    return getRepository(this.db, ref.repositoryId) === null ? null : ref;
+  }
+
+  /** The row an entry names, when a pass has already made one. */
+  private queuedRun(entry: BuildQueueEntry): PrRun | null {
+    const ref = this.reference(entry);
+    return ref === null ? null : findPrRun(this.db, ref.repositoryId, ref.prNumber);
   }
 
   private async drive(
@@ -730,6 +877,11 @@ export class PrFeedbackService {
 
   private view(run: PrRun): PrRunView {
     const state = this.live.get(run.id);
+    const queuePosition = buildQueuePosition(
+      this.db,
+      'pr-feedback',
+      prRefId(run.repositoryId, run.prNumber),
+    );
     return {
       id: run.id,
       repositoryId: run.repositoryId,
@@ -742,6 +894,8 @@ export class PrFeedbackService {
       phase: state?.phase ?? null,
       attempt: run.attempt,
       failureStage: run.failureStage,
+      queued: queuePosition !== null,
+      queuePosition,
       lastError: run.lastError,
       headSha: run.headSha,
       threads: listThreads(this.db, run.id).map((thread) => ({
