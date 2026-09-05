@@ -806,6 +806,87 @@ export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;
 }
 
+/* --------------------------------------------------------- recurring tasks */
+
+/**
+ * Mirrors the server's `RECURRING_TASK_OUTCOMES` (US-001): how a task's most
+ * recent occurrence ended. `started` is a run that is still going.
+ */
+export const RECURRING_TASK_OUTCOMES = [
+  'started',
+  'skipped',
+  'fire-failed',
+  'pr-opened',
+  'clean',
+  'failed',
+] as const;
+
+export type RecurringTaskOutcome = (typeof RECURRING_TASK_OUTCOMES)[number];
+
+/** Mirrors the server's `RecurringTaskView` (US-003): one task definition. */
+export interface RecurringTask {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  name: string;
+  prompt: string;
+  cronExpression: string;
+  /**
+   * The schedule in words — "At 03:00, only on Monday". The server owns cron
+   * semantics, so nothing here parses the expression; `null` only for a row
+   * whose expression stopped being valid, which the API refuses to store.
+   */
+  scheduleDescription: string | null;
+  baseBranch: string;
+  prTarget: PrTargetBranch;
+  runCodeReview: boolean;
+  paused: boolean;
+  /** UTC ISO-8601 of the next occurrence; null while the task is paused. */
+  nextRunAt: string | null;
+  lastOutcome: RecurringTaskOutcome | null;
+  /** The outcome in the operator's words, straight from the server. */
+  lastOutcomeLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Every editable field, all optional: `PUT` is one endpoint for edits and for
+ * pause/resume, and the server recomputes `nextRunAt` when the schedule or
+ * `paused` actually changed.
+ */
+export interface RecurringTaskInput {
+  name?: string;
+  prompt?: string;
+  cronExpression?: string;
+  baseBranch?: string;
+  prTarget?: PrTargetBranch;
+  runCodeReview?: boolean;
+  paused?: boolean;
+}
+
+export async function fetchRecurringTasks(signal?: AbortSignal): Promise<RecurringTask[]> {
+  const body = await api<{ recurringTasks: RecurringTask[] }>(
+    '/api/recurring-tasks',
+    signal ? { signal } : {},
+  );
+  return body.recurringTasks;
+}
+
+export async function updateRecurringTask(
+  id: string,
+  input: RecurringTaskInput,
+): Promise<RecurringTask> {
+  return api<RecurringTask>(`/api/recurring-tasks/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteRecurringTask(id: string): Promise<void> {
+  await api<void>(`/api/recurring-tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 /* ------------------------------------------------------------ pull requests */
 
 /** Mirrors the server's `PullRequestView`: one open pull request. */

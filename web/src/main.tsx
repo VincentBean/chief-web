@@ -22,6 +22,7 @@ const Settings = lazy(() => import('./pages/Settings.tsx').then((m) => ({ defaul
 const PullRequests = lazy(() => import('./pages/PullRequests.tsx').then((m) => ({ default: m.PullRequests })));
 const Repositories = lazy(() => import('./pages/Repositories.tsx').then((m) => ({ default: m.Repositories })));
 const NewSession = lazy(() => import('./pages/NewSession.tsx').then((m) => ({ default: m.NewSession })));
+const RecurringTasks = lazy(() => import('./pages/RecurringTasks.tsx').then((m) => ({ default: m.RecurringTasks })));
 
 /**
  * The entry points, matched on the pathname. The server redirects
@@ -31,6 +32,7 @@ const NewSession = lazy(() => import('./pages/NewSession.tsx').then((m) => ({ de
 const PAGES: Record<string, ComponentType> = {
   '/': Overview,
   '/pull-requests': PullRequests,
+  '/recurring-tasks': RecurringTasks,
   '/repositories': Repositories,
   '/sessions': Sessions,
   '/sessions/new': NewSession,

@@ -111,6 +111,21 @@ export function startsIn(iso: string, now: number = Date.now()): string {
 }
 
 /**
+ * The wait until a recurring task's next occurrence — "in 3 h 12 min" — and
+ * "due now" once the moment has passed but the scheduler has not fired yet
+ * (US-007).
+ *
+ * Separate from `startsIn` because a task has no single start: the sentence it
+ * reads in is "next run in …", and "overdue by 20 s" would be alarming copy
+ * for a tick that is at most a minute away.
+ */
+export function nextRunIn(iso: string, now: number = Date.now()): string {
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms)) return 'unknown';
+  return ms <= 0 ? 'due now' : `in ${formatDuration(ms)}`;
+}
+
+/**
  * The time left as a ticking clock — `4:59` under an hour, `1:04:59` over one
  * — for a countdown that is re-rendered every second, and `0:00` once the
  * moment has passed.
