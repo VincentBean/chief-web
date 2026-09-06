@@ -204,3 +204,28 @@ and:
 
 If Docker cannot be reached the server still starts and changes nothing: an
 unanswerable daemon is not evidence that anything is gone.
+
+## Delivery
+
+When the last story is `done`, `server/src/delivery/` turns the session into a
+pull request. It is a fixed sequence of steps, each one a module of its own, and
+the two that run an agent are optional constructor arguments that are `null`
+wherever no agent can be run:
+
+| # | Step | Module | Fails the delivery? |
+| - | ---- | ------ | ------------------- |
+| 1 | Count the commits on the branch — nothing committed, nothing to deliver | `delivery/commits.ts` | no, it finishes clean |
+| 2 | `git push --set-upstream origin <feature-branch>` from inside the session container | `delivery/push.ts` | yes, at the `push` stage |
+| 3 | Check the GitHub token, the repository and its `owner/repo` slug | `delivery/service.ts` | yes, at the `pull_request` stage |
+| 4 | **Write the functional description of the branch** — one headless `claude -p` over `origin/<target>...<feature>`, which becomes the **What this does** section of the body | `delivery/description-step.ts` over `description/` | **no** — a failure is `null` and the body is opened without the section |
+| 5 | `POST /repos/<owner>/<repo>/pulls` with the rendered body | `delivery/pull-request.ts` | yes, at the `pull_request` stage |
+| 6 | The code review, for a session that has it switched on | `delivery/review-step.ts` over `review/` | yes, at the `review` stage, with the pull request already open |
+
+Step 4 sits where it does deliberately: after everything that decides whether a
+pull request can be opened at all, so no agent is spent describing a branch that
+will not get one, and before the pull request is created, because that is the
+only moment the body is written — an existing pull request is adopted and its
+body is never rewritten. A successful description is stored on the session row,
+so a retry after a GitHub failure reuses it rather than paying for a second pass.
+See [Pull request descriptions](pr-descriptions.md) and
+[Push and pull request](build-loop.md#push-and-pull-request).

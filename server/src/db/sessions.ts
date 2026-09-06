@@ -160,6 +160,15 @@ export interface Session {
    * an ordinary session and outlives it.
    */
   readonly recurringTaskId: string | null;
+  /**
+   * The functional description of this branch, written by the description
+   * agent for the pull request body (US-003), and null until one has been.
+   *
+   * Kept on the session so a retried delivery reuses it: the description costs
+   * an agent run, the branch it described has not changed, and the pull request
+   * body is written once.
+   */
+  readonly prDescription: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -193,6 +202,7 @@ export interface UpdateSessionInput {
   readonly waitingUntil?: string | null;
   readonly codeReview?: boolean;
   readonly recurringTaskId?: string | null;
+  readonly prDescription?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -214,6 +224,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   waitingUntil: 'waiting_until',
   codeReview: 'code_review',
   recurringTaskId: 'recurring_task_id',
+  prDescription: 'pr_description',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -263,6 +274,7 @@ export function mapSession(row: Row): Session {
     waitingUntil: nullableText(row, 'waiting_until'),
     codeReview: integer(row, 'code_review') === 1,
     recurringTaskId: nullableText(row, 'recurring_task_id'),
+    prDescription: nullableText(row, 'pr_description'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -288,6 +300,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     waitingUntil: null,
     codeReview: input.codeReview ?? false,
     recurringTaskId: input.recurringTaskId ?? null,
+    prDescription: null,
     createdAt: now,
     updatedAt: now,
   };

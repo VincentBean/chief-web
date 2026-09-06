@@ -19,7 +19,13 @@ import {
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
-import { createDeliveryService, type DeliveryService, ReviewStep } from './delivery/index.js';
+import {
+  createDeliveryService,
+  type DeliveryService,
+  DescriptionStep,
+  ReviewStep,
+} from './delivery/index.js';
+import { createDescriptionService } from './description/index.js';
 import { DockerApi } from './docker/index.js';
 import { UsageLimitHold } from './limits/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
@@ -251,6 +257,10 @@ export function createApp(
   // reviews started by hand on the Pull requests page: same prompt, same model
   // setting, same findings file.
   const reviewer = createReviewService(config, db, orchestrator, createAgentRunner(exec));
+  // The functional description of the branch, written just before the pull
+  // request is opened (US-003). Its own agent pass, and its own failure mode:
+  // whatever it answers, the pull request is opened.
+  const describer = createDescriptionService(config, db, orchestrator, exec, createAgentRunner(exec));
   const delivery =
     deps.delivery ??
     createDeliveryService(
@@ -260,6 +270,7 @@ export function createApp(
       exec,
       undefined,
       new ReviewStep(reviewer, new GithubReviewPublisher(config), () => prFeedback),
+      new DescriptionStep(describer, db),
     );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
