@@ -2,78 +2,100 @@
 
 > ## ⚠️ Personal project — no guarantees
 >
-> **I built chief-web for myself.** It is a personal project, shaped around my
-> own machine, my own workflow and my own repositories. It is not a product,
-> it is not supported, and there is **no guarantee that it works** — for you or
-> at all. Expect rough edges, breaking changes without notice, and no promise
-> of fixes, releases or answered issues.
+> **I built chief-web for myself**, on my machine, for my repositories. It is
+> not a product. There is no support, no releases, and no promise that it works
+> for you — or at all. Expect rough edges and breaking changes.
 >
-> **It was vibe coded**, deliberately: the goal was to get it working as fast
-> as possible, not to get it right. The code is largely agent-written and only
-> lightly reviewed, so **the quality is not guaranteed either** — the
-> architecture, the tests and the error handling are whatever got it running.
-> Read it before you trust it.
+> **It was vibe coded on purpose.** The goal was to get it working fast, not to
+> get it right. Most of the code was written by an agent and only lightly
+> reviewed, so the quality is not guaranteed either. Read it before you trust
+> it.
 >
-> Read the [security model](docs/security.md) before you run it: chief-web
-> needs the Docker socket, which gives it root-equivalent control of the host,
-> and it lets an agent run with `--dangerously-skip-permissions`. Use it at
-> your own risk, on a machine you own, against repositories you can afford to
-> have touched.
+> **It needs the Docker socket**, which is root-level access to your machine,
+> and it runs agents with `--dangerously-skip-permissions`. Read the
+> [security model](docs/security.md) first. Run it on a machine you own,
+> against repositories you can afford to have touched.
 
-Self-hosted web version of [chief](https://github.com/minicodemonkey/chief), the
-autonomous PRD-driven coding agent. You plan a PRD in a browser terminal running
-Claude Code, then chief-web runs the Ralph Wiggum loop — one fresh agent
-invocation per user story, one commit per story — on an isolated feature branch
-inside a dedicated Docker container, and opens a pull request when it is done.
+## What it is
 
-**Why it exists.** I wanted a web interface for chief that can run
-[concurrent sessions](docs/scheduling.md#concurrency-and-the-build-queue) —
-several features being built at the same time, each in its own container,
-workspace and branch — instead of one terminal I have to keep open per feature.
-So sessions here are queued and run in parallel, they survive a closed tab or a
-restart, and they can be started on a schedule.
+chief-web is a self-hosted web app that builds features for you.
 
-**Recurring sessions.** A repository can also be given
-[recurring tasks](docs/scheduling.md#recurring-tasks): a stored prompt ("run
-rector and fix what it reports", "check the code style against the guide") plus
-a cron expression. Every time one comes due, chief-web spawns a fresh session
-for it with a PRD it generates itself, builds it with nobody in the loop, and
-opens a pull request — or finishes clean with no pull request when the run found
-nothing to change. While the previous run's pull request is still open the next
-occurrence is skipped, so nothing stacks up.
+You describe a feature in a browser terminal running Claude Code, which writes
+it down as a **PRD** — a list of user stories. Then you press build. chief-web
+works through the stories one at a time, each in a fresh agent run, commits
+after each one, and opens a pull request when it is done. All of it happens in
+a Docker container on its own git branch, so your machine is never touched.
 
-Installation requires nothing but Docker.
+It is a web version of [chief](https://github.com/minicodemonkey/chief). I made
+it because I wanted several features building at the same time, in the
+background, instead of babysitting one terminal per feature.
 
-**New here?** [Prerequisites](#prerequisites) → [Setup](#setup) →
+**Installing it needs nothing but Docker.**
+
+## What it does
+
+- **Builds a feature from a PRD.** Plan it, press build, get a pull request —
+  one agent run per story, one commit per story.
+  [How the loop works](docs/build-loop.md)
+- **Runs several builds at once.** Each one gets its own container, clone and
+  branch. Anything over your limit waits in a queue. Closing the tab or
+  restarting the server does not stop them.
+  [Concurrency](docs/scheduling.md#concurrency-and-the-build-queue)
+- **Starts when you tell it to.** Give a session a start time and it runs
+  overnight. [Scheduled starts](docs/scheduling.md#scheduled-starts)
+- **Repeats work on a schedule.** Save a prompt and a cron expression — "run
+  rector and fix what it reports". It writes its own PRD, builds it with nobody
+  watching, and opens a pull request, or nothing at all if there was nothing to
+  fix. [Recurring tasks](docs/scheduling.md#recurring-tasks)
+- **Describes what it built.** Every pull request opens with a **What this
+  does** section, written by an agent from the branch diff rather than the
+  story list. [Pull request descriptions](docs/pr-descriptions.md)
+- **Reviews its own pull requests.** An agent reads the finished branch and
+  leaves a review on GitHub. You can also review any open pull request by hand.
+  [Code review](docs/code-review.md)
+- **Answers review comments.** Point it at a pull request and an agent works
+  through the comment threads, pushes fixes, then replies to each one and marks
+  it resolved.
+  [Feedback runs](docs/code-review.md#the-hand-off-to-the-feedback-run)
+- **Fixes merge conflicts.** It checks its own open pull requests and resolves
+  conflicts with the base branch by itself.
+  [Merge conflicts](docs/merge-conflicts.md)
+- **Fixes Sentry errors.** Link a Sentry project and it works out which errors
+  a code change can fix, then opens a pull request for them. Merge it and the
+  issue is resolved in Sentry too. [Sentry](docs/sentry.md)
+- **Gives you a terminal in the browser.** A real shell inside any running
+  container. Close the tab, come back, the output is still there.
+  [Terminals](docs/interface.md#browser-terminals)
+- **Shows you a dashboard.** What is running, what needs you, what is queued,
+  and how much got built in the last two weeks.
+  [Overview](docs/interface.md#overview)
+
+If Claude runs into its usage limit mid-build, the session waits for the limit
+to lift and carries on instead of failing.
+[The hold](docs/build-loop.md#the-usage-limit-hold)
+
+**New here?** [What you need](#what-you-need) → [Setup](#setup) →
 [Your first session](docs/first-session.md) → [Documentation](#documentation).
 
-## Prerequisites
+## What you need
 
-- **Docker Engine 24+ with the Compose v2 plugin.** Check with
-  `docker --version` and `docker compose version` — if the second one prints
-  usage instead of a version, you have the old `docker-compose` binary and need
-  the plugin. Docker Desktop (macOS/Windows) and Docker Engine (Linux) both ship
-  it.
+- **Docker**, version 24 or newer, with the `compose` plugin. Check with
+  `docker compose version` — if it prints usage instead of a version number
+  you have the old `docker-compose` binary and need the plugin.
 - **Access to the Docker socket**, because chief-web starts a container per
-  session (see [Architecture](docs/architecture.md)). On Linux that means your user is
-  in the `docker` group or you run compose with `sudo`. Rootless Docker works
-  too, but its socket is elsewhere (`$XDG_RUNTIME_DIR/docker.sock`), so both the
-  bind mount in `docker-compose.yml` and `DOCKER_SOCKET` have to point at it.
-- **A GitHub account with admin rights on the repositories you want worked on** —
-  you need to add a deploy key to each of them, and a personal access token that
-  may open pull requests.
-- **A Claude account you can sign into interactively** (a Claude Pro/Max
-  subscription or Anthropic Console credentials). There is no API key to paste:
-  Claude Code is signed in once, in a browser terminal, and the credentials are
-  reused by every session.
-- **Outbound network** to `github.com` over SSH (port 22) and to
-  `api.github.com` and Anthropic over HTTPS.
-- **A couple of GB of disk** for the two images, plus a full clone per session
-  on the data volume, and enough RAM for the sessions you run at once — each one
-  is a container running an agent and, usually, your test suite.
+  session. On Linux that means your user is in the `docker` group, or you run
+  compose with `sudo`.
+- **A GitHub account** that can add a deploy key to each repository you want
+  worked on, and create an access token.
+- **A Claude account** you can log into — a Pro/Max subscription or Anthropic
+  Console. There is no API key to paste; you sign in once, in the browser.
+- **Internet access** to GitHub (SSH and HTTPS) and to Anthropic.
+- **A few GB of disk** for the images and a full clone per session, plus enough
+  RAM for the sessions you run at once. Each one is a container running an agent
+  and, usually, your test suite.
 
-Nothing else is needed on the host: git, Node.js and the Claude Code CLI all
-live inside the images.
+You do not need git, Node.js or the Claude Code CLI on your machine — they all
+live inside the Docker images.
 
 ## Quick start
 
@@ -82,13 +104,10 @@ cp .env.example .env      # set CHIEF_WEB_PASSWORD
 docker compose up --build
 ```
 
-The UI is then available on <http://localhost:8080> (change the host port with
-`CHIEF_WEB_PORT` in `.env`). First-run setup is completed in the browser: log in
-with the password, add a GitHub token and repositories, and sign Claude Code in
-once from **Settings → Set up Claude**. [Setup](#setup) walks through all of it
-step by step.
+Then open <http://localhost:8080>. The rest of the setup happens in the browser
+and is described below.
 
-Health check:
+To check it is running:
 
 ```sh
 curl http://localhost:8080/api/health   # -> {"status":"ok"}
@@ -96,8 +115,7 @@ curl http://localhost:8080/api/health   # -> {"status":"ok"}
 
 ## Setup
 
-Six steps from a clean host to a repository chief-web can build. Steps 1–3 are
-the terminal; 4–6 are the browser and take a couple of minutes.
+Six steps. The first three are in a terminal, the last three in the browser.
 
 ### 1. Configure `.env`
 
@@ -107,162 +125,148 @@ cd chief-web
 cp .env.example .env
 ```
 
-Every value has a working default; the one worth setting by hand is the
-password protecting the whole UI:
+Everything has a working default. The one thing worth setting yourself is the
+password for the web interface:
 
 ```ini
 CHIEF_WEB_PASSWORD=a-long-random-passphrase
-CHIEF_WEB_PORT=8080          # host port; the container always listens on 8080
+CHIEF_WEB_PORT=8080          # the port on your machine
 ```
 
-If you leave `CHIEF_WEB_PASSWORD` empty the server generates a password on first
-boot and logs it exactly once (`docker compose logs server | grep -i password`).
-Setting the variable later always wins over that generated one.
+Leave the password empty and chief-web makes one for you on first boot and
+prints it to the log once — find it with
+`docker compose logs server | grep -i password`. Setting the variable later
+replaces it.
 
-Two more are worth a look now; the rest are documented in
+Two more you may want now. Everything else is explained in
 [`.env.example`](.env.example) and can wait:
 
 ```ini
-PUBLIC_URL=https://chief.example.com   # only used to link a PR back to its session
-MAX_CONCURRENT_SESSIONS=3              # default build concurrency (changeable in the UI)
+PUBLIC_URL=https://chief.example.com   # used to link a pull request back to its session
+MAX_CONCURRENT_SESSIONS=3              # how many builds run at once (changeable in the UI)
 ```
 
-### 2. Start the stack
+### 2. Start it
 
 ```sh
 docker compose up --build
 ```
 
-This builds **two** images — the server (`chief-web:latest`) and the runner
-(`chief-web-runner:latest`, the image every session container runs) — and starts
-only the server. The first build takes a few minutes. Add `-d` to run it in the
-background; `docker compose logs -f server` follows the logs afterwards.
+This builds two images: the server, and the runner image that every session
+container is started from. The first build takes a few minutes. Add `-d` to
+leave it running in the background, and use `docker compose logs -f server` to
+watch the logs.
 
-Check it is up:
+### 3. Log in
 
-```sh
-curl http://localhost:8080/api/health    # -> {"status":"ok"}
-```
+Open <http://localhost:8080> and enter your password. There are no user
+accounts, the password is the whole login, and you stay logged in for 7 days.
 
-### 3. First login
-
-Open <http://localhost:8080>. Every page redirects to `/login` until you are
-signed in; enter the password from step 1. There are no user accounts — the
-password *is* the operator — and the session cookie lasts 7 days.
-
-The home page is the [overview](docs/interface.md#overview); the sidebar links
-to **Sessions**, **Pull requests**, **Recurring tasks**, **Repositories**,
-**Terminals** and **Settings**. Until setup is complete the overview shows a
-checklist of what is still missing — Claude Code not signed in, no repository
-yet — which is steps 4–6.
+You land on the overview. Until setup is finished it shows a checklist of what
+is still missing, which is steps 4 to 6.
 
 ### 4. Add a GitHub token
 
-chief-web opens pull requests with a **GitHub Personal Access Token**. Create
-one at <https://github.com/settings/tokens>, in either flavour:
+chief-web opens pull requests with a **personal access token**. Make one at
+<https://github.com/settings/tokens>. Either kind works:
 
-| Token type | Where | What to grant |
+| Token type | Where | What to give it |
 | --- | --- | --- |
-| **Classic PAT** | Settings → Developer settings → Personal access tokens → **Tokens (classic)** | the **`repo`** scope (that whole checkbox; it covers private repositories and pull requests) |
-| **Fine-grained token** | … → **Fine-grained tokens** | *Repository access*: the repositories chief-web will work on. *Repository permissions*: **Contents: Read and write** and **Pull requests: Read and write** |
+| **Fine-grained** (recommended) | Developer settings → **Fine-grained tokens** | Access to the repositories chief-web will work on, with **Contents: read and write** and **Pull requests: read and write** |
+| **Classic** | Developer settings → **Tokens (classic)** | The whole **`repo`** checkbox |
 
-Prefer the fine-grained token: it can be limited to the repositories you
-actually hand to chief-web. If those repositories belong to an organisation, a
-fine-grained token has to be approved by an org owner before it works.
+The fine-grained one is better because you can limit it to the repositories you
+actually hand over. If those belong to an organisation, an owner has to approve
+the token before it works.
 
-Give it an expiry you are willing to renew — an expired token fails at the very
-last step of a session, when the pull request is opened
-([troubleshooting](docs/troubleshooting.md#recovering-a-failed-session)).
+Pick an expiry you will remember to renew. An expired token does not fail until
+the very last step of a build, when the pull request is opened.
 
-Then in chief-web: **Settings → GitHub Personal Access Token**, paste, **Save**,
-then press **Validate**. Validate calls `GET https://api.github.com/user` and
-shows the account the token authenticates as, so a typo is caught here rather
-than at the end of a build. The token is write-only from then on: the UI only
-ever shows whether one is stored plus its last four characters.
+Now paste it into **Settings → GitHub Personal Access Token**, press **Save**,
+then press **Validate**. Validate shows you which GitHub account the token
+belongs to, so a typo turns up now instead of at the end of a two-hour build.
+After saving, the interface only ever shows the last four characters.
 
-The token opens pull requests. It is *not* how sessions push code — that is the
-per-repository deploy key in the next step.
+This token opens pull requests. It is *not* how code gets pushed — that is the
+deploy key in the next step.
 
-### 5. Add a repository and its deploy key
+### 5. Add a repository
 
-Go to **Repositories → Add repository**:
+Go to **Repositories → Add repository** and fill in:
 
-| Field | Value |
+| Field | What to put |
 | --- | --- |
-| **Name** | how it appears in chief-web |
+| **Name** | whatever you want to call it here |
 | **SSH URL** | `git@github.com:owner/repo.git` — SSH, not HTTPS |
-| **GitHub slug** | `owner/repo`, derived from the URL; override it only for an unusual remote |
-| **Default base branch** | what sessions branch from by default (`main`, `develop`, …) |
+| **GitHub slug** | `owner/repo`; filled in for you from the URL |
+| **Default base branch** | what new sessions branch from (`main`, `develop`, …) |
 | **SSH key** | leave **Generate a new ed25519 keypair** selected |
 
-Save. chief-web generates the keypair and shows you the **public** half under
-**Deploy key**, with a **Copy public key** button and a link straight to the
-right GitHub page.
+Save it. chief-web makes the key and shows you the public half, with a copy
+button and a link to the right GitHub page.
 
-On GitHub, go to `https://github.com/<owner>/<repo>/settings/keys/new`, paste the
-key, give it a title (`chief-web`), and — this is the part everyone forgets —
-**tick "Allow write access"**. Sessions push their feature branch with this key;
-a read-only deploy key clones fine and then fails at the first push.
+On GitHub, open `https://github.com/<owner>/<repo>/settings/keys/new`, paste the
+key, name it `chief-web`, and — this is the part everyone forgets — **tick
+"Allow write access"**. Without it the repository clones fine and then fails the
+first time a session tries to push.
 
-Back in chief-web, press **Test connection**. It runs `git ls-remote` in a
-short-lived runner container using that key and reports either success or git's
-own stderr. Do not skip it: it turns a mistake here into one line of output now
-instead of a failed session later.
+Back in chief-web, press **Test connection**. It tries to reach the repository
+with that key and tells you straight away whether it worked. Do not skip it.
 
-If you would rather use a key you already have, pick **Paste an existing private
-key** instead. It must be **unencrypted** — a session container has no way to
-answer a passphrase prompt. The private half never leaves the server: it is
-stored `0600` on the data volume and is never returned by the API, shown in the
-UI, or written to a log.
+You can paste your own private key instead, if you would rather. It has to be
+unencrypted, because nothing inside a container can type a passphrase. Either
+way the private key stays on the server and is never shown in the interface, in
+the API, or in a log.
 
-Repeat for every repository you want chief-web to work on. Each gets its own
-key.
+Do this once per repository. Each one gets its own key.
 
-### 6. Sign Claude Code in
+### 6. Sign in to Claude Code
 
-Go to **Settings → Claude Code** and press **Set up Claude**. chief-web starts a
-temporary container with only the credentials volume mounted, runs
-`claude auth login` in it, and shows the terminal inline:
+Go to **Settings → Claude Code** and press **Set up Claude**. A terminal
+appears and asks you to log in:
 
-1. Select the URL it prints, copy it with **Ctrl+Shift+C**, and open it in a
-   new tab.
-2. Approve the request in your browser and copy the code Claude gives you back.
-3. Paste it into the terminal with **Ctrl+Shift+V** and press Enter.
+1. Copy the URL it prints with **Ctrl+Shift+C** and open it in a new tab.
+2. Approve it, and copy the code Claude gives you.
+3. Paste it back into the terminal with **Ctrl+Shift+V** and press Enter.
 4. Press **Close login terminal**.
 
-The indicator flips to **Authenticated** immediately — closing the terminal
-removes the container and re-probes. The credentials live in the named
-`chief-web-claude-auth` volume and are shared by every session container, so
-this is a one-time step that survives `docker compose down` and restarts.
+It should now say **Authenticated**. You only do this once — the login is kept
+in a Docker volume, shared by every session, and survives restarts and
+`docker compose down`.
 
-**Creating or planning a session is blocked until this says Authenticated**, on
-purpose: an agent that cannot authenticate would otherwise fail on its first
-invocation, a long way from the cause.
+Until this says Authenticated you cannot create or plan a session. That is
+deliberate: an agent that cannot log in would fail on its first run, a long way
+from the actual cause.
 
-Setup is done. Everything after this is per session.
+That is it. Everything from here on is per session — start with
+[your first session](docs/first-session.md).
 
 ## Configuration
 
-All environment variables are documented in [`.env.example`](.env.example).
+Every environment variable is explained in [`.env.example`](.env.example).
+
+Your GitHub token, your Sentry token, the git identity commits are made with,
+and which model each step uses are all set in **Settings** in the browser, not
+in `.env`.
 
 ## Documentation
 
-The rest of the manual lives in [`docs/`](docs/):
+The rest of the manual is in [`docs/`](docs/):
 
-| Document | What is in it |
+| Document | What it covers |
 | --- | --- |
-| [Your first session](docs/first-session.md) | one feature end to end: create, plan a PRD, mark ready, build, pull request, merge |
-| [Architecture](docs/architecture.md) | one container per session, the volumes, the Docker socket, the data layer, the runner image |
-| [Repositories](docs/repositories.md) | registering a remote, deploy keys, testing the connection |
-| [Sessions](docs/sessions.md) | what a session is, setup, sessions a recurring task started, planning the PRD, marking it ready, the session states |
-| [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
-| [Code review](docs/code-review.md) | the per-session flag, the review model, what lands on the pull request, the three attempts, the feedback hand-off, reviewing an open pull request by hand |
-| [Pull request descriptions](docs/pr-descriptions.md) | the description pass behind the **What this does** section: when it runs, what it is given, the writing rules, and why a failure never fails the delivery |
-| [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the FIFO build queue |
-| [Merge conflict fixer](docs/merge-conflicts.md) | the conflict scan, the `chief/`-branch rule, the three attempts, and what letting an agent push to your pull requests means |
-| [Sentry auto-fixer](docs/sentry.md) | the auth token and its scopes, linking a project, the status lifecycle, the classification model and the polling interval, and why merging stays the only human act |
-| [Web interface](docs/interface.md) | the layout and shortcuts, the overview, sessions, browser terminals, the settings page |
-| [Claude authentication](docs/claude-auth.md) | the one-time login and the shared credentials volume |
+| [Your first session](docs/first-session.md) | one feature from start to finish |
+| [Architecture](docs/architecture.md) | how the containers, volumes and data fit together |
+| [Repositories](docs/repositories.md) | adding a repository, deploy keys, testing the connection |
+| [Sessions](docs/sessions.md) | what a session is and the states it goes through |
+| [The build loop](docs/build-loop.md) | how a build runs, the live log, the usage limit, what happens when it fails |
+| [Code review](docs/code-review.md) | the automatic review, and reviewing a pull request by hand |
+| [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
+| [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |
+| [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
+| [Sentry auto-fixer](docs/sentry.md) | linking a project, what gets fixed, and what does not |
+| [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
+| [Claude authentication](docs/claude-auth.md) | the one-time login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
-| [Troubleshooting](docs/troubleshooting.md) | SSH failures, auth failures, recovering a failed session |
-| [Development](docs/development.md) | running it from source, the quality checks |
+| [Troubleshooting](docs/troubleshooting.md) | SSH and login failures, recovering a failed session |
+| [Development](docs/development.md) | running it from source |
