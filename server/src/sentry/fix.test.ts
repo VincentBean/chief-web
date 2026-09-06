@@ -220,6 +220,7 @@ function view(session: Session): SessionView {
   return {
     ...session,
     repositoryName: 'demo',
+    recurringTaskName: null,
     scheduleMissed: false,
     queuePosition: null,
     stories: { total: 0, done: 0 },
