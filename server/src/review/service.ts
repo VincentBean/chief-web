@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentRunner } from '../build/index.js';
 import type { Config } from '../config.js';
-import type { Database, Session } from '../db/index.js';
+import { type Database, getRepository, type Session } from '../db/index.js';
 import { isUsageLimitRefusal } from '../limits/index.js';
 import { logger } from '../lib/logger.js';
 import { sessionWorkspaceDir } from '../orchestrator/index.js';
@@ -58,6 +58,16 @@ export interface ReviewSubject {
   readonly targetBranch: string;
   /** The pull request's branch, already checked out in the container. */
   readonly featureBranch: string;
+  /**
+   * The repository's review context, injected into the prompt (US-004);
+   * `null` or absent when the repository has none.
+   *
+   * Carried on the subject rather than looked up in the pass, so the
+   * repository is read once per review and not once per attempt — and so the
+   * pull request review, which already holds the repository, does not read it
+   * a second time.
+   */
+  readonly reviewContext?: string | null;
 }
 
 /**
@@ -95,12 +105,20 @@ export class ReviewService {
       });
     }
 
+    // The repository is what carries the review context (US-004). Read here
+    // rather than in the pass: the caller runs the pass up to three times, and
+    // the context cannot change between two attempts of the same review. A
+    // repository deleted since is simply reviewed without one, exactly as
+    // every review was before the field existed.
+    const repository = getRepository(this.db, session.repositoryId);
+
     return this.reviewInContainer({
       id: session.id,
       name: session.name,
       containerId,
       targetBranch: session.prTargetBranch,
       featureBranch: session.featureBranch,
+      reviewContext: repository?.reviewContext ?? null,
     });
   }
 
@@ -131,6 +149,7 @@ export class ReviewService {
         targetBranch: subject.targetBranch,
         featureBranch: subject.featureBranch,
         timeoutMs,
+        reviewContext: subject.reviewContext ?? null,
       }),
       timeoutMs,
       model,
