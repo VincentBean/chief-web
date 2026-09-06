@@ -838,6 +838,21 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE session_id IS NOT NULL;
     `,
   },
+  {
+    id: '0014_session_pr_description',
+    sql: `
+      -- The functional description the description agent wrote for this
+      -- session's pull request (US-003). Stored so a retried delivery opens the
+      -- pull request with the description the first attempt already paid an
+      -- agent for, instead of running it again. NULL means "none was written":
+      -- every session from before the feature, and every session whose
+      -- description pass failed.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK the way
+      -- 0005/0007/0008/0010/0011 did: this column has to be carried across.
+      ALTER TABLE sessions ADD COLUMN pr_description TEXT;
+    `,
+  },
 ];
 
 /**

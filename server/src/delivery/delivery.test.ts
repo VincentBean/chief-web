@@ -13,6 +13,7 @@ import {
   getSession,
   IN_MEMORY,
   isDeliveryStage,
+  listStories,
   openDatabase,
   type PrRunStatus,
   type Session,
@@ -23,6 +24,7 @@ import {
   updatePrRun,
   updateSession,
 } from '../db/index.js';
+import type { DescriptionResult } from '../description/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { GithubApiError, openPullRequest } from '../lib/github.js';
 import { UsageLimitHold } from '../limits/index.js';
@@ -37,6 +39,7 @@ import type {
 } from '../review/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
 import { COMMIT_COUNT_SCRIPT, type CommitCount, commitCountExecSpec, countBranchCommits } from './commits.js';
+import { DescriptionStep, type SessionDescriber } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { PUSH_SCRIPT, pushExecSpec } from './push.js';
 import { type FeedbackSolver, ReviewStep, type SessionReviewer } from './review-step.js';
@@ -2181,5 +2184,200 @@ describe('delivering a scheduled run that changed nothing (US-006)', () => {
     );
     assert.equal(opener.calls.length, 1);
     assert.equal(world.reload().status, 'pr-open');
+  });
+});
+
+/** A {@link SessionDescriber} the test scripts; counts every pass it is asked for. */
+class FakeDescriber implements SessionDescriber {
+  readonly calls: { sessionId: string; stories: readonly Story[] }[] = [];
+  /** What the pass answers with; a written description by default. */
+  result: DescriptionResult = {
+    ok: true,
+    sessionId: '',
+    code: 'ok',
+    message: 'The pull request description was written.',
+    description: 'Adds a login form and the session it needs.',
+    output: '',
+  };
+  /** Thrown instead of answering, when set: the failure the pass promises never to have. */
+  failure: Error | null = null;
+
+  describe(session: Session, stories: readonly Story[]): Promise<DescriptionResult> {
+    this.calls.push({ sessionId: session.id, stories });
+    if (this.failure !== null) return Promise.reject(this.failure);
+    return Promise.resolve({ ...this.result, sessionId: session.id });
+  }
+}
+
+describe('the functional description of a delivery (US-003)', () => {
+  function serviceFor(world: World, opener: PullRequestOpener, describer: FakeDescriber) {
+    return createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+      null,
+      new DescriptionStep(describer, world.db),
+    );
+  }
+
+  it('opens the pull request with the generated description and stores it', async () => {
+    const world = new World({ publicUrl: 'https://chief.example.com/' });
+    const opener = new FakeOpener();
+    const describer = new FakeDescriber();
+
+    const result = await serviceFor(world, opener, describer).complete(
+      world.session,
+      world.stories(),
+    );
+
+    assert.equal(describer.calls.length, 1);
+    assert.equal(describer.calls[0]?.sessionId, world.session.id);
+    // The body is the templated one with the description on top: the exact
+    // bytes, so a section in the wrong place is a failure and not a pass.
+    assert.equal(
+      opener.calls[0]?.input.body,
+      pullRequestBody({
+        session: world.session,
+        stories: world.stories(),
+        publicUrl: world.config.publicUrl,
+        description: 'Adds a login form and the session it needs.',
+      }),
+    );
+    assert.match(opener.calls[0]?.input.body ?? '', /## What this does/);
+
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open');
+    assert.equal(delivered.prDescription, 'Adds a login form and the session it needs.');
+    assert.equal(result, undefined, 'complete() answers nothing; the session carries the outcome');
+  });
+
+  it('opens the pull request with the templated body when the pass fails', async () => {
+    const world = new World({ publicUrl: 'https://chief.example.com/' });
+    const opener = new FakeOpener();
+    const describer = new FakeDescriber();
+    describer.result = {
+      ok: false,
+      sessionId: '',
+      code: 'agent_timed_out',
+      message: 'The description agent ran out of time before it wrote anything.',
+      description: null,
+      output: '',
+    };
+
+    const delivery = serviceFor(world, opener, describer);
+    await delivery.complete(world.session, world.stories());
+
+    assert.equal(describer.calls.length, 1);
+    // Byte-for-byte the body chief-web opened pull requests with before
+    // descriptions existed: the failure costs the reviewer a paragraph and
+    // nothing else.
+    assert.equal(
+      opener.calls[0]?.input.body,
+      pullRequestBody({
+        session: world.session,
+        stories: world.stories(),
+        publicUrl: world.config.publicUrl,
+      }),
+    );
+
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'pr-open', 'the delivery succeeded');
+    assert.equal(delivered.prUrl, 'https://github.com/acme/demo/pull/7');
+    assert.equal(delivered.lastError, null);
+    assert.equal(delivered.failureStage, null);
+    assert.equal(delivered.prDescription, null, 'nothing is stored, so a retry tries again');
+  });
+
+  it('survives a description pass that throws', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    const describer = new FakeDescriber();
+    describer.failure = new Error('the container went away');
+
+    await serviceFor(world, opener, describer).complete(world.session, world.stories());
+
+    assert.equal(opener.calls.length, 1);
+    assert.doesNotMatch(opener.calls[0]?.input.body ?? '', /## What this does/);
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('reuses the stored description on a retry instead of running the agent again', async () => {
+    const world = new World({ publicUrl: 'https://chief.example.com/' });
+    const opener = new FakeOpener();
+    const describer = new FakeDescriber();
+    const delivery = serviceFor(world, opener, describer);
+
+    // The description is written, and then GitHub refuses the pull request:
+    // the session fails at `pull_request` with the description already stored.
+    opener.failure = new GithubApiError('github_rejected', 'GitHub is having a moment', 500);
+    await delivery.complete(world.session, world.stories());
+    assert.equal(describer.calls.length, 1);
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+    assert.equal(failed.prDescription, 'Adds a login form and the session it needs.');
+
+    opener.failure = null;
+    const result = await delivery.retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(describer.calls.length, 1, 'the agent ran once, for both attempts');
+    // The retry reads the stories back out of the database rather than being
+    // handed them, so the expected body is built from the same rows.
+    assert.equal(
+      opener.calls[1]?.input.body,
+      pullRequestBody({
+        session: world.session,
+        stories: listStories(world.db, world.session.id),
+        publicUrl: world.config.publicUrl,
+        description: 'Adds a login form and the session it needs.',
+      }),
+    );
+    assert.equal(world.reload().status, 'pr-open');
+  });
+
+  it('never describes a session whose pull request already exists', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    const describer = new FakeDescriber();
+    // A delivery retried after the pull request was opened: the body was
+    // written when it was created and is not rewritten, so there is nothing
+    // for a description to be generated for.
+    updateSession(world.db, world.session.id, {
+      status: 'failed',
+      failureStage: 'pull_request',
+      prUrl: 'https://github.com/acme/demo/pull/7',
+    });
+
+    const result = await serviceFor(world, opener, describer).retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(describer.calls.length, 0, 'no agent is spent on a body nobody will read');
+    assert.doesNotMatch(opener.calls[0]?.input.body ?? '', /## What this does/);
+  });
+
+  it('opens the pull request as before when nothing can write a description', async () => {
+    const world = new World({ publicUrl: 'https://chief.example.com/' });
+    const opener = new FakeOpener();
+
+    await createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    ).complete(world.session, world.stories());
+
+    assert.equal(
+      opener.calls[0]?.input.body,
+      pullRequestBody({
+        session: world.session,
+        stories: world.stories(),
+        publicUrl: world.config.publicUrl,
+      }),
+    );
+    assert.equal(world.reload().prDescription, null);
   });
 });
