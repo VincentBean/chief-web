@@ -59,6 +59,9 @@ const PR_STATES_MIGRATION = '0008_session_pr_states';
 const REVIEW_STATES_MIGRATION = '0010_session_review_states';
 const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 
+/** The migration under test in 'adds `review_context`'. */
+const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -431,6 +434,47 @@ describe('migrations', () => {
     }
     assert.ok(deleteSession(db, 'failed'));
     assert.equal(listStories(db, 'failed').length, 0);
+
+    closeDatabase(db);
+  });
+
+  it('adds `review_context` to existing repositories as NULL', () => {
+    // A plain ADD COLUMN rather than a rebuild, so what this walk proves is
+    // that a repository written before the column exists still reads back
+    // through `mapRepository` afterwards, with nothing to add to the prompt.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === REVIEW_CONTEXT_MIGRATION);
+    assert.ok(index > 0, `${REVIEW_CONTEXT_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-06T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+
+    assert.ok(runMigrations(db).includes(REVIEW_CONTEXT_MIGRATION));
+
+    const migrated = getRepository(db, repository.id);
+    assert.equal(migrated?.name, 'chief-web');
+    assert.equal(migrated?.reviewContext, null);
+
+    // And the column takes a value, which survives a partial update.
+    assert.equal(
+      updateRepository(db, repository.id, { reviewContext: 'Watch the N+1 queries.' })
+        ?.reviewContext,
+      'Watch the N+1 queries.',
+    );
+    assert.equal(
+      updateRepository(db, repository.id, { name: 'renamed' })?.reviewContext,
+      'Watch the N+1 queries.',
+    );
+    assert.equal(updateRepository(db, repository.id, { reviewContext: null })?.reviewContext, null);
 
     closeDatabase(db);
   });

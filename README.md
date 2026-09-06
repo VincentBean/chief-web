@@ -257,10 +257,10 @@ The rest of the manual is in [`docs/`](docs/):
 | --- | --- |
 | [Your first session](docs/first-session.md) | one feature from start to finish |
 | [Architecture](docs/architecture.md) | how the containers, volumes and data fit together |
-| [Repositories](docs/repositories.md) | adding a repository, deploy keys, testing the connection |
+| [Repositories](docs/repositories.md) | adding a repository, deploy keys, testing the connection, its code review context |
 | [Sessions](docs/sessions.md) | what a session is and the states it goes through |
 | [The build loop](docs/build-loop.md) | how a build runs, the live log, the usage limit, what happens when it fails |
-| [Code review](docs/code-review.md) | the automatic review, and reviewing a pull request by hand |
+| [Code review](docs/code-review.md) | the automatic review, the per-repository context it gets, and reviewing a pull request by hand |
 | [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |

@@ -36,12 +36,45 @@ export interface ReviewPromptInput {
    * nothing behind at all.
    */
   readonly timeoutMs: number;
+  /**
+   * The repository's own review context, as its owner wrote it on the settings
+   * page (US-004); `null` or absent for a repository that has none.
+   *
+   * Rendered verbatim, in a section of its own, because it is the one part of
+   * this prompt chief-web did not write: a repository's conventions, its known
+   * trouble spots and the areas it wants left alone are things only the team
+   * owning it can say.
+   */
+  readonly reviewContext?: string | null;
 }
 
 /** The budget as the agent should read it: whole minutes, never "1800000ms". */
 function minutes(timeoutMs: number): string {
   const whole = Math.max(1, Math.round(timeoutMs / 60_000));
   return `${String(whole)} minute${whole === 1 ? '' : 's'}`;
+}
+
+/**
+ * The repository's own context as a section of its own, or nothing at all.
+ *
+ * Whitespace-only counts as nothing: the settings field trims what it saves,
+ * but a prompt that grew an empty heading anyway would be telling the agent
+ * there is context to respect when there is none. It goes before the output
+ * contract so the last thing the agent reads is still what it has to leave
+ * behind.
+ */
+function contextSection(reviewContext: string | null | undefined): string {
+  const text = reviewContext?.trim() ?? '';
+  if (text === '') return '';
+  return `## Repository-specific review context
+
+Written by the people who own this repository. It does not replace the rules
+above — report the same two kinds of thing — but it says what this repository's
+conventions are, where it has been bitten before, and what to leave alone.
+
+${text}
+
+`;
 }
 
 /** The whole prompt: what to review, what counts as a finding, what to write. */
@@ -84,7 +117,7 @@ summary and write an empty list. Do not pad the list to look thorough.
 
 You have **${minutes(input.timeoutMs)}**. Spend it on the diff.
 
-## chief-web: what this pass has to leave behind
+${contextSection(input.reviewContext)}## chief-web: what this pass has to leave behind
 
 chief-web reads exactly one thing when you are done: the JSON document at
 \`${CONTAINER_FINDINGS_PATH}\`. Nothing you say in your reply is read.

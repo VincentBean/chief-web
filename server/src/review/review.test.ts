@@ -17,6 +17,7 @@ import {
   openDatabase,
   type Session,
   setSetting,
+  updateRepository,
 } from '../db/index.js';
 import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import type { SessionContainers } from '../sessions/index.js';
@@ -97,6 +98,29 @@ describe('the review prompt', () => {
   it('states the budget in whole minutes', () => {
     assert.ok(reviewPrompt(input).includes('**30 minutes**'));
     assert.ok(reviewPrompt({ ...input, timeoutMs: 60_000 }).includes('**1 minute**'));
+  });
+
+  it("renders the repository's own context verbatim, before the output contract", () => {
+    const reviewContext = 'Never touch `legacy/`. Migrations are append-only.';
+    const prompt = reviewPrompt({ ...input, reviewContext });
+
+    assert.ok(prompt.includes('## Repository-specific review context'));
+    assert.ok(prompt.includes(reviewContext));
+    // The last instructions the agent reads have to stay the ones about the
+    // document it leaves behind, so the section goes above them.
+    assert.ok(
+      prompt.indexOf('## Repository-specific review context') <
+        prompt.indexOf('## chief-web: what this pass has to leave behind'),
+    );
+  });
+
+  it('renders no section at all when there is no context, or only whitespace', () => {
+    const bare = reviewPrompt(input);
+
+    assert.ok(!bare.includes('Repository-specific review context'));
+    assert.equal(reviewPrompt({ ...input, reviewContext: null }), bare);
+    assert.equal(reviewPrompt({ ...input, reviewContext: '' }), bare);
+    assert.equal(reviewPrompt({ ...input, reviewContext: '  \n\t ' }), bare);
   });
 });
 
@@ -248,6 +272,24 @@ describe('the headless review pass', () => {
     assert.equal(runner.invocations[0]?.containerId, `container-${session.id.slice(0, 8)}`);
     assert.equal(runner.invocations[0]?.iteration, REVIEW_ITERATION);
     assert.ok(runner.invocations[0]?.prompt.includes('git diff origin/develop...HEAD'));
+  });
+
+  it("injects the session repository's review context into the prompt", async () => {
+    updateRepository(db, session.repositoryId, { reviewContext: 'Migrations are append-only.' });
+    agentWrites(document([]));
+
+    await service().review(session);
+
+    assert.ok(runner.invocations[0]?.prompt.includes('## Repository-specific review context'));
+    assert.ok(runner.invocations[0]?.prompt.includes('Migrations are append-only.'));
+  });
+
+  it('leaves the prompt alone for a repository with no context', async () => {
+    agentWrites(document([]));
+
+    await service().review(session);
+
+    assert.ok(!runner.invocations[0]?.prompt.includes('Repository-specific review context'));
   });
 
   it('passes --model when a review model is set, and none when it is null', async () => {

@@ -309,7 +309,7 @@ export class PrReviewService {
       stopping: false,
     };
     this.live.set(review.id, state);
-    state.finished = this.drive(started, repository.sshUrl, repository.githubSlug, token, pull, state)
+    state.finished = this.drive(started, repository, token, pull, state)
       .catch((cause: unknown) => {
         logger.error('pull request review crashed', { review: review.id, error: String(cause) });
         this.fail(review.id, 'agent', String(cause));
@@ -476,12 +476,15 @@ export class PrReviewService {
 
   private async drive(
     review: PrReview,
-    repoUrl: string,
-    slug: string,
+    repository: Repository,
     token: string,
     pull: PullRequestFeedback,
     state: RunState,
   ): Promise<void> {
+    // The whole repository rather than the two strings the checkout needs: the
+    // review context travels with it into every attempt's prompt (US-004),
+    // read once by `start` instead of once per pass.
+    const { sshUrl: repoUrl, githubSlug: slug } = repository;
     state.phase = 'starting';
     let container: SessionContainerView;
     try {
@@ -530,6 +533,7 @@ export class PrReviewService {
         containerId: container.id,
         targetBranch: review.baseBranch,
         featureBranch: review.headBranch,
+        reviewContext: repository.reviewContext,
       });
       if (state.stopping) return this.stopped(review.id);
       if (pass.code === 'usage_limit') {

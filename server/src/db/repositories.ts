@@ -31,6 +31,12 @@ export interface Repository {
    */
   readonly sentryOrg: string | null;
   readonly sentryProject: string | null;
+  /**
+   * Free-form, repo-specific guidance appended to the AI review prompt for
+   * every review of this repository. NULL means the review prompt is left
+   * exactly as it is.
+   */
+  readonly reviewContext: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -45,6 +51,7 @@ export interface CreateRepositoryInput {
   readonly keySource?: RepositoryKeySource | null;
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
+  readonly reviewContext?: string | null;
 }
 
 export interface UpdateRepositoryInput {
@@ -57,6 +64,7 @@ export interface UpdateRepositoryInput {
   readonly keySource?: RepositoryKeySource | null;
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
+  readonly reviewContext?: string | null;
 }
 
 const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
@@ -69,6 +77,7 @@ const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
   keySource: 'key_source',
   sentryOrg: 'sentry_org',
   sentryProject: 'sentry_project',
+  reviewContext: 'review_context',
 };
 
 function keySourceOf(row: Row): RepositoryKeySource | null {
@@ -92,6 +101,7 @@ export function mapRepository(row: Row): Repository {
     keySource: keySourceOf(row),
     sentryOrg: nullableText(row, 'sentry_org'),
     sentryProject: nullableText(row, 'sentry_project'),
+    reviewContext: nullableText(row, 'review_context'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -110,6 +120,7 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     keySource: input.keySource ?? null,
     sentryOrg: input.sentryOrg ?? null,
     sentryProject: input.sentryProject ?? null,
+    reviewContext: input.reviewContext ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -118,8 +129,8 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     `INSERT INTO repositories
        (id, name, ssh_url, github_slug, default_base_branch,
         public_key, key_fingerprint, key_source, sentry_org, sentry_project,
-        created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        review_context, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     repository.id,
     repository.name,
@@ -131,6 +142,7 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     repository.keySource,
     repository.sentryOrg,
     repository.sentryProject,
+    repository.reviewContext,
     repository.createdAt,
     repository.updatedAt,
   );

@@ -196,6 +196,8 @@ export interface Repository {
   /** The linked Sentry project; both slugs are set, or both are null. */
   sentryOrg: string | null;
   sentryProject: string | null;
+  /** Markdown folded into this repository's AI code review prompt; null if unset. */
+  reviewContext: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -211,6 +213,8 @@ export interface RepositoryInput {
   /** `null` unlinks Sentry; both slugs are set together or not at all. */
   sentryOrg?: string | null;
   sentryProject?: string | null;
+  /** `null` or an empty string clears the review context. */
+  reviewContext?: string | null;
 }
 
 export interface ConnectionTestResult {
