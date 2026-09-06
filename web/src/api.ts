@@ -649,7 +649,7 @@ export interface Build {
   queued: boolean;
   /** Its 1-based place in that queue — shown as "Queued (#2)" — or null. */
   queuePosition: number | null;
-  /** Sessions building right now, across the whole server. */
+  /** Build slots in use right now, of every kind, across the server (US-006). */
   activeBuilds: number;
   /** The cap they are counted against, from the settings page. */
   maxConcurrentBuilds: number;
@@ -707,6 +707,57 @@ export interface RepositoryStats {
   active: number;
 }
 
+/** One build slot in use, and what is holding it (US-006). */
+export interface BuildSlot {
+  kind: 'session' | 'pr-review' | 'pr-feedback' | 'pr-conflict-fix';
+  /** A session id, or `<repositoryId>:<prNumber>` for the pull-request kinds. */
+  refId: string;
+  /** For a person: a session name, "Review of PR #12", "Conflict fix: PR #7". */
+  label: string;
+}
+
+/** One entry of the unified build queue, in FIFO order (US-006). */
+export interface QueuedBuild {
+  kind: 'session' | 'pr-review' | 'pr-feedback';
+  refId: string;
+  label: string;
+  /** 1-based place in the queue: the "#2" the UI shows. */
+  position: number;
+  queuedAt: string;
+}
+
+/** What kind of work is holding a build slot, in the operator's words. */
+export function buildSlotKindLabel(kind: BuildSlot['kind']): string {
+  switch (kind) {
+    case 'session':
+      return 'Session';
+    case 'pr-review':
+      return 'PR review';
+    case 'pr-feedback':
+      return 'PR feedback';
+    case 'pr-conflict-fix':
+      return 'Conflict fix';
+  }
+}
+
+/**
+ * The whole pool as one tooltip: the count, every occupied slot, and whatever
+ * is waiting behind them. The meter in the sidebar and the one on the overview
+ * both hang this off `title`, so hovering answers "why is nothing starting?".
+ */
+export function describeBuildSlots(builds: Stats['builds']): string {
+  const lines = [`${String(builds.active)} of ${String(builds.max)} build slots in use`];
+  for (const slot of builds.slots) lines.push(`• ${buildSlotKindLabel(slot.kind)}: ${slot.label}`);
+  if (builds.slots.length === 0) lines.push('• nothing is building');
+  if (builds.queue.length > 0) {
+    lines.push(`${String(builds.queue.length)} queued, in the order they were asked for`);
+    for (const entry of builds.queue) {
+      lines.push(`• #${String(entry.position)} ${buildSlotKindLabel(entry.kind)}: ${entry.label}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 /** Mirrors the server's `StatsView`: everything the overview page shows. */
 export interface Stats {
   generatedAt: string;
@@ -714,7 +765,15 @@ export interface Stats {
   stories: { total: number; done: number; inProgress: number; todo: number };
   prRuns: { total: number; running: number; finished: number; failed: number };
   pullRequestsOpened: number;
-  builds: { active: number; queued: number; max: number };
+  builds: {
+    /** Build slots in use, of every kind — what the cap actually counts. */
+    active: number;
+    queued: number;
+    max: number;
+    free: number;
+    slots: BuildSlot[];
+    queue: QueuedBuild[];
+  };
   hold: { until: string | null };
   /**
    * The machine the server runs on. `cpu` is the busy fraction (0–1) since the
@@ -1219,6 +1278,10 @@ export interface PrRun {
   /** Passes made so far; quoted in the reply footer. */
   attempt: number;
   failureStage: PrFailureStage | null;
+  /** True while it is waiting in the build queue for a slot. */
+  queued: boolean;
+  /** Its 1-based place in that queue; null when it is not in it. */
+  queuePosition: number | null;
   lastError: string | null;
   /** The commit the last successful push delivered. */
   headSha: string | null;
@@ -1312,6 +1375,10 @@ export interface PrReview {
   /** Which of the three passes of this start is running; null once over. */
   pass: number | null;
   failureStage: PrReviewFailureStage | null;
+  /** True while it is waiting in the build queue for a slot. */
+  queued: boolean;
+  /** Its 1-based place in that queue; null when it is not in it. */
+  queuePosition: number | null;
   lastError: string | null;
   /** The commit the review was read at. */
   headSha: string | null;

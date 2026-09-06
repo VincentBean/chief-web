@@ -31,6 +31,7 @@ import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
 import { type CommitCount, countBranchCommits } from './commits.js';
+import type { DescriptionStep } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { type PushResult, runPush } from './push.js';
 import type { ReviewStep, SolverOutcome } from './review-step.js';
@@ -187,6 +188,13 @@ export class DeliveryService implements BuildCompletion {
      * review. A session with `codeReview` off never reaches it either way.
      */
     private readonly review: ReviewStep | null = null,
+    /**
+     * The functional description of the branch (US-003), or `null` where
+     * nothing can write one — the same deployments and tests the review is
+     * `null` for. A delivery without it opens exactly the pull request it
+     * always did.
+     */
+    private readonly description: DescriptionStep | null = null,
     /**
      * The global usage-limit hold (US-004). The review runs an agent, so it can
      * be refused for the same reason a build iteration can, and the answer is
@@ -346,6 +354,12 @@ export class DeliveryService implements BuildCompletion {
       });
     }
 
+    // Everything the pull request needs is in place, so the description is
+    // worth an agent run: the body is written once, here, and no later step
+    // touches it. It never fails the delivery — `null` is the body chief-web
+    // opened pull requests with before descriptions existed (US-003).
+    const description = this.description === null ? null : await this.description.run(session, stories);
+
     let opened: OpenedPullRequest;
     try {
       opened = await this.pullRequests.open(token, {
@@ -353,7 +367,7 @@ export class DeliveryService implements BuildCompletion {
         head: session.featureBranch,
         base: session.prTargetBranch,
         title: pullRequestTitle(session),
-        body: pullRequestBody({ session, stories, publicUrl: this.config.publicUrl }),
+        body: pullRequestBody({ session, stories, publicUrl: this.config.publicUrl, description }),
       });
     } catch (cause) {
       const detail = cause instanceof GithubApiError ? cause.message : describe(cause);
@@ -576,6 +590,13 @@ export class DeliveryService implements BuildCompletion {
       if (solver.code === 'no_unresolved_feedback') return { message: null, failure: null };
       return { message: null, failure: solver.message };
     }
+    // Queued behind a full pool rather than running (US-004). Waiting for it
+    // would hold this session — and the draft — for however long the queue in
+    // front of it takes, which is a wait nobody asked for and one the delivery
+    // has no timeout for. The run is on the queue with the pull request's
+    // findings recorded against it, the review step's message says so, and the
+    // pump starts it without anybody watching.
+    if (solver.queued) return { message: null, failure: null };
 
     updateSession(this.db, session.id, { status: 'fixing' });
     logger.info('waiting for the feedback run on the review findings', {
@@ -982,8 +1003,9 @@ export function createDeliveryService(
   exec: SessionExecutor,
   pullRequests: PullRequestOpener = new GithubPullRequests(config),
   review: ReviewStep | null = null,
+  description: DescriptionStep | null = null,
 ): DeliveryService {
-  return new DeliveryService(config, db, containers, exec, pullRequests, review);
+  return new DeliveryService(config, db, containers, exec, pullRequests, review, description);
 }
 
 function describe(cause: unknown): string {

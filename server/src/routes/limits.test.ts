@@ -19,6 +19,7 @@ import {
   type Database,
   deleteSetting,
   featureBranchFor,
+  getQueuedBuild,
   getSession,
   IN_MEMORY,
   listSessions,
@@ -243,7 +244,7 @@ describe('usage limit api', () => {
     assert.equal(response.status, 200);
     assert.equal(body.resumed, 1);
     const building = held.filter((s) => getSession(db, s.id)?.status === 'building');
-    const queued = held.filter((s) => getSession(db, s.id)?.queuedAt !== null);
+    const queued = held.filter((s) => getQueuedBuild(db, 'session', s.id) !== null);
     assert.equal(building.length, 1);
     assert.equal(queued.length, 1);
     assert.equal(getSession(db, queued[0]?.id ?? '')?.status, 'ready');

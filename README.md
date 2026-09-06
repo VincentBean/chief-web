@@ -47,6 +47,9 @@ background, instead of babysitting one terminal per feature.
   rector and fix what it reports". It writes its own PRD, builds it with nobody
   watching, and opens a pull request, or nothing at all if there was nothing to
   fix. [Recurring tasks](docs/scheduling.md#recurring-tasks)
+- **Describes what it built.** Every pull request opens with a **What this
+  does** section, written by an agent from the branch diff rather than the
+  story list. [Pull request descriptions](docs/pr-descriptions.md)
 - **Reviews its own pull requests.** An agent reads the finished branch and
   leaves a review on GitHub. You can also review any open pull request by hand.
   [Code review](docs/code-review.md)
@@ -258,6 +261,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Sessions](docs/sessions.md) | what a session is and the states it goes through |
 | [The build loop](docs/build-loop.md) | how a build runs, the live log, the usage limit, what happens when it fails |
 | [Code review](docs/code-review.md) | the automatic review, the per-repository context it gets, and reviewing a pull request by hand |
+| [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, what gets fixed, and what does not |

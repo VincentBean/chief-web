@@ -675,6 +675,51 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
+    id: '0012_build_queue',
+    sql: `
+      -- One queue for everything that waits for a build slot (US-001).
+      --
+      -- Sessions used to queue on \`sessions.queued_at\`, which no other kind
+      -- of work could ever join: a pull-request review or a feedback run that
+      -- found the pool full was refused outright. This table is the queue
+      -- itself rather than a flag on one of its members, so the pump can take
+      -- the head without asking what kind it is, and strict arrival order
+      -- holds across kinds.
+      --
+      -- \`ref_id\` is whatever the kind needs to find its work again: a
+      -- session id for 'session', and '<repositoryId>:<prNumber>' for the two
+      -- pull-request kinds. It is deliberately not a foreign key — one column
+      -- cannot reference three tables — so the pump drops entries whose
+      -- referent is gone instead of the database doing it.
+      CREATE TABLE IF NOT EXISTS build_queue (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind      TEXT NOT NULL
+                    CHECK (kind IN ('session', 'pr-review', 'pr-feedback')),
+        ref_id    TEXT NOT NULL,
+        queued_at TEXT NOT NULL,
+        -- One place in the queue per referent per kind: pressing "start" twice
+        -- must not queue the same work twice.
+        UNIQUE (kind, ref_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_build_queue_fifo ON build_queue (queued_at, id);
+
+      -- Whatever was waiting for a slot when this shipped keeps its place. The
+      -- ORDER BY makes the assigned ids ascend with the queue, so the id
+      -- tie-break agrees with the arrival order for rows queued in the same
+      -- millisecond.
+      INSERT INTO build_queue (kind, ref_id, queued_at)
+        SELECT 'session', id, queued_at FROM sessions
+         WHERE queued_at IS NOT NULL
+         ORDER BY queued_at ASC, id ASC;
+
+      -- \`sessions.queued_at\` is dead from here on: this table is the only
+      -- queue. The column stays (dropping it means rebuilding the table for
+      -- nothing) but nothing reads or writes it any more.
+      UPDATE sessions SET queued_at = NULL WHERE queued_at IS NOT NULL;
+    `,
+  },
+  {
     id: '0012_recurring_tasks',
     sql: `
       -- Recurring tasks (US-001): a stored prompt plus a cron expression, from
@@ -845,6 +890,21 @@ export const MIGRATIONS: readonly Migration[] = [
       -- (US-001). Nullable like \`sentry_org\`: NULL is "nothing to add", and
       -- every repository that predates the column reads back that way.
       ALTER TABLE repositories ADD COLUMN review_context TEXT;
+    `,
+  },
+  {
+    id: '0014_session_pr_description',
+    sql: `
+      -- The functional description the description agent wrote for this
+      -- session's pull request (US-003). Stored so a retried delivery opens the
+      -- pull request with the description the first attempt already paid an
+      -- agent for, instead of running it again. NULL means "none was written":
+      -- every session from before the feature, and every session whose
+      -- description pass failed.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK the way
+      -- 0005/0007/0008/0010/0011 did: this column has to be carried across.
+      ALTER TABLE sessions ADD COLUMN pr_description TEXT;
     `,
   },
 ];

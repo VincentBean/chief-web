@@ -134,7 +134,7 @@ export function PullRequests() {
   }, [load]);
 
   const liveKeys = Object.entries(runs)
-    .filter(([, run]) => run.running)
+    .filter(([, run]) => run.running || run.queued)
     .map(([key, run]) => `${key}:${run.id}`)
     .sort()
     .join(',');
@@ -150,7 +150,7 @@ export function PullRequests() {
         fetchPrRun(id)
           .then((run) => {
             setRuns((current) => ({ ...current, [key]: run }));
-            if (!run.running) load({ refresh: true });
+            if (!run.running && !run.queued) load({ refresh: true });
           })
           .catch(() => {
             // The next tick, or a refresh, sorts it out.
@@ -164,7 +164,7 @@ export function PullRequests() {
   }, [liveKeys, load]);
 
   const liveReviewKeys = Object.entries(reviews)
-    .filter(([, review]) => review.running)
+    .filter(([, review]) => review.running || review.queued)
     .map(([key, review]) => `${key}:${review.id}`)
     .sort()
     .join(',');
@@ -182,7 +182,7 @@ export function PullRequests() {
             setReviews((current) => ({ ...current, [key]: review }));
             // A finished review may have started a feedback run; the refresh
             // picks that run up along with the review itself.
-            if (!review.running) load({ refresh: true });
+            if (!review.running && !review.queued) load({ refresh: true });
           })
           .catch(() => {
             // The next tick, or a refresh, sorts it out.
@@ -203,7 +203,11 @@ export function PullRequests() {
     startPrReview(group.repositoryId, pull.number)
       .then((review) => {
         setReviews((current) => ({ ...current, [key]: review }));
-        toast.ok(`Reviewing #${String(pull.number)}.`);
+        toast.ok(
+          review.queued
+            ? `Review of #${String(pull.number)} is queued (#${String(review.queuePosition ?? 1)}); it starts when a build slot frees.`
+            : `Reviewing #${String(pull.number)}.`,
+        );
       })
       .catch((error: unknown) => toast.error(describeError(error)))
       .finally(() => {
@@ -214,8 +218,12 @@ export function PullRequests() {
 
   const onStopReview = (group: RepositoryPullRequests, pull: PullRequest, review: PrReview): void => {
     const key = pullRequestKey(group.repositoryId, pull.number);
+    const wasQueued = review.queued;
     stopPrReview(review.id)
-      .then((stopped) => setReviews((current) => ({ ...current, [key]: stopped })))
+      .then((stopped) => {
+        setReviews((current) => ({ ...current, [key]: stopped }));
+        if (wasQueued) toast.ok(`Review of #${String(pull.number)} left the queue.`);
+      })
       .catch((error: unknown) => toast.error(describeError(error)));
   };
 
@@ -227,7 +235,11 @@ export function PullRequests() {
     startPrRun(group.repositoryId, pull.number)
       .then((run) => {
         setRuns((current) => ({ ...current, [key]: run }));
-        toast.ok(`Processing feedback on #${String(pull.number)}.`);
+        toast.ok(
+          run.queued
+            ? `Feedback on #${String(pull.number)} is queued (#${String(run.queuePosition ?? 1)}); it starts when a build slot frees.`
+            : `Processing feedback on #${String(pull.number)}.`,
+        );
       })
       .catch((error: unknown) => toast.error(describeError(error)))
       .finally(() => {
@@ -238,8 +250,12 @@ export function PullRequests() {
 
   const onStop = (group: RepositoryPullRequests, pull: PullRequest, run: PrRun): void => {
     const key = pullRequestKey(group.repositoryId, pull.number);
+    const wasQueued = run.queued;
     stopPrRun(run.id)
-      .then((stopped) => setRuns((current) => ({ ...current, [key]: stopped })))
+      .then((stopped) => {
+        setRuns((current) => ({ ...current, [key]: stopped }));
+        if (wasQueued) toast.ok(`Feedback on #${String(pull.number)} left the queue.`);
+      })
       .catch((error: unknown) => toast.error(describeError(error)));
   };
 
@@ -491,11 +507,18 @@ function PullRequestRow({
             <span className="visually-hidden"> on pull request {pull.number}</span>
             <Icon name="chevron-down" />
           </button>
-          {!pull.fromFork && review?.running !== true && (
+          {!pull.fromFork && review?.running !== true && review?.queued !== true && (
             <button type="button" className="button button--small" onClick={onReview}>
               <Icon name="search" />
               Review
               <span className="visually-hidden"> pull request {pull.number}</span>
+            </button>
+          )}
+          {review?.queued === true && (
+            <button type="button" className="button button--small" onClick={() => onStopReview(review)}>
+              <Icon name="x" />
+              Leave queue
+              <span className="visually-hidden"> — cancel the queued review of pull request {pull.number}</span>
             </button>
           )}
           {review?.running === true && (
@@ -504,10 +527,17 @@ function PullRequestRow({
               Stop review
             </button>
           )}
-          {!pull.fromFork && run?.running !== true && (
+          {!pull.fromFork && run?.running !== true && run?.queued !== true && (
             <button type="button" className="button button--small button--primary" disabled={preparing} onClick={onProcess}>
               <Icon name="zap" />
               {preparing ? 'Reading…' : 'Address feedback'}
+            </button>
+          )}
+          {run?.queued === true && (
+            <button type="button" className="button button--small" onClick={() => onStop(run)}>
+              <Icon name="x" />
+              Leave queue
+              <span className="visually-hidden"> — cancel the queued feedback run on pull request {pull.number}</span>
             </button>
           )}
           {run?.running === true && (
@@ -533,6 +563,13 @@ function PullRequestRow({
 }
 
 function RunBadge({ run }: { readonly run: PrRun }) {
+  if (run.queued) {
+    return (
+      <Badge tone="wait" title="Every build slot is taken; this run starts when one frees">
+        feedback queued #{run.queuePosition ?? 1}
+      </Badge>
+    );
+  }
   if (run.running && run.phase !== null) {
     return (
       <Badge tone="active" pulse>
@@ -548,6 +585,13 @@ function RunBadge({ run }: { readonly run: PrRun }) {
 }
 
 function ReviewBadge({ review }: { readonly review: PrReview }) {
+  if (review.queued) {
+    return (
+      <Badge tone="wait" title="Every build slot is taken; this review starts when one frees">
+        review queued #{review.queuePosition ?? 1}
+      </Badge>
+    );
+  }
   if (review.running && review.phase !== null) {
     return (
       <Badge tone="review" pulse>

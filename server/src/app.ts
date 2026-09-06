@@ -19,7 +19,13 @@ import {
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
 import type { Config } from './config.js';
 import type { Database } from './db/index.js';
-import { createDeliveryService, type DeliveryService, ReviewStep } from './delivery/index.js';
+import {
+  createDeliveryService,
+  type DeliveryService,
+  DescriptionStep,
+  ReviewStep,
+} from './delivery/index.js';
+import { createDescriptionService } from './description/index.js';
 import { DockerApi } from './docker/index.js';
 import { UsageLimitHold } from './limits/index.js';
 import { createSessionOrchestrator } from './orchestrator/index.js';
@@ -195,7 +201,10 @@ export function createApp(
   // Guard for every API route added below (and for unknown ones, which must
   // not reveal whether they exist).
   api.use(requireApiAuth(auth));
-  api.use(createSettingsRouter(db, config));
+  // `builds` is created further down, and the settings router only reads it
+  // from inside a request — by which point everything below exists. Raising
+  // the concurrency cap has to drain the queue there and then (US-001).
+  api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the
@@ -248,6 +257,10 @@ export function createApp(
   // reviews started by hand on the Pull requests page: same prompt, same model
   // setting, same findings file.
   const reviewer = createReviewService(config, db, orchestrator, createAgentRunner(exec));
+  // The functional description of the branch, written just before the pull
+  // request is opened (US-003). Its own agent pass, and its own failure mode:
+  // whatever it answers, the pull request is opened.
+  const describer = createDescriptionService(config, db, orchestrator, exec, createAgentRunner(exec));
   const delivery =
     deps.delivery ??
     createDeliveryService(
@@ -257,6 +270,7 @@ export function createApp(
       exec,
       undefined,
       new ReviewStep(reviewer, new GithubReviewPublisher(config), () => prFeedback),
+      new DescriptionStep(describer, db),
     );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
@@ -344,12 +358,14 @@ export function createApp(
     deps.sentrySync ??
     createSentrySync(db, undefined, sentryClassifier, sentryFixer, sentryCompleter);
   sentrySync.start();
-  // Pull request feedback (US-021). It shares the build loop's slot cap rather
-  // than its queue: a five-minute pass should not wait behind an hour of
-  // stories, so a full server refuses the run instead of holding it.
+  // Pull request feedback (US-021). It shares the build loop's slot cap, and
+  // since US-004 its queue as well: a pass asked for while every slot is taken
+  // waits its turn instead of being refused, whether an operator asked for it
+  // or a review that just found something handed it over.
   prFeedback =
     deps.prFeedback ??
     createPrFeedbackService(config, db, sessionOrchestrator, exec, createAgentRunner(exec), builds);
+  builds.registerStart('pr-feedback', prFeedback.starter());
   // A code review started by hand on an open pull request: the same pass the
   // delivery runs, in a feedback-run container, handing its findings to the
   // solver above exactly as the delivery's review does.
@@ -365,6 +381,9 @@ export function createApp(
       builds,
       () => prFeedback,
     );
+  // A review asked for while every slot is taken waits in the unified queue
+  // instead of being refused (US-003); this is how the pump starts it again.
+  builds.registerStart('pr-review', prReviews.starter());
   api.use(
     createPullRequestsRouter(
       deps.pullRequests ?? createPullRequestService(config, db),
@@ -391,7 +410,7 @@ export function createApp(
   const hold = new UsageLimitHold(db);
   api.use(createLimitsRouter(hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
-  api.use(createStatsRouter(db, config, hold));
+  api.use(createStatsRouter(db, hold, builds));
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
   // dispatching on the stage the session failed at.
   const retries = createRetryService(db, builds, delivery);

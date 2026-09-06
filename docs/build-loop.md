@@ -177,12 +177,18 @@ When the last story is done, `server/src/delivery/` takes over:
 1. `git push --set-upstream origin <feature-branch>` once more, from **inside**
    the session container — that is where the repository's deploy key is. Never
    a force push, and never a refspec chief-web invented.
-2. `POST /repos/<owner>/<repo>/pulls` with the global PAT from Settings. The
-   title is the **session name**; the body lists the completed stories by id and
-   title (with their short commit SHAs), names the branches, and ends with a note
-   saying chief-web generated it — a link back to the session page when
-   `PUBLIC_URL` is set.
-3. The session becomes **finished**, the pull request URL is stored on the row,
+2. One headless `claude -p` over the branch diff writes the **What this does**
+   section of the body — two short paragraphs saying what the branch built and
+   how it works. It runs only here, just before the pull request is created,
+   and a failure is never a delivery failure: the pull request is opened
+   without the section. See
+   [Pull request descriptions](pr-descriptions.md).
+3. `POST /repos/<owner>/<repo>/pulls` with the global PAT from Settings. The
+   title is the **session name**; the body opens with that description, then
+   lists the completed stories by id and title (with their short commit SHAs),
+   names the branches, and ends with a note saying chief-web generated it — a
+   link back to the session page when `PUBLIC_URL` is set.
+4. The session becomes **finished**, the pull request URL is stored on the row,
    and the session page shows it as a link.
 
 **An existing pull request is adopted, never duplicated.** The open pull request
@@ -199,7 +205,7 @@ story again. Like session setup, it answers `200 { ok: false, … }` for a remot
 failure and reserves `409` for the wrong state (still building, or a story left
 outstanding).
 
-**A session with [code review](code-review.md) switched on gets a third step**,
+**A session with [code review](code-review.md) switched on gets one more step**,
 after the pull request exists: one headless `claude -p` over the diff, and its
 findings posted as a single `COMMENT` review. Only this step is retried — three complete
 attempts (run the agent, post what it found), because an agent that stalled or a

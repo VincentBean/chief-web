@@ -19,26 +19,40 @@ export interface PullRequestBodyInput {
   readonly stories: readonly Story[];
   /** Base URL of this chief-web, for the link back; empty when unknown. */
   readonly publicUrl: string;
+  /**
+   * The generated functional description of the branch (US-002), or `null`
+   * when the description pass did not produce one. Left out entirely, the body
+   * is exactly what it was before descriptions existed.
+   */
+  readonly description?: string | null;
 }
 
 /**
- * The body: the completed stories with their ids and titles, and a note saying
- * where the branch came from. When chief-web knows its own URL that note links
- * back to the session page; otherwise it just names the session, because a
- * fabricated link is worse than none.
+ * The body: what the branch does, then the completed stories with their ids
+ * and titles, and a note saying where the branch came from. When chief-web
+ * knows its own URL that note links back to the session page; otherwise it
+ * just names the session, because a fabricated link is worse than none.
+ *
+ * The description goes first because it is what a reviewer needs before the
+ * story list means anything to them. Without one the body is unchanged.
  */
 export function pullRequestBody(input: PullRequestBodyInput): string {
   const { session, stories, publicUrl } = input;
   const done = stories.filter((story) => story.status === 'done');
   const outstanding = stories.filter((story) => story.status !== 'done');
+  const description = (input.description ?? '').trim();
 
   const lines: string[] = [
     `Autonomous build of session **${session.name}**, ` +
       `\`${session.featureBranch}\` → \`${session.prTargetBranch}\`.`,
     '',
-    `## Completed stories (${String(done.length)}/${String(stories.length)})`,
-    '',
   ];
+
+  if (description !== '') {
+    lines.push('## What this does', '', description, '');
+  }
+
+  lines.push(`## Completed stories (${String(done.length)}/${String(stories.length)})`, '');
 
   if (done.length === 0) {
     lines.push('_No story was completed on this branch._');

@@ -11,6 +11,7 @@ import {
   prConflictFixFailureStageLabel,
   type PrConflictFixFailureStage,
   type PrConflictFixStatus,
+  prRefId,
   updatePrConflictFix,
 } from '../db/index.js';
 import { REVIEW_ATTEMPTS, runPush } from '../delivery/index.js';
@@ -171,8 +172,10 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
    *
    * A refusal is thrown rather than swallowed, because the scan is the one that
    * decides what to do about it — and what it does is nothing, until the next
-   * tick. That *is* the queue: a fix that cannot have a build slot now is
-   * simply started on a later pass, so a busy host is never oversubscribed.
+   * tick. A fix never joins the unified queue (US-005): it is the one piece of
+   * work nobody asked for, so it takes a slot only when nothing that was asked
+   * for is waiting, and is simply started on a later pass otherwise. The scan
+   * makes that call before it gets here; this end only refuses a full host.
    */
   async start(pull: ConflictedPullRequest): Promise<void> {
     const repository = getRepository(this.db, pull.repositoryId);
@@ -202,6 +205,26 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       );
     }
 
+    // Claimed before anything is created (US-001). The pump decides on
+    // `freeSlots()` as well, so only an in-flight claim keeps the two of them
+    // from handing the same free slot to two agents — and the claim is dropped
+    // again the moment the row says `running`, which is what counts the fix
+    // against the cap from then on.
+    const slot = this.slots.claimStart('pr-conflict-fix', prRefId(pull.repositoryId, pull.prNumber));
+    try {
+      this.begin(pull, repository.sshUrl);
+    } finally {
+      slot();
+    }
+  }
+
+  /**
+   * Everything a start does once it is allowed to: the row, the `running`
+   * status the rest of the server counts, and the run itself. Synchronous up
+   * to handing off to {@link drive}, so the claim above it never has to
+   * outlive the call.
+   */
+  private begin(pull: ConflictedPullRequest, repoUrl: string): void {
     const fix = createPrConflictFix(this.db, {
       repositoryId: pull.repositoryId,
       prNumber: pull.prNumber,
@@ -236,7 +259,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       finished: Promise.resolve(),
     };
     this.live.set(fix.id, state);
-    state.finished = this.drive(started, repository.sshUrl, pull, state)
+    state.finished = this.drive(started, repoUrl, pull, state)
       .catch((cause: unknown) => {
         logger.error('conflict fix run crashed', { fix: fix.id, error: describe(cause) });
         this.fail(fix.id, 'agent', describe(cause));

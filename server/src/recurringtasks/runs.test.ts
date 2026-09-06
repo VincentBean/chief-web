@@ -597,6 +597,7 @@ function session(overrides: Partial<Session>): Session {
     waitingUntil: null,
     codeReview: false,
     recurringTaskId: 'task-1',
+    prDescription: null,
     createdAt: '2026-09-05T03:00:00.000Z',
     updatedAt: '2026-09-05T03:00:00.000Z',
     ...overrides,

@@ -103,8 +103,9 @@ retroactively to a review that already ran.
 
 ## Attempts, failure and Retry
 
-The review is the third delivery step, after the push and the pull request, and
-it is the only one of the three that is retried by itself:
+The review is the last delivery step, after the push, the
+[description](pr-descriptions.md) and the pull request, and it is the only one
+of them that is retried by itself:
 
 - **Three complete attempts.** One attempt is the whole pass — run the agent,
   then post what it found — so a GitHub call that failed costs a fresh look at
@@ -188,8 +189,9 @@ another three. **Stop review** signals the agent and posts nothing.
   requests on that repository — the same token that opened the pull request.
 - Claude Code signed in ([Claude authentication](claude-auth.md)): the review is
   a headless `claude -p`, so an unauthenticated CLI fails all three attempts.
-  It is the only part of delivery that needs Claude at all — the push and the
-  pull request do not.
+  Only this step and the [description](pr-descriptions.md) need Claude at all —
+  the push and the pull request do not, and a missing login costs the
+  description its section rather than failing anything.
 - A pull request that exists. The review never opens one and never pushes.
 - For a review started by hand: a pull request whose branch is on the
   repository itself, so the deploy key can clone it.

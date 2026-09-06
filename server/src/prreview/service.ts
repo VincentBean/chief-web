@@ -1,13 +1,18 @@
-import type { AgentRunner } from '../build/index.js';
+import type { AgentRunner, QueuedStart } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
+  type BuildQueueEntry,
+  buildQueuePosition,
   createPrReview,
   type Database,
   findPrReview,
   getPrReview,
+  getQueuedBuild,
   getRepository,
+  parsePrRefId,
   type PrReview,
   type PrReviewFailureStage,
+  prRefId,
   type Repository,
   updatePrReview,
 } from '../db/index.js';
@@ -61,6 +66,20 @@ export class PrReviewError extends Error {
   }
 }
 
+/**
+ * Refusals that mean "there is nothing left to review", as opposed to "this
+ * could not be run": the pull request was merged or closed while the review
+ * sat in the queue. Started by hand they are the 409 the operator asked for;
+ * reached by the pump they are simply the end of the story, and are recorded
+ * as such rather than as a failure.
+ */
+const SETTLED_CODES = new Set(['pull_request_not_open']);
+
+/** True when a start was refused because there was nothing left to review. */
+function isSettled(cause: unknown): cause is PrReviewError {
+  return cause instanceof PrReviewError && SETTLED_CODES.has(cause.code);
+}
+
 /** The slice of the review pass this run drives; tests pass a stub. */
 export interface PrReviewer {
   reviewInContainer(subject: ReviewSubject): Promise<ReviewPassResult>;
@@ -68,7 +87,10 @@ export interface PrReviewer {
 
 /** The slice of `PrFeedbackService` the findings are handed to. */
 export interface PrReviewSolver {
-  start(repositoryId: string, prNumber: number): Promise<{ readonly id: string }>;
+  start(
+    repositoryId: string,
+    prNumber: number,
+  ): Promise<{ readonly id: string; readonly queued?: boolean }>;
 }
 
 /** The slice of the GitHub API a review reads; tests pass a stub. */
@@ -93,6 +115,10 @@ export interface PrReviewView {
   /** Which pass of the current start is running; `null` once it is over. */
   readonly pass: number | null;
   readonly failureStage: PrReviewFailureStage | null;
+  /** True while it is waiting in the build queue for a slot (US-003). */
+  readonly queued: boolean;
+  /** Its 1-based place in that queue, or `null` when it is not in it. */
+  readonly queuePosition: number | null;
   readonly lastError: string | null;
   readonly headSha: string | null;
   readonly reviewUrl: string | null;
@@ -148,8 +174,13 @@ export class PrReviewService {
   }
 
   /**
-   * Starts a review, after every refusal that can be made without spending
-   * anything: the cheap checks come before a container exists.
+   * Starts a review, or takes a place in the unified build queue (US-003).
+   *
+   * Every refusal that can be made without spending anything is made first:
+   * the cheap checks come before a container — or even a GitHub call — exists.
+   * A full pool is no longer one of them. The review is queued instead, and the
+   * pump starts it the moment a slot frees, so nobody has to press the button a
+   * second time.
    */
   async start(repositoryId: string, prNumber: number): Promise<PrReviewView> {
     const repository = getRepository(this.db, repositoryId);
@@ -181,13 +212,14 @@ export class PrReviewService {
         'That pull request is already being reviewed.',
       );
     }
-    if (this.slots.freeSlots() <= 0) {
-      throw new PrReviewError(
-        409,
-        'no_free_slot',
-        'Every build slot is in use. Wait for one to free, or raise the cap on the settings page.',
-      );
+    // Already waiting for a slot: this request *is* the one in the queue, not
+    // a second one. Answered before the GitHub read, so leaning on the button
+    // costs nothing at all.
+    const refId = prRefId(repositoryId, prNumber);
+    if (existing !== null && getQueuedBuild(this.db, 'pr-review', refId) !== null) {
+      return this.view(existing);
     }
+
     const held = this.hold.until();
     if (held !== null) {
       throw new PrReviewError(
@@ -198,6 +230,30 @@ export class PrReviewService {
       );
     }
 
+    // Claimed before the pull request is read, so the slot this review was
+    // offered is still its own when the read comes back, and the pump cannot
+    // hand the same one to the entry behind it in the meantime. `null` means
+    // there was nothing to claim: this review is going to queue.
+    const slot = this.slots.freeSlots() > 0 ? this.slots.claimStart('pr-review', refId) : null;
+    try {
+      return await this.begin(repository, prNumber, token, slot !== null);
+    } finally {
+      // The row says `running` by now, which is what the cap counts; a review
+      // that queued or was refused never took the slot in the first place.
+      if (slot !== null) slot();
+    }
+  }
+
+  /**
+   * The half of {@link start} that costs something: the pull request is read,
+   * and the review either starts or joins the queue.
+   */
+  private async begin(
+    repository: Repository,
+    prNumber: number,
+    token: string,
+    hasSlot: boolean,
+  ): Promise<PrReviewView> {
     const pull = await this.readPullRequest(token, repository.githubSlug, prNumber);
     if (pull.state !== 'OPEN') {
       throw new PrReviewError(
@@ -218,7 +274,7 @@ export class PrReviewService {
     }
 
     const review = createPrReview(this.db, {
-      repositoryId,
+      repositoryId: repository.id,
       prNumber,
       prUrl: pull.url,
       prTitle: pull.title,
@@ -232,6 +288,7 @@ export class PrReviewService {
         'That pull request is already being reviewed.',
       );
     }
+    if (!hasSlot) return this.queue(review);
 
     const started =
       updatePrReview(this.db, review.id, {
@@ -267,10 +324,14 @@ export class PrReviewService {
     return this.status(review.id);
   }
 
-  /** Signals the agent. Nothing is posted for a stopped review. */
+  /**
+   * Signals the agent, or — for a review that is still waiting for a slot —
+   * takes it out of the queue before it ever starts (US-003). Nothing is
+   * posted for a stopped review either way.
+   */
   async stop(reviewId: string): Promise<PrReviewView> {
     const state = this.live.get(reviewId);
-    if (state === undefined) return this.status(reviewId);
+    if (state === undefined) return this.cancelQueued(reviewId);
     state.stopping = true;
     if (state.containerId !== null) await this.runner.stop(reviewId, state.containerId);
     await settle(state.finished, this.config.buildStopTimeoutMs);
@@ -280,6 +341,137 @@ export class PrReviewService {
   /** Resolves when the review is no longer driving anything; used by tests. */
   async whenIdle(reviewId: string): Promise<void> {
     await this.live.get(reviewId)?.finished;
+  }
+
+  /**
+   * How the pump starts a queued review (US-003).
+   *
+   * Handed to `BuildService.registerStart` in `app.ts` rather than imported
+   * there, because the build loop sits below this service: it owns the queue,
+   * this owns what a `pr-review` entry means.
+   */
+  starter(): QueuedStart {
+    return {
+      // A repository deleted while the review waited takes its pull requests
+      // with it; the entry is dropped rather than started.
+      exists: (entry) => this.reference(entry) !== null,
+      isRunning: (entry) => {
+        const review = this.queuedReview(entry);
+        return review !== null && this.live.has(review.id);
+      },
+      start: async (entry) => {
+        const ref = this.reference(entry);
+        if (ref === null) {
+          throw new Error(`"${entry.refId}" no longer names a pull request that can be reviewed.`);
+        }
+        try {
+          // The same call the operator made, with the same parameters: the
+          // pull request is read afresh, so the review runs against whatever
+          // has been pushed to it since it was asked for.
+          await this.start(ref.repositoryId, ref.prNumber);
+        } catch (cause) {
+          if (!isSettled(cause)) throw cause;
+          // Reading it afresh is exactly what found this: the pull request was
+          // merged or closed while the review waited. Nothing could be
+          // reviewed, but nothing went wrong either.
+          this.settle(entry, cause.message);
+        }
+      },
+      // Only the starts that genuinely could not run reach this; see
+      // {@link isSettled} for the ones that had nothing left to review.
+      onFailed: (entry, message) => {
+        const review = this.queuedReview(entry);
+        // Somewhere the operator will see it: the review's own row on the pull
+        // requests page. Saying nothing would be a review that quietly never
+        // happened.
+        if (review !== null) {
+          this.fail(
+            review.id,
+            'agent',
+            `The queued review could not be started, so it left the queue: ${message}`,
+          );
+        }
+      },
+    };
+  }
+
+  /** Puts the review in the unified queue and answers with where it stands. */
+  private queue(review: PrReview): PrReviewView {
+    const entry = this.slots.enqueue('pr-review', prRefId(review.repositoryId, review.prNumber));
+    // Whatever the last pass left behind is history: this review is going to
+    // run again, and `pending` is what the UI reads as "nothing to show yet".
+    const waiting =
+      updatePrReview(this.db, review.id, {
+        status: 'pending',
+        failureStage: null,
+        lastError: null,
+        solverMessage: null,
+        startedAt: null,
+        finishedAt: null,
+      }) ?? review;
+    logger.info('pull request review queued: every build slot is in use', {
+      review: review.id,
+      repository: review.repositoryId,
+      number: review.prNumber,
+      queuedAt: entry.queuedAt,
+    });
+    return this.view(waiting);
+  }
+
+  /**
+   * A queued review the queue reached too late: the pull request was merged or
+   * closed while it waited (US-003).
+   *
+   * Recorded the way a cancellation is — back to `pending`, with a line
+   * saying why — rather than as a failed review, because there is nothing here
+   * for the operator to fix or retry.
+   */
+  private settle(entry: BuildQueueEntry, reason: string): void {
+    logger.info('a queued pull request review had nothing left to review', {
+      ref: entry.refId,
+      reason,
+    });
+    const review = this.queuedReview(entry);
+    if (review === null) return;
+    updatePrReview(this.db, review.id, {
+      status: 'pending',
+      failureStage: null,
+      lastError: `The queue reached this review, but there was nothing left to review: ${reason}`,
+    });
+  }
+
+  /** Takes a review that has not started out of the queue; a no-op otherwise. */
+  private cancelQueued(reviewId: string): PrReviewView {
+    const review = getPrReview(this.db, reviewId);
+    if (review === null) throw new PrReviewError(404, 'pr_review_not_found', 'No such review.');
+    if (!this.slots.leaveQueue('pr-review', prRefId(review.repositoryId, review.prNumber))) {
+      return this.view(review);
+    }
+
+    logger.info('a queued pull request review was cancelled', {
+      review: review.id,
+      repository: review.repositoryId,
+      number: review.prNumber,
+    });
+    return this.view(
+      updatePrReview(this.db, review.id, {
+        status: 'pending',
+        lastError: 'Cancelled before it started.',
+      }) ?? review,
+    );
+  }
+
+  /** The pull request an entry points at, or `null` when it is gone. */
+  private reference(entry: BuildQueueEntry): { repositoryId: string; prNumber: number } | null {
+    const ref = parsePrRefId(entry.refId);
+    if (ref === null) return null;
+    return getRepository(this.db, ref.repositoryId) === null ? null : ref;
+  }
+
+  /** The row an entry names, when a pass has already made one. */
+  private queuedReview(entry: BuildQueueEntry): PrReview | null {
+    const ref = this.reference(entry);
+    return ref === null ? null : findPrReview(this.db, ref.repositoryId, ref.prNumber);
   }
 
   private async drive(
@@ -446,7 +638,10 @@ export class PrReviewService {
         number: review.prNumber,
         run: run.id,
       });
-      return `A run was started on #${String(review.prNumber)} to work on them.`;
+      return run.queued === true
+        ? `A run was queued on #${String(review.prNumber)} to work on them; it starts as soon as ` +
+            'a build slot frees.'
+        : `A run was started on #${String(review.prNumber)} to work on them.`;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       logger.warn('the pull request review could not start a feedback run', {
@@ -492,6 +687,11 @@ export class PrReviewService {
 
   private view(review: PrReview): PrReviewView {
     const state = this.live.get(review.id);
+    const queuePosition = buildQueuePosition(
+      this.db,
+      'pr-review',
+      prRefId(review.repositoryId, review.prNumber),
+    );
     return {
       id: review.id,
       repositoryId: review.repositoryId,
@@ -506,6 +706,8 @@ export class PrReviewService {
       attempt: review.attempt,
       pass: state === undefined || state.attempt === 0 ? null : state.attempt,
       failureStage: review.failureStage,
+      queued: queuePosition !== null,
+      queuePosition,
       lastError: review.lastError,
       headSha: review.headSha,
       reviewUrl: review.reviewUrl,

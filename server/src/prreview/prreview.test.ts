@@ -7,13 +7,20 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { AgentRunner } from '../build/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
+  type BuildQueueEntry,
+  type BuildQueueKind,
+  buildQueuePosition,
   closeDatabase,
   countActivePrReviews,
   createRepository,
   type Database,
+  enqueueBuild,
   findPrReview,
   IN_MEMORY,
+  listBuildQueue,
   openDatabase,
+  prRefId,
+  removeQueuedBuild,
   type Repository,
   setSetting,
   setSettingNumber,
@@ -124,13 +131,21 @@ class StubSolver implements PrReviewSolver {
   }
 }
 
+/**
+ * The build loop as a review sees it. The queue is the real table — the review
+ * reads its own position out of it — while the cap is a number the test sets.
+ */
 class StubSlots implements BuildSlots {
   free = 1;
   readonly heldUntil: string[] = [];
   pumps = 0;
+  readonly claims: string[] = [];
+  released = 0;
+
+  constructor(private readonly db: Database) {}
 
   freeSlots(): number {
-    return this.free;
+    return this.free - this.claims.length + this.released;
   }
 
   pump(): Promise<void> {
@@ -141,6 +156,21 @@ class StubSlots implements BuildSlots {
   holdAll(until: string): Promise<void> {
     this.heldUntil.push(until);
     return Promise.resolve();
+  }
+
+  enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry {
+    return enqueueBuild(this.db, { kind, refId });
+  }
+
+  leaveQueue(kind: BuildQueueKind, refId: string): boolean {
+    return removeQueuedBuild(this.db, kind, refId);
+  }
+
+  claimStart(kind: BuildQueueKind, refId: string): () => void {
+    this.claims.push(`${kind}:${refId}`);
+    return () => {
+      this.released += 1;
+    };
   }
 }
 
@@ -222,13 +252,16 @@ describe('reviewing an open pull request by hand', () => {
     reviewer = new StubReviewer();
     publisher = new StubPublisher();
     solver = new StubSolver();
-    slots = new StubSlots();
+    slots = new StubSlots(db);
     execs = [];
     checkoutSha = HEAD;
     containersStarted = [];
     containersRemoved = [];
     hold = new UsageLimitHold(db);
     hold.clear();
+    // The database outlives each test, and so would anything one of them left
+    // waiting for a slot.
+    for (const entry of listBuildQueue(db)) removeQueuedBuild(db, entry.kind, entry.refId);
   });
 
   const serviceWith = (overrides: { solver?: PrReviewSolver | null; token?: string | null } = {}) =>
@@ -251,6 +284,27 @@ describe('reviewing an open pull request by hand', () => {
     const started = await service.start(repository.id, 61);
     await service.whenIdle(started.id);
     return started.id;
+  };
+
+  /**
+   * What `BuildService.drain()` does with the queue, in the small: the head is
+   * dropped before it is started, and a start that throws is surfaced rather
+   * than swallowed. The real one is tested in `build.test.ts`; this is here so
+   * the review's side of the contract is exercised with the same shape.
+   */
+  const pump = async (service: PrReviewService): Promise<void> => {
+    const starter = service.starter();
+    for (const entry of listBuildQueue(db)) {
+      if (slots.freeSlots() <= 0) return;
+      if (starter.isRunning?.(entry) === true) continue;
+      removeQueuedBuild(db, entry.kind, entry.refId);
+      if (starter.exists?.(entry) === false) continue;
+      try {
+        await starter.start(entry);
+      } catch (cause) {
+        starter.onFailed?.(entry, String(cause));
+      }
+    }
   };
 
   const refusal = async (promise: Promise<unknown>): Promise<PrReviewError> => {
@@ -450,10 +504,148 @@ describe('reviewing an open pull request by hand', () => {
     assert.equal(findPrReview(db, repository.id, 61), null);
   });
 
-  it('refuses without a free build slot', async () => {
+  it('queues instead of refusing when every build slot is in use', async () => {
     slots.free = 0;
-    const error = await refusal(serviceWith().start(repository.id, 61));
-    assert.equal(error.code, 'no_free_slot');
+    const service = serviceWith();
+    const view = await service.start(repository.id, 61);
+
+    // Not a refusal any more (US-003): the review is answered with its place
+    // in the queue, and nothing was spent on it.
+    assert.equal(view.queued, true);
+    assert.equal(view.queuePosition, 1);
+    assert.equal(view.status, 'pending');
+    assert.equal(view.running, false);
+    assert.deepEqual(containersStarted, []);
+    assert.equal(reviewer.subjects.length, 0);
+
+    const queue = listBuildQueue(db);
+    assert.equal(queue.length, 1);
+    assert.equal(queue[0]?.kind, 'pr-review');
+    assert.equal(queue[0]?.refId, prRefId(repository.id, 61));
+    // The row is there too, so the pull requests page can say "queued".
+    assert.equal(service.find(repository.id, 61)?.queued, true);
+  });
+
+  it('starts the queued review by itself once a slot frees', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    slots.free = 1;
+    await pump(service);
+    await service.whenIdle(queued.id);
+
+    const view = service.status(queued.id);
+    // The same review, with the parameters it was asked for.
+    assert.equal(view.id, queued.id);
+    assert.equal(view.prNumber, 61);
+    assert.equal(view.status, 'finished');
+    assert.equal(view.queued, false);
+    assert.equal(view.queuePosition, null);
+    assert.equal(reviewer.subjects[0]?.targetBranch, 'develop');
+    assert.equal(reviewer.subjects[0]?.featureBranch, 'feature/booking-proposal-fields');
+    assert.equal(publisher.published.length, 1);
+    assert.deepEqual(listBuildQueue(db), []);
+    // It took the slot it was handed rather than assuming one.
+    assert.deepEqual(slots.claims, [`pr-review:${prRefId(repository.id, 61)}`]);
+  });
+
+  it('queues a pull request once however often it is asked for', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const first = await service.start(repository.id, 61);
+    const second = await service.start(repository.id, 61);
+
+    assert.equal(second.id, first.id);
+    assert.equal(second.queuePosition, 1);
+    assert.equal(listBuildQueue(db).length, 1);
+    // The second ask did not even reach GitHub, let alone the back of the queue.
+    assert.equal(buildQueuePosition(db, 'pr-review', prRefId(repository.id, 61)), 1);
+  });
+
+  it('does not queue a review of a pull request that is already being reviewed', async () => {
+    const service = serviceWith();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    reviewer.reviewInContainer = async (subject) => {
+      reviewer.subjects.push(subject);
+      await gate;
+      return reviewer.result;
+    };
+
+    const first = await service.start(repository.id, 61);
+    slots.free = 0;
+    const error = await refusal(service.start(repository.id, 61));
+    assert.equal(error.code, 'review_already_active');
+    assert.deepEqual(listBuildQueue(db), []);
+
+    release();
+    await service.whenIdle(first.id);
+  });
+
+  it('cancels a queued review before it starts', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    const cancelled = await service.stop(queued.id);
+    assert.equal(cancelled.queued, false);
+    assert.equal(cancelled.queuePosition, null);
+    assert.equal(cancelled.status, 'pending');
+    assert.equal(cancelled.lastError, 'Cancelled before it started.');
+    assert.deepEqual(listBuildQueue(db), []);
+
+    // And a slot freeing afterwards starts nothing.
+    slots.free = 1;
+    await pump(service);
+    assert.deepEqual(containersStarted, []);
+    assert.equal(publisher.published.length, 0);
+  });
+
+  it('drops a queued entry whose repository is gone', () => {
+    const entry = enqueueBuild(db, { kind: 'pr-review', refId: prRefId('deleted', 61) });
+    assert.equal(serviceWith().starter().exists?.(entry), false);
+  });
+
+  it('drops a queued review whose pull request was merged while it waited', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    // Merged while it waited: there is nothing left to review, which is not a
+    // review that failed and not something the operator has to act on.
+    github.result = pullFixture({ state: 'MERGED' });
+    slots.free = 1;
+    await pump(service);
+
+    const view = service.status(queued.id);
+    assert.equal(view.status, 'pending');
+    assert.equal(view.failureStage, null);
+    assert.match(view.lastError ?? '', /nothing left to review/i);
+    assert.match(view.lastError ?? '', /merged/);
+    assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
+  });
+
+  it('says on the review why a queued start could not be made', async () => {
+    slots.free = 0;
+    const service = serviceWith();
+    const queued = await service.start(repository.id, 61);
+
+    // Nothing to do with the pull request: the review could not be started at
+    // all, and that is what the operator has to be told about.
+    github.error = new Error('github is unreachable');
+    slots.free = 1;
+    await pump(service);
+
+    const view = service.status(queued.id);
+    assert.equal(view.status, 'failed');
+    assert.match(view.lastError ?? '', /left the queue/);
+    assert.match(view.lastError ?? '', /unreachable/);
+    assert.deepEqual(listBuildQueue(db), []);
+    assert.deepEqual(containersStarted, []);
   });
 
   it('refuses without a GitHub token', async () => {

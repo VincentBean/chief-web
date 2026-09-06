@@ -37,7 +37,10 @@ export interface SessionReviewer {
  * PullRequests page's button calls, with no second implementation behind it.
  */
 export interface FeedbackSolver {
-  start(repositoryId: string, prNumber: number): Promise<{ readonly id: string }>;
+  start(
+    repositoryId: string,
+    prNumber: number,
+  ): Promise<{ readonly id: string; readonly queued?: boolean }>;
 }
 
 /** What the chained solver run did; `null` when none was attempted. */
@@ -46,6 +49,11 @@ export interface SolverOutcome {
   readonly runId: string | null;
   /** The refusal's code, as the PullRequests page shows it; `null` on success. */
   readonly code: string | null;
+  /**
+   * True when the run took a place in the build queue instead of starting
+   * (US-004): the row exists, but nothing is running against it yet.
+   */
+  readonly queued: boolean;
   /** The sentence appended to the delivery's own message. */
   readonly message: string;
 }
@@ -186,10 +194,15 @@ export class ReviewStep {
         number: target.number,
         run: run.id,
       });
+      const queued = run.queued === true;
       return {
         runId: run.id,
         code: null,
-        message: `A run was started on #${String(target.number)} to work on them.`,
+        queued,
+        message: queued
+          ? `A run was queued on #${String(target.number)} to work on them; it starts as soon as ` +
+            'a build slot frees.'
+          : `A run was started on #${String(target.number)} to work on them.`,
       };
     } catch (cause) {
       const refusal = refusalOf(cause);
@@ -203,6 +216,7 @@ export class ReviewStep {
       return {
         runId: null,
         code: refusal.code,
+        queued: false,
         message: `No run was started to work on them: ${refusal.message}`,
       };
     }

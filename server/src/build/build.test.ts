@@ -8,21 +8,28 @@ import { type Config, loadConfig } from '../config.js';
 import {
   countSessionsByStatus,
   createPrConflictFix,
+  createPrReview,
+  createPrRun,
   createRepository,
   createSession,
   type Database,
   failSession,
+  enqueueBuild,
+  getQueuedBuild,
   getSession,
   IN_MEMORY,
-  listQueuedSessions,
+  listBuildQueue,
   listSessions,
   listStories,
   openDatabase,
+  prRefId,
   type Session,
   setSetting,
   setSettingNumber,
   type Story,
   syncStories,
+  updatePrReview,
+  updatePrRun,
   updateSession,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
@@ -1313,8 +1320,16 @@ describe('concurrency and the build queue', () => {
       return listSessions(this.world.db, { status: 'building' }).map((s) => s.name);
     }
 
+    /** The unified queue as session names, in FIFO order. */
     queue(): string[] {
-      return listQueuedSessions(this.world.db).map((s) => s.name);
+      return listBuildQueue(this.world.db).map(
+        (entry) => getSession(this.world.db, entry.refId)?.name ?? entry.refId,
+      );
+    }
+
+    /** When a session joined the queue, or null when it is not in it. */
+    queuedAt(sessionId: string): string | null {
+      return getQueuedBuild(this.world.db, 'session', sessionId)?.queuedAt ?? null;
     }
   }
 
@@ -1360,7 +1375,7 @@ describe('concurrency and the build queue', () => {
     assert.equal(queued.status, 'ready');
     assert.equal(queued.queued, true);
     assert.equal(queued.queuePosition, 1);
-    assert.notEqual(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    assert.notEqual(fleet.queuedAt(billing.id), null);
     // Nothing at all was spawned for it.
     assert.deepEqual(
       fleet.world.containerStarts.filter((id) => id === billing.id),
@@ -1427,6 +1442,105 @@ describe('concurrency and the build queue', () => {
     assert.deepEqual(fleet.entered, []);
   });
 
+  it('reports every slot the cap counts, with a label for each (US-006)', () => {
+    const fleet = new Fleet(6, ['add-billing', 'add-search']);
+    const db = fleet.world.db;
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const search = fleet.named('add-search');
+
+    // One of every kind of occupant: the three session statuses that hold a
+    // slot, a feedback run, a review, a conflict fix and a start in flight.
+    updateSession(db, login.id, { status: 'building' });
+    updateSession(db, billing.id, { status: 'waiting' });
+    updateSession(db, search.id, { status: 'reviewing' });
+    const pr = (prNumber: number) => ({
+      repositoryId: fleet.world.repositoryId,
+      prNumber,
+      prUrl: `https://github.com/acme/demo/pull/${String(prNumber)}`,
+      prTitle: 'Booking totals in minor units',
+      headBranch: 'chief/booking-minor-units',
+      baseBranch: 'main',
+    });
+    const run = createPrRun(db, pr(12));
+    updatePrRun(db, run.id, { status: 'running' });
+    const review = createPrReview(db, pr(9));
+    updatePrReview(db, review.id, { status: 'running' });
+    createPrConflictFix(db, { ...pr(7), headSha: 'head1111', baseSha: 'base1111' });
+    const release = fleet.builds.claimStart(
+      'pr-review',
+      prRefId(fleet.world.repositoryId, 21),
+    );
+
+    const pool = fleet.builds.pool();
+
+    // The whole point of the story: the meter's number is the cap's number.
+    assert.equal(pool.active, 7);
+    assert.equal(pool.max, 6);
+    assert.equal(pool.free, -1);
+    assert.equal(pool.active, pool.max - fleet.builds.freeSlots());
+    assert.equal(pool.slots.length, pool.active);
+
+    const labels = new Map(pool.slots.map((slot) => [slot.refId, slot]));
+    assert.equal(labels.get(login.id)?.label, 'add-login');
+    assert.equal(labels.get(login.id)?.kind, 'session');
+    assert.equal(labels.get(billing.id)?.label, 'add-billing');
+    assert.equal(labels.get(search.id)?.label, 'add-search');
+    const feedback = labels.get(prRefId(fleet.world.repositoryId, 12));
+    assert.deepEqual([feedback?.kind, feedback?.label], ['pr-feedback', 'Feedback on PR #12']);
+    const reviewing = labels.get(prRefId(fleet.world.repositoryId, 9));
+    assert.deepEqual([reviewing?.kind, reviewing?.label], ['pr-review', 'Review of PR #9']);
+    const fixing = labels.get(prRefId(fleet.world.repositoryId, 7));
+    assert.deepEqual([fixing?.kind, fixing?.label], ['pr-conflict-fix', 'Conflict fix: PR #7']);
+    const starting = labels.get(prRefId(fleet.world.repositoryId, 21));
+    assert.deepEqual([starting?.kind, starting?.label], ['pr-review', 'Review of PR #21']);
+
+    // The in-flight start gives its slot back the moment it is released.
+    release();
+    assert.equal(fleet.builds.pool().active, 6);
+    assert.equal(fleet.builds.freeSlots(), 0);
+  });
+
+  it('counts work that is both starting and running as the one slot it is', () => {
+    const fleet = new Fleet(2, []);
+    const login = fleet.named('add-login');
+    updateSession(fleet.world.db, login.id, { status: 'building' });
+
+    // The window between the row going `building` and the claim being
+    // released: one session, one container, one slot.
+    const release = fleet.builds.claimStart('session', login.id);
+    const pool = fleet.builds.pool();
+    assert.equal(pool.active, 1);
+    assert.equal(pool.slots.length, 1);
+    assert.equal(fleet.builds.freeSlots(), 1);
+    release();
+  });
+
+  it('reports the unified queue in FIFO order, with a label per entry (US-006)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    fleet.builds.enqueue('pr-review', prRefId(fleet.world.repositoryId, 12));
+    fleet.builds.enqueue('pr-feedback', prRefId(fleet.world.repositoryId, 12));
+
+    const pool = fleet.builds.pool();
+    assert.equal(pool.queued, 3);
+    assert.equal(pool.queue.length, pool.queued);
+    assert.deepEqual(
+      pool.queue.map((entry) => [entry.position, entry.kind, entry.label]),
+      [
+        [1, 'session', 'add-billing'],
+        [2, 'pr-review', 'Review of PR #12'],
+        [3, 'pr-feedback', 'Feedback on PR #12'],
+      ],
+    );
+
+    await fleet.finish(login);
+  });
+
   it('starts the queue in FIFO order as slots free', async () => {
     const fleet = new Fleet(1, ['add-billing', 'add-search']);
     const login = fleet.named('add-login');
@@ -1465,11 +1579,11 @@ describe('concurrency and the build queue', () => {
     await fleet.builds.start(login.id);
     await fleet.builds.start(billing.id);
     await fleet.builds.start(search.id);
-    const queuedAt = getSession(fleet.world.db, billing.id)?.queuedAt;
+    const queuedAt = fleet.queuedAt(billing.id);
 
     const again = await fleet.builds.start(billing.id);
     assert.equal(again.queuePosition, 1);
-    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, queuedAt);
+    assert.equal(fleet.queuedAt(billing.id), queuedAt);
     assert.deepEqual(fleet.queue(), ['add-billing', 'add-search']);
 
     await fleet.finish(login);
@@ -1528,12 +1642,16 @@ describe('concurrency and the build queue', () => {
     const billing = fleet.named('add-billing');
     // What a restart leaves behind: a row waiting for a slot, and no loop
     // anywhere that could ever free one.
-    updateSession(fleet.world.db, billing.id, { queuedAt: '2026-08-29T09:00:00.000Z' });
+    enqueueBuild(fleet.world.db, {
+      kind: 'session',
+      refId: billing.id,
+      queuedAt: '2026-08-29T09:00:00.000Z',
+    });
 
     await fleet.builds.pump();
 
     assert.deepEqual(fleet.building(), ['add-billing']);
-    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    assert.equal(fleet.queuedAt(billing.id), null);
     await fleet.finish(billing);
     assert.equal(fleet.world.status(billing), 'finished');
   });
@@ -1555,7 +1673,7 @@ describe('concurrency and the build queue', () => {
     await until('the next session started', () => fleet.building().length === 1);
 
     assert.deepEqual(fleet.building(), ['add-search']);
-    assert.equal(getSession(fleet.world.db, billing.id)?.queuedAt, null);
+    assert.equal(fleet.queuedAt(billing.id), null);
     assert.match(fleet.world.error(billing) ?? '', /Only a ready or failed session/);
 
     await fleet.finish(search);
@@ -1686,6 +1804,140 @@ describe('concurrency and the build queue', () => {
 
     // Once the hold lifts, the queue it was put on is what starts it.
     hold.clear();
+    await fleet.builds.pump();
+    assert.deepEqual(fleet.building(), ['add-login']);
+    await fleet.finish(login);
+  });
+
+  it('starts queued entries of every kind in one arrival order (US-001)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+
+    // The two pull-request kinds are wired up from above in later stories; here
+    // they only have to prove that the pump takes the head whatever it is.
+    const started: string[] = [];
+    for (const kind of ['pr-review', 'pr-feedback'] as const) {
+      fleet.builds.registerStart(kind, {
+        start: (entry) => {
+          started.push(`${entry.kind} ${entry.refId}`);
+          return Promise.resolve();
+        },
+      });
+    }
+
+    // One slot, taken by a session, and three things arriving behind it.
+    await fleet.builds.start(login.id);
+    fleet.builds.enqueue('pr-review', 'repo-1:7');
+    await fleet.builds.start(billing.id);
+    fleet.builds.enqueue('pr-feedback', 'repo-1:8');
+
+    assert.deepEqual(fleet.queue(), ['repo-1:7', 'add-billing', 'repo-1:8']);
+    assert.equal(fleet.builds.status(billing.id).queuePosition, 2);
+
+    // The slot frees: the review was asked for first, so it goes first, and
+    // the session behind it takes the slot the review does not hold.
+    await fleet.finish(login);
+    await until('the queued session started', () => fleet.building().length === 1);
+
+    assert.deepEqual(started, ['pr-review repo-1:7']);
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.deepEqual(fleet.queue(), ['repo-1:8']);
+
+    await fleet.finish(billing);
+    await until('the last entry started', () => started.length === 2);
+    assert.deepEqual(started, ['pr-review repo-1:7', 'pr-feedback repo-1:8']);
+    assert.deepEqual(fleet.queue(), []);
+  });
+
+  it('drops a queued entry no kind knows how to start (US-001)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const billing = fleet.named('add-billing');
+
+    // Left by a newer version, or by a service that was not wired up. Nothing
+    // can start it — and it must not sit at the head forever.
+    enqueueBuild(fleet.world.db, {
+      kind: 'pr-review',
+      refId: 'repo-1:7',
+      queuedAt: '2026-08-29T09:00:00.000Z',
+    });
+    fleet.builds.enqueue('session', billing.id);
+
+    await fleet.builds.pump();
+
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.deepEqual(fleet.queue(), []);
+    await fleet.finish(billing);
+  });
+
+  it('drops a queued entry whose referent is gone (US-001)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const billing = fleet.named('add-billing');
+
+    // The session was deleted while it waited. There is nobody to tell, and
+    // the entry behind it is still owed a slot.
+    enqueueBuild(fleet.world.db, {
+      kind: 'session',
+      refId: 'a-session-that-was-deleted',
+      queuedAt: '2026-08-29T09:00:00.000Z',
+    });
+    fleet.builds.enqueue('session', billing.id);
+
+    await fleet.builds.pump();
+
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.deepEqual(fleet.queue(), []);
+    await fleet.finish(billing);
+  });
+
+  it('removes a queued entry whose start throws, and starts the next (US-001)', async () => {
+    const fleet = new Fleet(1, ['add-billing']);
+    const billing = fleet.named('add-billing');
+
+    const failures: string[] = [];
+    fleet.builds.registerStart('pr-feedback', {
+      start: () => Promise.reject(new Error('the run container would not come up')),
+      onFailed: (entry, message) => failures.push(`${entry.refId}: ${message}`),
+    });
+    enqueueBuild(fleet.world.db, {
+      kind: 'pr-feedback',
+      refId: 'repo-1:9',
+      queuedAt: '2026-08-29T09:00:00.000Z',
+    });
+    fleet.builds.enqueue('session', billing.id);
+
+    await fleet.builds.pump();
+
+    // The failure is surfaced rather than swallowed, the entry is gone, and
+    // the session behind it got the slot.
+    assert.deepEqual(failures, ['repo-1:9: the run container would not come up']);
+    assert.deepEqual(fleet.building(), ['add-billing']);
+    assert.deepEqual(fleet.queue(), []);
+    await fleet.finish(billing);
+  });
+
+  it('counts an in-flight start of any kind against the cap (US-001)', async () => {
+    const fleet = new Fleet(1, []);
+    const login = fleet.named('add-login');
+    assert.equal(fleet.builds.freeSlots(), 1);
+
+    // A review is booting: it holds nothing in the database yet, but its slot
+    // is spoken for, so a session started right now waits instead of taking it.
+    const started = fleet.builds.claimStart('pr-review', 'repo-1:7');
+    assert.equal(fleet.builds.isStarting('pr-review', 'repo-1:7'), true);
+    assert.equal(fleet.builds.freeSlots(), 0);
+
+    const queued = await fleet.builds.start(login.id);
+    assert.equal(queued.queued, true);
+    assert.deepEqual(fleet.world.containerStarts, []);
+
+    started();
+    assert.equal(fleet.builds.isStarting('pr-review', 'repo-1:7'), false);
+    assert.equal(fleet.builds.freeSlots(), 1);
+    // Releasing the same claim twice must not hand out a second slot.
+    started();
+    assert.equal(fleet.builds.freeSlots(), 1);
+
     await fleet.builds.pump();
     assert.deepEqual(fleet.building(), ['add-login']);
     await fleet.finish(login);

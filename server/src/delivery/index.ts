@@ -5,6 +5,7 @@ export {
   type CommitCountInput,
   countBranchCommits,
 } from './commits.js';
+export { DescriptionStep, type SessionDescriber } from './description-step.js';
 export {
   pullRequestBody,
   type PullRequestBodyInput,
