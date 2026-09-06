@@ -9,12 +9,14 @@ import {
   testRepositoryConnection,
   updateRepository,
 } from '../api.ts';
+import { type TextRun } from '../comment.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { describeError, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
+import { type MarkdownBlock, parseMarkdown } from '../markdown.ts';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { Badge, EmptyState, Notice, PageHeader, Panel, Segmented, Skeleton } from '../ui.tsx';
 
 type TestState = { status: 'running' } | ({ status: 'done' } & ConnectionTestResult);
 
@@ -36,6 +38,9 @@ function deriveSlugPreview(raw: string): string | null {
 
 /** Mirrors `isValidSentrySlug` on the server, so the form catches a typo first. */
 const SENTRY_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Mirrors `MAX_REVIEW_CONTEXT_LENGTH` in `routes/repositories.ts` (US-003). */
+const MAX_REVIEW_CONTEXT_LENGTH = 10_000;
 
 /**
  * Repository management (US-005): register a git remote, get an ed25519 deploy
@@ -342,6 +347,8 @@ function RepositoryForm({
   const [baseBranch, setBaseBranch] = useState(initial?.defaultBaseBranch ?? 'main');
   const [sentryOrg, setSentryOrg] = useState(initial?.sentryOrg ?? '');
   const [sentryProject, setSentryProject] = useState(initial?.sentryProject ?? '');
+  const [reviewContext, setReviewContext] = useState(initial?.reviewContext ?? '');
+  const [contextView, setContextView] = useState<'write' | 'preview'>('write');
   const [keyMode, setKeyMode] = useState<'generate' | 'paste'>('generate');
   const [privateKey, setPrivateKey] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -368,6 +375,15 @@ function RepositoryForm({
       setError('Sentry slugs are lowercase letters, digits and hyphens, exactly as they appear in the Sentry URL.');
       return;
     }
+    // The server trims before measuring, so the count the form checks and the
+    // one it rejects on are the same number.
+    const context = reviewContext.trim();
+    if (context.length > MAX_REVIEW_CONTEXT_LENGTH) {
+      setError(
+        `The review context is ${context.length.toLocaleString()} characters; the limit is ${MAX_REVIEW_CONTEXT_LENGTH.toLocaleString()}.`,
+      );
+      return;
+    }
     const input: RepositoryInput = {
       name: name.trim(),
       sshUrl: sshUrl.trim(),
@@ -375,6 +391,7 @@ function RepositoryForm({
       // Always sent, so emptying a field unlinks instead of being ignored.
       sentryOrg: org === '' ? null : org,
       sentryProject: project === '' ? null : project,
+      reviewContext: context === '' ? null : context,
     };
     if (githubSlug.trim() !== '') input.githubSlug = githubSlug.trim();
     if (keyMode === 'paste') input.privateKey = privateKey;
@@ -459,6 +476,42 @@ function RepositoryForm({
         </p>
 
         <div className="field">
+          <div className="field__head">
+            <label className="field__label" htmlFor={`review-context-${mode}`}>
+              Code review context <span className="muted">(optional)</span>
+            </label>
+            <Segmented
+              value={contextView}
+              options={[
+                { value: 'write', label: 'Write' },
+                { value: 'preview', label: 'Preview' },
+              ]}
+              onChange={setContextView}
+              ariaLabel="Review context view"
+            />
+          </div>
+          {contextView === 'write' ? (
+            <textarea
+              id={`review-context-${mode}`}
+              className="field__input field__textarea"
+              value={reviewContext}
+              onChange={(event) => setReviewContext(event.target.value)}
+              placeholder={'## Conventions\n- Money is handled in cents; flag float arithmetic.\n- `app/Legacy` is being retired — do not review it.'}
+              rows={8}
+              spellCheck={false}
+            />
+          ) : (
+            <MarkdownPreview text={reviewContext} />
+          )}
+          <p className="field__hint">
+            Added to the AI code review prompt for this repository, so reviews know its conventions and the places to look hard at.
+            Markdown, up to {MAX_REVIEW_CONTEXT_LENGTH.toLocaleString()} characters
+            {reviewContext.trim() === '' ? '' : ` (${reviewContext.trim().length.toLocaleString()} used)`}. Leave it empty to
+            review with the standard prompt.
+          </p>
+        </div>
+
+        <div className="field">
           <span className="field__label">SSH key</span>
           <label className="radio">
             <input type="radio" name={`key-mode-${mode}`} checked={keyMode === 'generate'} onChange={() => setKeyMode('generate')} />
@@ -498,5 +551,48 @@ function RepositoryForm({
         </div>
       </div>
     </form>
+  );
+}
+
+/**
+ * The review context as the reader of a review prompt would see it. Empty text
+ * gets a line saying so rather than a blank box, which reads as broken.
+ */
+function MarkdownPreview({ text }: { readonly text: string }) {
+  const blocks: MarkdownBlock[] = parseMarkdown(text);
+  if (blocks.length === 0) return <p className="markdown markdown--empty">Nothing to preview yet.</p>;
+  return (
+    <div className="markdown">
+      {blocks.map((block, index) => {
+        if (block.kind === 'code') {
+          return (
+            <pre className="output output--wrap" key={index}>
+              {block.text}
+            </pre>
+          );
+        }
+        if (block.kind === 'list') {
+          const items = block.items.map((runs, itemIndex) => <li key={itemIndex}>{renderRuns(runs)}</li>);
+          return block.ordered ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>;
+        }
+        if (block.kind === 'heading') {
+          const Heading = `h${String(block.level)}` as 'h1' | 'h2' | 'h3';
+          return <Heading key={index}>{renderRuns(block.runs)}</Heading>;
+        }
+        return <p key={index}>{renderRuns(block.runs)}</p>;
+      })}
+    </div>
+  );
+}
+
+function renderRuns(runs: readonly TextRun[]) {
+  return runs.map((run, index) =>
+    run.code ? (
+      <code className="mono" key={index}>
+        {run.text}
+      </code>
+    ) : (
+      <span key={index}>{run.text}</span>
+    ),
   );
 }

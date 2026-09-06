@@ -260,6 +260,68 @@
     resize: vertical;
   }
 
+  /* A label with a control of its own on the right: the Write/Preview switch
+   * over the review context textarea (US-003). */
+  .field__head {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: space-between;
+  }
+
+  /*
+   * Rendered markdown inside a form, standing in for the textarea it replaces:
+   * the same sunken box, sized to what the field held. Preflight strips the
+   * list markers and the heading and list spacing, so they are said here.
+   */
+  .markdown {
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-line-default);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-sunken);
+    color: var(--color-fg-default);
+    display: flex;
+    flex-direction: column;
+    font-size: var(--text-sm);
+    gap: 0.625rem;
+    line-height: 1.35rem;
+    min-height: 12rem;
+    overflow-wrap: anywhere;
+    padding: 0.625rem;
+  }
+
+  .markdown--empty {
+    color: var(--color-fg-subtle);
+  }
+
+  /* Soft breaks are kept, the way GitHub keeps them inside a comment. */
+  .markdown p {
+    white-space: pre-wrap;
+  }
+
+  .markdown ul,
+  .markdown ol {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0;
+    padding-left: 1.25rem;
+  }
+
+  .markdown ul {
+    list-style: disc;
+  }
+
+  .markdown ol {
+    list-style: decimal;
+  }
+
+  .markdown code {
+    color: var(--color-fg-emphasis);
+    font-size: var(--text-code);
+  }
+
   .field__input {
     background-color: var(--color-surface-sunken);
     border: 1px solid var(--color-line-default);
