@@ -50,6 +50,11 @@ export interface RepositoryView {
    */
   readonly sentryOrg: string | null;
   readonly sentryProject: string | null;
+  /**
+   * Free-form guidance injected into the review prompt for this repository
+   * (US-002); `null` means reviews run with the generic prompt.
+   */
+  readonly reviewContext: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -76,6 +81,8 @@ export interface CreateRepositoryRequest {
   /** The Sentry link; both slugs together, or neither. */
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
+  /** Repository-specific review guidance; omitted means none. */
+  readonly reviewContext?: string | null;
 }
 
 export interface UpdateRepositoryRequest {
@@ -88,6 +95,8 @@ export interface UpdateRepositoryRequest {
   /** `null` unlinks; omitted leaves the stored slug alone. */
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
+  /** `null` clears the guidance; omitted leaves the stored text alone. */
+  readonly reviewContext?: string | null;
 }
 
 interface KeyMaterial {
@@ -110,6 +119,7 @@ export function toRepositoryView(config: Config, repository: Repository): Reposi
     keyConfigured: hasPrivateKey(config, repository.id),
     sentryOrg: repository.sentryOrg,
     sentryProject: repository.sentryProject,
+    reviewContext: repository.reviewContext,
     createdAt: repository.createdAt,
     updatedAt: repository.updatedAt,
   };
@@ -197,6 +207,7 @@ export function createRepositoryWithKey(
       keySource: key.keySource,
       sentryOrg,
       sentryProject,
+      reviewContext: request.reviewContext ?? null,
     });
   } catch (cause) {
     if (isUniqueNameViolation(cause)) {
@@ -253,6 +264,7 @@ export function updateRepositoryWithKey(
     keySource?: RepositoryKeySource;
     sentryOrg?: string | null;
     sentryProject?: string | null;
+    reviewContext?: string | null;
   } = {};
   if (request.name !== undefined) patch.name = request.name;
   if (request.sshUrl !== undefined) patch.sshUrl = request.sshUrl;
@@ -267,6 +279,8 @@ export function updateRepositoryWithKey(
   assertSentryLinkIsComplete(sentryOrg, sentryProject);
   if (request.sentryOrg !== undefined) patch.sentryOrg = request.sentryOrg;
   if (request.sentryProject !== undefined) patch.sentryProject = request.sentryProject;
+
+  if (request.reviewContext !== undefined) patch.reviewContext = request.reviewContext;
 
   if (request.privateKey !== undefined) {
     const inspected = inspect(request.privateKey);

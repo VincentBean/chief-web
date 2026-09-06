@@ -31,6 +31,7 @@ interface RepositoryBody {
   keyConfigured: boolean;
   sentryOrg: string | null;
   sentryProject: string | null;
+  reviewContext: string | null;
 }
 
 describe('repositories api', () => {
@@ -240,6 +241,88 @@ describe('repositories api', () => {
 
     assert.equal(updated.sentryOrg, 'acme');
     assert.equal(updated.sentryProject, 'web');
+  });
+
+  it('stores the review context on add and returns it everywhere (US-002)', async () => {
+    const { status, body } = await create({ reviewContext: 'Watch the N+1 queries.' });
+
+    assert.equal(status, 201);
+    assert.equal(body.reviewContext, 'Watch the N+1 queries.');
+
+    const fetched = (await (await call('GET', `/api/repositories/${body.id}`)).json()) as RepositoryBody;
+    assert.equal(fetched.reviewContext, 'Watch the N+1 queries.');
+
+    const listed = (await (await call('GET', '/api/repositories')).json()) as {
+      repositories: RepositoryBody[];
+    };
+    assert.equal(listed.repositories[0]?.reviewContext, 'Watch the N+1 queries.');
+  });
+
+  it('leaves the review context unset by default', async () => {
+    const { body } = await create();
+
+    assert.equal(body.reviewContext, null);
+  });
+
+  it('sets, clears and preserves the review context from the edit form', async () => {
+    const { body: created } = await create();
+
+    const set = (await (
+      await call('PUT', `/api/repositories/${created.id}`, {
+        reviewContext: 'Prefer composition over inheritance.',
+      })
+    ).json()) as RepositoryBody;
+    assert.equal(set.reviewContext, 'Prefer composition over inheritance.');
+
+    // An edit that does not mention the field keeps what is stored.
+    const renamed = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { name: 'renamed' })
+    ).json()) as RepositoryBody;
+    assert.equal(renamed.reviewContext, 'Prefer composition over inheritance.');
+
+    // The form sends the emptied textarea, which is what clears it.
+    const cleared = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { reviewContext: '' })
+    ).json()) as RepositoryBody;
+    assert.equal(cleared.reviewContext, null);
+
+    const nulled = (await (
+      await call('PUT', `/api/repositories/${created.id}`, {
+        reviewContext: 'Back again.',
+      })
+    ).json()) as RepositoryBody;
+    assert.equal(nulled.reviewContext, 'Back again.');
+    const explicitNull = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { reviewContext: null })
+    ).json()) as RepositoryBody;
+    assert.equal(explicitNull.reviewContext, null);
+  });
+
+  it('rejects a review context longer than 10,000 characters', async () => {
+    const tooLong = 'x'.repeat(10_001);
+
+    const created = await call('POST', '/api/repositories', {
+      name: 'wordy',
+      sshUrl: SSH_URL,
+      reviewContext: tooLong,
+    });
+    const createError = (await created.json()) as { error: string; message: string };
+    assert.equal(created.status, 400);
+    assert.equal(createError.error, 'invalid_review_context');
+    assert.match(createError.message, /at most 10000 characters/);
+
+    const { body: existing } = await create({ reviewContext: 'Short and useful.' });
+    const updated = await call('PUT', `/api/repositories/${existing.id}`, {
+      reviewContext: tooLong,
+    });
+    assert.equal(updated.status, 400);
+    assert.equal(((await updated.json()) as { error: string }).error, 'invalid_review_context');
+
+    // The rejected edit left the stored text alone.
+    const current = (await (
+      await call('GET', `/api/repositories/${existing.id}`)
+    ).json()) as RepositoryBody;
+    assert.equal(current.reviewContext, 'Short and useful.');
   });
 
   it('asks for the slug when it cannot be derived', async () => {

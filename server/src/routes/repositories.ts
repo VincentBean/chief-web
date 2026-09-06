@@ -25,6 +25,11 @@ interface Invalid {
 
 const MAX_NAME_LENGTH = 100;
 const MAX_BRANCH_LENGTH = 255;
+/**
+ * The review context is pasted straight into the review prompt, so it is
+ * capped well below the model's context window rather than left unbounded.
+ */
+const MAX_REVIEW_CONTEXT_LENGTH = 10_000;
 const DEFAULT_BASE_BRANCH = 'main';
 
 /**
@@ -229,6 +234,25 @@ function parseSentryLink(
   return link;
 }
 
+/**
+ * Reads the per-repository review context (US-002). Optional and clearable,
+ * like the Sentry slugs: an empty string is how the settings form removes it.
+ */
+function parseReviewContext(
+  input: Record<string, unknown>,
+): { reviewContext?: string | null } | Invalid {
+  const reviewContext = clearableString(input, 'reviewContext', 'invalid_review_context');
+  if (typeof reviewContext === 'object' && reviewContext !== null) return reviewContext;
+  if (reviewContext === undefined) return {};
+  if (reviewContext !== null && reviewContext.length > MAX_REVIEW_CONTEXT_LENGTH) {
+    return {
+      error: 'invalid_review_context',
+      message: `The review context must be at most ${MAX_REVIEW_CONTEXT_LENGTH} characters.`,
+    };
+  }
+  return { reviewContext };
+}
+
 function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -271,12 +295,16 @@ function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const sentry = parseSentryLink(input);
   if ('error' in sentry) return sentry;
 
+  const review = parseReviewContext(input);
+  if ('error' in review) return review;
+
   return {
     name,
     sshUrl,
     githubSlug,
     defaultBaseBranch,
     ...sentry,
+    ...review,
     // Omitted (not `undefined`) so `exactOptionalPropertyTypes` is satisfied
     // and the service can generate a keypair instead.
     ...(privateKey === undefined ? {} : { privateKey }),
@@ -296,6 +324,7 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
     privateKey?: string;
     sentryOrg?: string | null;
     sentryProject?: string | null;
+    reviewContext?: string | null;
   } = {};
 
   const name = optionalString(input, 'name', 'invalid_name');
@@ -338,6 +367,10 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
   if ('error' in sentry) return sentry;
   if (sentry.sentryOrg !== undefined) update.sentryOrg = sentry.sentryOrg;
   if (sentry.sentryProject !== undefined) update.sentryProject = sentry.sentryProject;
+
+  const review = parseReviewContext(input);
+  if ('error' in review) return review;
+  if (review.reviewContext !== undefined) update.reviewContext = review.reviewContext;
 
   return update;
 }
