@@ -76,6 +76,31 @@ is still posted, as a short body saying so.
 
 There is no cap on how many findings one review may carry.
 
+## Repository review context
+
+The prompt above is the same for every repository. **Code review context** on
+the repository form ([Repositories](repositories.md#code-review-context)) is how
+one repository says something of its own: free-form markdown, up to 10,000
+characters, holding the conventions, the known trouble spots and the parts to
+leave alone.
+
+When it is set, it is rendered verbatim into the prompt under a
+**Repository-specific review context** heading, before the instructions about
+what to leave behind. It does not replace the rules the pass already follows —
+the agent still reports the same two kinds of thing and still changes nothing —
+it only tells it what this repository is like.
+
+**Both entry points get it**: the review a session runs after opening its pull
+request, and the **Review** button on the Pull requests page. Both resolve the
+repository the review is against and use its context, so the two passes read the
+same prompt.
+
+**An empty field changes nothing.** No context, an empty one, or one that is
+only whitespace all produce exactly the prompt of a repository that never had
+the field — no heading, no empty section. Clearing the box on the repository
+form puts the standard prompt back on the next review; it never applies
+retroactively to a review that already ran.
+
 ## Attempts, failure and Retry
 
 The review is the third delivery step, after the push and the pull request, and
