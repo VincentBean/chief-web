@@ -838,6 +838,15 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE session_id IS NOT NULL;
     `,
   },
+  {
+    id: '0014_review_context',
+    sql: `
+      -- Free-form, repo-specific guidance injected into the AI review prompt
+      -- (US-001). Nullable like \`sentry_org\`: NULL is "nothing to add", and
+      -- every repository that predates the column reads back that way.
+      ALTER TABLE repositories ADD COLUMN review_context TEXT;
+    `,
+  },
 ];
 
 /**
