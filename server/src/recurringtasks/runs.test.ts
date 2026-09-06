@@ -10,15 +10,17 @@ import {
   createRecurringTask,
   createRepository,
   type Database,
+  enqueueBuild,
+  getQueuedBuild,
   getRecurringTask,
   getSession,
   IN_MEMORY,
   latestRecurringTaskOccurrence,
   listRecurringTaskOccurrences,
   listSessions,
-  nowIso,
   openDatabase,
   type RecurringTask,
+  removeQueuedBuild,
   type Session,
   type Repository,
   updateRecurringTask,
@@ -55,11 +57,12 @@ class FakeBuilds implements RecurringTaskBuilds {
 
   start(sessionId: string): Promise<unknown> {
     if (this.refusal !== null) {
-      if (this.queuesWhenRefused) updateSession(this.db, sessionId, { queuedAt: nowIso() });
+      if (this.queuesWhenRefused) enqueueBuild(this.db, { kind: 'session', refId: sessionId });
       return Promise.reject(this.refusal);
     }
     this.started.push(sessionId);
-    updateSession(this.db, sessionId, { status: 'building', queuedAt: null });
+    removeQueuedBuild(this.db, 'session', sessionId);
+    updateSession(this.db, sessionId, { status: 'building' });
     return Promise.resolve({});
   }
 }
@@ -315,7 +318,7 @@ describe('skipping an occurrence the previous run is in the way of', () => {
     assert.match(skipReasonFor(session({ status: 'pending' })) ?? '', /is still being set up\.$/);
     assert.match(skipReasonFor(session({ status: 'ready' })) ?? '', /still waiting to be built/);
     assert.match(
-      skipReasonFor(session({ status: 'ready', queuedAt: '2026-09-05T03:00:00.000Z' })) ?? '',
+      skipReasonFor(session({ status: 'ready' }), null, true) ?? '',
       /still queued for a slot/,
     );
     assert.equal(
@@ -367,8 +370,7 @@ describe('skipping an occurrence the previous run is in the way of', () => {
     // is a run like any other, whatever the occurrence that fired it says.
     assert.match(skipReasonFor(session({ status: 'building' }), 'fire-failed') ?? '', /building/);
     assert.match(
-      skipReasonFor(session({ status: 'ready', queuedAt: '2026-09-05T03:00:00.000Z' }), 'fire-failed') ??
-        '',
+      skipReasonFor(session({ status: 'ready' }), 'fire-failed', true) ?? '',
       /queued for a slot/,
     );
     // And a run that started is held back exactly as before.
@@ -482,7 +484,7 @@ describe('skipping an occurrence the previous run is in the way of', () => {
     const [stranded] = listSessions(f.db, {});
     assert.ok(stranded);
     assert.equal(stranded.status, 'ready');
-    assert.equal(stranded.queuedAt, null);
+    assert.equal(getQueuedBuild(f.db, 'session', stranded.id), null);
 
     f.builds.refusal = null;
     assert.equal(await f.runner.fireDue(new Date(2026, 8, 6, 3, 0).toISOString()), 1);
@@ -589,7 +591,6 @@ function session(overrides: Partial<Session>): Session {
     featureBranch: 'chief/rector-20260905-0300',
     prTargetBranch: 'develop',
     scheduledStartAt: null,
-    queuedAt: null,
     containerId: null,
     prUrl: null,
     lastError: null,

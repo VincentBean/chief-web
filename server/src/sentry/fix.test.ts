@@ -12,7 +12,9 @@ import {
   createSession,
   type Database,
   deleteSession,
+  enqueueBuild,
   featureBranchFor,
+  getQueuedBuild,
   getSentryIssue,
   getSession,
   IN_MEMORY,
@@ -206,7 +208,7 @@ class FakeBuilds implements FixBuildService {
     this.started.push(sessionId);
     if (this.failure !== null) {
       if (this.queueBeforeFailing) {
-        updateSession(this.db, sessionId, { queuedAt: new Date().toISOString() });
+        enqueueBuild(this.db, { kind: 'session', refId: sessionId });
       }
       return Promise.reject(this.failure);
     }
@@ -219,6 +221,7 @@ class FakeBuilds implements FixBuildService {
 function view(session: Session): SessionView {
   return {
     ...session,
+    queuedAt: null,
     repositoryName: 'demo',
     recurringTaskName: null,
     scheduleMissed: false,
@@ -467,7 +470,7 @@ describe('the Sentry fix session builder', () => {
       const session = listSessions(w.db, {})[0];
       assert.ok(session !== undefined);
       assert.equal(session.status, 'ready');
-      assert.notEqual(session.queuedAt, null);
+      assert.notEqual(getQueuedBuild(w.db, 'session', session.id), null);
       assert.equal(w.sessions.deleted.length, 0);
 
       const row = w.reload(issue);

@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import {
   type Database,
+  getQueuedBuild,
   getSession,
   latestRecurringTaskRunSession,
   listDueRecurringTasks,
@@ -229,7 +230,7 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
       // does the same thing — has queued the session, and the queue is what
       // starts it. Anything else really did fail to fire.
       const current = getSession(this.db, run.id);
-      if (current === null || current.queuedAt === null) {
+      if (current === null || getQueuedBuild(this.db, 'session', run.id) === null) {
         const reason = `The build of "${run.name}" could not be started: ${describe(cause)}`;
         this.settleAs(occurrence, 'fire-failed', reason);
         logger.warn('recurring task run could not be built', {
@@ -257,7 +258,11 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
       const previous = latestRecurringTaskRunSession(this.db, task.id);
       const occurrence =
         previous === null ? null : recurringTaskOccurrenceForSession(this.db, previous.id);
-      return skipReasonFor(previous, occurrence?.outcome ?? null);
+      return skipReasonFor(
+        previous,
+        occurrence?.outcome ?? null,
+        previous !== null && getQueuedBuild(this.db, 'session', previous.id) !== null,
+      );
     } catch (cause) {
       logger.warn('could not read the previous run of a recurring task', {
         task: task.id,
@@ -413,7 +418,9 @@ const RUN_IN_PROGRESS = [
 /**
  * Why the task's next occurrence must not fire, or null when nothing is in
  * the way. `session` is the task's most recent run, or null if it has none,
- * and `outcome` is what its occurrence recorded of the firing that made it.
+ * `outcome` is what its occurrence recorded of the firing that made it, and
+ * `queued` is whether that run is waiting in the build queue — the queue lives
+ * in its own table, so it has to be read alongside the session.
  *
  * Only two things hold an occurrence back, and both are read off that one
  * session: a run that is still going, and a run whose pull request nobody has
@@ -425,11 +432,12 @@ const RUN_IN_PROGRESS = [
 export function skipReasonFor(
   session: Session | null,
   outcome: RecurringTaskOutcome | null = null,
+  queued = false,
 ): string | null {
   if (session === null) return null;
-  if (wasAbandonedByAFailedFiring(session, outcome)) return null;
+  if (wasAbandonedByAFailedFiring(session, outcome, queued)) return null;
 
-  const phrase = inProgressPhrase(session);
+  const phrase = inProgressPhrase(session, queued);
   if (phrase !== null) return `The previous run “${session.name}” is ${phrase}.`;
 
   if (hasOpenPullRequest(session)) {
@@ -461,19 +469,20 @@ export function skipReasonFor(
 function wasAbandonedByAFailedFiring(
   session: Session,
   outcome: RecurringTaskOutcome | null,
+  queued: boolean,
 ): boolean {
   if (outcome !== 'fire-failed') return false;
-  return session.status === 'pending' || (session.status === 'ready' && session.queuedAt === null);
+  return session.status === 'pending' || (session.status === 'ready' && !queued);
 }
 
 /** How a run that has not finished is described, or null once it has. */
-function inProgressPhrase(session: Session): string | null {
+function inProgressPhrase(session: Session, queued: boolean): string | null {
   if (!(RUN_IN_PROGRESS as readonly SessionStatus[]).includes(session.status)) return null;
   switch (session.status) {
     case 'pending':
       return 'still being set up';
     case 'ready':
-      return session.queuedAt === null ? 'still waiting to be built' : 'still queued for a slot';
+      return queued ? 'still queued for a slot' : 'still waiting to be built';
     case 'waiting':
       return 'still held by Claude’s usage limit';
     default:
