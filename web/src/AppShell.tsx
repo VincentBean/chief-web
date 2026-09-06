@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { logout } from './api.ts';
+import { describeBuildSlots, logout } from './api.ts';
 import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
@@ -110,13 +110,23 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
   const status = (
     <div className="sidebar__status">
       {hold !== null && <HoldClock until={hold} />}
-      <div className="status-row" title="Build slots in use">
+      <div
+        className="status-row"
+        title={stats === null ? 'Build slots in use' : describeBuildSlots(stats.builds)}
+      >
         <Icon name="zap" />
-        <span className="status-row__label">Slots</span>
+        <span className="status-row__label">
+          Slots
+          {stats !== null && stats.builds.queued > 0 && (
+            <span className="status-row__note">+{stats.builds.queued} queued</span>
+          )}
+        </span>
         <span className="status-row__value">
           {stats === null ? '…' : `${String(stats.builds.active)}/${String(stats.builds.max)}`}
         </span>
-        {stats !== null && <Meter value={stats.builds.active} max={stats.builds.max} label="Build slots" />}
+        {stats !== null && (
+          <Meter value={stats.builds.active} max={stats.builds.max} label={describeBuildSlots(stats.builds)} />
+        )}
       </div>
       <div
         className="status-row"

@@ -7,33 +7,38 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, beforeEach, describe, it } from 'node:test';
 
 import {
+  buildQueuePosition,
   closeDatabase,
+  countQueuedBuilds,
   countSessionsByStatus,
   createRepository,
   createSession,
   type Database,
   deleteRepository,
   deleteSession,
+  enqueueBuild,
   failSession,
   FAILURE_STAGES,
   failureStageLabel,
   getAllSettings,
+  getQueuedBuild,
   getRepository,
   getSession,
   getSetting,
   getSettingNumber,
   IN_MEMORY,
   isDeliveryStage,
+  listBuildQueue,
   listDueScheduledSessions,
-  listQueuedSessions,
   listRepositories,
   listSessions,
   listStories,
   MIGRATIONS,
   nextIncompleteStory,
   openDatabase,
-  queuePosition,
   type Repository,
+  removeBuildQueueEntry,
+  removeQueuedBuild,
   runMigrations,
   setSetting,
   syncStories,
@@ -44,6 +49,7 @@ import {
 
 /** The migration under test in 'widens the session status check'. */
 const WAITING_MIGRATION = '0005_session_waiting_status';
+const BUILD_QUEUE_MIGRATION = '0012_build_queue';
 const REVIEW_STAGE_MIGRATION = '0007_session_review_failure_stage';
 
 /** The migration under test in 'widens the check to `pr-open`/`merged`'. */
@@ -525,7 +531,8 @@ describe('sessions', () => {
     assert.equal(session.status, 'pending');
     assert.equal(session.featureBranch, 'chief/add-login');
     assert.equal(session.scheduledStartAt, null);
-    assert.equal(session.queuedAt, null);
+    // Nothing is queued for a session nobody has asked to build.
+    assert.equal(getQueuedBuild(db, 'session', session.id), null);
     assert.equal(session.containerId, null);
     assert.equal(session.prUrl, null);
     assert.equal(session.lastError, null);
@@ -691,8 +698,8 @@ describe('sessions', () => {
     );
   });
 
-  it('filters, counts and orders the build queue', () => {
-    const first = createSession(db, {
+  it('filters and counts sessions', () => {
+    createSession(db, {
       repositoryId: repository.id,
       name: 'first',
       baseBranch: 'main',
@@ -712,49 +719,114 @@ describe('sessions', () => {
     assert.equal(listSessions(db, { repositoryId: 'other' }).length, 0);
     assert.equal(countSessionsByStatus(db, 'building'), 1);
 
-    updateSession(db, second.id, { status: 'ready', queuedAt: '2026-08-29T10:00:00.000Z' });
-    updateSession(db, first.id, { queuedAt: '2026-08-29T09:00:00.000Z' });
-
-    assert.deepEqual(
-      listQueuedSessions(db).map((session) => session.id),
-      [first.id, second.id],
-    );
-    // The "#2" the UI shows, counted with the same order (US-018).
-    assert.equal(queuePosition(db, { id: first.id, queuedAt: '2026-08-29T09:00:00.000Z' }), 1);
-    assert.equal(queuePosition(db, { id: second.id, queuedAt: '2026-08-29T10:00:00.000Z' }), 2);
-    assert.equal(queuePosition(db, { id: first.id, queuedAt: null }), null);
-
-    updateSession(db, first.id, { queuedAt: null });
-    assert.deepEqual(
-      listQueuedSessions(db).map((session) => session.id),
-      [second.id],
-    );
-    assert.equal(queuePosition(db, { id: second.id, queuedAt: '2026-08-29T10:00:00.000Z' }), 1);
+    updateSession(db, second.id, { status: 'ready' });
   });
 
-  it('orders two sessions queued in the same millisecond by id', () => {
-    const at = '2026-08-29T11:00:00.000Z';
-    const ids = ['alpha', 'beta', 'gamma'].map((name) => {
-      const session = createSession(db, {
-        repositoryId: repository.id,
-        name,
-        baseBranch: 'main',
-        prTargetBranch: 'main',
-        status: 'ready',
-      });
-      updateSession(db, session.id, { queuedAt: at });
-      return session.id;
-    });
+  it('queues every kind of action in one strict FIFO order (US-001)', () => {
+    enqueueBuild(db, { kind: 'session', refId: 's1', queuedAt: '2026-08-29T10:00:00.000Z' });
+    enqueueBuild(db, { kind: 'pr-review', refId: 'r1:7', queuedAt: '2026-08-29T09:00:00.000Z' });
+    enqueueBuild(db, { kind: 'pr-feedback', refId: 'r1:8', queuedAt: '2026-08-29T11:00:00.000Z' });
 
-    // A tie on the timestamp is broken on the id, so every reader — the queue
-    // itself and the position shown next to a session — agrees on the order.
+    // Arrival time alone decides; no kind goes in front of another.
     assert.deepEqual(
-      listQueuedSessions(db).map((session) => session.id),
-      [...ids].sort(),
+      listBuildQueue(db).map((entry) => `${entry.kind}:${entry.refId}`),
+      ['pr-review:r1:7', 'session:s1', 'pr-feedback:r1:8'],
     );
-    for (const [index, id] of [...ids].sort().entries()) {
-      assert.equal(queuePosition(db, { id, queuedAt: at }), index + 1);
+    assert.equal(countQueuedBuilds(db), 3);
+
+    // The "#2" the UI shows, counted with the same order.
+    assert.equal(buildQueuePosition(db, 'pr-review', 'r1:7'), 1);
+    assert.equal(buildQueuePosition(db, 'session', 's1'), 2);
+    assert.equal(buildQueuePosition(db, 'pr-feedback', 'r1:8'), 3);
+    // A kind and a ref that are not queued together are not queued at all.
+    assert.equal(buildQueuePosition(db, 'session', 'r1:7'), null);
+    assert.equal(buildQueuePosition(db, 'session', 'nobody'), null);
+
+    // Queueing the same work again leaves it exactly where it was.
+    const again = enqueueBuild(db, { kind: 'session', refId: 's1' });
+    assert.equal(again.queuedAt, '2026-08-29T10:00:00.000Z');
+    assert.equal(buildQueuePosition(db, 'session', 's1'), 2);
+    assert.equal(countQueuedBuilds(db), 3);
+
+    // Removal by referent, and by the entry's own id — what a cancel and what
+    // the pump each do.
+    assert.equal(removeQueuedBuild(db, 'pr-review', 'r1:7'), true);
+    assert.equal(removeQueuedBuild(db, 'pr-review', 'r1:7'), false);
+    assert.equal(buildQueuePosition(db, 'session', 's1'), 1);
+
+    const head = listBuildQueue(db)[0];
+    assert.ok(head !== undefined);
+    assert.equal(removeBuildQueueEntry(db, head.id), true);
+    assert.equal(removeBuildQueueEntry(db, head.id), false);
+    assert.deepEqual(
+      listBuildQueue(db).map((entry) => entry.refId),
+      ['r1:8'],
+    );
+  });
+
+  it('breaks a tie on the queue timestamp by arrival, not by reference', () => {
+    const at = '2026-08-29T11:00:00.000Z';
+    const refs = ['gamma', 'alpha', 'beta'];
+    for (const refId of refs) enqueueBuild(db, { kind: 'session', refId, queuedAt: at });
+
+    // Every entry arrived in the same millisecond, so the row id decides — and
+    // that is insertion order, not alphabetical order of the reference.
+    assert.deepEqual(
+      listBuildQueue(db).map((entry) => entry.refId),
+      refs,
+    );
+    for (const [index, refId] of refs.entries()) {
+      assert.equal(buildQueuePosition(db, 'session', refId), index + 1);
     }
+  });
+
+  it('moves the sessions that were queued on `sessions.queued_at` into the queue', () => {
+    // The database as it was before the unified queue: two sessions waiting on
+    // the old column, in an order that has to survive.
+    const walked = new DatabaseSync(IN_MEMORY) as Database;
+    walked.exec('PRAGMA foreign_keys = ON');
+    walked.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === BUILD_QUEUE_MIGRATION);
+    assert.ok(index > 0, `${BUILD_QUEUE_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      walked.exec(migration.sql);
+      walked
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(migration.id, '2026-08-30T00:00:00.000Z');
+    }
+
+    const seeded = seedRepository(walked);
+    const waiting: readonly (readonly [string, string])[] = [
+      ['later', '2026-08-29T10:00:00.000Z'],
+      ['earlier', '2026-08-29T09:00:00.000Z'],
+    ];
+    for (const [id, queuedAt] of waiting) {
+      walked
+        .prepare(
+          `INSERT INTO sessions
+             (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+              queued_at, created_at, updated_at)
+           VALUES (?, ?, ?, 'ready', 'main', 'chief/x', 'main', ?, ?, ?)`,
+        )
+        .run(id, seeded.id, id, queuedAt, '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+    }
+
+    assert.ok(runMigrations(walked).includes(BUILD_QUEUE_MIGRATION));
+
+    // Both came across, oldest first, and the column they came from is empty.
+    assert.deepEqual(
+      listBuildQueue(walked).map((entry) => [entry.kind, entry.refId]),
+      [
+        ['session', 'earlier'],
+        ['session', 'later'],
+      ],
+    );
+    assert.equal(getQueuedBuild(walked, 'session', 'earlier')?.queuedAt, '2026-08-29T09:00:00.000Z');
+    const left = walked.prepare('SELECT COUNT(*) AS n FROM sessions WHERE queued_at IS NOT NULL').get();
+    assert.equal(Number(left?.['n']), 0);
+
+    closeDatabase(walked);
   });
 
   it('finds ready sessions whose schedule is due', () => {

@@ -4,9 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
-import type { AgentInvocation, AgentResult, AgentRunner } from '../build/index.js';
+import type {
+  AgentInvocation,
+  AgentResult,
+  AgentRunner,
+  BuildSlotKind,
+} from '../build/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
+  type BuildQueueEntry,
+  type BuildQueueKind,
   closeDatabase,
   createRepository,
   type Database,
@@ -145,6 +152,33 @@ class StubSlots implements BuildSlots {
   holdAll(until: string): Promise<void> {
     this.heldUntil.push(until);
     return Promise.resolve();
+  }
+
+  /** The unified queue, in memory: nothing here joins it, so it stays empty. */
+  readonly queued: string[] = [];
+
+  enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry {
+    const key = `${kind}:${refId}`;
+    if (!this.queued.includes(key)) this.queued.push(key);
+    return { id: this.queued.indexOf(key) + 1, kind, refId, queuedAt: new Date().toISOString() };
+  }
+
+  leaveQueue(kind: BuildQueueKind, refId: string): boolean {
+    const at = this.queued.indexOf(`${kind}:${refId}`);
+    if (at < 0) return false;
+    this.queued.splice(at, 1);
+    return true;
+  }
+
+  /** Every in-flight claim made against the shared accounting (US-005). */
+  readonly claims: { key: string; released: boolean }[] = [];
+
+  claimStart(kind: BuildSlotKind, refId: string): () => void {
+    const claim = { key: `${kind}:${refId}`, released: false };
+    this.claims.push(claim);
+    return () => {
+      claim.released = true;
+    };
   }
 }
 
@@ -485,9 +519,23 @@ describe('resolving a pull request’s merge conflicts', () => {
       (error: unknown) =>
         error instanceof ConflictFixError && error.code === 'no_free_slot',
     );
-    // Nothing was spent: no row, no container, no agent.
+    // Nothing was spent: no row, no container, no agent, and no slot claimed.
     assert.equal(findPrConflictFix(db, repository.id, 61), null);
     assert.deepEqual(containersStarted, []);
+    assert.deepEqual(slots.claims, []);
+  });
+
+  it('claims its slot in the shared accounting before it creates anything', async () => {
+    await inFlight(service());
+
+    // The claim is what keeps the pump from handing the same free slot out
+    // while the row is still being written (US-001); once `start` has answered
+    // the `running` row counts the fix, so the claim is released again.
+    assert.deepEqual(
+      slots.claims.map((claim) => claim.key),
+      [`pr-conflict-fix:${repository.id}:61`],
+    );
+    assert.ok(slots.claims.every((claim) => claim.released));
   });
 
   it('refuses to start while Claude’s usage limit is held', async () => {

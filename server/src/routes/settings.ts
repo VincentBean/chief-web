@@ -41,7 +41,22 @@ interface Invalid {
  * The token is write-only over the API — `GET /api/settings` returns only its
  * last four characters, and no other response ever includes it.
  */
-export function createSettingsRouter(db: Database, config: Config): Router {
+/**
+ * What a saved setting has to tell the rest of the server about (US-001).
+ *
+ * Only the concurrency cap needs it so far: raising it frees slots that
+ * nothing else would notice until the scheduler's next tick, which is a
+ * minute of an empty pool with work waiting in it.
+ */
+export interface SettingsEffects {
+  pump(): void;
+}
+
+export function createSettingsRouter(
+  db: Database,
+  config: Config,
+  effects: SettingsEffects = { pump: () => undefined },
+): Router {
   const router = Router();
 
   router.get('/settings', (_req, res) => {
@@ -55,7 +70,12 @@ export function createSettingsRouter(db: Database, config: Config): Router {
       return;
     }
 
-    res.status(200).json(updateAppSettings(db, config, parsed));
+    const saved = updateAppSettings(db, config, parsed);
+    // The cap moved: give the queue whatever that just freed, now rather than
+    // on the next scheduler tick. Lowering it is harmless — the pump finds no
+    // free slot and does nothing.
+    if (parsed.maxConcurrentSessions !== undefined) effects.pump();
+    res.status(200).json(saved);
   });
 
   // Proves the token works and tells the operator which account it belongs to.

@@ -457,7 +457,11 @@ export function Settings() {
                 Concurrent builds
               </label>
               <input id="max-sessions" name="max-sessions" type="number" min={1} max={50} step={1} value={maxSessions} onChange={(event) => setMaxSessions(event.target.value)} className="field__input field__input--narrow" />
-              <p className="field__hint">Build slots. Sessions beyond the cap queue in the order they were started.</p>
+              <p className="field__hint">
+                Build slots. Sessions, PR reviews, PR feedback runs and merge-conflict fixes all share this one pool.
+                Anything beyond the cap waits in a single queue, in the order it was asked for — except a conflict fix,
+                which is never queued and simply retries on the next scan.
+              </p>
             </div>
             <div className="field">
               <label className="field__label" htmlFor="agent-timeout">
