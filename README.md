@@ -257,6 +257,7 @@ The rest of the manual lives in [`docs/`](docs/):
 | [Sessions](docs/sessions.md) | what a session is, setup, sessions a recurring task started, planning the PRD, marking it ready, the session states |
 | [The build loop](docs/build-loop.md) | the Ralph loop, the live log, the usage-limit hold, push and pull request, failure and recovery |
 | [Code review](docs/code-review.md) | the per-session flag, the review model, what lands on the pull request, the three attempts, the feedback hand-off, reviewing an open pull request by hand |
+| [Pull request descriptions](docs/pr-descriptions.md) | the description pass behind the **What this does** section: when it runs, what it is given, the writing rules, and why a failure never fails the delivery |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the FIFO build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | the conflict scan, the `chief/`-branch rule, the three attempts, and what letting an agent push to your pull requests means |
 | [Sentry auto-fixer](docs/sentry.md) | the auth token and its scopes, linking a project, the status lifecycle, the classification model and the polling interval, and why merging stays the only human act |
