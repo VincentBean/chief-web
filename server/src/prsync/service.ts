@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+
 import type { Config } from '../config.js';
 import {
   type Database,
@@ -10,6 +12,7 @@ import {
 import { isValidGithubSlug } from '../lib/git-url.js';
 import { fetchPullRequestState, GithubApiError, type PullRequestState } from '../lib/github.js';
 import { logger } from '../lib/logger.js';
+import { removeSessionWorkspace, sessionWorkspaceDir } from '../orchestrator/index.js';
 import { getGithubToken, getPrSyncIntervalMs } from '../settings/index.js';
 
 /**
@@ -97,8 +100,8 @@ export class GithubPullRequestStates implements PullRequestStateGateway {
 
 /**
  * The slice of the orchestrator (US-009) the merge cleanup drives: remove the
- * session's container, keep its workspace. `SessionOrchestrator` satisfies it
- * structurally, and a test passes a stub.
+ * session's container. `SessionOrchestrator` satisfies it structurally, and a
+ * test passes a stub.
  */
 export interface SessionContainerCleanup {
   remove(sessionId: string): Promise<void>;
@@ -300,37 +303,68 @@ export class PrSyncService implements PullRequestSync {
   }
 
   /**
-   * Throws away the build container of a merged session, keeping its workspace
-   * — the clone and the `.chief/` state stay on the data volume, because only
-   * deleting the session is allowed to take those.
+   * Throws away everything a merged session still holds: its build container
+   * and then its workspace.
    *
-   * A session with no container is a no-op, so nothing is asked of Docker for
-   * the sessions this has already cleaned. A failure is logged and swallowed
-   * with `container_id` left as it was, which is both the honest record — the
-   * container may well still be there — and what brings the next tick back.
+   * A merged pull request is the end of the work — the branch is on the remote
+   * and the PRD went with it — so the clone is a few hundred megabytes of the
+   * data volume kept for nothing. This is the only place other than session
+   * deletion allowed to take a workspace, and it may only do so once the
+   * container is provably gone: a running container with the directory pulled
+   * out from under it is worse than the disk it would have saved.
+   *
+   * Both halves are no-ops once done, so a session this has already cleaned
+   * costs one `existsSync`. Neither failure is fatal: they are logged and
+   * swallowed, `container_id` is left as it was — the honest record, since the
+   * container may well still be there — and the sweep at the top of the next
+   * tick is the retry.
    */
   private async cleanUp(session: Session): Promise<void> {
-    if (session.containerId === null) return;
+    if (session.containerId !== null) {
+      try {
+        await this.containers.remove(session.id);
+      } catch (cause) {
+        logger.warn('could not remove the container of a merged session', {
+          session: session.id,
+          name: session.name,
+          container: session.containerId,
+          error: describe(cause),
+        });
+        // The workspace stays: the container may still be using it.
+        return;
+      }
 
-    try {
-      await this.containers.remove(session.id);
-    } catch (cause) {
-      logger.warn('could not remove the container of a merged session', {
+      // The orchestrator clears the column itself, but the sync states the
+      // outcome it promised rather than relying on how the removal was done.
+      updateSession(this.db, session.id, { containerId: null });
+      logger.info('removed the container of a merged session', {
         session: session.id,
         name: session.name,
         container: session.containerId,
+      });
+    }
+
+    this.cleanUpWorkspace(session);
+  }
+
+  /** The workspace half of {@link cleanUp}; never throws. */
+  private cleanUpWorkspace(session: Session): void {
+    if (!fs.existsSync(sessionWorkspaceDir(this.config, session.id))) return;
+
+    try {
+      removeSessionWorkspace(this.config, session.id);
+    } catch (cause) {
+      logger.warn('could not remove the workspace of a merged session', {
+        session: session.id,
+        name: session.name,
         error: describe(cause),
       });
       return;
     }
 
-    // The orchestrator clears the column itself, but the sync states the
-    // outcome it promised rather than relying on how the removal was done.
-    updateSession(this.db, session.id, { containerId: null });
-    logger.info('removed the container of a merged session', {
+    logger.info('removed the workspace of a merged session', {
       session: session.id,
       name: session.name,
-      container: session.containerId,
     });
   }
 

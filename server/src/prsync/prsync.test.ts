@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { after, describe, it, type TestContext } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
@@ -24,9 +27,12 @@ import {
 } from './service.js';
 
 const databases: Database[] = [];
+/** Temporary data directories, one per world; the workspaces live under them. */
+const dataDirs: string[] = [];
 
 after(() => {
   for (const db of databases) closeDatabase(db);
+  for (const dir of dataDirs) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /**
@@ -89,10 +95,19 @@ interface World {
     prUrl?: string | null;
     containerId?: string;
   }): Session;
+  /** Creates `workspaces/<id>/repo`, the way a clone would. */
+  workspace(sessionId: string): string;
+  hasWorkspace(sessionId: string): boolean;
 }
 
 function world(options: { token?: string | null; slug?: string } = {}): World {
-  const config = loadConfig({});
+  // A real directory, because the sync deletes the workspace of a merged
+  // session: pointing the config at the default `/data` would aim that at the
+  // running stack's volume.
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-prsync-'));
+  dataDirs.push(dataDir);
+  const config = loadConfig({ DATA_DIR: dataDir });
+  fs.mkdirSync(config.workspacesDir, { recursive: true });
   const db = openDatabase(IN_MEMORY);
   databases.push(db);
 
@@ -132,6 +147,13 @@ function world(options: { token?: string | null; slug?: string } = {}): World {
         }) ?? created
       );
     },
+    workspace: (sessionId) => {
+      const dir = path.join(config.workspacesDir, sessionId, 'repo');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'README.md'), '# clone\n');
+      return dir;
+    },
+    hasWorkspace: (sessionId) => fs.existsSync(path.join(config.workspacesDir, sessionId)),
   };
 }
 
@@ -468,6 +490,77 @@ describe('cleaning up the container of a merged session (US-005)', () => {
 
     assert.equal(getSession(db, shipped.id)?.status, 'merged');
     assert.deepEqual(containers.removed, []);
+  });
+
+  it('removes the workspace of a session that becomes merged', async () => {
+    const { github, containers, sync, session, workspace, hasWorkspace } = world();
+    const shipped = session({
+      name: 'shipped',
+      prUrl: 'https://github.com/acme/demo/pull/11',
+      containerId: 'container-11',
+    });
+    workspace(shipped.id);
+    github.merged('acme/demo', 11);
+
+    assert.equal(await sync.tick(), 1);
+
+    assert.deepEqual(containers.removed, [shipped.id]);
+    assert.equal(hasWorkspace(shipped.id), false, 'the clone is a few hundred megabytes kept for nothing');
+  });
+
+  it('keeps the workspace when the container could not be removed', async () => {
+    const { github, containers, sync, session, workspace, hasWorkspace } = world();
+    const shipped = session({
+      name: 'shipped',
+      prUrl: 'https://github.com/acme/demo/pull/12',
+      containerId: 'container-12',
+    });
+    workspace(shipped.id);
+    github.merged('acme/demo', 12);
+    containers.failure = new Error('the docker daemon is not responding');
+
+    assert.equal(await sync.tick(), 1);
+
+    // A container that may still be running must not have its workspace pulled
+    // out from under it; the next tick retries both halves.
+    assert.equal(hasWorkspace(shipped.id), true);
+
+    containers.failure = null;
+    assert.equal(await sync.tick(), 0);
+    assert.equal(hasWorkspace(shipped.id), false);
+  });
+
+  it('sweeps up the workspace of a session that was already merged and cleaned', async () => {
+    const { github, containers, sync, session, workspace, hasWorkspace } = world();
+    // No container left: cleaned up by an earlier version that kept workspaces.
+    const long = session({
+      name: 'long-done',
+      status: 'merged',
+      prUrl: 'https://github.com/acme/demo/pull/13',
+    });
+    workspace(long.id);
+
+    assert.equal(await sync.tick(), 0, 'a merged session is never asked about again');
+
+    assert.deepEqual(containers.removed, [], 'there is no container to ask Docker about');
+    assert.equal(hasWorkspace(long.id), false);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('keeps the workspace of a session whose pull request is open or closed unmerged', async () => {
+    const { github, sync, session, workspace, hasWorkspace } = world();
+    const open = session({ name: 'in-review', prUrl: 'https://github.com/acme/demo/pull/5' });
+    const abandoned = session({ name: 'dropped', prUrl: 'https://github.com/acme/demo/pull/6' });
+    workspace(open.id);
+    workspace(abandoned.id);
+    github.closed('acme/demo', 6);
+
+    assert.equal(await sync.tick(), 1);
+
+    // Neither is merged: the clone is what a retry or a reopened pull request
+    // would carry on from.
+    assert.equal(hasWorkspace(open.id), true);
+    assert.equal(hasWorkspace(abandoned.id), true);
   });
 
   it('leaves the container of a session whose pull request is open or closed unmerged', async () => {
