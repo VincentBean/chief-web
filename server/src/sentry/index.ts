@@ -4,6 +4,7 @@ export {
   classifyCheckoutSpec,
   classifyRunId,
   createSentryClassifier,
+  duplicateRootId,
   MAX_CLASSIFY_ATTEMPTS,
   MAX_ISSUES_PER_TICK,
   type SentryClassifier,

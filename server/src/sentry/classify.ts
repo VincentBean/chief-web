@@ -3,6 +3,8 @@ import type { Config } from '../config.js';
 import {
   type Database,
   getRepository,
+  getSession,
+  listSentryDuplicateCandidates,
   listSentryIssuesByStatus,
   type Repository,
   type SentryIssue,
@@ -17,7 +19,19 @@ import { CONTAINER_REPO_DIR, type SessionExecutor } from '../sessions/index.js';
 import { getSentryModel } from '../settings/index.js';
 
 import { createSentryClient, SentryApiError, type SentryIssueDetails } from './client.js';
-import { classificationPrompt, type Classification, parseClassification } from './prompts.js';
+import {
+  classificationPrompt,
+  type Classification,
+  type DuplicateCandidate,
+  parseClassification,
+} from './prompts.js';
+import {
+  candidateSignature,
+  type IssueSignature,
+  issueSignature,
+  rankCandidates,
+  serializeSignature,
+} from './similarity.js';
 
 /**
  * Deciding which Sentry issues are worth a build session (US-006).
@@ -26,7 +40,21 @@ import { classificationPrompt, type Classification, parseClassification } from '
  * One cheap `claude -p` per issue — haiku by default (US-002) — in a
  * throwaway container holding a checkout of the repository's base branch, so
  * the judgement is made against the actual code rather than against the error
- * message alone. The answer is one JSON object: fixable, and why.
+ * message alone. The answer is one JSON object: fixable, why, and — when the
+ * repository has work in flight the error might belong to — which of those
+ * issues this one duplicates.
+ *
+ * ## Duplicates
+ *
+ * Before the prompt is built, the issues this repository already has queued,
+ * building or recently fixed are scored against the issue being classified and
+ * the best few are named in the prompt. All of that is local: the candidates'
+ * reports come out of their own database rows, so a shortlist costs no Sentry
+ * requests and the per-tick budget in `docs/sentry.md` is unchanged. An issue
+ * the model calls a duplicate is written as `duplicate` pointing at the row it
+ * repeats, and stops there — no session, no pull request. Failing to gather
+ * candidates is not a failure of the classification: it means an empty list,
+ * which is the prompt and the outcome of every classification before this.
  *
  * ## What bounds the cost
  *
@@ -78,6 +106,17 @@ export interface SentryDetailsGateway {
 
 /** Null means "Sentry is not set up"; see the sync's factory, same reasoning. */
 export type SentryDetailsFactory = (db: Database) => SentryDetailsGateway | null;
+
+/**
+ * One shortlisted candidate, in both the shapes the classification needs it:
+ * the row, because `duplicate_of` stores a row id, and the prompt's view of
+ * it, because the answer comes back as a short id. Keeping them together is
+ * what makes "the ids offered are the ids parsed" true by construction.
+ */
+interface Shortlisted {
+  readonly row: SentryIssue;
+  readonly candidate: DuplicateCandidate;
+}
 
 /** What the poller calls once its own pass is done. */
 export interface SentryClassifier {
@@ -267,14 +306,22 @@ export class SentryClassifyService implements SentryClassifier {
       return false;
     }
 
+    // Computed from the details already in hand, never from a second fetch, and
+    // written with the verdict below so the next issue's shortlist can score
+    // against this one.
+    const signature = issueSignature(details);
+    const shortlist = this.shortlist(issue, signature);
+
     const model = getSentryModel(this.db);
     const result = await this.runner.run({
       sessionId: classifyRunId(repository.id),
       containerId,
       iteration,
-      // US-006 shortlists the in-flight issues that go here; until then the list
-      // is empty, which is the prompt exactly as it was before duplicates.
-      prompt: classificationPrompt({ details, baseBranch: repository.defaultBaseBranch, candidates: [] }),
+      prompt: classificationPrompt({
+        details,
+        baseBranch: repository.defaultBaseBranch,
+        candidates: shortlist.map((entry) => entry.candidate),
+      }),
       timeoutMs: CLASSIFY_TIMEOUT_MS,
       model,
     });
@@ -286,9 +333,12 @@ export class SentryClassifyService implements SentryClassifier {
       return false;
     }
 
-    // No candidates were offered, so no short id is answerable: US-006 passes
-    // the shortlist here and to the prompt from the same list.
-    const verdict = parseClassification(result.output, []);
+    // The answerable ids are exactly the ones the prompt named, off the same
+    // list — an id from anywhere else is one the model invented.
+    const verdict = parseClassification(
+      result.output,
+      shortlist.map((entry) => entry.candidate.shortId),
+    );
     if (verdict === null) {
       this.failed(
         issue,
@@ -299,16 +349,98 @@ export class SentryClassifyService implements SentryClassifier {
       return false;
     }
 
-    this.record(issue, verdict, model);
+    this.record(issue, verdict, model, signature, shortlist);
     return true;
   }
 
-  /** Writes the verdict. `attempts` is reset: the next phase counts its own. */
-  private record(issue: SentryIssue, verdict: Classification, model: string): void {
+  /**
+   * The in-flight issues worth asking the model about, best first.
+   *
+   * Every part of this is local: the rows come from the database, and each
+   * report is assembled from the row's own title, culprit and stored signature.
+   * Nothing here calls Sentry, so the documented per-tick request budget is
+   * exactly what it was before duplicate detection existed.
+   *
+   * Never throws. A database that would not answer, or a stored signature this
+   * build cannot read, means no candidates — which is the prompt, and the
+   * behaviour, of every classification before this feature: a missed duplicate
+   * costs a redundant pull request, while a thrown error costs the issue one of
+   * its three attempts and eventually marks a real bug unfixable.
+   */
+  private shortlist(issue: SentryIssue, signature: IssueSignature): Shortlisted[] {
+    try {
+      const rows = listSentryDuplicateCandidates(this.db, issue.repositoryId, {
+        excludeId: issue.id,
+      });
+      return rankCandidates(signature, rows).map((row) => ({
+        row,
+        candidate: {
+          shortId: row.shortId,
+          status: row.status,
+          sessionName: this.sessionName(row),
+          report: candidateReport(row),
+        },
+      }));
+    } catch (cause) {
+      logger.warn('the duplicate candidates for a Sentry issue could not be gathered', {
+        issue: issue.shortId,
+        repository: issue.repositoryId,
+        error: describe(cause),
+      });
+      return [];
+    }
+  }
+
+  /** The build session working on a candidate, when it still has one. */
+  private sessionName(row: SentryIssue): string | null {
+    if (row.sessionId === null) return null;
+    return getSession(this.db, row.sessionId)?.name ?? null;
+  }
+
+  /**
+   * Writes the verdict. `attempts` is reset: the next phase counts its own.
+   *
+   * A duplicate wins over fixability. An issue that is the same defect as one
+   * already being fixed does not need a second opinion on whether it *could* be
+   * fixed — the fix is already being built — so it is recorded as `duplicate`
+   * and keeps no `session_id` of its own. Only when `duplicateOf` is null
+   * does the fixable/unfixable split below apply, exactly as it always has.
+   */
+  private record(
+    issue: SentryIssue,
+    verdict: Classification,
+    model: string,
+    signature: IssueSignature,
+    shortlist: readonly Shortlisted[],
+  ): void {
+    const serialized = serializeSignature(signature);
+    const original =
+      verdict.duplicateOf === null
+        ? undefined
+        : shortlist.find((entry) => entry.candidate.shortId === verdict.duplicateOf);
+
+    if (original !== undefined) {
+      updateSentryIssue(this.db, issue.id, {
+        status: 'duplicate',
+        duplicateOf: duplicateRootId(original.row),
+        explanation: verdict.explanation,
+        attempts: 0,
+        signature: serialized,
+      });
+      logger.info('a Sentry issue was classified as a duplicate', {
+        issue: issue.shortId,
+        repository: issue.repositoryId,
+        duplicateOf: original.row.shortId,
+        model,
+      });
+      return;
+    }
+
     updateSentryIssue(this.db, issue.id, {
       status: verdict.fixable ? 'queued' : 'cannot_fix',
       explanation: verdict.explanation,
       attempts: 0,
+      signature: serialized,
     });
     logger.info('a Sentry issue was classified', {
       issue: issue.shortId,
@@ -345,6 +477,44 @@ export class SentryClassifyService implements SentryClassifier {
       error: reason,
     });
   }
+}
+
+/**
+ * The row `duplicate_of` should point at: the candidate itself, or — if the
+ * candidate is somehow a duplicate already — whatever it duplicates.
+ *
+ * `listSentryDuplicateCandidates` never returns a `duplicate` row, so this is
+ * a guard rather than a path anything walks today. It exists because a chain is
+ * the one shape that would break every reader of the column: the UI showing
+ * "duplicate of X" would have to follow it, and a two-link chain would have to
+ * be re-followed after any row in it changed. One hop is enough precisely
+ * because this function is the only thing that writes the column.
+ */
+export function duplicateRootId(candidate: SentryIssue): string {
+  if (candidate.status === 'duplicate' && candidate.duplicateOf !== null) {
+    return candidate.duplicateOf;
+  }
+  return candidate.id;
+}
+
+/**
+ * What the prompt is told about one candidate, out of the candidate's own row.
+ *
+ * Title and culprit are columns; the exception type and frames come from the
+ * signature the classification that judged *that* issue stored, or are simply
+ * absent for a row written before signatures existed. Deliberately no Sentry
+ * call: a shortlist of three would otherwise triple the tick's request count.
+ */
+function candidateReport(candidate: SentryIssue): string {
+  const signature = candidateSignature(candidate);
+  const lines = [`Title: ${candidate.title}`];
+  if (candidate.culprit !== null) lines.push(`Culprit: ${candidate.culprit}`);
+  if (signature.exceptionType !== null) lines.push(`Exception: ${signature.exceptionType}`);
+  if (signature.frames.length > 0) {
+    lines.push('Stack (innermost last):');
+    for (const frame of signature.frames) lines.push(`  ${frame}`);
+  }
+  return lines.join('\n');
 }
 
 /** The batches, in the order the issues came: oldest repository first. */

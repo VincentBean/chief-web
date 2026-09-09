@@ -6,6 +6,7 @@ import {
   closeDatabase,
   createRepository,
   createSentryIssue,
+  createSession,
   type Database,
   getSentryIssue,
   IN_MEMORY,
@@ -24,12 +25,14 @@ import type { SessionExecutor } from '../sessions/index.js';
 import {
   CLASSIFICATION_FAILED,
   classifyRunId,
+  duplicateRootId,
   MAX_CLASSIFY_ATTEMPTS,
   SentryClassifyService,
   type SentryDetailsGateway,
 } from './classify.js';
 import { SentryApiError, type SentryIssueDetails, type SentryIssueSummary } from './client.js';
 import { SENTRY_DATA_BEGIN, SENTRY_DATA_END } from './prompts.js';
+import { parseSignature } from './similarity.js';
 
 const databases: Database[] = [];
 
@@ -241,6 +244,22 @@ function world(options: { token?: boolean; link?: boolean } = {}): World {
       return row;
     },
   };
+}
+
+/** The same database, except that the duplicate-candidate query will not run. */
+function breakingCandidateQuery(db: Database): Database {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === 'prepare') {
+        return (sql: string) => {
+          if (sql.includes('id <> ?')) throw new Error('database is locked');
+          return target.prepare(sql);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 function hasToken(db: Database): boolean {
@@ -525,6 +544,176 @@ describe('the Sentry issue classifier', () => {
         classifyRunId(other.id),
       ]);
       assert.deepEqual(w.sentry.calls.map((call) => call.org), ['acme', 'acme']);
+    });
+  });
+
+  describe('duplicates', () => {
+    /** An issue already in flight, so it is a candidate rather than a subject. */
+    function inFlight(w: World, shortId: string, status: 'queued' | 'working' | 'fixed') {
+      const row = w.issue({ shortId });
+      return updateSentryIssue(w.db, row.id, { status }) ?? row;
+    }
+
+    it('records an issue the agent calls a duplicate, with no session of its own', async () => {
+      const w = world();
+      const original = inFlight(w, 'PROJ-OLD', 'working');
+      const subject = w.issue({ shortId: 'PROJ-NEW' });
+      w.runner.answers.push(
+        ok('{"fixable": true, "explanation": "Same missing check.", "duplicateOf": "PROJ-OLD"}'),
+      );
+
+      assert.equal(await w.classifier.classifyPending(), 1);
+
+      const row = w.reload(subject);
+      assert.equal(row.status, 'duplicate');
+      assert.equal(row.duplicateOf, original.id);
+      assert.equal(row.explanation, 'Same missing check.');
+      assert.equal(row.attempts, 0);
+      assert.equal(row.sessionId, null);
+      // The original is untouched: it is the one still being fixed.
+      assert.equal(w.reload(original).status, 'working');
+    });
+
+    it('offers the candidate out of its own row, without asking Sentry again', async () => {
+      const w = world();
+      inFlight(w, 'PROJ-OLD', 'queued');
+      w.issue({ shortId: 'PROJ-NEW' });
+
+      await w.classifier.classifyPending();
+
+      const prompt = w.runner.invocations[0]?.prompt ?? '';
+      assert.ok(prompt.includes('Is this the same defect as one already being fixed?'));
+      assert.ok(prompt.includes('PROJ-OLD'));
+      assert.ok(prompt.includes('Title: TypeError: cannot read property x of undefined'));
+      assert.ok(prompt.includes('Culprit: app/handlers.ts in handle'));
+      // One issue was classified, so exactly one Sentry read happened.
+      assert.deepEqual(w.sentry.calls, [{ org: 'acme', issueId: '4502' }]);
+    });
+
+    it('names the build session a candidate is being fixed in', async () => {
+      const w = world();
+      const original = inFlight(w, 'PROJ-OLD', 'working');
+      const session = createSession(w.db, {
+        repositoryId: w.repository.id,
+        name: 'fix-the-handler',
+        baseBranch: 'trunk',
+        prTargetBranch: 'main',
+      });
+      updateSentryIssue(w.db, original.id, { sessionId: session.id });
+      w.issue({ shortId: 'PROJ-NEW' });
+
+      await w.classifier.classifyPending();
+
+      assert.ok((w.runner.invocations[0]?.prompt ?? '').includes('fix-the-handler'));
+    });
+
+    it('queues an issue the agent says duplicates nothing', async () => {
+      const w = world();
+      inFlight(w, 'PROJ-OLD', 'queued');
+      const subject = w.issue({ shortId: 'PROJ-NEW' });
+      w.runner.answers.push(
+        ok('{"fixable": true, "explanation": "A separate bug.", "duplicateOf": null}'),
+      );
+
+      assert.equal(await w.classifier.classifyPending(), 1);
+
+      const row = w.reload(subject);
+      assert.equal(row.status, 'queued');
+      assert.equal(row.duplicateOf, null);
+      assert.equal(row.explanation, 'A separate bug.');
+    });
+
+    it('queues an issue whose duplicate names an id that was never offered', async () => {
+      const w = world();
+      inFlight(w, 'PROJ-OLD', 'queued');
+      const subject = w.issue({ shortId: 'PROJ-NEW' });
+      w.runner.answers.push(
+        ok('{"fixable": true, "explanation": "Looks new.", "duplicateOf": "PROJ-999"}'),
+      );
+
+      assert.equal(await w.classifier.classifyPending(), 1);
+
+      const row = w.reload(subject);
+      assert.equal(row.status, 'queued');
+      assert.equal(row.duplicateOf, null);
+    });
+
+    it('stores the signature on a duplicate verdict and on an ordinary one', async () => {
+      const w = world();
+      inFlight(w, 'PROJ-OLD', 'queued');
+      const duplicate = w.issue({ shortId: 'PROJ-DUP' });
+      w.runner.answers.push(
+        ok('{"fixable": true, "explanation": "Same one.", "duplicateOf": "PROJ-OLD"}'),
+      );
+      await w.classifier.classifyPending();
+
+      const stored = parseSignature(w.reload(duplicate).signature);
+      assert.equal(stored?.exceptionType, 'TypeError');
+      assert.equal(stored?.culprit, 'app/handlers.ts in handle');
+      assert.deepEqual(stored?.frames, ['app/handlers.ts:handle']);
+
+      const plain = w.issue({ shortId: 'PROJ-PLAIN' });
+      w.runner.answers.length = 0;
+      w.runner.answers.push(ok('{"fixable": false, "explanation": "Nothing to fix."}'));
+      await w.classifier.classifyPending();
+
+      const row = w.reload(plain);
+      assert.equal(row.status, 'cannot_fix');
+      assert.equal(parseSignature(row.signature)?.exceptionType, 'TypeError');
+    });
+
+    it('asks the unchanged question when the repository has nothing in flight', async () => {
+      const w = world();
+      const subject = w.issue({ shortId: 'PROJ-ONLY' });
+
+      await w.classifier.classifyPending();
+
+      const prompt = w.runner.invocations[0]?.prompt ?? '';
+      assert.ok(!prompt.includes('Is this the same defect as one already being fixed?'));
+      assert.ok(!prompt.includes('duplicateOf'));
+      assert.equal(prompt.split(SENTRY_DATA_BEGIN).length - 1, 1);
+      assert.equal(prompt.split(SENTRY_DATA_END).length - 1, 1);
+      assert.equal(w.reload(subject).status, 'queued');
+    });
+
+    it('classifies as usual when the candidates cannot be gathered', async () => {
+      const w = world();
+      inFlight(w, 'PROJ-OLD', 'queued');
+      const subject = w.issue({ shortId: 'PROJ-NEW' });
+      // Whatever the failure is — a locked database, a query the schema no
+      // longer matches — it must cost the classification nothing.
+      const classifier = new SentryClassifyService(
+        CONFIG,
+        breakingCandidateQuery(w.db),
+        w.containers,
+        w.exec,
+        w.runner,
+        () => w.sentry,
+      );
+
+      assert.equal(await classifier.classifyPending(), 1);
+
+      const prompt = w.runner.invocations[0]?.prompt ?? '';
+      assert.ok(!prompt.includes('Is this the same defect as one already being fixed?'));
+      assert.equal(w.reload(subject).status, 'queued');
+    });
+
+    it('follows a candidate that is itself a duplicate through to the root', () => {
+      const w = world();
+      const root = w.issue({ shortId: 'PROJ-ROOT' });
+      const link = w.issue({ shortId: 'PROJ-LINK' });
+      const linked = updateSentryIssue(w.db, link.id, {
+        status: 'duplicate',
+        duplicateOf: root.id,
+      });
+      assert.ok(linked !== null);
+
+      assert.equal(duplicateRootId(linked), root.id);
+      // Anything that is not a duplicate is its own root, including a row that
+      // somehow carries a stale pointer.
+      assert.equal(duplicateRootId(root), root.id);
+      assert.equal(duplicateRootId({ ...linked, status: 'queued' }), link.id);
+      assert.equal(duplicateRootId({ ...linked, duplicateOf: null }), link.id);
     });
   });
 });
