@@ -523,12 +523,14 @@ describe('session scheduling', () => {
     const f = await fixture();
     const created = createSessionRow(f);
 
-    const scheduled = f.service.setSchedule(created, '2026-09-01T02:00:00.000Z');
-    assert.equal(scheduled.scheduledStartAt, '2026-09-01T02:00:00.000Z');
+    // Dated well ahead: a schedule in the past is a *missed* one, so a literal
+    // near today turns this test red the day it goes by.
+    const scheduled = f.service.setSchedule(created, '2099-09-01T02:00:00.000Z');
+    assert.equal(scheduled.scheduledStartAt, '2099-09-01T02:00:00.000Z');
     assert.equal(scheduled.scheduleMissed, false);
 
-    const moved = f.service.setSchedule(created, '2026-09-02T02:00:00.000Z');
-    assert.equal(moved.scheduledStartAt, '2026-09-02T02:00:00.000Z');
+    const moved = f.service.setSchedule(created, '2099-09-02T02:00:00.000Z');
+    assert.equal(moved.scheduledStartAt, '2099-09-02T02:00:00.000Z');
 
     assert.equal(f.service.setSchedule(created, null).scheduledStartAt, null);
     assert.equal(getSession(f.db, created)?.scheduledStartAt, null);

@@ -461,20 +461,23 @@ describe('sessions api', () => {
     const { body } = await create();
     const id = body.session.id;
 
+    // Dated well ahead: a schedule in the past comes back `scheduleMissed`, so a
+    // literal near today turns this test red the day it goes by. The offset is
+    // the point of the first one -- it has to come back normalised to UTC.
     const set = await call('PUT', `/api/sessions/${id}/schedule`, {
-      scheduledStartAt: '2026-09-01T10:30:00+02:00',
+      scheduledStartAt: '2099-09-01T10:30:00+02:00',
     });
     assert.equal(set.status, 200);
     const scheduled = (await set.json()) as SessionView;
-    assert.equal(scheduled.scheduledStartAt, '2026-09-01T08:30:00.000Z');
+    assert.equal(scheduled.scheduledStartAt, '2099-09-01T08:30:00.000Z');
     assert.equal(scheduled.scheduleMissed, false);
 
     const moved = await call('PUT', `/api/sessions/${id}/schedule`, {
-      scheduledStartAt: '2026-09-02T08:30:00.000Z',
+      scheduledStartAt: '2099-09-02T08:30:00.000Z',
     });
     assert.equal(
       ((await moved.json()) as SessionView).scheduledStartAt,
-      '2026-09-02T08:30:00.000Z',
+      '2099-09-02T08:30:00.000Z',
     );
 
     const cleared = await call('PUT', `/api/sessions/${id}/schedule`, { scheduledStartAt: null });

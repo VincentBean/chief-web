@@ -840,7 +840,9 @@ describe('sessions', () => {
         .run(migration.id, '2026-08-30T00:00:00.000Z');
     }
 
-    const seeded = seedRepository(walked);
+    // Walked only as far as `0012`, so `createRepository` -- which writes the
+    // columns `0013` adds -- cannot be used here.
+    const seeded = seedLegacyRepository(walked);
     const waiting: readonly (readonly [string, string])[] = [
       ['later', '2026-08-29T10:00:00.000Z'],
       ['earlier', '2026-08-29T09:00:00.000Z'],
