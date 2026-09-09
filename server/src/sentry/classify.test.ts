@@ -369,6 +369,37 @@ describe('the Sentry issue classifier', () => {
       assert.equal(w.runner.invocations.length, 2);
     });
 
+    it('is the "plans per poll" setting, read again on every tick (US-010)', async () => {
+      const w = world();
+      const first = w.issue({ shortId: 'PROJ-1' });
+      const second = w.issue({ shortId: 'PROJ-2' });
+      const third = w.issue({ shortId: 'PROJ-3' });
+
+      setSetting(w.db, 'sentry_plans_per_tick', '1');
+      assert.equal(await w.classifier.classifyPending(), 1);
+      assert.equal(w.reload(first).status, 'planned');
+      assert.equal(w.reload(second).status, 'pending');
+
+      // Raised between ticks: the next pass takes the other two, no restart.
+      setSetting(w.db, 'sentry_plans_per_tick', '3');
+      assert.equal(await w.classifier.classifyPending(), 2);
+      assert.equal(w.reload(second).status, 'planned');
+      assert.equal(w.reload(third).status, 'planned');
+    });
+
+    it('falls back to two when the stored value is out of range (US-010)', async () => {
+      const w = world();
+      w.issue({ shortId: 'PROJ-1' });
+      w.issue({ shortId: 'PROJ-2' });
+      const third = w.issue({ shortId: 'PROJ-3' });
+
+      // A hand-edited 0 must not wedge the pass on a cap nothing fits under.
+      setSetting(w.db, 'sentry_plans_per_tick', '0');
+
+      assert.equal(await w.classifier.classifyPending(), 2);
+      assert.equal(w.reload(third).status, 'pending');
+    });
+
     it('picks the surplus up on a later tick', async () => {
       const w = world();
       w.issue();

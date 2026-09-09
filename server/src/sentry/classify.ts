@@ -15,7 +15,7 @@ import type { SessionContainerView } from '../orchestrator/index.js';
 import type { PrRunContainers } from '../prfeedback/index.js';
 import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import { CONTAINER_REPO_DIR, type SessionExecutor } from '../sessions/index.js';
-import { getSentryModel } from '../settings/index.js';
+import { getSentryModel, getSentryPlansPerTick } from '../settings/index.js';
 
 import { createSentryClient, SentryApiError, type SentryIssueDetails } from './client.js';
 import { classificationPrompt, type Classification, parseClassification } from './prompts.js';
@@ -32,10 +32,11 @@ import { classificationPrompt, type Classification, parseClassification } from '
  *
  * ## What bounds the cost
  *
- * Three things, because an error storm is the case this has to survive.
- * {@link MAX_ISSUES_PER_TICK} issues are classified per tick across every
- * repository, so a hundred new issues take fifty ticks rather than a hundred
- * agents; the surplus stays `pending` and is picked up later, oldest first.
+ * Three things, because an error storm is the case this has to survive. The
+ * **Plans per poll** setting (US-010, two by default) caps how many issues are
+ * classified per tick across every repository, so at the default a hundred new
+ * issues take fifty ticks rather than a hundred agents; the surplus stays
+ * `pending` and is picked up later, oldest first.
  * One container is started per repository per tick and reused for all of that
  * repository's issues, so the clone is paid for once. And the container is
  * removed at the end of the tick — the workspace is keyed by the repository,
@@ -54,9 +55,6 @@ import { classificationPrompt, type Classification, parseClassification } from '
  * removed — is not a failure. Its issues are skipped, untouched, and wait for
  * the link to come back.
  */
-
-/** Per tick, across every repository. An error storm must not become a fleet. */
-export const MAX_ISSUES_PER_TICK = 2;
 
 /** Failed attempts at classifying one issue before it is given up on. */
 export const MAX_CLASSIFY_ATTEMPTS = 3;
@@ -148,6 +146,10 @@ export class SentryClassifyService implements SentryClassifier {
     const pending = listSentryIssuesByStatus(this.db, 'pending');
     if (pending.length === 0) return 0;
 
+    // Read per pass rather than held on the instance, so lowering the cap
+    // applies from the next tick without a restart.
+    const perTick = getSentryPlansPerTick(this.db);
+
     // Only now, so an install with nothing pending never looks the token up.
     const client = this.clients(this.db);
     if (client === null) {
@@ -163,7 +165,7 @@ export class SentryClassifyService implements SentryClassifier {
     // an unlinked repository cannot starve everything behind it.
     const eligible: { issue: SentryIssue; repository: Repository }[] = [];
     for (const issue of pending) {
-      if (eligible.length >= MAX_ISSUES_PER_TICK) break;
+      if (eligible.length >= perTick) break;
       const repository = getRepository(this.db, issue.repositoryId);
       if (repository === null) continue;
       if (repository.sentryOrg === null || repository.sentryProject === null) continue;

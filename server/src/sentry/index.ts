@@ -5,7 +5,6 @@ export {
   classifyRunId,
   createSentryClassifier,
   MAX_CLASSIFY_ATTEMPTS,
-  MAX_ISSUES_PER_TICK,
   type SentryClassifier,
   SentryClassifyService,
   type SentryDetailsFactory,

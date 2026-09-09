@@ -58,6 +58,7 @@ export function Settings() {
   const [sentryToken, setSentryToken] = useState('');
   const [sentryInterval, setSentryInterval] = useState('15');
   const [sentryModel, setSentryModel] = useState<AgentModel>('haiku');
+  const [sentryPlans, setSentryPlans] = useState('2');
   const [sentryBaseUrl, setSentryBaseUrl] = useState('');
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | null>(null);
   const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
@@ -112,6 +113,7 @@ export function Settings() {
     setAuthorEmail(loaded.gitAuthorEmail);
     setSentryInterval(String(loaded.sentryPollIntervalMinutes));
     setSentryModel(loaded.sentryModel);
+    setSentryPlans(String(loaded.sentryPlansPerTick));
     setSentryBaseUrl(loaded.sentryBaseUrl);
   }
 
@@ -162,6 +164,11 @@ export function Settings() {
       toast.error('The Sentry poll interval must be a whole number of minutes between 1 and 1440.');
       return;
     }
+    const plansPerTick = Number.parseInt(sentryPlans, 10);
+    if (!Number.isInteger(plansPerTick) || plansPerTick < 1 || plansPerTick > 10) {
+      toast.error('Plans per poll must be a whole number between 1 and 10.');
+      return;
+    }
     const baseUrl = sentryBaseUrl.trim();
     if (baseUrl !== '' && !/^https?:\/\//i.test(baseUrl)) {
       toast.error('The Sentry base URL must start with http:// or https://.');
@@ -181,6 +188,7 @@ export function Settings() {
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
       sentryPollIntervalMinutes: sentryPoll,
       sentryModel,
+      sentryPlansPerTick: plansPerTick,
       // Blank restores the hosted API, the same way a blank identity field
       // restores the built-in commit author.
       sentryBaseUrl: baseUrl === '' ? null : baseUrl,
@@ -304,6 +312,7 @@ export function Settings() {
     sentryToken.trim() !== '' ||
     sentryInterval !== String(settings.sentryPollIntervalMinutes) ||
     sentryModel !== settings.sentryModel ||
+    sentryPlans !== String(settings.sentryPlansPerTick) ||
     sentryBaseUrl !== settings.sentryBaseUrl;
   const claudeStatus = claude?.status ?? null;
 
@@ -571,7 +580,7 @@ export function Settings() {
             </div>
             <div className="field">
               <label className="field__label" htmlFor="sentry-model">
-                Classification model
+                Planning model
               </label>
               <select id="sentry-model" name="sentry-model" value={sentryModel} onChange={(event) => setSentryModel(event.target.value as AgentModel)} className="field__input">
                 {AGENT_MODELS.map((model) => (
@@ -580,8 +589,16 @@ export function Settings() {
                   </option>
                 ))}
               </select>
-              <p className="field__hint">One short call per new issue, deciding whether it can be fixed with a code change. The fix itself runs on the build model.</p>
+              <p className="field__hint">One short call per new issue: it triages whether the issue can be fixed with a code change and writes the fix plan you approve. The fix itself runs on the build model.</p>
             </div>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="sentry-plans">
+              Plans per poll
+            </label>
+            <input id="sentry-plans" name="sentry-plans" type="number" min={1} max={10} step={1} value={sentryPlans} onChange={(event) => setSentryPlans(event.target.value)} className="field__input field__input--narrow" />
+            <p className="field__hint">How many issues are planned per poll, across every repository. The rest wait for a later poll, oldest first. This is the only spend that happens without you: nothing is built until you approve a plan.</p>
           </div>
 
           <div className="field">

@@ -85,6 +85,7 @@ describe('settings api', () => {
     deleteSetting(db, 'sentry_token');
     deleteSetting(db, 'sentry_poll_interval_minutes');
     deleteSetting(db, 'sentry_model');
+    deleteSetting(db, 'sentry_plans_per_tick');
     deleteSetting(db, 'sentry_base_url');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
@@ -177,6 +178,7 @@ describe('settings api', () => {
       sentryToken: { configured: false, last4: null },
       sentryPollIntervalMinutes: 15,
       sentryModel: 'haiku',
+      sentryPlansPerTick: 2,
       sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
@@ -201,6 +203,7 @@ describe('settings api', () => {
       sentryToken: { configured: false, last4: null },
       sentryPollIntervalMinutes: 15,
       sentryModel: 'haiku',
+      sentryPlansPerTick: 2,
       sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
@@ -242,6 +245,7 @@ describe('settings api', () => {
       sentryToken: { configured: false, last4: null },
       sentryPollIntervalMinutes: 15,
       sentryModel: 'haiku',
+      sentryPlansPerTick: 2,
       sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
@@ -267,6 +271,7 @@ describe('settings api', () => {
       sentryToken: { configured: false, last4: null },
       sentryPollIntervalMinutes: 15,
       sentryModel: 'haiku',
+      sentryPlansPerTick: 2,
       sentryBaseUrl: 'https://sentry.io/api/0/',
       planningModel: null,
       buildModel: null,
@@ -669,7 +674,32 @@ describe('settings api', () => {
       assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
     }
 
-    // There is no "let the CLI choose" for the classifier, so null is a 400 too.
+    // Plans per poll: the default until saved, then the saved value (US-010).
+    const beforePlans = (await (await get()).json()) as Record<string, unknown>;
+    assert.equal(beforePlans['sentryPlansPerTick'], 2);
+
+    const withPlans = (await (await put({ sentryPlansPerTick: 5 })).json()) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(withPlans['sentryPlansPerTick'], 5);
+
+    for (const value of [0, -1, 11, 2.5, '5', null]) {
+      const response = await put({ sentryPlansPerTick: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_sentry_plans_per_tick',
+      );
+    }
+
+    // A row hand-edited outside the range is clamped rather than served back.
+    setSetting(db, 'sentry_plans_per_tick', '99');
+    const clamped = (await (await get()).json()) as Record<string, unknown>;
+    assert.equal(clamped['sentryPlansPerTick'], 10);
+    await put({ sentryPlansPerTick: 5 });
+
+    // There is no "let the CLI choose" for the planning pass, so null is a 400 too.
     for (const value of ['gpt-5', 'Haiku', '', null, 3]) {
       const response = await put({ sentryModel: value });
       assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
@@ -693,5 +723,6 @@ describe('settings api', () => {
     const current = (await (await get()).json()) as Record<string, unknown>;
     assert.equal(current['sentryPollIntervalMinutes'], 5);
     assert.equal(current['sentryModel'], 'sonnet');
+    assert.equal(current['sentryPlansPerTick'], 5);
   });
 });

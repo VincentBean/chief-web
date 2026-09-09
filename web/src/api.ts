@@ -65,8 +65,10 @@ export interface Settings {
   sentryToken: { configured: boolean; last4: string | null };
   /** How often Sentry is polled for new unresolved issues (US-002). */
   sentryPollIntervalMinutes: number;
-  /** Model the issue classification runs on; never `null`, defaults to haiku. */
+  /** Model the triage-and-plan call runs on; never `null`, defaults to haiku. */
   sentryModel: AgentModel;
+  /** How many issues one planning pass may plan, across repositories (US-010). */
+  sentryPlansPerTick: number;
   /** Root of the Sentry API; self-hosted installs point this at themselves. */
   sentryBaseUrl: string;
   maxConcurrentSessions: number;
@@ -97,8 +99,9 @@ export interface SettingsUpdate {
   /** The same rules as `githubToken`, for Sentry (US-002). */
   sentryToken?: string | null;
   sentryPollIntervalMinutes?: number;
-  /** No "let Claude Code choose" here — the classifier always has a model. */
+  /** No "let Claude Code choose" here — the planning pass always has a model. */
   sentryModel?: AgentModel;
+  sentryPlansPerTick?: number;
   /** `null` restores Sentry's own hosted API. */
   sentryBaseUrl?: string | null;
   maxConcurrentSessions?: number;
