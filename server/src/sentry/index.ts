@@ -41,6 +41,7 @@ export {
   type SentryResolveGateway,
   SESSION_DELETED,
 } from './complete.js';
+export { releaseDuplicates } from './duplicates.js';
 export {
   createSentryFixer,
   DEFAULT_PR_TARGET_BRANCH,

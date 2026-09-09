@@ -240,6 +240,8 @@ interface World {
   readonly fixer: SentryFixService;
   readonly repository: Repository;
   issue(fields?: { shortId?: string; attempts?: number }): SentryIssue;
+  /** A row folded into `original` by the classifier (US-006). */
+  duplicate(original: SentryIssue): SentryIssue;
   reload(issue: SentryIssue): SentryIssue;
   prd(sessionName: string): string;
 }
@@ -299,6 +301,17 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
       });
       assert.ok(queued !== null);
       return queued;
+    },
+    duplicate(original) {
+      const row = this.issue();
+      const folded = updateSentryIssue(db, row.id, {
+        status: 'duplicate',
+        duplicateOf: original.id,
+        explanation: `the same defect as ${original.shortId}`,
+        attempts: 1,
+      });
+      assert.ok(folded !== null);
+      return folded;
     },
     reload(issue) {
       const row = getSentryIssue(db, issue.id);
@@ -547,6 +560,35 @@ describe('the Sentry fix session builder', () => {
         row.explanation,
         'No fix session could be created for this issue: no private key',
       );
+    });
+
+    it('releases the duplicates folded into it when it gives up', async () => {
+      const w = world();
+      const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
+      const folded = w.duplicate(issue);
+      w.sessions.createFailure = new Error('no private key');
+
+      assert.equal(await w.fixer.createFixSessions(), 0);
+
+      assert.equal(w.reload(issue).status, 'cannot_fix');
+      const released = w.reload(folded);
+      assert.equal(released.status, 'pending');
+      assert.equal(released.duplicateOf, null);
+      assert.equal(released.explanation, null);
+      assert.equal(released.attempts, 0);
+    });
+
+    it('keeps the duplicates folded while the attempts are not spent', async () => {
+      const w = world();
+      const issue = w.issue();
+      const folded = w.duplicate(issue);
+      w.sessions.createFailure = new Error('no private key');
+
+      assert.equal(await w.fixer.createFixSessions(), 0);
+
+      assert.equal(w.reload(issue).status, 'queued');
+      assert.equal(w.reload(folded).status, 'duplicate');
+      assert.equal(w.reload(folded).duplicateOf, issue.id);
     });
 
     it('throws the session away when its clone failed', async () => {

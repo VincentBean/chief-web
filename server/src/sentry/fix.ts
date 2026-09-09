@@ -21,6 +21,7 @@ import { sessionPrdFile } from '../sessions/index.js';
 
 import { createSentryClient, SentryApiError, type SentryIssueDetails } from './client.js';
 import type { SentryDetailsFactory, SentryDetailsGateway } from './classify.js';
+import { releaseDuplicates } from './duplicates.js';
 import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
 
 /**
@@ -349,13 +350,21 @@ export class SentryFixService implements SentryFixer {
    * tick until the attempts run out, at which point it is given up on with the
    * failure named — `attempts` is the counter the classification pass reset to
    * zero when it said the issue was fixable.
+   *
+   * A `queued` issue is a duplicate candidate like a `working` one, so this
+   * ending can have issues folded into it too, and it is the only other place
+   * an issue reaches `cannot_fix`. They are released here for the same reason
+   * {@link import('./complete.js').SentryCompletionService} releases the ones
+   * it strands: nothing else ever moves a `duplicate` row, so a duplicate left
+   * pointing at a dead end is a real bug lost for good.
    */
   private failed(issue: SentryIssue, reason: string): void {
     const attempts = issue.attempts + 1;
     if (attempts >= MAX_FIX_ATTEMPTS) {
+      const explanation = fixSessionFailedExplanation(reason);
       updateSentryIssue(this.db, issue.id, {
         status: 'cannot_fix',
-        explanation: fixSessionFailedExplanation(reason),
+        explanation,
         attempts,
       });
       logger.error('a Sentry issue was given up on after repeated session failures', {
@@ -363,6 +372,7 @@ export class SentryFixService implements SentryFixer {
         attempts,
         error: reason,
       });
+      releaseDuplicates(this.db, issue, explanation);
       return;
     }
     updateSentryIssue(this.db, issue.id, { attempts });

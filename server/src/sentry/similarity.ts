@@ -45,7 +45,8 @@ export const MAX_SIGNATURE_FRAMES = 5;
  * shares little more than a word or two of its title, and asking about it would
  * spend tokens on a question with an obvious answer. Thirty is low enough that
  * a pair matching on culprit and title alone — all a pre-feature row with a
- * NULL signature can offer — still gets asked about.
+ * NULL signature can offer, and worth at most 35 — still gets asked about, and
+ * high enough that a shared culprit on its own (25) does not.
  */
 export const DUPLICATE_SCORE_THRESHOLD = 30;
 
@@ -109,9 +110,12 @@ export function issueSignature(details: SentryIssueDetails): IssueSignature {
  * Every row the poller ingested before this feature shipped has
  * `signature = NULL`, and re-fetching its event from Sentry to fill that in
  * would cost one API call per candidate per tick. Title and culprit are on the
- * row already, and together they are worth {@link DUPLICATE_SCORE_THRESHOLD}
- * exactly — so an old row that really is the same defect still reaches the
- * prompt, and the model decides.
+ * row already, and they are the only two parts such a row can score on: a
+ * matching culprit is worth {@link CULPRIT_WEIGHT} and a fully overlapping
+ * title {@link TITLE_WEIGHT}, so 35 at best and
+ * {@link DUPLICATE_SCORE_THRESHOLD} once the culprit matches and about half
+ * the title tokens do. An old row that really is the same defect still reaches
+ * the prompt, and the model decides.
  */
 export function signatureFromIssue(issue: SentryIssue): IssueSignature {
   return {

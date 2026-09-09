@@ -217,7 +217,8 @@ Three things worth knowing about the ends of that walk:
   to try again, that is a session you create yourself.
 - **`duplicate` is the one status that can go backwards**, and it is the only
   one. When the original a duplicate points at never lands — its session failed,
-  its pull request was closed unmerged, someone deleted it — the original becomes
+  its pull request was closed unmerged, someone deleted it, or no session for it
+  could be created at all — the original becomes
   `cannot_fix` and every issue folded into it is released back to `pending`,
   with its explanation cleared and its attempt count reset, so it is classified
   again on its own merits. That is deliberately narrow: it is a rule about
