@@ -19,9 +19,12 @@ import {
   IN_MEMORY,
   listSentryIssuesAwaitingResolve,
   openDatabase,
+  type SentryIssueStatus,
   setSetting,
   updateSentryIssue,
 } from '../db/index.js';
+import type { FixSessionResult, SentryFixer } from '../sentry/index.js';
+
 import type { SentryIssueList } from './sentry.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -316,5 +319,206 @@ describe('sentry issues api', () => {
   it('rejects an unauthenticated read', async () => {
     const response = await fetch(`${baseUrl}/api/sentry/issues`);
     assert.equal(response.status, 401);
+  });
+});
+
+/**
+ * `POST /sentry/fix-sessions` (US-006).
+ *
+ * Its own app, because the real fixer clones the repository and starts a
+ * container: what is under test here is the rule about *which* batches may
+ * become a session, and what the answer is when the service says no.
+ */
+describe('creating a fix session from approved issues (US-006)', () => {
+  let baseUrl: string;
+  let cookie: string;
+  let db: Database;
+  let server: http.Server;
+  let repositoryId: string;
+  let otherRepositoryId: string;
+  /** What the stub fixer was asked for, and what it answers with. */
+  let asked: string[][];
+  let answer: FixSessionResult;
+
+  before(async () => {
+    const config = loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD });
+    db = openDatabase(IN_MEMORY);
+    asked = [];
+    answer = { ok: true, session: { id: 'ses_1', name: 'sentry-batch-20260909' } };
+    const fixer: SentryFixer = {
+      createFixSession: (issueIds) => {
+        asked.push(issueIds);
+        return Promise.resolve(answer);
+      },
+    };
+    const app = createApp(config, createAuthService(config, db), db, { sentryFixer: fixer });
+    server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: PASSWORD }),
+    });
+    cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+
+    repositoryId = createRepository(db, {
+      name: 'demo',
+      sshUrl: 'git@github.com:acme/demo.git',
+      githubSlug: 'acme/demo',
+      defaultBaseBranch: 'main',
+    }).id;
+    otherRepositoryId = createRepository(db, {
+      name: 'other',
+      sshUrl: 'git@github.com:acme/other.git',
+      githubSlug: 'acme/other',
+      defaultBaseBranch: 'main',
+    }).id;
+  });
+
+  beforeEach(() => {
+    db.prepare('DELETE FROM sentry_issues').run();
+    asked.length = 0;
+    answer = { ok: true, session: { id: 'ses_1', name: 'sentry-batch-20260909' } };
+  });
+
+  after(() => {
+    server.close();
+    closeDatabase(db);
+  });
+
+  let seq = 0;
+  const approved = (options: { repository?: string; status?: SentryIssueStatus } = {}) => {
+    seq += 1;
+    const row = createSentryIssue(db, {
+      repositoryId: options.repository ?? repositoryId,
+      sentryIssueId: `45${String(seq)}`,
+      shortId: `DEMO-${String(seq)}`,
+      title: 'boom',
+      culprit: 'app/handler.ts',
+      permalink: 'https://sentry.io/organizations/acme/issues/451/',
+      level: 'error',
+      eventCount: 3,
+      firstSeen: '2026-09-01T00:00:00.000Z',
+      lastSeen: '2026-09-02T00:00:00.000Z',
+    });
+    const decided = updateSentryIssue(db, row.id, {
+      status: options.status ?? 'approved',
+      plan: 'Guard the read.',
+    });
+    assert.ok(decided !== null);
+    return decided;
+  };
+
+  const create = (body: unknown) =>
+    fetch(`${baseUrl}/api/sentry/fix-sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify(body),
+    });
+
+  const errorOf = async (response: Response) =>
+    ((await response.json()) as { error: string }).error;
+
+  it('creates one session for a three-issue batch', async () => {
+    const issues = [approved(), approved(), approved()];
+
+    const response = await create({ issueIds: issues.map((issue) => issue.id) });
+
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), { id: 'ses_1', name: 'sentry-batch-20260909' });
+    // In the order the operator ticked them, which is the order of the stories.
+    assert.deepEqual(asked, [issues.map((issue) => issue.id)]);
+  });
+
+  it('names an id twice only once', async () => {
+    const issue = approved();
+
+    assert.equal((await create({ issueIds: [issue.id, issue.id] })).status, 201);
+
+    assert.deepEqual(asked, [[issue.id]]);
+  });
+
+  it('refuses a batch that spans two repositories', async () => {
+    const here = approved();
+    const there = approved({ repository: otherRepositoryId });
+
+    const response = await create({ issueIds: [here.id, there.id] });
+
+    assert.equal(response.status, 400);
+    assert.equal(await errorOf(response), 'sentry_issues_span_repositories');
+    assert.deepEqual(asked, []);
+  });
+
+  it('refuses an id nothing is known about', async () => {
+    const issue = approved();
+
+    const response = await create({ issueIds: [issue.id, 'no-such-issue'] });
+
+    assert.equal(response.status, 400);
+    assert.equal(await errorOf(response), 'sentry_issue_not_found');
+    assert.deepEqual(asked, []);
+  });
+
+  it('refuses an issue that is not approved, whatever else it is', async () => {
+    for (const status of ['pending', 'planned', 'working', 'fixed', 'cannot_fix'] as const) {
+      const ok = approved();
+      const not = approved({ status });
+
+      const response = await create({ issueIds: [ok.id, not.id] });
+
+      assert.equal(response.status, 400, status);
+      assert.equal(await errorOf(response), 'sentry_issue_not_approved');
+      assert.deepEqual(asked, []);
+      // And neither issue moved.
+      assert.equal(getSentryIssue(db, ok.id)?.status, 'approved');
+      assert.equal(getSentryIssue(db, not.id)?.status, status);
+    }
+  });
+
+  it('refuses a batch of the wrong size or shape', async () => {
+    const issues = Array.from({ length: 11 }, () => approved());
+    for (const body of [
+      {},
+      { issueIds: 'one' },
+      { issueIds: [] },
+      { issueIds: [''] },
+      { issueIds: [1, 2] },
+      { issueIds: issues.map((issue) => issue.id) },
+    ]) {
+      const response = await create(body);
+      assert.equal(response.status, 400, JSON.stringify(body));
+      assert.equal(await errorOf(response), 'invalid_issue_ids');
+    }
+    assert.equal((await create([])).status, 400);
+    assert.deepEqual(asked, []);
+  });
+
+  it('answers 500 with the reason when the session could not be built', async () => {
+    const issues = [approved(), approved()];
+    answer = { ok: false, reason: '"demo" has no private key on the data volume.' };
+
+    const response = await create({ issueIds: issues.map((issue) => issue.id) });
+
+    assert.equal(response.status, 500);
+    const body = (await response.json()) as { error: string; message: string };
+    assert.equal(body.error, 'fix_session_failed');
+    assert.equal(body.message, '"demo" has no private key on the data volume.');
+    // The rollback itself is the service's (see `sentry/fix.test.ts`); what
+    // matters here is that the route wrote nothing of its own on the way past.
+    for (const issue of issues) assert.equal(getSentryIssue(db, issue.id)?.status, 'approved');
+  });
+
+  it('rejects an unauthenticated request', async () => {
+    const issue = approved();
+    const response = await fetch(`${baseUrl}/api/sentry/fix-sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ issueIds: [issue.id] }),
+    });
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(asked, []);
   });
 });

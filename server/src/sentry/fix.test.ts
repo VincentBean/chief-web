@@ -42,6 +42,7 @@ import { SentryApiError, type SentryIssueDetails, type SentryIssueSummary } from
 import type { SentryDetailsGateway } from './classify.js';
 import {
   type FixBuildService,
+  type FixSessionResult,
   type FixSessionService,
   MAX_FIX_ATTEMPTS,
   SentryFixService,
@@ -107,12 +108,15 @@ function details(fields: Partial<SentryIssueSummary> = {}): SentryIssueDetails {
 /** Stands in for `GET /organizations/{org}/issues/{id}/`. */
 class FakeSentry implements SentryDetailsGateway {
   readonly calls: { org: string; issueId: string }[] = [];
+  /** What Sentry calls each issue, so a batch's stories are told apart. */
+  readonly shortIds = new Map<string, string>();
   failure: Error | null = null;
 
   getIssueDetails(org: string, issueId: string): Promise<SentryIssueDetails> {
     this.calls.push({ org, issueId });
     if (this.failure !== null) return Promise.reject(this.failure);
-    return Promise.resolve(details({ id: issueId }));
+    const shortId = this.shortIds.get(issueId);
+    return Promise.resolve(details({ id: issueId, ...(shortId === undefined ? {} : { shortId }) }));
   }
 }
 
@@ -127,6 +131,8 @@ class FakeSessions implements FixSessionService {
   readonly deleted: string[] = [];
   createFailure: Error | null = null;
   setupOk = true;
+  /** Makes the clone a *file*, so nothing can be created underneath it. */
+  prdUnwritable = false;
 
   constructor(
     private readonly config: { workspacesDir: string },
@@ -147,7 +153,15 @@ class FakeSessions implements FixSessionService {
       scheduledStartAt: null,
       codeReview: request.codeReview ?? false,
     });
-    if (this.setupOk) fs.mkdirSync(sessionRepoDir(this.config, session.id), { recursive: true });
+    if (this.setupOk) {
+      const repoDir = sessionRepoDir(this.config, session.id);
+      if (this.prdUnwritable) {
+        fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+        fs.writeFileSync(repoDir, 'not a directory');
+      } else {
+        fs.mkdirSync(repoDir, { recursive: true });
+      }
+    }
 
     return Promise.resolve({
       session: view(session),
@@ -239,13 +253,13 @@ interface World {
   readonly builds: FakeBuilds;
   readonly fixer: SentryFixService;
   readonly repository: Repository;
-  issue(fields?: { shortId?: string; attempts?: number }): SentryIssue;
+  issue(fields?: { shortId?: string; attempts?: number; repositoryId?: string }): SentryIssue;
   /**
    * The operator's call: every issue this world has made, by id, in the order
    * they were made. Nothing scans any more, so a test that seeds no issue asks
    * for no session.
    */
-  fix(issues?: SentryIssue[]): Promise<number>;
+  fix(issues?: SentryIssue[]): Promise<FixSessionResult>;
   reload(issue: SentryIssue): SentryIssue;
   prd(sessionName: string): string;
 }
@@ -286,10 +300,12 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
     repository,
     issue(fields = {}) {
       seq += 1;
+      const shortId = fields.shortId ?? `PROJ-${String(seq)}`;
+      sentry.shortIds.set(`450${String(seq)}`, shortId);
       const row = createSentryIssue(db, {
-        repositoryId: repository.id,
+        repositoryId: fields.repositoryId ?? repository.id,
         sentryIssueId: `450${String(seq)}`,
-        shortId: fields.shortId ?? `PROJ-${String(seq)}`,
+        shortId,
         title: 'TypeError: cannot read property x of undefined',
         culprit: 'app/handlers.ts in handle',
         permalink: 'https://sentry.io/organizations/acme/issues/4507/',
@@ -311,7 +327,7 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
       return approved;
     },
     fix(issues) {
-      return fixer.createFixSessions((issues ?? seeded).map((issue) => issue.id));
+      return fixer.createFixSession((issues ?? seeded).map((issue) => issue.id));
     },
     reload(issue) {
       const row = getSentryIssue(db, issue.id);
@@ -337,7 +353,7 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       const issue = w.issue({ shortId: 'PROJ-123' });
 
-      assert.equal(await w.fix(), 1);
+      assert.ok((await w.fix()).ok);
 
       assert.deepEqual(w.sessions.created, [
         {
@@ -375,7 +391,7 @@ describe('the Sentry fix session builder', () => {
       assert.ok(prd.includes('### US-001: Fix the production error reported as Sentry PROJ-123'));
       assert.ok(prd.includes('[app] app/handlers.ts:42 in handle'));
       assert.ok(prd.includes('Permalink: https://sentry.io/organizations/acme/issues/4507/'));
-      assert.ok(prd.includes('chief-web triage note: The handler never checks x.'));
+      assert.ok(prd.includes('Guard the read in app/handlers.ts.'));
 
       // Readable by the runner: uid 1000 cannot be chowned to in a test, so the
       // fallback the server takes when it is not root is what is asserted.
@@ -421,16 +437,88 @@ describe('the Sentry fix session builder', () => {
       assert.equal(w.sessions.created[0]?.name, 'sentry-proj-123-2');
     });
 
-    it('creates one session per issue it is given', async () => {
+    it('takes a whole batch into one dated session (US-006)', async () => {
       const w = world();
-      w.issue({ shortId: 'PROJ-1' });
-      w.issue({ shortId: 'PROJ-2' });
+      const first = w.issue({ shortId: 'PROJ-1' });
+      const second = w.issue({ shortId: 'PROJ-2' });
+      const third = w.issue({ shortId: 'PROJ-3' });
 
-      assert.equal(await w.fix(), 2);
+      const result = await w.fix();
+      assert.ok(result.ok);
+
+      // One session, one branch, one pull request — not three.
+      assert.equal(w.sessions.created.length, 1);
+      const sessions = listSessions(w.db, {});
+      assert.equal(sessions.length, 1);
+      const [session] = sessions;
+      assert.ok(session !== undefined);
+      assert.equal(result.session.id, session.id);
+      assert.equal(result.session.name, session.name);
+      assert.match(session.name, /^sentry-batch-\d{8}$/);
+      assert.deepEqual(w.sessions.readied, [session.id]);
+      assert.deepEqual(w.builds.started, [session.id]);
+
+      for (const issue of [first, second, third]) {
+        const row = w.reload(issue);
+        assert.equal(row.status, 'working');
+        assert.equal(row.sessionId, session.id);
+        assert.equal(row.attempts, 0);
+      }
+    });
+
+    it('writes a story per issue, in the order it was given them', async () => {
+      const w = world();
+      const first = w.issue({ shortId: 'PROJ-1' });
+      const second = w.issue({ shortId: 'PROJ-2' });
+      const third = w.issue({ shortId: 'PROJ-3' });
+      updateSentryIssue(w.db, second.id, { plan: null });
+
+      // Deliberately not the order they were seeded in: the operator's order is
+      // the order the stories are fixed in.
+      assert.ok((await w.fix([third, first, second])).ok);
+
+      const session = listSessions(w.db, {})[0];
+      assert.ok(session !== undefined);
+      const prd = w.prd(session.name);
+      assert.ok(prd.startsWith('# PRD: Fix 3 Sentry issues'));
+      assert.ok(prd.includes('### US-001: Fix the production error reported as Sentry PROJ-3'));
+      assert.ok(prd.includes('### US-002: Fix the production error reported as Sentry PROJ-1'));
+      assert.ok(prd.includes('### US-003: Fix the production error reported as Sentry PROJ-2'));
+      // Every story is a real one the build loop can walk.
       assert.deepEqual(
-        w.sessions.created.map((request) => request.name),
-        ['sentry-proj-1', 'sentry-proj-2'],
+        (readPrdDocument(sessionPrdFile(w.config, session), prdPathFor(session.name)).parsed
+          ?.stories ?? []).map((story) => story.id),
+        ['US-001', 'US-002', 'US-003'],
       );
+      // The plan an operator approved rides along with each story that has one;
+      // PROJ-2 has none, so its story simply carries no plan block.
+      assert.equal(prd.match(/Approved fix plan for /g)?.length, 2);
+    });
+
+    it('refuses a batch that spans two repositories', async () => {
+      const w = world();
+      const other = createRepository(w.db, {
+        name: 'other',
+        sshUrl: 'git@github.com:acme/other.git',
+        githubSlug: 'acme/other',
+        defaultBaseBranch: 'main',
+        sentryOrg: 'acme',
+        sentryProject: 'other',
+      });
+      const here = w.issue({ shortId: 'PROJ-1' });
+      const there = w.issue({ shortId: 'OTHER-1', repositoryId: other.id });
+
+      const result = await w.fix([here, there]);
+      assert.equal(result.ok, false);
+      assert.ok(!result.ok && result.reason.includes('one repository'));
+
+      assert.equal(w.sessions.created.length, 0);
+      // Refused, not failed: nobody spent an attempt on a request that was
+      // never valid.
+      for (const issue of [here, there]) {
+        assert.equal(w.reload(issue).status, 'approved');
+        assert.equal(w.reload(issue).attempts, 0);
+      }
     });
   });
 
@@ -439,8 +527,8 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       const issue = w.issue();
 
-      assert.equal(await w.fix(), 1);
-      assert.equal(await w.fix(), 0);
+      assert.ok((await w.fix()).ok);
+      assert.equal((await w.fix()).ok, false);
 
       assert.equal(w.sessions.created.length, 1);
       assert.equal(listSessions(w.db, {}).length, 1);
@@ -462,7 +550,7 @@ describe('the Sentry fix session builder', () => {
       });
       updateSentryIssue(w.db, issue.id, { sessionId: session.id });
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       assert.equal(w.sessions.created.length, 0);
       assert.equal(w.reload(issue).status, 'approved');
@@ -472,7 +560,7 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       const issue = w.issue();
 
-      assert.equal(await w.fix([issue, issue]), 1);
+      assert.ok((await w.fix([issue, issue])).ok);
 
       assert.equal(w.sessions.created.length, 1);
     });
@@ -484,7 +572,7 @@ describe('the Sentry fix session builder', () => {
       const named = w.issue({ shortId: 'PROJ-1' });
       const other = w.issue({ shortId: 'PROJ-2' });
 
-      assert.equal(await w.fix([named]), 1);
+      assert.ok((await w.fix([named])).ok);
 
       assert.deepEqual(
         w.sessions.created.map((request) => request.name),
@@ -498,7 +586,7 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       const issue = w.issue();
 
-      assert.equal(await w.fixer.createFixSessions(['no-such-issue', issue.id]), 1);
+      assert.ok((await w.fixer.createFixSession(['no-such-issue', issue.id])).ok);
 
       assert.equal(w.sessions.created.length, 1);
       assert.equal(w.reload(issue).status, 'working');
@@ -507,7 +595,7 @@ describe('the Sentry fix session builder', () => {
     it('does nothing at all when every id is unknown', async () => {
       const w = world();
 
-      assert.equal(await w.fixer.createFixSessions(['no-such-issue']), 0);
+      assert.equal((await w.fixer.createFixSession(['no-such-issue'])).ok, false);
 
       assert.equal(w.sentry.calls.length, 0);
       assert.equal(w.sessions.created.length, 0);
@@ -521,7 +609,7 @@ describe('the Sentry fix session builder', () => {
       w.builds.queueBeforeFailing = true;
       w.builds.failure = new BuildError(429, 'usage_limit_hold', 'Queued behind the hold.');
 
-      assert.equal(await w.fix(), 1);
+      assert.ok((await w.fix()).ok);
 
       // The refusal came after the queueing, so there is nothing to undo: the
       // pump starts it when the hold lifts.
@@ -541,7 +629,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.builds.failure = new BuildError(409, 'session_not_ready', 'The session is finished.');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
@@ -551,7 +639,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(row.sessionId, null);
 
       w.builds.failure = null;
-      assert.equal(await w.fix(), 1);
+      assert.ok((await w.fix()).ok);
       assert.equal(w.reload(issue).status, 'working');
     });
 
@@ -560,7 +648,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
       w.builds.failure = new BuildError(500, 'container_failed', 'no docker daemon');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'cannot_fix');
@@ -578,7 +666,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sessions.createFailure = new Error('"demo" has no private key on the data volume.');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'approved');
@@ -587,7 +675,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(row.explanation, 'The handler never checks x.');
 
       w.sessions.createFailure = null;
-      assert.equal(await w.fix(), 1);
+      assert.ok((await w.fix()).ok);
       assert.equal(w.reload(issue).status, 'working');
     });
 
@@ -596,7 +684,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
       w.sessions.createFailure = new Error('no private key');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'cannot_fix');
@@ -607,12 +695,60 @@ describe('the Sentry fix session builder', () => {
       );
     });
 
+    it('rolls a whole batch back to approved when the PRD cannot be written', async () => {
+      const w = world();
+      const issues = [
+        w.issue({ shortId: 'PROJ-1' }),
+        w.issue({ shortId: 'PROJ-2' }),
+        w.issue({ shortId: 'PROJ-3' }),
+      ];
+      // The clone directory is a file, so `.chief/prds/...` cannot be created
+      // under it: exactly the "PRD unwritable" failure, without a mocked fs.
+      w.sessions.prdUnwritable = true;
+
+      const result = await w.fix();
+      assert.equal(result.ok, false);
+      assert.ok(!result.ok && result.reason.includes('the generated PRD could not be written'));
+
+      assert.equal(w.sessions.deleted.length, 1);
+      assert.equal(listSessions(w.db, {}).length, 0);
+      for (const issue of issues) {
+        const row = w.reload(issue);
+        assert.equal(row.status, 'approved');
+        assert.equal(row.attempts, 1);
+        assert.equal(row.sessionId, null);
+      }
+
+      // And the operator can simply press the button again.
+      w.sessions.prdUnwritable = false;
+      assert.ok((await w.fix()).ok);
+      for (const issue of issues) assert.equal(w.reload(issue).status, 'working');
+    });
+
+    it('gives every issue of a failed batch its own last attempt', async () => {
+      const w = world();
+      const spent = w.issue({ shortId: 'PROJ-1', attempts: MAX_FIX_ATTEMPTS - 1 });
+      const fresh = w.issue({ shortId: 'PROJ-2' });
+      w.sessions.createFailure = new Error('no private key');
+
+      assert.equal((await w.fix()).ok, false);
+
+      assert.equal(w.reload(spent).status, 'cannot_fix');
+      assert.equal(
+        w.reload(spent).explanation,
+        'No fix session could be created for this issue: no private key',
+      );
+      // The other one has attempts left, so it stays where the operator put it.
+      assert.equal(w.reload(fresh).status, 'approved');
+      assert.equal(w.reload(fresh).attempts, 1);
+    });
+
     it('throws the session away when its clone failed', async () => {
       const w = world();
       const issue = w.issue();
       w.sessions.setupOk = false;
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
@@ -627,7 +763,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sentry.failure = new SentryApiError('sentry_unreachable', 'Sentry is down.');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'approved');
@@ -640,7 +776,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sentry.failure = new SentryApiError('sentry_not_found', 'No such issue.');
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       assert.equal(w.reload(issue).attempts, 1);
     });
@@ -650,7 +786,7 @@ describe('the Sentry fix session builder', () => {
     it('does not look the token up when it is given no ids', async () => {
       const w = world();
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
       assert.equal(w.sentry.calls.length, 0);
     });
 
@@ -658,7 +794,7 @@ describe('the Sentry fix session builder', () => {
       const w = world({ token: false });
       const issue = w.issue();
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'approved');
@@ -669,7 +805,7 @@ describe('the Sentry fix session builder', () => {
       const w = world({ link: false });
       const issue = w.issue();
 
-      assert.equal(await w.fix(), 0);
+      assert.equal((await w.fix()).ok, false);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'approved');

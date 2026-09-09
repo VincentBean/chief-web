@@ -51,7 +51,9 @@ import { createPullRequestService, type PullRequestService } from './pullrequest
 import {
   createSentryClassifier,
   createSentryCompleter,
+  createSentryFixer,
   createSentrySync,
+  type SentryFixer,
   type SentrySync,
 } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
@@ -166,6 +168,12 @@ export interface AppDependencies {
    * gateway so they never reach the network.
    */
   readonly sentrySync?: SentrySync;
+  /**
+   * What the operator's "Create fix session" button drives (US-006). Defaults
+   * to a service that really creates the session; tests pass one built on
+   * stubs, because the real one clones the repository.
+   */
+  readonly sentryFixer?: SentryFixer;
 }
 
 /**
@@ -350,6 +358,11 @@ export function createApp(
   // And how it ends (US-008): a merged pull request marks its issue fixed and
   // resolves it in Sentry, while a session that failed or whose pull request
   // was closed unmerged closes the issue with what happened written on it.
+  // And what an approved plan is worth (US-006): the operator picks a batch of
+  // approved issues, and this turns the lot into one session, on one branch,
+  // behind one pull request. Built here because it needs the session service
+  // above; its only caller is the Sentry router further down.
+  const sentryFixer = deps.sentryFixer ?? createSentryFixer(config, db, sessions, builds);
   const sentryCompleter = createSentryCompleter(db);
   const sentrySync =
     deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier, sentryCompleter);
@@ -395,7 +408,7 @@ export function createApp(
   // have seen (US-009). A read over the database, mounted here
   // rather than beside the settings router so it sits next to the pipeline it
   // reports on.
-  api.use(createSentryRouter(db));
+  api.use(createSentryRouter(db, sentryFixer));
   api.use(createSessionsRouter(sessions));
   api.use(createPlanningRouter(planning));
   api.use(createDeliveryRouter(delivery));
