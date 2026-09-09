@@ -311,5 +311,8 @@ function toPlan(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.replace(/\r/g, '').trim();
   if (trimmed === '') return null;
-  return trimmed.length <= MAX_PLAN_CHARS ? trimmed : `${trimmed.slice(0, MAX_PLAN_CHARS)}…`;
+  // The ellipsis counts: a plan of MAX_PLAN_CHARS + 1 characters is one the
+  // approve route refuses and the plan textarea marks too long before the
+  // operator has touched it.
+  return trimmed.length <= MAX_PLAN_CHARS ? trimmed : `${trimmed.slice(0, MAX_PLAN_CHARS - 1)}…`;
 }

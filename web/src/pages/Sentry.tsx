@@ -416,7 +416,11 @@ function PlannedRow({
   const [error, setError] = useState<string | null>(null);
 
   const edited = draft.trim();
-  const tooLong = edited.length > MAX_SENTRY_PLAN_CHARS;
+  // What Approve would send: an untouched plan is left alone, so the cap is a
+  // check on the edit rather than on the plan. A plan the classifier itself
+  // wrote up to the cap is still approvable as it stands.
+  const submission = editing && edited !== (issue.plan ?? '') ? edited : undefined;
+  const tooLong = submission !== undefined && submission.length > MAX_SENTRY_PLAN_CHARS;
   const emptyEdit = editing && edited === '';
 
   const settle = (work: Promise<SentryIssue>, kind: 'approve' | 'reject', message: string): void => {
@@ -441,8 +445,7 @@ function PlannedRow({
     if (emptyEdit || tooLong) return;
     // An untouched plan is approved as it stands; sending it back unchanged
     // would only risk a normalisation the operator never asked for.
-    const plan = editing && edited !== (issue.plan ?? '') ? edited : undefined;
-    settle(approveSentryPlan(issue.id, plan), 'approve', `Approved the plan for ${issue.shortId}.`);
+    settle(approveSentryPlan(issue.id, submission), 'approve', `Approved the plan for ${issue.shortId}.`);
   };
 
   const reject = (): void => {

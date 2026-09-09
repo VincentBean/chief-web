@@ -182,7 +182,9 @@ describe('reading a classification back', () => {
     );
 
     assert.ok(verdict !== null);
-    assert.equal(verdict.plan, `${'p'.repeat(MAX_PLAN_CHARS)}…`);
+    assert.equal(verdict.plan, `${'p'.repeat(MAX_PLAN_CHARS - 1)}…`);
+    // The ellipsis included, so the stored plan is one the approve route takes.
+    assert.equal(verdict.plan?.length, MAX_PLAN_CHARS);
   });
 
   it('drops the plan of an answer that is not fixable', () => {
