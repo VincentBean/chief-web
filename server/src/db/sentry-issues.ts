@@ -25,6 +25,8 @@ import {
  * awaiting session creation. `working` → a session is building the fix.
  * `fixed` → that session's pull request was merged. `cannot_fix` → the
  * classifier said no, or the fix never landed; always with an explanation.
+ * `duplicate` → classified as the same underlying defect as another issue that
+ * is already being worked on; no session of its own.
  */
 export const SENTRY_ISSUE_STATUSES = [
   'pending',
@@ -32,6 +34,7 @@ export const SENTRY_ISSUE_STATUSES = [
   'working',
   'fixed',
   'cannot_fix',
+  'duplicate',
 ] as const;
 export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
 
@@ -58,6 +61,10 @@ export interface SentryIssue {
   readonly resolvedInSentry: boolean;
   /** Failed tries at the issue's current phase; at three it goes `cannot_fix`. */
   readonly attempts: number;
+  /** The issue this one duplicates, once it is classified `duplicate` (US-002). */
+  readonly duplicateOf: string | null;
+  /** The classifier's normalised fingerprint of the defect, used for matching. */
+  readonly signature: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -88,6 +95,8 @@ export interface UpdateSentryIssueInput {
   readonly sessionId?: string | null;
   readonly resolvedInSentry?: boolean;
   readonly attempts?: number;
+  readonly duplicateOf?: string | null;
+  readonly signature?: string | null;
 }
 
 const COLUMNS: Record<keyof UpdateSentryIssueInput, string> = {
@@ -103,6 +112,8 @@ const COLUMNS: Record<keyof UpdateSentryIssueInput, string> = {
   sessionId: 'session_id',
   resolvedInSentry: 'resolved_in_sentry',
   attempts: 'attempts',
+  duplicateOf: 'duplicate_of',
+  signature: 'signature',
 };
 
 export function mapSentryIssue(row: Row): SentryIssue {
@@ -123,6 +134,8 @@ export function mapSentryIssue(row: Row): SentryIssue {
     sessionId: nullableText(row, 'session_id'),
     resolvedInSentry: integer(row, 'resolved_in_sentry') !== 0,
     attempts: integer(row, 'attempts'),
+    duplicateOf: nullableText(row, 'duplicate_of'),
+    signature: nullableText(row, 'signature'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -134,7 +147,9 @@ export function mapSentryIssue(row: Row): SentryIssue {
  * A refresh deliberately touches only what the last poll saw — the counts, the
  * timestamps and the title Sentry may have re-grouped — and never `status`,
  * `explanation`, `session_id` or `attempts`: an issue that is already being
- * fixed must not fall back to `pending` because it fired one more event.
+ * fixed must not fall back to `pending` because it fired one more event. The
+ * same holds for `duplicate_of` and `signature`: a classification is about the
+ * defect, and survives every later poll of the issue it was made about.
  */
 export function createSentryIssue(db: Database, input: CreateSentryIssueInput): SentryIssue {
   const existing = findSentryIssue(db, input.sentryIssueId);
@@ -170,6 +185,8 @@ export function createSentryIssue(db: Database, input: CreateSentryIssueInput): 
     sessionId: null,
     resolvedInSentry: false,
     attempts: 0,
+    duplicateOf: null,
+    signature: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -288,5 +305,58 @@ export function listSentryIssuesAwaitingResolve(db: Database): SentryIssue[] {
         'ORDER BY created_at ASC',
     )
     .all()
+    .map(mapSentryIssue);
+}
+
+/**
+ * How far back a `fixed` issue still counts as work that is "in flight".
+ *
+ * Deliberately wide: a slow-burning error can resurface weeks after its fix
+ * merged, and re-fixing it costs a whole build session. The cost of the width
+ * is weaker candidates reaching the shortlist, which the score threshold and
+ * the model's own conservative tie-break are there to absorb.
+ */
+export const DUPLICATE_LOOKBACK_DAYS = 30;
+
+/**
+ * The most candidates one classification will score, newest activity first: a
+ * repository with a long history must not make the scoring pass unbounded.
+ */
+const DUPLICATE_CANDIDATE_LIMIT = 50;
+
+export interface ListSentryDuplicateCandidatesOptions {
+  /** The issue being classified; nothing can be a duplicate of itself. */
+  readonly excludeId: string;
+}
+
+/**
+ * The issues in a repository that count as already being worked on, and so are
+ * worth comparing a freshly fetched issue against (US-002).
+ *
+ * `queued` and `working` are in flight by definition; `fixed` stays a candidate
+ * for `DUPLICATE_LOOKBACK_DAYS` after its last change. `pending` is excluded
+ * because nothing is being spent on it yet, `cannot_fix` because pointing a new
+ * issue at a dead end helps no one, and `duplicate` because the row it points
+ * at is the real work — chains of duplicates would only blur the target.
+ */
+export function listSentryDuplicateCandidates(
+  db: Database,
+  repositoryId: string,
+  options: ListSentryDuplicateCandidatesOptions,
+): SentryIssue[] {
+  const cutoff = new Date(
+    Date.now() - DUPLICATE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  return db
+    .prepare(
+      `SELECT * FROM sentry_issues
+        WHERE repository_id = ?
+          AND id <> ?
+          AND (status IN ('queued', 'working') OR (status = 'fixed' AND updated_at >= ?))
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+    )
+    .all(repositoryId, options.excludeId, cutoff, DUPLICATE_CANDIDATE_LIMIT)
     .map(mapSentryIssue);
 }

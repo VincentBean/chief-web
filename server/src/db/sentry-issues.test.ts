@@ -8,9 +8,11 @@ import {
   createSession,
   type Database,
   deleteSession,
+  DUPLICATE_LOOKBACK_DAYS,
   findSentryIssue,
   findSentryIssueBySession,
   IN_MEMORY,
+  listSentryDuplicateCandidates,
   listSentryIssues,
   listSentryIssuesAwaitingResolve,
   listSentryIssuesByStatus,
@@ -117,14 +119,23 @@ describe('sentry issues', () => {
   it('leaves the pipeline state alone when an issue is seen again', () => {
     // An issue already being fixed must not fall back to `pending` because it
     // fired one more event between two ticks.
+    const original = issueFor('4098');
     const issue = issueFor('4004');
-    updateSentryIssue(db, issue.id, { status: 'queued', attempts: 1 });
+    updateSentryIssue(db, issue.id, {
+      status: 'queued',
+      attempts: 1,
+      // A classification is about the defect, so it outlives every later poll.
+      duplicateOf: original.id,
+      signature: 'TypeError|BookingController::store',
+    });
 
     const again = issueFor('4004', { eventCount: 900, lastSeen: '2026-09-05T10:00:00.000Z' });
 
     assert.equal(again.status, 'queued');
     assert.equal(again.attempts, 1);
     assert.equal(again.eventCount, 900);
+    assert.equal(again.duplicateOf, original.id);
+    assert.equal(again.signature, 'TypeError|BookingController::store');
   });
 
   it('walks an issue from pending through to fixed', () => {
@@ -238,6 +249,115 @@ describe('sentry issues', () => {
       awaiting.map((issue) => issue.sentryIssueId),
       [older.sentryIssueId, newer.sentryIssueId],
     );
+  });
+
+  /** Ages a row the way the passing of days would, so the window is testable. */
+  const ageBy = (id: string, days: number) => {
+    const at = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('UPDATE sentry_issues SET updated_at = ? WHERE id = ?').run(at, id);
+  };
+
+  it('offers as duplicate candidates only the work that is in flight, newest first', () => {
+    const subject = issueFor('4030');
+    const queued = issueFor('4031');
+    const working = issueFor('4032');
+    const fixed = issueFor('4033');
+    const pending = issueFor('4034');
+    const cannotFix = issueFor('4035');
+    const duplicate = issueFor('4036');
+
+    updateSentryIssue(db, queued.id, { status: 'queued' });
+    updateSentryIssue(db, working.id, { status: 'working' });
+    updateSentryIssue(db, fixed.id, { status: 'fixed' });
+    updateSentryIssue(db, cannotFix.id, { status: 'cannot_fix', explanation: 'upstream' });
+    updateSentryIssue(db, duplicate.id, { status: 'duplicate', duplicateOf: working.id });
+    ageBy(queued.id, 1);
+    ageBy(working.id, 2);
+    ageBy(fixed.id, DUPLICATE_LOOKBACK_DAYS - 1);
+
+    const candidates = listSentryDuplicateCandidates(db, repository.id, {
+      excludeId: subject.id,
+    });
+
+    assert.deepEqual(
+      candidates.map((issue) => issue.sentryIssueId),
+      [queued.sentryIssueId, working.sentryIssueId, fixed.sentryIssueId],
+    );
+    for (const excluded of [pending, cannotFix, duplicate]) {
+      assert.ok(!candidates.some((issue) => issue.id === excluded.id));
+    }
+  });
+
+  it('drops a fixed issue out of the candidates once the lookback window passes', () => {
+    const subject = issueFor('4040');
+    const stale = issueFor('4041');
+    updateSentryIssue(db, stale.id, { status: 'fixed' });
+    ageBy(stale.id, DUPLICATE_LOOKBACK_DAYS + 1);
+
+    const candidates = listSentryDuplicateCandidates(db, repository.id, {
+      excludeId: subject.id,
+    });
+
+    assert.deepEqual(candidates, []);
+  });
+
+  it('keeps duplicate candidates inside their own repository', () => {
+    const other = createRepository(db, {
+      name: `leo-other-${String(seq)}`,
+      sshUrl: 'git@github.com:VincentBean/leo.git',
+      githubSlug: 'VincentBean/leo',
+      defaultBaseBranch: 'develop',
+      sentryOrg: 'boeq',
+      sentryProject: 'leo-frontend',
+    });
+    const subject = issueFor('4050');
+    const elsewhere = issueFor('4051', { repositoryId: other.id });
+    updateSentryIssue(db, elsewhere.id, { status: 'working' });
+
+    const candidates = listSentryDuplicateCandidates(db, repository.id, {
+      excludeId: subject.id,
+    });
+
+    assert.deepEqual(candidates, []);
+  });
+
+  it('never offers the issue being classified as its own duplicate', () => {
+    const subject = issueFor('4060');
+    updateSentryIssue(db, subject.id, { status: 'working' });
+
+    const candidates = listSentryDuplicateCandidates(db, repository.id, {
+      excludeId: subject.id,
+    });
+
+    assert.deepEqual(candidates, []);
+    // Any other issue's classification still sees it.
+    const other = issueFor('4061');
+    assert.deepEqual(
+      listSentryDuplicateCandidates(db, repository.id, { excludeId: other.id }).map(
+        (issue) => issue.id,
+      ),
+      [subject.id],
+    );
+  });
+
+  it('stores the duplicate link and the signature the classifier wrote', () => {
+    const original = issueFor('4070');
+    const copy = issueFor('4071');
+
+    const linked = updateSentryIssue(db, copy.id, {
+      status: 'duplicate',
+      duplicateOf: original.id,
+      signature: 'TypeError|BookingController::store',
+      explanation: 'Same defect as LEO-BACKEND-4070.',
+    });
+
+    assert.equal(linked?.status, 'duplicate');
+    assert.equal(linked?.duplicateOf, original.id);
+    assert.equal(linked?.signature, 'TypeError|BookingController::store');
+    assert.equal(findSentryIssue(db, '4071')?.duplicateOf, original.id);
+    // A fresh row carries neither until something classifies it.
+    assert.equal(original.duplicateOf, null);
+    assert.equal(original.signature, null);
   });
 
   it('takes the issues with the repository they belong to', () => {
