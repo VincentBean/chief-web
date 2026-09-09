@@ -5,10 +5,12 @@ import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 
 import type { SentryIssueDetails } from './client.js';
 import {
+  type Classification,
   classificationPrompt,
   type DuplicateCandidate,
   MAX_BREADCRUMBS,
   MAX_FIELD_CHARS,
+  MAX_REJECTED_CHARS,
   parseClassification,
   SENTRY_DATA_BEGIN,
   SENTRY_DATA_END,
@@ -350,36 +352,82 @@ describe('the duplicate question in the classification prompt', () => {
   });
 });
 
+/**
+ * Everything `parseClassification` accepted before duplicates existed, with the
+ * verdict it produced. Kept as a table so the "nothing was offered" case — the
+ * ordinary classification, and the one every install runs today — is asserted
+ * to be unchanged rather than re-argued case by case.
+ */
+const OLD_SHAPE_ANSWERS: { readonly output: string; readonly verdict: Classification }[] = [
+  {
+    output: '{"fixable": true, "explanation": "Yes."}',
+    verdict: { fixable: true, explanation: 'Yes.', duplicateOf: null },
+  },
+  {
+    output: 'Sure thing.\n```json\n{"fixable": false, "explanation": "No code fix."}\n```\n',
+    verdict: { fixable: false, explanation: 'No code fix.', duplicateOf: null },
+  },
+  {
+    output:
+      'I will answer with {"fixable": false, "explanation": "placeholder"}.\n' +
+      '{"fixable": true, "explanation": "The guard is missing."}',
+    verdict: { fixable: true, explanation: 'The guard is missing.', duplicateOf: null },
+  },
+  {
+    output: '{"fixable": true, "explanation": "a } brace"}',
+    verdict: { fixable: true, explanation: 'a } brace', duplicateOf: null },
+  },
+];
+
+/** The warn lines the logger wrote while `run` ran; see `lib/logger.ts`. */
+function warnings(run: () => void): string[] {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (line: unknown) => {
+    lines.push(String(line));
+  };
+  try {
+    run();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
 describe('reading a classification back', () => {
   it('accepts a bare object', () => {
-    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "Yes."}'), {
+    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "Yes."}', []), {
       fixable: true,
       explanation: 'Yes.',
+      duplicateOf: null,
     });
   });
 
   it('accepts one wrapped in prose and a markdown fence', () => {
     const output = 'Sure thing.\n```json\n{"fixable": false, "explanation": "No code fix."}\n```\n';
-    assert.deepEqual(parseClassification(output), {
+    assert.deepEqual(parseClassification(output, []), {
       fixable: false,
       explanation: 'No code fix.',
+      duplicateOf: null,
     });
   });
 
   it('takes the last object when the shape was quoted before it was filled in', () => {
     const output =
       'I will answer with {"fixable": false, "explanation": "placeholder"}.\n' +
-      '{"fixable": true, "explanation": "The guard is missing."}';
-    assert.deepEqual(parseClassification(output), {
+      '{"fixable": true, "explanation": "The guard is missing.", "duplicateOf": "PROJ-1AB"}';
+    assert.deepEqual(parseClassification(output, ['PROJ-1AB']), {
       fixable: true,
       explanation: 'The guard is missing.',
+      duplicateOf: 'PROJ-1AB',
     });
   });
 
   it('is not fooled by a brace inside a string', () => {
-    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "a } brace"}'), {
+    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "a } brace"}', []), {
       fixable: true,
       explanation: 'a } brace',
+      duplicateOf: null,
     });
   });
 
@@ -393,8 +441,88 @@ describe('reading a classification back', () => {
       '{"fixable": true, "explanation": "   "}',
       '{"fixable": true, "explanation": ',
       '[{"fixable": true, "explanation": "in an array, alone"}]'.replace('{', '('),
+      '{"fixable": "true", "explanation": "bad boolean", "duplicateOf": "PROJ-1AB"}',
     ]) {
-      assert.equal(parseClassification(output), null, output);
+      assert.equal(parseClassification(output, ['PROJ-1AB']), null, output);
     }
+  });
+
+  it('reads back the answers it always did when nothing was offered', () => {
+    for (const { output, verdict } of OLD_SHAPE_ANSWERS) {
+      assert.deepEqual(parseClassification(output, []), verdict, output);
+    }
+  });
+
+  it('takes an answer with no duplicateOf field as no duplicate, silently', () => {
+    const lines = warnings(() => {
+      assert.deepEqual(
+        parseClassification('{"fixable": true, "explanation": "The guard is missing."}', [
+          'PROJ-1AB',
+        ]),
+        { fixable: true, explanation: 'The guard is missing.', duplicateOf: null },
+      );
+    });
+
+    assert.deepEqual(lines, []);
+  });
+
+  it('takes an explicit null duplicateOf as no duplicate, silently', () => {
+    const lines = warnings(() => {
+      assert.deepEqual(
+        parseClassification(
+          '{"fixable": true, "duplicateOf": null, "explanation": "Its own bug."}',
+          ['PROJ-1AB'],
+        ),
+        { fixable: true, explanation: 'Its own bug.', duplicateOf: null },
+      );
+    });
+
+    assert.deepEqual(lines, []);
+  });
+
+  it('drops a duplicateOf that was never offered, keeping the fixability verdict', () => {
+    const lines = warnings(() => {
+      assert.deepEqual(
+        parseClassification(
+          '{"fixable": true, "duplicateOf": "PROJ-999", "explanation": "Same as the other."}',
+          ['PROJ-1AB'],
+        ),
+        { fixable: true, explanation: 'Same as the other.', duplicateOf: null },
+      );
+    });
+
+    assert.equal(lines.length, 1);
+    assert.match(lines[0] ?? '', /"level":"warn"/);
+    assert.match(lines[0] ?? '', /PROJ-999/);
+  });
+
+  it('drops a duplicateOf that is not a string at all', () => {
+    for (const value of ['7', '{"shortId": "PROJ-1AB"}', '["PROJ-1AB"]', 'true']) {
+      const output = `{"fixable": false, "duplicateOf": ${value}, "explanation": "No fix here."}`;
+      const lines = warnings(() => {
+        assert.deepEqual(
+          parseClassification(output, ['PROJ-1AB']),
+          { fixable: false, explanation: 'No fix here.', duplicateOf: null },
+          output,
+        );
+      });
+
+      assert.equal(lines.length, 1, output);
+      assert.match(lines[0] ?? '', /"level":"warn"/);
+    }
+  });
+
+  it('bounds the rejected value it logs', () => {
+    const invented = 'P'.repeat(MAX_REJECTED_CHARS * 2);
+    const lines = warnings(() => {
+      parseClassification(
+        `{"fixable": true, "duplicateOf": "${invented}", "explanation": "Long."}`,
+        [],
+      );
+    });
+
+    assert.equal(lines.length, 1);
+    assert.ok(!(lines[0] ?? '').includes('P'.repeat(MAX_REJECTED_CHARS + 1)));
+    assert.ok((lines[0] ?? '').includes('P'.repeat(MAX_REJECTED_CHARS)));
   });
 });

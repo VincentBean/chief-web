@@ -1,4 +1,5 @@
 import type { SentryIssueStatus } from '../db/index.js';
+import { logger } from '../lib/logger.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 
 import type { SentryEvent, SentryIssueDetails } from './client.js';
@@ -80,6 +81,14 @@ export interface Classification {
   readonly fixable: boolean;
   /** 1–3 sentences, in the operator's words; stored on the issue row. */
   readonly explanation: string;
+  /**
+   * The short id of the issue this one duplicates, or null.
+   *
+   * Null is the answer in every doubtful case, and it is what an unusable
+   * answer becomes: see {@link parseClassification} for why an id the model
+   * made up costs nothing but a log line.
+   */
+  readonly duplicateOf: string | null;
 }
 
 export function classificationPrompt(input: ClassificationPromptInput): string {
@@ -316,6 +325,9 @@ function defang(marker: string): string {
   return marker.replaceAll('-----', '- - - - -');
 }
 
+/** How much of an unusable `duplicateOf` is copied into the log line. */
+export const MAX_REJECTED_CHARS = 200;
+
 /**
  * Reads the verdict back out of whatever the agent printed.
  *
@@ -324,9 +336,28 @@ function defang(marker: string): string {
  * model that wrapped it in a markdown fence or said "here you go" first has
  * still answered. The *last* valid object wins, because a model that reasons
  * out loud tends to quote the shape before it fills it in.
+ *
+ * ## Why a bad `duplicateOf` is not a parse failure
+ *
+ * `offeredShortIds` is the list the prompt actually wrote out — chief-web's
+ * own rows, not anything the model read inside the untrusted block — and it is
+ * the only vocabulary the answer may draw on. Anything else (an id from the
+ * error text, a Sentry link, a number, an object, a whole invented issue) is
+ * dropped to null and logged.
+ *
+ * Dropped, rather than rejected: the fixability verdict is the question that
+ * matters, it was answered, and a failed parse costs the issue one of its
+ * three classification attempts. Burning an attempt — and eventually marking a
+ * real error `cannot_fix` — because a model garnished a correct answer with a
+ * short id it invented would be the expensive way to be strict. The
+ * conservative reading of an unusable duplicate claim is that there is no
+ * duplicate, which is exactly what null means.
  */
-export function parseClassification(output: string): Classification | null {
-  let found: Classification | null = null;
+export function parseClassification(
+  output: string,
+  offeredShortIds: readonly string[],
+): Classification | null {
+  let found: ParsedAnswer | null = null;
   for (const candidate of jsonObjects(output)) {
     let value: unknown;
     try {
@@ -334,10 +365,26 @@ export function parseClassification(output: string): Classification | null {
     } catch {
       continue;
     }
-    const classification = toClassification(value);
-    if (classification !== null) found = classification;
+    const answer = toClassification(value, offeredShortIds);
+    if (answer !== null) found = answer;
   }
-  return found;
+  if (found === null) return null;
+  // Logged once, for the object that won: the shape a model quotes before it
+  // fills it in is not an answer anybody acted on.
+  if (found.rejected !== null) {
+    logger.warn('a classification named a duplicate that was not offered', {
+      duplicateOf: found.rejected.value,
+      offered: offeredShortIds,
+    });
+  }
+  return found.classification;
+}
+
+/** A parsed object, plus whatever its `duplicateOf` claimed and did not get. */
+interface ParsedAnswer {
+  readonly classification: Classification;
+  /** Null when `duplicateOf` was absent, null, or one of the offered ids. */
+  readonly rejected: { readonly value: string } | null;
 }
 
 /** Every balanced `{…}` span in `text`, outermost first, in order. */
@@ -376,7 +423,7 @@ function matchingBrace(text: string, start: number): number | null {
   return null;
 }
 
-function toClassification(value: unknown): Classification | null {
+function toClassification(value: unknown, offeredShortIds: readonly string[]): ParsedAnswer | null {
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
   const fixable = record.fixable;
@@ -387,5 +434,27 @@ function toClassification(value: unknown): Classification | null {
   if (typeof explanation !== 'string') return null;
   const trimmed = explanation.trim();
   if (trimmed === '') return null;
-  return { fixable, explanation: trimmed };
+
+  const duplicate = record.duplicateOf;
+  // Absent is the old answer shape, and the old shape answered the question
+  // that was asked of it. Explicit null is "no duplicate". Both are silent.
+  if (duplicate === undefined || duplicate === null) {
+    return { classification: { fixable, explanation: trimmed, duplicateOf: null }, rejected: null };
+  }
+  if (typeof duplicate === 'string' && offeredShortIds.includes(duplicate)) {
+    return {
+      classification: { fixable, explanation: trimmed, duplicateOf: duplicate },
+      rejected: null,
+    };
+  }
+  return {
+    classification: { fixable, explanation: trimmed, duplicateOf: null },
+    rejected: { value: describeRejected(duplicate) },
+  };
+}
+
+/** An unusable `duplicateOf`, as one bounded line of log. */
+function describeRejected(value: unknown): string {
+  const text = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value));
+  return text.length <= MAX_REJECTED_CHARS ? text : `${text.slice(0, MAX_REJECTED_CHARS)}…`;
 }

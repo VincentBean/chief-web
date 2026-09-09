@@ -286,7 +286,9 @@ export class SentryClassifyService implements SentryClassifier {
       return false;
     }
 
-    const verdict = parseClassification(result.output);
+    // No candidates were offered, so no short id is answerable: US-006 passes
+    // the shortlist here and to the prompt from the same list.
+    const verdict = parseClassification(result.output, []);
     if (verdict === null) {
       this.failed(
         issue,
