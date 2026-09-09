@@ -2,9 +2,12 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   approveSentryPlan,
+  createSentryFixSession,
   fetchSentryIssues,
+  MAX_SENTRY_FIX_BATCH,
   MAX_SENTRY_PLAN_CHARS,
   rejectSentryPlan,
+  type SentryFixSession,
   type SentryIssue,
   type SentryIssueList,
   type SentryIssueStatus,
@@ -197,6 +200,21 @@ export function Sentry() {
         issues.length > 0 &&
         SECTIONS.map((section) => {
           const rows = issues.filter((issue) => section.statuses.includes(issue.status)).sort(byLastSeen);
+          if (section.key === 'approved') {
+            return (
+              <ApprovedSection
+                key={section.key}
+                section={section}
+                rows={rows}
+                onStarted={(session, count) => {
+                  toast.ok(`${session.name} is fixing ${String(count)} ${count === 1 ? 'issue' : 'issues'}.`);
+                  // The 201 carries the session, not the issues, so the list is
+                  // read again: every issue of the batch is `working` now.
+                  load({ refresh: true });
+                }}
+              />
+            );
+          }
           return (
             <Panel
               key={section.key}
@@ -227,6 +245,149 @@ export function Sentry() {
           );
         })}
     </div>
+  );
+}
+
+/**
+ * The approved issues, and the one button that turns a batch of them into a
+ * session (US-009).
+ *
+ * The selection is this section's own state and is deliberately not lifted:
+ * nothing outside it reads which rows are ticked, and a decision taken in the
+ * section above must not disturb it. It is kept as a list of ids rather than of
+ * rows, and filtered against what is on screen on every render, so an id that
+ * has left the section — its session has just started, or someone else decided
+ * it — cannot be counted or sent.
+ *
+ * One session is one branch and one pull request, so a batch is one repository:
+ * the first tick decides which, and the rest of the rows go quiet until the
+ * selection is cleared. The server enforces the same rule; the checkbox exists
+ * so the operator never has to be told off for it.
+ */
+function ApprovedSection({
+  section,
+  rows,
+  onStarted,
+}: {
+  readonly section: (typeof SECTIONS)[number];
+  readonly rows: readonly SentryIssue[];
+  readonly onStarted: (session: SentryFixSession, count: number) => void;
+}) {
+  const [ticked, setTicked] = useState<readonly string[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onScreen = new Set(rows.map((row) => row.id));
+  const selected = ticked.filter((id) => onScreen.has(id));
+  const batch = rows.filter((row) => selected.includes(row.id));
+  // The repository the batch is already committed to, once anything is ticked.
+  const repository: SentryIssue | null = batch[0] ?? null;
+  const full = selected.length >= MAX_SENTRY_FIX_BATCH;
+
+  const unavailable = (row: SentryIssue): boolean =>
+    busy ||
+    (repository !== null && row.repositoryId !== repository.repositoryId) ||
+    (full && !selected.includes(row.id));
+
+  const toggle = (id: string, on: boolean): void => {
+    setError(null);
+    setTicked(on ? [...selected, id] : selected.filter((other) => other !== id));
+  };
+
+  const start = (): void => {
+    if (selected.length === 0) return;
+    const count = selected.length;
+    setBusy(true);
+    setError(null);
+    createSentryFixSession(selected)
+      .then((session) => {
+        setConfirming(false);
+        setTicked([]);
+        onStarted(session, count);
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        // The dialog closes so the error is not hidden behind it; the ticks
+        // stay, because pressing the button again is the whole retry.
+        setConfirming(false);
+        setError(describeError(cause));
+      })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Panel
+      title={section.title}
+      icon={section.icon}
+      meta={<span className="panel__meta muted">{String(rows.length)}</span>}
+      actions={
+        <button
+          type="button"
+          className="button button--primary"
+          onClick={() => setConfirming(true)}
+          disabled={busy || selected.length === 0}
+        >
+          <Icon name="play" />
+          {selected.length === 0 ? 'Create fix session' : `Create fix session (${String(selected.length)})`}
+        </button>
+      }
+    >
+      {error !== null && (
+        <p className="row__meta text-danger" role="alert">
+          Could not create the fix session: {error}
+        </p>
+      )}
+      {rows.length === 0 && <p className="muted">{section.empty}</p>}
+      {rows.length > 0 && (
+        <>
+          <ul className="rows rows--divided">
+            {rows.map((issue) => (
+              <IssueRow
+                key={issue.id}
+                issue={issue}
+                showState={false}
+                select={
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(issue.id)}
+                      disabled={unavailable(issue)}
+                      onChange={(event) => toggle(issue.id, event.target.checked)}
+                      aria-label={`Include ${issue.shortId} in the fix session`}
+                    />
+                  </label>
+                }
+              />
+            ))}
+          </ul>
+          {repository !== null && rows.some((row) => row.repositoryId !== repository.repositoryId) && (
+            <p className="field__hint">
+              A batch is one branch and one pull request, so it covers a single repository — only other{' '}
+              {repository.repositoryName} issues can be ticked.
+            </p>
+          )}
+          {full && <p className="field__hint">A session covers at most {String(MAX_SENTRY_FIX_BATCH)} issues; untick one to pick another.</p>}
+        </>
+      )}
+
+      <ConfirmDialog
+        open={confirming}
+        title={`Create one session fixing ${String(selected.length)} ${selected.length === 1 ? 'issue' : 'issues'} in ${repository?.repositoryName ?? 'this repository'}?`}
+        confirmLabel="Create fix session"
+        busyLabel="Creating…"
+        busy={busy}
+        confirmDisabled={selected.length === 0}
+        onConfirm={start}
+        onCancel={() => setConfirming(false)}
+      >
+        <p>
+          One agent session fixes all of them on one branch and opens one pull request, so they are reviewed and merged together.
+          Each issue moves to <strong>Working</strong> and links to the session.
+        </p>
+        <p className="row__meta mono">{batch.map((issue) => issue.shortId).join(', ')}</p>
+      </ConfirmDialog>
+    </Panel>
   );
 }
 
@@ -397,16 +558,20 @@ function PlannedRow({
 function IssueRow({
   issue,
   showState,
+  select,
   children,
 }: {
   readonly issue: SentryIssue;
   readonly showState: boolean;
+  /** A checkbox, on the sections where rows are picked in batches (US-009). */
+  readonly select?: ReactNode;
   /** The plan, the decision buttons and their errors, under the meta line. */
   readonly children?: ReactNode;
 }) {
   return (
     <li className="row row--stacked">
       <div className="row__line">
+        {select}
         <Icon name="alert" className={issue.status === 'fixed' ? 'text-done' : 'text-muted'} />
         <div className="row__main">
           <span className="row__title">

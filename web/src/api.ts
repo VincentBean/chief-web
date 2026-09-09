@@ -1631,6 +1631,32 @@ export async function rejectSentryPlan(id: string, reason: string): Promise<Sent
   });
 }
 
+/**
+ * Most issues one fix session may cover, mirroring the server's
+ * `MAX_FIX_BATCH`. A longer batch is a 400, so the tab stops ticking there.
+ */
+export const MAX_SENTRY_FIX_BATCH = 10;
+
+/** Mirrors the server's `FixSessionCreatedView`: the session the batch became. */
+export interface SentryFixSession {
+  id: string;
+  name: string;
+}
+
+/**
+ * Starts one fix session covering a batch of approved issues (US-006).
+ *
+ * Unlike the two decisions, this answers with the *session* rather than with
+ * the issues, so the caller reloads the list afterwards: every issue in the
+ * batch has moved to `working` and carries the new session's id.
+ */
+export async function createSentryFixSession(issueIds: readonly string[]): Promise<SentryFixSession> {
+  return api<SentryFixSession>('/api/sentry/fix-sessions', {
+    method: 'POST',
+    body: JSON.stringify({ issueIds }),
+  });
+}
+
 /** What the operator reads for each pipeline state. */
 export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
   switch (status) {
