@@ -234,6 +234,11 @@ describe('sentry issues', () => {
     );
   });
 
+  /** Dates a row, since the typed writers always stamp `created_at` as now. */
+  const createdAt = (id: string, at: string) => {
+    db.prepare('UPDATE sentry_issues SET created_at = ? WHERE id = ?').run(at, id);
+  };
+
   it('queues the fixed issues Sentry has not been told about, oldest first', () => {
     const older = issueFor('4021');
     const newer = issueFor('4022');
@@ -250,6 +255,71 @@ describe('sentry issues', () => {
       awaiting.map((issue) => issue.sentryIssueId),
       [older.sentryIssueId, newer.sentryIssueId],
     );
+  });
+
+  it('queues the duplicates of a fixed issue too, in one oldest-first order', () => {
+    const original = issueFor('4024');
+    const folded = issueFor('4025');
+    const laterFix = issueFor('4026');
+    // Rows created inside one millisecond share a `created_at`; spread them so
+    // the order under test is the column's and not the scan's.
+    createdAt(original.id, '2026-09-01T00:00:00.000Z');
+    createdAt(folded.id, '2026-09-02T00:00:00.000Z');
+    createdAt(laterFix.id, '2026-09-03T00:00:00.000Z');
+    updateSentryIssue(db, original.id, { status: 'fixed' });
+    updateSentryIssue(db, folded.id, { status: 'duplicate', duplicateOf: original.id });
+    updateSentryIssue(db, laterFix.id, { status: 'fixed' });
+
+    const awaiting = listSentryIssuesAwaitingResolve(db).filter(
+      (issue) => issue.repositoryId === repository.id,
+    );
+
+    // Created in that order, and the duplicate takes its place among the fixes.
+    assert.deepEqual(
+      awaiting.map((issue) => issue.sentryIssueId),
+      [original.sentryIssueId, folded.sentryIssueId, laterFix.sentryIssueId],
+    );
+  });
+
+  it('leaves out the duplicates of an issue that has not landed', () => {
+    const working = issueFor('4027');
+    const cannotFix = issueFor('4028');
+    const stillWorking = issueFor('4029');
+    const givenUp = issueFor('4040');
+    updateSentryIssue(db, working.id, { status: 'working' });
+    updateSentryIssue(db, cannotFix.id, { status: 'cannot_fix', explanation: 'upstream' });
+    updateSentryIssue(db, stillWorking.id, { status: 'duplicate', duplicateOf: working.id });
+    updateSentryIssue(db, givenUp.id, { status: 'duplicate', duplicateOf: cannotFix.id });
+
+    const awaiting = listSentryIssuesAwaitingResolve(db).filter(
+      (issue) => issue.repositoryId === repository.id,
+    );
+
+    assert.deepEqual(awaiting, []);
+  });
+
+  it('stops queueing a duplicate once it has been resolved in Sentry', () => {
+    const original = issueFor('4041');
+    const folded = issueFor('4042');
+    updateSentryIssue(db, original.id, { status: 'fixed', resolvedInSentry: true });
+    updateSentryIssue(db, folded.id, { status: 'duplicate', duplicateOf: original.id });
+
+    const before = listSentryIssuesAwaitingResolve(db).filter(
+      (issue) => issue.repositoryId === repository.id,
+    );
+    assert.deepEqual(
+      before.map((issue) => issue.sentryIssueId),
+      [folded.sentryIssueId],
+    );
+
+    updateSentryIssue(db, folded.id, { resolvedInSentry: true });
+
+    const after = listSentryIssuesAwaitingResolve(db).filter(
+      (issue) => issue.repositoryId === repository.id,
+    );
+    assert.deepEqual(after, []);
+    // Reporting it upstream is not a promotion: it never had a fix of its own.
+    assert.equal(findSentryIssue(db, '4042')?.status, 'duplicate');
   });
 
   /** Ages a row the way the passing of days would, so the window is testable. */

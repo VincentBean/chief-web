@@ -543,6 +543,93 @@ describe('the Sentry completion watcher', () => {
     });
   });
 
+  describe('the duplicates of an issue that landed', () => {
+    it('resolves them in Sentry on the tick the original merged', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'merged' });
+      const folded = w.duplicate(issue);
+
+      assert.equal(await w.completer.trackCompletions(), 1);
+
+      assert.deepEqual(w.sentry.calls, [
+        { org: 'acme', issueId: issue.sentryIssueId },
+        { org: 'acme', issueId: folded.sentryIssueId },
+      ]);
+      assert.equal(w.reload(issue).resolvedInSentry, true);
+      assert.equal(w.reload(folded).resolvedInSentry, true);
+    });
+
+    it('leaves the duplicate a duplicate: only the flag changes', async () => {
+      const w = world();
+      const original = w.issue({ status: 'fixed', resolvedInSentry: true });
+      const folded = w.duplicate(original);
+
+      await w.completer.trackCompletions();
+
+      const after = w.reload(folded);
+      // No session and no pull request of its own ever existed to call it fixed.
+      assert.deepEqual(after, { ...folded, resolvedInSentry: true, updatedAt: after.updatedAt });
+      assert.equal(after.sessionId, null);
+    });
+
+    it('leaves alone the duplicates of an issue that is still working', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'pr-open' });
+      const folded = w.duplicate(issue);
+
+      assert.equal(await w.completer.trackCompletions(), 0);
+
+      assert.deepEqual(w.sentry.calls, []);
+      const after = w.reload(folded);
+      assert.equal(after.status, 'duplicate');
+      assert.equal(after.resolvedInSentry, false);
+    });
+
+    it('leaves alone the duplicates of an issue that was given up on', async () => {
+      const w = world();
+      const original = w.issue({ status: 'cannot_fix', explanation: 'not a code problem' });
+      const folded = w.duplicate(original);
+
+      assert.equal(await w.completer.trackCompletions(), 0);
+
+      assert.deepEqual(w.sentry.calls, []);
+      assert.equal(w.reload(folded).resolvedInSentry, false);
+    });
+
+    it('does not report a duplicate twice', async () => {
+      const w = world();
+      const original = w.issue({ status: 'fixed', resolvedInSentry: true });
+      const folded = w.duplicate(original, { resolvedInSentry: true });
+
+      await w.completer.trackCompletions();
+
+      assert.deepEqual(w.sentry.calls, []);
+      assert.equal(w.reload(folded).status, 'duplicate');
+    });
+
+    it('retries a failed resolve on the next tick, still as a duplicate', async () => {
+      const w = world();
+      const original = w.issue({ status: 'fixed', resolvedInSentry: true });
+      const folded = w.duplicate(original);
+      w.sentry.fail(new SentryApiError('sentry_unreachable', 'Sentry is unreachable'));
+
+      await w.completer.trackCompletions();
+
+      // Exactly as it was, down to the attempt count and the explanation.
+      assert.deepEqual(w.reload(folded), folded);
+      assert.equal(w.sentry.calls.length, 1);
+
+      w.sentry.recover();
+      await w.completer.trackCompletions();
+
+      assert.equal(w.sentry.calls.length, 2);
+      const resolved = w.reload(folded);
+      assert.equal(resolved.status, 'duplicate');
+      assert.equal(resolved.duplicateOf, original.id);
+      assert.equal(resolved.resolvedInSentry, true);
+    });
+  });
+
   it('does nothing at all when no issue is working or awaiting a resolve', async () => {
     const w = world();
     w.issue({ status: 'pending' });

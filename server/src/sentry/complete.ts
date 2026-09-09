@@ -72,6 +72,12 @@ import { createSentryClient, SentryApiError } from './client.js';
  * next tick tries again, for as long as it takes. That is also why the resolve
  * pass runs over *every* unresolved `fixed` row rather than only over the ones
  * this pass just marked: a retry and a first attempt are the same work.
+ *
+ * The mirror of the release above: when the original *does* land, the issues
+ * folded into it are resolved in Sentry alongside it, so the inbox reflects
+ * what was actually fixed. They keep `status: 'duplicate'` — no session and no
+ * pull request of their own ever existed to make them `fixed` — and the flag
+ * is the only column this pass has ever written, for either kind of row.
  */
 
 /** The slice of {@link import('./client.js').SentryClient} this needs. */
@@ -220,7 +226,8 @@ export class SentryCompletionService implements SentryCompleter {
   }
 
   /**
-   * Tells Sentry about every fix that has landed and not been reported yet.
+   * Tells Sentry about every fix that has landed and not been reported yet,
+   * including the duplicates of each one.
    *
    * Nothing here may ever write a status: the issue is `fixed` before the call
    * is made and stays `fixed` whatever the call does. The only write is the
@@ -273,9 +280,11 @@ export class SentryCompletionService implements SentryCompleter {
       return;
     }
 
+    // The flag and nothing else: a duplicate stays a duplicate, a fix stays fixed.
     updateSentryIssue(this.db, issue.id, { resolvedInSentry: true });
-    logger.info('a fixed Sentry issue was resolved in Sentry', {
+    logger.info('a Sentry issue was resolved in Sentry', {
       issue: issue.shortId,
+      status: issue.status,
       org,
     });
   }

@@ -292,17 +292,32 @@ export function deleteSentryIssue(db: Database, id: string): boolean {
 }
 
 /**
- * The `fixed` issues Sentry has not been told about yet, oldest first (US-008).
+ * The issues Sentry has not been told about yet, oldest first (US-008).
  *
  * `resolved_in_sentry` is deliberately a flag rather than a status: the fix
  * landed whatever Sentry says, so a resolve call that failed must leave the
  * issue `fixed` and merely stay on this list until a later tick gets through.
+ *
+ * A `duplicate` row belongs here too, once the issue it points at is `fixed`:
+ * the merge that fixed the original fixed this defect as well, and an operator
+ * reading Sentry should see both closed. It stays `duplicate` while it is
+ * reported — there was never a session or a pull request of its own to call it
+ * `fixed` on, and the flag is the only thing the resolve pass writes. A
+ * duplicate of anything else — `working`, `cannot_fix`, or another status
+ * entirely — is not reported: nothing has landed for it yet, and a failed
+ * original releases its duplicates back to `pending` instead (US-007).
  */
 export function listSentryIssuesAwaitingResolve(db: Database): SentryIssue[] {
   return db
     .prepare(
-      "SELECT * FROM sentry_issues WHERE status = 'fixed' AND resolved_in_sentry = 0 " +
-        'ORDER BY created_at ASC',
+      `SELECT * FROM sentry_issues AS issue
+        WHERE issue.resolved_in_sentry = 0
+          AND (issue.status = 'fixed'
+               OR (issue.status = 'duplicate'
+                   AND EXISTS (SELECT 1 FROM sentry_issues AS original
+                                WHERE original.id = issue.duplicate_of
+                                  AND original.status = 'fixed')))
+        ORDER BY issue.created_at ASC`,
     )
     .all()
     .map(mapSentryIssue);
