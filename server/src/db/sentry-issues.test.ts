@@ -13,6 +13,7 @@ import {
   findSentryIssueBySession,
   IN_MEMORY,
   listSentryDuplicateCandidates,
+  listSentryDuplicatesOf,
   listSentryIssues,
   listSentryIssuesAwaitingResolve,
   listSentryIssuesByStatus,
@@ -358,6 +359,38 @@ describe('sentry issues', () => {
     // A fresh row carries neither until something classifies it.
     assert.equal(original.duplicateOf, null);
     assert.equal(original.signature, null);
+  });
+
+  it('lists the duplicates folded into one issue, oldest first', () => {
+    const original = issueFor('4080');
+    const first = issueFor('4081');
+    const second = issueFor('4082');
+    const elsewhere = issueFor('4083');
+    const other = issueFor('4084');
+
+    for (const copy of [first, second]) {
+      updateSentryIssue(db, copy.id, { status: 'duplicate', duplicateOf: original.id });
+    }
+    updateSentryIssue(db, elsewhere.id, { status: 'duplicate', duplicateOf: other.id });
+
+    assert.deepEqual(
+      listSentryDuplicatesOf(db, original.id).map((issue) => issue.sentryIssueId),
+      [first.sentryIssueId, second.sentryIssueId],
+    );
+    assert.deepEqual(listSentryDuplicatesOf(db, other.id).map((issue) => issue.id), [
+      elsewhere.id,
+    ]);
+    assert.deepEqual(listSentryDuplicatesOf(db, first.id), []);
+  });
+
+  it('stops listing a duplicate once it has been released', () => {
+    const original = issueFor('4090');
+    const copy = issueFor('4091');
+    updateSentryIssue(db, copy.id, { status: 'duplicate', duplicateOf: original.id });
+
+    updateSentryIssue(db, copy.id, { status: 'pending', duplicateOf: null });
+
+    assert.deepEqual(listSentryDuplicatesOf(db, original.id), []);
   });
 
   it('takes the issues with the repository they belong to', () => {

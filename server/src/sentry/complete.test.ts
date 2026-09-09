@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
 
+import type { AgentRunner } from '../build/index.js';
 import {
   closeDatabase,
   createRepository,
@@ -11,6 +12,8 @@ import {
   featureBranchFor,
   getSentryIssue,
   IN_MEMORY,
+  listSentryDuplicatesOf,
+  listSentryIssuesByStatus,
   openDatabase,
   type Repository,
   type SentryIssue,
@@ -21,9 +24,20 @@ import {
   updateSentryIssue,
   updateSession,
 } from '../db/index.js';
+import type { PrRunContainers } from '../prfeedback/index.js';
+import type { SessionExecutor } from '../sessions/index.js';
 
+import {
+  MAX_ISSUES_PER_TICK,
+  SentryClassifyService,
+  type SentryDetailsGateway,
+} from './classify.js';
 import { SentryApiError } from './client.js';
-import { SentryCompletionService, type SentryResolveGateway } from './complete.js';
+import {
+  SentryCompletionService,
+  SESSION_DELETED,
+  type SentryResolveGateway,
+} from './complete.js';
 
 const databases: Database[] = [];
 
@@ -69,6 +83,8 @@ interface World {
     failureStage?: Session['failureStage'];
   }): { issue: SentryIssue; session: Session };
   issue(fields?: Partial<SentryIssue>): SentryIssue;
+  /** An issue folded into `original`, as US-006 leaves one behind. */
+  duplicate(original: SentryIssue, fields?: Partial<SentryIssue>): SentryIssue;
   reload(issue: SentryIssue): SentryIssue;
 }
 
@@ -113,6 +129,16 @@ function world(options: { token?: string | null } = {}): World {
     completer,
     repository,
     issue,
+    duplicate(original, fields = {}) {
+      return issue({
+        status: 'duplicate',
+        duplicateOf: original.id,
+        explanation: `the same defect as ${original.shortId}`,
+        signature: '{"exceptionType":"TypeError","culprit":null,"titleKey":"x","frames":[]}',
+        attempts: 1,
+        ...fields,
+      });
+    },
     working(session = {}) {
       const name = `sentry-fix-${(names += 1)}`;
       const row = createSession(db, {
@@ -400,6 +426,123 @@ describe('the Sentry completion watcher', () => {
     });
   });
 
+  describe('the duplicates of an issue that never landed', () => {
+    it('releases them when the fix session failed', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'failed', lastError: 'the agent stalled' });
+      const folded = w.duplicate(issue);
+
+      await w.completer.trackCompletions();
+
+      const released = w.reload(folded);
+      assert.equal(released.status, 'pending');
+      assert.equal(released.duplicateOf, null);
+      assert.equal(released.explanation, null);
+      assert.equal(released.attempts, 0);
+      // Still an accurate description of the error, so still worth keeping.
+      assert.equal(released.signature, folded.signature);
+      assert.deepEqual(listSentryDuplicatesOf(w.db, issue.id), []);
+    });
+
+    it('releases them when the pull request was closed without merging', async () => {
+      const w = world();
+      const { issue } = w.working({
+        status: 'finished',
+        prUrl: 'https://github.com/acme/demo/pull/42',
+      });
+      const folded = w.duplicate(issue);
+
+      await w.completer.trackCompletions();
+
+      assert.equal(w.reload(issue).explanation, 'PR #42 closed without merging');
+      assert.equal(w.reload(folded).status, 'pending');
+      assert.equal(w.reload(folded).duplicateOf, null);
+    });
+
+    it('releases them when the session was deleted out from under the issue', async () => {
+      const w = world();
+      const { issue, session } = w.working({ status: 'building' });
+      const folded = w.duplicate(issue);
+      deleteSession(w.db, session.id);
+
+      await w.completer.trackCompletions();
+
+      assert.equal(w.reload(issue).explanation, SESSION_DELETED);
+      assert.equal(w.reload(folded).status, 'pending');
+      assert.equal(w.reload(folded).duplicateOf, null);
+    });
+
+    it('keeps them folded when the issue was actually fixed', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'merged' });
+      const folded = w.duplicate(issue);
+
+      await w.completer.trackCompletions();
+
+      const still = w.reload(folded);
+      assert.equal(still.status, 'duplicate');
+      assert.equal(still.duplicateOf, issue.id);
+      assert.equal(still.explanation, folded.explanation);
+      assert.deepEqual(
+        listSentryDuplicatesOf(w.db, issue.id).map((row) => row.id),
+        [folded.id],
+      );
+    });
+
+    it('releases every duplicate of the failed issue, and nothing else', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'failed' });
+      const other = w.issue({ status: 'queued' });
+      const folded = [w.duplicate(issue), w.duplicate(issue)];
+      const elsewhere = w.duplicate(other);
+
+      await w.completer.trackCompletions();
+
+      for (const row of folded) assert.equal(w.reload(row).status, 'pending');
+      assert.equal(w.reload(elsewhere).status, 'duplicate');
+      assert.equal(w.reload(elsewhere).duplicateOf, other.id);
+    });
+
+    it('logs the release at info, naming both issues and the reason', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'failed', lastError: 'the agent stalled' });
+      const folded = w.duplicate(issue);
+
+      const lines = await logs(() => w.completer.trackCompletions());
+
+      const released = lines.filter((line) => line.includes('a duplicate Sentry issue was released'));
+      assert.equal(released.length, 1);
+      const [line] = released;
+      assert.ok(line !== undefined);
+      assert.match(line, /"level":"info"/);
+      assert.match(line, new RegExp(`"issue":"${folded.shortId}"`));
+      assert.match(line, new RegExp(`"duplicateOf":"${issue.shortId}"`));
+      assert.match(line, /build session failed: the agent stalled/);
+    });
+
+    it('lets the per-tick cap pace a burst of releases', async () => {
+      const w = world();
+      const { issue } = w.working({ status: 'failed' });
+      const folded = [1, 2, 3, 4, 5].map(() => w.duplicate(issue));
+
+      await w.completer.trackCompletions();
+
+      // All five are back in the pipeline, and none of them is a session.
+      assert.equal(listSentryIssuesByStatus(w.db, 'pending').length, folded.length);
+      assert.equal(listSentryIssuesByStatus(w.db, 'queued').length, 0);
+
+      // And the next tick classifies them at the usual rate, not all at once.
+      const classified = await classifier(w).classifyPending();
+
+      assert.equal(classified, MAX_ISSUES_PER_TICK);
+      assert.equal(listSentryIssuesByStatus(w.db, 'queued').length, MAX_ISSUES_PER_TICK);
+      assert.equal(
+        listSentryIssuesByStatus(w.db, 'pending').length,
+        folded.length - MAX_ISSUES_PER_TICK,
+      );
+    });
+  });
+
   it('does nothing at all when no issue is working or awaiting a resolve', async () => {
     const w = world();
     w.issue({ status: 'pending' });
@@ -412,3 +555,74 @@ describe('the Sentry completion watcher', () => {
     assert.deepEqual(w.sentry.calls, []);
   });
 });
+
+/**
+ * Captures the `info` lines a call writes. `logger.info` emits one
+ * `JSON.stringify`d line to `console.log`, so the assertion is on the line.
+ */
+async function logs(run: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (line: unknown) => {
+    lines.push(String(line));
+  };
+  try {
+    await run();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+/**
+ * A classifier over the same database, with every moving part stubbed out: the
+ * only thing under test through it is how many issues one tick takes on.
+ */
+function classifier(w: World): SentryClassifyService {
+  const containers: PrRunContainers = {
+    startPrRun: (run) =>
+      Promise.resolve({ id: `container-${run.id}`, name: run.id, running: true, state: 'running' }),
+    removePrRun: () => Promise.resolve(),
+  };
+  const exec: SessionExecutor = {
+    runExec: () =>
+      Promise.resolve({ exitCode: 0, stdout: 'deadbeef\n', stderr: '', timedOut: false }),
+  };
+  const runner: AgentRunner = {
+    run: () =>
+      Promise.resolve({
+        exitCode: 0,
+        output: '{"fixable": true, "explanation": "A null check is missing."}',
+        timedOut: false,
+      }),
+    stop: () => Promise.resolve(),
+    reap: () => Promise.resolve(),
+    headSha: () => Promise.resolve('deadbeef'),
+  };
+  const sentry: SentryDetailsGateway = {
+    getIssueDetails: (_org, issueId) =>
+      Promise.resolve({
+        issue: {
+          id: issueId,
+          shortId: `PROJ-${issueId}`,
+          title: 'TypeError: cannot read property x of undefined',
+          culprit: 'app/handlers.ts in handle',
+          permalink: 'https://sentry.io/organizations/acme/issues/4507/',
+          level: 'error',
+          status: 'unresolved',
+          count: 12,
+          firstSeen: '2026-08-01T10:00:00.000Z',
+          lastSeen: '2026-09-04T22:15:00.000Z',
+        },
+        latestEvent: null,
+      }),
+  };
+  return new SentryClassifyService(
+    { sessionSetupTimeoutMs: 1000 },
+    w.db,
+    containers,
+    exec,
+    runner,
+    () => sentry,
+  );
+}

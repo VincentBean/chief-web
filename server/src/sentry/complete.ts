@@ -4,6 +4,7 @@ import {
   failureStageLabel,
   getRepository,
   getSession,
+  listSentryDuplicatesOf,
   listSentryIssuesAwaitingResolve,
   listSentryIssuesByStatus,
   type SentryIssue,
@@ -44,6 +45,24 @@ import { createSentryClient, SentryApiError } from './client.js';
  * was deleted, and `ON DELETE SET NULL` kept the issue while taking the link.
  * Nothing is building that fix any more, and nothing ever will, so the issue is
  * closed with exactly that said.
+ *
+ * ## Duplicates the failure takes down with it
+ *
+ * An issue that was folded into another one (US-006) has no session of its
+ * own: it is waiting on the original's fix and nothing else. So when the
+ * original ends at `cannot_fix` — for any of the three reasons above — every
+ * `duplicate` row pointing at it is released back to `pending` and is
+ * classified again from scratch on a later tick, on its own merits. Without
+ * that, one failed session would silently bury every real bug that had been
+ * recognised as the same defect.
+ *
+ * Releasing is deliberately not a re-queue: a `pending` row goes back through
+ * {@link import('./classify.js').MAX_ISSUES_PER_TICK}, so five duplicates
+ * released at once become at most two classifications on the next tick rather
+ * than five build sessions at once. The row keeps its `signature`, which is
+ * still an accurate description of the error, but loses every trace of having
+ * been a duplicate — a second classification that remembered the first
+ * verdict would only reach it again.
  *
  * ## Resolving, and why it is a flag
  *
@@ -171,7 +190,33 @@ export class SentryCompletionService implements SentryCompleter {
       session: issue.sessionId,
       explanation,
     });
+    this.releaseDuplicates(issue, explanation);
     return true;
+  }
+
+  /**
+   * Puts every issue folded into this one back into the pipeline (US-007).
+   *
+   * Called only from {@link cannotFix}: a `fixed` original is exactly what
+   * the fold was for, and its duplicates are fixed along with it. `attempts`
+   * goes back to zero and the explanation is cleared, so the next
+   * classification starts from nothing; the signature stays, because it
+   * describes the error rather than the verdict.
+   */
+  private releaseDuplicates(issue: SentryIssue, explanation: string): void {
+    for (const duplicate of listSentryDuplicatesOf(this.db, issue.id)) {
+      updateSentryIssue(this.db, duplicate.id, {
+        status: 'pending',
+        duplicateOf: null,
+        explanation: null,
+        attempts: 0,
+      });
+      logger.info('a duplicate Sentry issue was released: the issue it repeats was given up on', {
+        issue: duplicate.shortId,
+        duplicateOf: issue.shortId,
+        explanation,
+      });
+    }
   }
 
   /**

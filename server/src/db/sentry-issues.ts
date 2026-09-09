@@ -360,3 +360,21 @@ export function listSentryDuplicateCandidates(
     .all(repositoryId, options.excludeId, cutoff, DUPLICATE_CANDIDATE_LIMIT)
     .map(mapSentryIssue);
 }
+
+/**
+ * The `duplicate` rows folded into one issue (US-007).
+ *
+ * The pointer is only ever one hop deep — the classifier resolves a candidate
+ * that is itself a duplicate to its root before writing — so this is the whole
+ * set of issues waiting on that one fix, not the first level of a tree.
+ * Ordered oldest first, the same order everything else here reports a queue in.
+ */
+export function listSentryDuplicatesOf(db: Database, issueId: string): SentryIssue[] {
+  return db
+    .prepare(
+      "SELECT * FROM sentry_issues WHERE status = 'duplicate' AND duplicate_of = ? " +
+        'ORDER BY created_at ASC',
+    )
+    .all(issueId)
+    .map(mapSentryIssue);
+}
