@@ -907,6 +907,109 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN pr_description TEXT;
     `,
   },
+  {
+    id: '0015_sentry_duplicates',
+    sql: `
+      -- Sentry groups one underlying defect into several issues, and the
+      -- classifier judges each of them alone, so the same bug has opened one
+      -- session -- and one pull request -- per issue (US-001). An issue the
+      -- classifier recognises as work already in flight now gets a status of
+      -- its own and a pointer at the original instead.
+      --
+      -- SQLite cannot widen a CHECK in place, so \`sentry_issues\` is rebuilt
+      -- the way \`sessions\` is in 0005/0007/0008/0010/0011. Nothing else
+      -- references it, so unlike \`sessions\` it can be built alongside the old
+      -- table and renamed into place: the self-reference below is written
+      -- against \`sentry_issues_new\`, and SQLite rewrites it to
+      -- \`sentry_issues\` when the rename lands.
+      CREATE TABLE sentry_issues_new (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE CASCADE,
+        -- Sentry's own issue id, as a string. Unique across the install, so it
+        -- is the dedupe key for the poller across every linked project.
+        sentry_issue_id    TEXT NOT NULL UNIQUE,
+        -- The human-facing \`PROJECT-1AB\` id; what session names derive from.
+        short_id           TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        -- Where Sentry thinks the error came from; frequently absent.
+        culprit            TEXT,
+        permalink          TEXT NOT NULL,
+        level              TEXT,
+        event_count        INTEGER NOT NULL DEFAULT 0,
+        first_seen         TEXT NOT NULL,
+        last_seen          TEXT NOT NULL,
+        -- pending    -> fetched, awaiting classification
+        -- queued     -> classified fixable, awaiting session creation
+        -- working    -> session created and linked
+        -- fixed      -> the linked session's pull request was merged
+        -- cannot_fix -> the classifier said no, or the session never landed
+        -- duplicate  -> the same underlying defect as the issue \`duplicate_of\`
+        --               points at, which is already being worked on; the
+        --               duplicate gets no session of its own
+        status             TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (status IN
+                               ('pending', 'queued', 'working', 'fixed', 'cannot_fix',
+                                'duplicate')),
+        -- Why an issue is \`cannot_fix\`, in the operator's words. Every
+        -- \`cannot_fix\` row is expected to carry one.
+        explanation        TEXT,
+        -- The build session working on the fix. ON DELETE SET NULL rather than
+        -- CASCADE: deleting a session must not erase the record that chief-web
+        -- ever looked at this issue, or the next poll would ingest it again.
+        session_id         TEXT
+                             REFERENCES sessions (id) ON DELETE SET NULL,
+        -- Whether the "resolve it upstream" call has succeeded yet. Separate
+        -- from \`status\`, because a failed resolve retries on later ticks and
+        -- must never revert \`fixed\`.
+        resolved_in_sentry INTEGER NOT NULL DEFAULT 0,
+        -- Failed tries at the issue's current phase; at three the issue goes
+        -- \`cannot_fix\`. One counter serves both classification and session
+        -- creation because those phases never overlap -- the verdict that ends
+        -- the first is what starts the second, and it resets the counter.
+        attempts           INTEGER NOT NULL DEFAULT 0,
+        -- The issue this one duplicates; NULL for everything that is not a
+        -- duplicate. ON DELETE SET NULL for the same reason \`session_id\` uses
+        -- it: losing the original must not erase the record that chief-web
+        -- ever looked at the duplicate, or the next poll would ingest it again.
+        duplicate_of       TEXT
+                             REFERENCES sentry_issues_new (id) ON DELETE SET NULL,
+        -- The JSON similarity signature the shortlisting pass compares on
+        -- (US-003). NULL for every issue that predates it.
+        signature          TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+
+      INSERT INTO sentry_issues_new
+        (id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
+         event_count, first_seen, last_seen, status, explanation, session_id,
+         resolved_in_sentry, attempts, duplicate_of, signature, created_at, updated_at)
+      SELECT
+         id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
+         event_count, first_seen, last_seen, status, explanation, session_id,
+         resolved_in_sentry, attempts, NULL, NULL, created_at, updated_at
+      FROM sentry_issues;
+
+      -- Takes the old indexes with it; all three are recreated below.
+      DROP TABLE sentry_issues;
+      ALTER TABLE sentry_issues_new RENAME TO sentry_issues;
+
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_repository
+        ON sentry_issues (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_status
+        ON sentry_issues (status);
+      -- The merge watcher looks issues up by the session that is fixing them.
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_session
+        ON sentry_issues (session_id)
+        WHERE session_id IS NOT NULL;
+      -- Backs "which issues duplicate this one"; NULLs are not indexed by
+      -- SQLite, so the rows that are nobody's duplicate cost nothing.
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_duplicate_of
+        ON sentry_issues (duplicate_of)
+        WHERE duplicate_of IS NOT NULL;
+    `,
+  },
 ];
 
 /**

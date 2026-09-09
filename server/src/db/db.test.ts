@@ -62,6 +62,9 @@ const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 /** The migration under test in 'adds `review_context`'. */
 const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
 
+/** The migration under test in 'widens the sentry issue status check'. */
+const SENTRY_DUPLICATES_MIGRATION = '0015_sentry_duplicates';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -475,6 +478,99 @@ describe('migrations', () => {
       'Watch the N+1 queries.',
     );
     assert.equal(updateRepository(db, repository.id, { reviewContext: null })?.reviewContext, null);
+
+    closeDatabase(db);
+  });
+
+  it('widens the sentry issue status check to `duplicate`, rows intact', () => {
+    // `sentry_issues` is rebuilt to widen its CHECK and gain `duplicate_of`
+    // and `signature` (US-001), so this walks a database up to the migration
+    // before it, puts an issue in, and then applies it: the cached Sentry
+    // fields and the state machine both have to come out the other side
+    // untouched, with the two new columns reading back NULL.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === SENTRY_DUPLICATES_MIGRATION);
+    assert.ok(index > 0, `${SENTRY_DUPLICATES_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-08T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-08T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO sentry_issues
+         (id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
+          event_count, first_seen, last_seen, status, explanation, session_id,
+          resolved_in_sentry, attempts, created_at, updated_at)
+       VALUES ('i1', ?, '99', 'CHIEF-1AB', 'TypeError: undefined is not a function',
+               'app/Http/Kernel.php', 'https://sentry.io/i/99/', 'error', 12, ?, ?,
+               'cannot_fix', 'Not our code.', NULL, 1, 3, ?, ?)`,
+    ).run(repository.id, at, at, at, at);
+
+    assert.ok(runMigrations(db).includes(SENTRY_DUPLICATES_MIGRATION));
+
+    // Every column value survived the rebuild, and the two new ones are NULL.
+    const row = db.prepare("SELECT * FROM sentry_issues WHERE id = 'i1'").get();
+    assert.deepEqual(row, {
+      __proto__: null,
+      id: 'i1',
+      repository_id: repository.id,
+      sentry_issue_id: '99',
+      short_id: 'CHIEF-1AB',
+      title: 'TypeError: undefined is not a function',
+      culprit: 'app/Http/Kernel.php',
+      permalink: 'https://sentry.io/i/99/',
+      level: 'error',
+      event_count: 12,
+      first_seen: at,
+      last_seen: at,
+      status: 'cannot_fix',
+      explanation: 'Not our code.',
+      session_id: null,
+      resolved_in_sentry: 1,
+      attempts: 3,
+      duplicate_of: null,
+      signature: null,
+      created_at: at,
+      updated_at: at,
+    });
+
+    // The widened constraint takes the new status and still refuses the rest.
+    db.prepare('UPDATE sentry_issues SET status = ?, duplicate_of = ? WHERE id = ?').run(
+      'duplicate',
+      'i1',
+      'i1',
+    );
+    assert.throws(
+      () => db.prepare('UPDATE sentry_issues SET status = ? WHERE id = ?').run('bogus', 'i1'),
+      /CHECK/i,
+    );
+    // And the self-reference survived the rename, so a dangling pointer fails.
+    assert.throws(
+      () => db.prepare('UPDATE sentry_issues SET duplicate_of = ? WHERE id = ?').run('gone', 'i1'),
+      /FOREIGN KEY/i,
+    );
+
+    // All four indexes are on the rebuilt table.
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sentry_issues'")
+      .all()
+      .map((row) => row['name']);
+    for (const name of [
+      'idx_sentry_issues_repository',
+      'idx_sentry_issues_status',
+      'idx_sentry_issues_session',
+      'idx_sentry_issues_duplicate_of',
+    ]) {
+      assert.ok(indexes.includes(name), `missing index ${name}`);
+    }
 
     closeDatabase(db);
   });
