@@ -272,7 +272,9 @@ export class SentryClassifyService implements SentryClassifier {
       sessionId: classifyRunId(repository.id),
       containerId,
       iteration,
-      prompt: classificationPrompt({ details, baseBranch: repository.defaultBaseBranch }),
+      // US-006 shortlists the in-flight issues that go here; until then the list
+      // is empty, which is the prompt exactly as it was before duplicates.
+      prompt: classificationPrompt({ details, baseBranch: repository.defaultBaseBranch, candidates: [] }),
       timeoutMs: CLASSIFY_TIMEOUT_MS,
       model,
     });

@@ -66,6 +66,7 @@ export {
   type Classification,
   classificationPrompt,
   type ClassificationPromptInput,
+  type DuplicateCandidate,
   MAX_BREADCRUMBS,
   MAX_EXCEPTIONS,
   MAX_FIELD_CHARS,
