@@ -4,6 +4,7 @@ import {
   type Database,
   getRepository,
   listSentryIssuesByStatus,
+  nowIso,
   type Repository,
   type SentryIssue,
   updateSentryIssue,
@@ -26,7 +27,8 @@ import { classificationPrompt, type Classification, parseClassification } from '
  * One cheap `claude -p` per issue — haiku by default (US-002) — in a
  * throwaway container holding a checkout of the repository's base branch, so
  * the judgement is made against the actual code rather than against the error
- * message alone. The answer is one JSON object: fixable, and why.
+ * message alone. The answer is one JSON object: fixable, why, and — when it is
+ * fixable — the short plan an operator approves before anything is built.
  *
  * ## What bounds the cost
  *
@@ -299,13 +301,28 @@ export class SentryClassifyService implements SentryClassifier {
     return true;
   }
 
-  /** Writes the verdict. `attempts` is reset: the next phase counts its own. */
+  /**
+   * Writes the verdict. `attempts` is reset: the next phase counts its own.
+   *
+   * A fixable issue lands on `planned` with its proposed plan and the moment
+   * it was proposed, and stops there: `approved` is the operator's word and
+   * nothing here may write it, nor create a session. An unfixable one is
+   * terminal with its explanation and never carries a plan.
+   */
   private record(issue: SentryIssue, verdict: Classification, model: string): void {
-    updateSentryIssue(this.db, issue.id, {
-      status: verdict.fixable ? 'planned' : 'cannot_fix',
-      explanation: verdict.explanation,
-      attempts: 0,
-    });
+    updateSentryIssue(
+      this.db,
+      issue.id,
+      verdict.fixable
+        ? {
+            status: 'planned',
+            explanation: verdict.explanation,
+            plan: verdict.plan,
+            planProposedAt: nowIso(),
+            attempts: 0,
+          }
+        : { status: 'cannot_fix', explanation: verdict.explanation, attempts: 0 },
+    );
     logger.info('a Sentry issue was classified', {
       issue: issue.shortId,
       repository: issue.repositoryId,

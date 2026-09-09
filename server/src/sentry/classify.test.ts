@@ -9,6 +9,7 @@ import {
   type Database,
   getSentryIssue,
   IN_MEMORY,
+  nowIso,
   openDatabase,
   type Repository,
   type SentryIssue,
@@ -157,7 +158,9 @@ class FakeRunner implements AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentResult> {
     this.invocations.push(invocation);
     const answer = this.answers.length > 1 ? this.answers.shift() : this.answers[0];
-    return Promise.resolve(answer ?? ok('{"fixable": true, "explanation": "Because."}'));
+    return Promise.resolve(
+      answer ?? ok('{"fixable": true, "explanation": "Because.", "plan": "Guard the null."}'),
+    );
   }
 
   stop(): Promise<void> {
@@ -250,22 +253,51 @@ function hasToken(db: Database): boolean {
 
 describe('the Sentry issue classifier', () => {
   describe('a verdict', () => {
-    it('queues an issue the agent calls fixable', async () => {
+    it('plans an issue the agent calls fixable, and stops there', async () => {
       const w = world();
       const issue = w.issue();
+      const plan =
+        'Root cause: the handler reads payload.x without checking it.\n' +
+        'Change app/handlers.ts to guard the missing field and return a 400.';
       w.runner.answers.push(
-        ok('Here is my answer:\n{"fixable": true, "explanation": "The handler never checks x."}'),
+        ok(
+          'Here is my answer:\n' +
+            JSON.stringify({ fixable: true, explanation: 'The handler never checks x.', plan }),
+        ),
       );
 
+      const before = nowIso();
       assert.equal(await w.classifier.classifyPending(), 1);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'planned');
       assert.equal(row.explanation, 'The handler never checks x.');
+      assert.equal(row.plan, plan);
+      assert.ok(row.planProposedAt !== null);
+      assert.ok(row.planProposedAt >= before);
       assert.equal(row.attempts, 0);
+      // The operator's decision and the work are both still ahead of this.
+      assert.equal(row.planDecidedAt, null);
+      assert.equal(row.sessionId, null);
     });
 
-    it('closes an issue the agent calls unfixable, with its explanation', async () => {
+    it('leaves a fixable answer with no plan pending and counts an attempt', async () => {
+      const w = world();
+      const issue = w.issue();
+      w.runner.answers.push(ok('{"fixable": true, "explanation": "The handler never checks x."}'));
+
+      assert.equal(await w.classifier.classifyPending(), 0);
+
+      const row = w.reload(issue);
+      assert.equal(row.status, 'pending');
+      assert.equal(row.attempts, 1);
+      assert.equal(row.plan, null);
+      assert.equal(row.planProposedAt, null);
+      // Nothing of a half-answer is kept: the next tick asks the whole question.
+      assert.equal(row.explanation, null);
+    });
+
+    it('closes an issue the agent calls unfixable, with its explanation and no plan', async () => {
       const w = world();
       const issue = w.issue();
       w.runner.answers.push(
@@ -277,6 +309,10 @@ describe('the Sentry issue classifier', () => {
       const row = w.reload(issue);
       assert.equal(row.status, 'cannot_fix');
       assert.equal(row.explanation, 'The database was unreachable.');
+      // A plan the model wrote anyway is dropped: nothing is planned for an
+      // issue no code change can fix.
+      assert.equal(row.plan, null);
+      assert.equal(row.planProposedAt, null);
     });
 
     it('runs the configured model in a container holding the base branch', async () => {

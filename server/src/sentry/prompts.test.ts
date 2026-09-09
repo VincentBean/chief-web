@@ -6,6 +6,7 @@ import {
   classificationPrompt,
   MAX_BREADCRUMBS,
   MAX_FIELD_CHARS,
+  MAX_PLAN_CHARS,
   parseClassification,
   SENTRY_DATA_BEGIN,
   SENTRY_DATA_END,
@@ -76,7 +77,23 @@ describe('the Sentry classification prompt', () => {
     assert.ok(prompt.includes('environment=production'));
     assert.ok(prompt.includes('POST /api/orders'));
     assert.ok(prompt.includes('`main`'));
-    assert.ok(prompt.includes('{"fixable": true, "explanation": "One to three sentences."}'));
+    assert.ok(
+      prompt.includes(
+        '{"fixable": true, "explanation": "One to three sentences.", "plan": "The plan, at most ten lines."}',
+      ),
+    );
+  });
+
+  it('asks for a plan of at most ten lines, naming cause, files and change', () => {
+    const prompt = classificationPrompt({ details: details(), baseBranch: 'main' });
+
+    // The plan is the whole point of the call now: an operator approves it
+    // without opening the stack trace, so the brief has to say what goes in it.
+    assert.ok(prompt.includes('`plan` is required when `fixable` is true'));
+    assert.ok(prompt.includes('at most ten lines'));
+    assert.ok(prompt.includes('suspected root cause'));
+    assert.ok(prompt.includes('files or areas of this repository'));
+    assert.ok(prompt.includes('An answer with `fixable` true and no plan is not an answer'));
   });
 
   it('warns about the untrusted block before opening it', () => {
@@ -144,47 +161,81 @@ describe('the Sentry classification prompt', () => {
 
 describe('reading a classification back', () => {
   it('accepts a bare object', () => {
-    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "Yes."}'), {
-      fixable: true,
-      explanation: 'Yes.',
-    });
+    assert.deepEqual(
+      parseClassification('{"fixable": true, "explanation": "Yes.", "plan": "Guard the null."}'),
+      { fixable: true, explanation: 'Yes.', plan: 'Guard the null.' },
+    );
   });
 
-  it('accepts one wrapped in prose and a markdown fence', () => {
-    const output = 'Sure thing.\n```json\n{"fixable": false, "explanation": "No code fix."}\n```\n';
+  it('keeps the newlines of a multi-line plan', () => {
+    const plan = 'Root cause: payload.x is optional.\nChange app/handlers.ts to guard it.';
+    const verdict = parseClassification(
+      JSON.stringify({ fixable: true, explanation: 'Missing guard.', plan: `  ${plan}\n` }),
+    );
+
+    assert.deepEqual(verdict, { fixable: true, explanation: 'Missing guard.', plan });
+  });
+
+  it('bounds a plan that ignored the ten-line brief', () => {
+    const verdict = parseClassification(
+      JSON.stringify({ fixable: true, explanation: 'Yes.', plan: 'p'.repeat(MAX_PLAN_CHARS * 2) }),
+    );
+
+    assert.ok(verdict !== null);
+    assert.equal(verdict.plan, `${'p'.repeat(MAX_PLAN_CHARS)}…`);
+  });
+
+  it('drops the plan of an answer that is not fixable', () => {
+    const output = 'Sure thing.\n```json\n{"fixable": false, "explanation": "No code fix.", "plan": "Rewrite everything."}\n```\n';
     assert.deepEqual(parseClassification(output), {
       fixable: false,
       explanation: 'No code fix.',
+      plan: null,
+    });
+  });
+
+  it('accepts a not-fixable answer with no plan at all', () => {
+    assert.deepEqual(parseClassification('{"fixable": false, "explanation": "Sentry was down."}'), {
+      fixable: false,
+      explanation: 'Sentry was down.',
+      plan: null,
     });
   });
 
   it('takes the last object when the shape was quoted before it was filled in', () => {
     const output =
       'I will answer with {"fixable": false, "explanation": "placeholder"}.\n' +
-      '{"fixable": true, "explanation": "The guard is missing."}';
+      '{"fixable": true, "explanation": "The guard is missing.", "plan": "Add the guard."}';
     assert.deepEqual(parseClassification(output), {
       fixable: true,
       explanation: 'The guard is missing.',
+      plan: 'Add the guard.',
     });
   });
 
   it('is not fooled by a brace inside a string', () => {
-    assert.deepEqual(parseClassification('{"fixable": true, "explanation": "a } brace"}'), {
-      fixable: true,
-      explanation: 'a } brace',
-    });
+    assert.deepEqual(
+      parseClassification('{"fixable": true, "explanation": "a } brace", "plan": "a { one"}'),
+      { fixable: true, explanation: 'a } brace', plan: 'a { one' },
+    );
   });
 
   it('refuses everything that is not the verdict', () => {
     for (const output of [
       '',
       'It looks fixable to me.',
-      '{"fixable": "true", "explanation": "a string boolean"}',
-      '{"fixable": 1, "explanation": "a number"}',
-      '{"fixable": true}',
-      '{"fixable": true, "explanation": "   "}',
+      '{"fixable": "true", "explanation": "a string boolean", "plan": "p"}',
+      '{"fixable": 1, "explanation": "a number", "plan": "p"}',
+      '{"fixable": true, "plan": "p"}',
+      '{"fixable": true, "explanation": "   ", "plan": "p"}',
+      // A fixable verdict is the plan: without one there is nothing to approve,
+      // so it is no more an answer than a missing explanation is.
+      '{"fixable": true, "explanation": "The guard is missing."}',
+      '{"fixable": true, "explanation": "The guard is missing.", "plan": "  "}',
+      '{"fixable": true, "explanation": "The guard is missing.", "plan": 12}',
+      '{"fixable": true, "explanation": "The guard is missing.", "plan": ["a", "b"]}',
       '{"fixable": true, "explanation": ',
-      '[{"fixable": true, "explanation": "in an array, alone"}]'.replace('{', '('),
+      '[{"fixable": true, "explanation": "in an array, alone", "plan": "p"}]'.replace('{', '('),
     ]) {
       assert.equal(parseClassification(output), null, output);
     }
