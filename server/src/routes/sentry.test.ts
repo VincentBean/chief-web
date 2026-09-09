@@ -152,6 +152,52 @@ describe('sentry issues api', () => {
     assert.equal(orphaned.sessionName, null);
   });
 
+  it('links a duplicate to the original it was folded into', async () => {
+    const original = seed('1', 'DEMO-1', '2026-09-04T00:00:00.000Z');
+    const duplicate = seed('2', 'DEMO-2', '2026-09-03T00:00:00.000Z');
+    updateSentryIssue(db, original.id, { status: 'working' });
+    updateSentryIssue(db, duplicate.id, { status: 'duplicate', duplicateOf: original.id });
+
+    const view = await list();
+    const folded = view.issues.find((issue) => issue.shortId === 'DEMO-2');
+    assert.ok(folded);
+    assert.equal(folded.status, 'duplicate');
+    assert.equal(folded.duplicateOf, original.id);
+    assert.equal(folded.duplicateOfShortId, 'DEMO-1');
+    assert.equal(folded.duplicateOfPermalink, 'https://sentry.io/organizations/acme/issues/1/');
+    // The work is the original's; the duplicate reaches the session through it.
+    assert.equal(folded.sessionId, null);
+    assert.equal(folded.sessionName, null);
+
+    // The original is not a duplicate of anything.
+    const leader = view.issues.find((issue) => issue.shortId === 'DEMO-1');
+    assert.ok(leader);
+    assert.equal(leader.duplicateOf, null);
+    assert.equal(leader.duplicateOfShortId, null);
+    assert.equal(leader.duplicateOfPermalink, null);
+  });
+
+  it('answers with nulls when the original is no longer tracked', async () => {
+    const original = seed('1', 'DEMO-1', '2026-09-04T00:00:00.000Z');
+    const duplicate = seed('2', 'DEMO-2', '2026-09-03T00:00:00.000Z');
+    updateSentryIssue(db, duplicate.id, { status: 'duplicate', duplicateOf: original.id });
+
+    // The foreign key is ON DELETE SET NULL, so only a write that side-steps it
+    // can leave a dangling pointer — the endpoint must still answer.
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.prepare('DELETE FROM sentry_issues WHERE id = ?').run(original.id);
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    const [dangling] = (await list()).issues;
+    assert.ok(dangling);
+    assert.equal(dangling.duplicateOf, original.id);
+    assert.equal(dangling.duplicateOfShortId, null);
+    assert.equal(dangling.duplicateOfPermalink, null);
+  });
+
   it('rejects an unauthenticated read', async () => {
     const response = await fetch(`${baseUrl}/api/sentry/issues`);
     assert.equal(response.status, 401);
