@@ -17,6 +17,7 @@ import {
   type Session,
   type SessionStatus,
   setSetting,
+  syncStories,
   updateRepository,
   updateSentryIssue,
   updateSession,
@@ -68,6 +69,11 @@ interface World {
     lastError?: string | null;
     failureStage?: Session['failureStage'];
   }): { issue: SentryIssue; session: Session };
+  /** Several `working` issues sharing one session, as a fix batch does. */
+  batch(
+    count: number,
+    options?: Parameters<World['working']>[0],
+  ): { issues: SentryIssue[]; session: Session };
   issue(fields?: Partial<SentryIssue>): SentryIssue;
   reload(issue: SentryIssue): SentryIssue;
 }
@@ -107,6 +113,28 @@ function world(options: { token?: string | null } = {}): World {
     return updateSentryIssue(db, created.id, rest) ?? created;
   }
 
+  function fixSession(session: Parameters<World['working']>[0] = {}): Session {
+    const name = `sentry-fix-${(names += 1)}`;
+    const row = createSession(db, {
+      repositoryId: repository.id,
+      name,
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      featureBranch: featureBranchFor(name),
+      status: 'pr-open',
+      scheduledStartAt: null,
+      codeReview: true,
+    });
+    return (
+      updateSession(db, row.id, {
+        status: session.status ?? 'pr-open',
+        prUrl: session.prUrl === undefined ? 'https://github.com/acme/demo/pull/42' : session.prUrl,
+        lastError: session.lastError ?? null,
+        failureStage: session.failureStage ?? null,
+      }) ?? row
+    );
+  }
+
   return {
     db,
     sentry,
@@ -114,28 +142,18 @@ function world(options: { token?: string | null } = {}): World {
     repository,
     issue,
     working(session = {}) {
-      const name = `sentry-fix-${(names += 1)}`;
-      const row = createSession(db, {
-        repositoryId: repository.id,
-        name,
-        baseBranch: 'main',
-        prTargetBranch: 'main',
-        featureBranch: featureBranchFor(name),
-        status: 'pr-open',
-        scheduledStartAt: null,
-        codeReview: true,
-      });
-      const updated =
-        updateSession(db, row.id, {
-          status: session.status ?? 'pr-open',
-          prUrl: session.prUrl === undefined ? 'https://github.com/acme/demo/pull/42' : session.prUrl,
-          lastError: session.lastError ?? null,
-          failureStage: session.failureStage ?? null,
-        }) ?? row;
+      const updated = fixSession(session);
       return {
         issue: issue({ status: 'working', sessionId: updated.id }),
         session: updated,
       };
+    },
+    batch(count, session = {}) {
+      const updated = fixSession(session);
+      const issues = Array.from({ length: count }, () =>
+        issue({ status: 'working', sessionId: updated.id }),
+      );
+      return { issues, session: updated };
     },
     reload(row) {
       const found = getSentryIssue(db, row.id);
@@ -428,6 +446,159 @@ describe('the Sentry completion watcher', () => {
       const after = w.reload(issue);
       assert.equal(after.status, 'fixed');
       assert.equal(after.resolvedInSentry, true);
+    });
+  });
+
+  describe('a batch of issues behind one session (US-007)', () => {
+    it('fixes every issue of a merged batch and resolves each one in Sentry', async () => {
+      const w = world();
+      const { issues, session } = w.batch(3, { status: 'merged' });
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      for (const issue of issues) {
+        const after = w.reload(issue);
+        assert.equal(after.status, 'fixed');
+        assert.equal(after.explanation, null);
+        assert.equal(after.resolveUpstream, true);
+        assert.equal(after.resolvedInSentry, true);
+        // The batch is closed out, but each issue keeps the link that grouped it.
+        assert.equal(after.sessionId, session.id);
+      }
+      // Three issues, three independent calls — one per Sentry issue id.
+      assert.deepEqual(
+        w.sentry.calls,
+        issues.map((issue) => ({ org: 'acme', issueId: issue.sentryIssueId })),
+      );
+
+      // And once they are all through, the next tick has nothing left to do.
+      assert.equal(await w.completer.trackCompletions(), 0);
+      assert.equal(w.sentry.calls.length, 3);
+    });
+
+    it('fixes every issue of a merged batch even when a story was left todo', async () => {
+      const w = world();
+      const { issues, session } = w.batch(3, { status: 'merged' });
+      // The session's outcome decides the batch; the PRD's own bookkeeping is
+      // never read, so an unfinished story does not hold its issue open.
+      syncStories(w.db, session.id, [
+        { storyId: 'US-001', title: 'Fix PROJ-1', priority: 1, status: 'done' },
+        { storyId: 'US-002', title: 'Fix PROJ-2', priority: 2, status: 'todo' },
+        { storyId: 'US-003', title: 'Fix PROJ-3', priority: 3, status: 'in-progress' },
+      ]);
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      for (const issue of issues) assert.equal(w.reload(issue).status, 'fixed');
+    });
+
+    it('gives up on every issue of a failed batch, with the one explanation', async () => {
+      const w = world();
+      const { issues } = w.batch(3, {
+        status: 'failed',
+        failureStage: 'review',
+        lastError: 'the review agent stalled',
+      });
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      for (const issue of issues) {
+        const after = w.reload(issue);
+        assert.equal(after.status, 'cannot_fix');
+        assert.equal(
+          after.explanation,
+          'build session failed at the code review stage: the review agent stalled',
+        );
+        assert.equal(after.resolveUpstream, false);
+      }
+      // Nothing was fixed, so Sentry is owed nothing.
+      assert.deepEqual(w.sentry.calls, []);
+    });
+
+    it('gives up on every issue when the pull request was closed unmerged', async () => {
+      const w = world();
+      const { issues } = w.batch(3, {
+        status: 'finished',
+        prUrl: 'https://github.com/acme/demo/pull/42',
+      });
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      for (const issue of issues) {
+        const after = w.reload(issue);
+        assert.equal(after.status, 'cannot_fix');
+        assert.equal(after.explanation, 'PR #42 closed without merging');
+      }
+    });
+
+    it('gives up on every issue when the session opened no pull request', async () => {
+      const w = world();
+      const { issues } = w.batch(3, { status: 'finished', prUrl: null });
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      const said = 'build session ended without opening a pull request';
+      for (const issue of issues) assert.equal(w.reload(issue).explanation, said);
+    });
+
+    it('gives up on every issue when the session was deleted', async () => {
+      const w = world();
+      const { issues, session } = w.batch(3, { status: 'building' });
+
+      deleteSession(w.db, session.id);
+
+      assert.equal(await w.completer.trackCompletions(), 3);
+
+      for (const issue of issues) {
+        const after = w.reload(issue);
+        assert.equal(after.sessionId, null);
+        assert.equal(after.status, 'cannot_fix');
+        assert.equal(after.explanation, 'session was deleted');
+      }
+    });
+
+    it('leaves the batch alone while its session is still open', async () => {
+      const w = world();
+      const { issues } = w.batch(3, { status: 'pr-open' });
+
+      assert.equal(await w.completer.trackCompletions(), 0);
+
+      for (const issue of issues) assert.equal(w.reload(issue).status, 'working');
+    });
+
+    it('lets one failing resolve call cost only its own issue of the batch', async () => {
+      const w = world();
+      const { issues } = w.batch(3, { status: 'merged' });
+      const [first, second, third] = issues;
+      assert.ok(first && second && third);
+      let broken = second.sentryIssueId;
+      const calls: string[] = [];
+      const flaky: SentryResolveGateway = {
+        resolveIssue(_org, issueId) {
+          calls.push(issueId);
+          return issueId === broken
+            ? Promise.reject(new SentryApiError('sentry_error', 'boom'))
+            : Promise.resolve();
+        },
+      };
+      const completer = new SentryCompletionService(w.db, () => flaky);
+
+      // The merge is local, so every issue of the batch is fixed regardless.
+      assert.equal(await completer.trackCompletions(), 3);
+
+      const reported = issues.map((issue) => issue.sentryIssueId);
+      assert.deepEqual(calls, reported);
+      for (const issue of issues) assert.equal(w.reload(issue).status, 'fixed');
+      assert.equal(w.reload(first).resolvedInSentry, true);
+      assert.equal(w.reload(second).resolvedInSentry, false);
+      assert.equal(w.reload(third).resolvedInSentry, true);
+
+      // Only the one that failed is still owed, and the next tick makes it good.
+      broken = '';
+      assert.equal(await completer.trackCompletions(), 0);
+
+      assert.deepEqual(calls, [...reported, second.sentryIssueId]);
+      for (const issue of issues) assert.equal(w.reload(issue).resolvedInSentry, true);
     });
   });
 
