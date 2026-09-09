@@ -6,7 +6,7 @@ import type { Config } from '../config.js';
 import {
   type Database,
   getRepository,
-  listSentryIssuesByStatus,
+  getSentryIssue,
   listSessions,
   type PrTargetBranch,
   type Repository,
@@ -24,10 +24,16 @@ import type { SentryDetailsFactory, SentryDetailsGateway } from './classify.js';
 import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
 
 /**
- * Turning a fixable Sentry issue into a build session (US-007).
+ * Turning an approved Sentry issue into a build session (US-007).
  *
- * Runs after the classification pass, over the `planned` rows it left behind.
- * Each one becomes a real session: the repository's default base branch, code
+ * Nothing here scans for work. The only way in is
+ * {@link SentryFixService.createFixSessions}, which is handed an explicit list
+ * of issue ids by the operator's "Create fix session" API (US-006) — the poll
+ * tick ends at a proposed plan and never reaches this file. That is the whole
+ * point of the approval flow: a pull request exists because somebody asked for
+ * it, not because an error fired.
+ *
+ * Each id becomes a real session: the repository's default base branch, code
  * review on so the existing review + PR-feedback pipeline runs, a generated
  * `prd.md` holding everything Sentry knows about the error, "Mark ready", and
  * then the very call the Start button makes. From that point on nothing about
@@ -46,28 +52,27 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
  *
  * ## Why there is no cap here
  *
- * There is one upstream. {@link import('./classify.js').MAX_ISSUES_PER_TICK}
- * decides how many issues reach `planned` per tick, and the build queue decides
- * how many sessions run at once. A second cap in the middle would only leave
- * sessions un-created while slots sat empty.
+ * There is one on either side. The API caps a batch at ten ids, and the build
+ * queue decides how many sessions run at once. A second cap in the middle
+ * would only leave sessions un-created while slots sat empty.
  *
  * ## Exactly one session per issue
  *
- * The row leaves `planned` in the same beat the session is created, so the next
- * tick's `listSentryIssuesByStatus(db, 'planned')` no longer returns it. An issue
- * that somehow still carries a `session_id` is skipped outright rather than
+ * The row leaves `approved` for `working` in the same beat the session is
+ * created, so a second call naming the same id finds an issue that already has
+ * one. An issue that carries a `session_id` is skipped outright rather than
  * given a second one.
  *
  * ## Failure
  *
  * Per issue, and never destructive. A missing deploy key, a clone that was
- * refused, a PRD that would not write: the error is logged, the issue stays
- * `planned` with one more attempt against it, and the next tick tries again. At
- * {@link MAX_FIX_ATTEMPTS} it becomes `cannot_fix` with the failure named, so
- * the Sentry tab says what went wrong rather than "nothing happened". A session
- * that was created before the failure is deleted, so the retry starts clean —
- * and because `session_id` is `ON DELETE SET NULL`, the issue is unlinked by
- * the deletion itself.
+ * refused, a PRD that would not write: the error is logged, the issue keeps
+ * the status it came in with and one more attempt against it, and the operator
+ * can press the button again. At {@link MAX_FIX_ATTEMPTS} it becomes
+ * `cannot_fix` with the failure named, so the Sentry tab says what went wrong
+ * rather than "nothing happened". A session that was created before the
+ * failure is deleted, so the retry starts clean — and because `session_id` is
+ * `ON DELETE SET NULL`, the issue is unlinked by the deletion itself.
  */
 
 /** Failed attempts at building a fix session before the issue is given up on. */
@@ -99,10 +104,14 @@ export interface FixBuildService {
   start(sessionId: string): Promise<unknown>;
 }
 
-/** What the poller calls once the classification pass is done. */
+/** What the operator's "Create fix session" API (US-006) calls. */
 export interface SentryFixer {
-  /** One pass over the queued issues. Returns how many sessions were created. */
-  createFixSessions(): Promise<number>;
+  /**
+   * One pass over exactly the issues named. Returns how many sessions were
+   * created. An id nothing is known about, or one whose issue already has a
+   * session, is skipped; nothing else is ever looked at.
+   */
+  createFixSessions(issueIds: string[]): Promise<number>;
 }
 
 /**
@@ -161,24 +170,30 @@ export class SentryFixService implements SentryFixer {
     private readonly clients: SentryDetailsFactory = createSentryClient,
   ) {}
 
-  async createFixSessions(): Promise<number> {
-    const queued = listSentryIssuesByStatus(this.db, 'planned');
-    if (queued.length === 0) return 0;
+  async createFixSessions(issueIds: string[]): Promise<number> {
+    // The caller's order is kept — it is the order the operator ticked the
+    // rows in — but an id named twice is one issue, not two sessions.
+    const wanted = [...new Set(issueIds)];
+    const asked = wanted
+      .map((id) => getSentryIssue(this.db, id))
+      .filter((issue): issue is SentryIssue => issue !== null);
+    if (asked.length === 0) return 0;
 
-    // Only now, so an install with nothing queued never looks the token up.
+    // Only now, so a call with nothing to do never looks the token up.
     const client = this.clients(this.db);
     if (client === null) {
       logger.debug('sentry fix sessions cannot be created: no Sentry token is configured', {
-        queued: queued.length,
+        asked: asked.length,
       });
       return 0;
     }
 
     let created = 0;
-    for (const issue of queued) {
+    for (const issue of asked) {
       if (issue.sessionId !== null) {
-        // Belt and braces: the status alone already keeps a second tick away.
-        logger.warn('a queued Sentry issue already has a session; leaving it alone', {
+        // Belt and braces: the API refuses anything that is not `approved`,
+        // and an issue with a session left `approved` long ago.
+        logger.warn('a Sentry issue named for a fix session already has one; leaving it alone', {
           issue: issue.shortId,
           session: issue.sessionId,
         });
@@ -195,7 +210,7 @@ export class SentryFixService implements SentryFixer {
     return created;
   }
 
-  /** One issue. Returns whether it left `planned` with a session behind it. */
+  /** One issue. Returns whether it left `approved` with a session behind it. */
   private async createFor(
     issue: SentryIssue,
     repository: Repository,
@@ -302,8 +317,8 @@ export class SentryFixService implements SentryFixer {
       });
     }
 
-    // Only here, and in one write: from now on the issue is `working` and no
-    // tick will look at it again.
+    // Only here, and in one write: from now on the issue is `working` and the
+    // completion pass is the only thing that touches it again.
     updateSentryIssue(this.db, issue.id, {
       sessionId: session.id,
       status: 'working',
@@ -345,10 +360,10 @@ export class SentryFixService implements SentryFixer {
   }
 
   /**
-   * One failed attempt. The issue stays `planned` and comes back on the next
-   * tick until the attempts run out, at which point it is given up on with the
-   * failure named — `attempts` is the counter the classification pass reset to
-   * zero when it said the issue was fixable.
+   * One failed attempt. The issue keeps the status it came in with, so the
+   * operator can press the button again, until the attempts run out — at which
+   * point it is given up on with the failure named. `attempts` is the counter
+   * the classification pass reset to zero when it said the issue was fixable.
    */
   private failed(issue: SentryIssue, reason: string): void {
     const attempts = issue.attempts + 1;

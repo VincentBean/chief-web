@@ -51,7 +51,6 @@ import { createPullRequestService, type PullRequestService } from './pullrequest
 import {
   createSentryClassifier,
   createSentryCompleter,
-  createSentryFixer,
   createSentrySync,
   type SentrySync,
 } from './sentry/index.js';
@@ -334,29 +333,26 @@ export function createApp(
     exec,
     createAgentRunner(exec),
   );
-  // And what a "yes" is worth (US-007): a real build session on the base
-  // branch, seeded with a generated PRD holding the whole Sentry report, code
-  // review on, marked ready and handed to `builds.start` exactly as the Start
-  // button would — from there the ordinary queue, delivery and review pipeline
-  // take it the rest of the way to a pull request.
-  // Which needs the session service, so it is built here rather than beside
-  // its router: the fixer starts sessions through it, and the recurring task
-  // runner's thunk above resolves to this same one. Deleting a session (US-015)
-  // has to unwind whatever is running in its container first, which is why it
-  // takes the orchestrator and the executor along with the three services.
+  // And what a "yes" is worth: a proposed fix plan on the row, and there the
+  // tick stops. No session is created and no pull request is opened until an
+  // operator has approved the plan and asked for the work (US-006); the fixer
+  // is wired to that route rather than to this poller.
+  // The session service is built here rather than beside its router because
+  // the recurring task runner's thunk above resolves to this same one.
+  // Deleting a session (US-015) has to unwind whatever is running in its
+  // container first, which is why it takes the orchestrator and the executor
+  // along with the three services.
   sessions = createSessionService(config, db, orchestrator, exec, {
     builds,
     planning,
     scheduler,
   });
-  const sentryFixer = createSentryFixer(config, db, sessions, builds);
   // And how it ends (US-008): a merged pull request marks its issue fixed and
   // resolves it in Sentry, while a session that failed or whose pull request
   // was closed unmerged closes the issue with what happened written on it.
   const sentryCompleter = createSentryCompleter(db);
   const sentrySync =
-    deps.sentrySync ??
-    createSentrySync(db, undefined, sentryClassifier, sentryFixer, sentryCompleter);
+    deps.sentrySync ?? createSentrySync(db, undefined, sentryClassifier, sentryCompleter);
   sentrySync.start();
   // Pull request feedback (US-021). It shares the build loop's slot cap, and
   // since US-004 its queue as well: a pass asked for while every slot is taken
@@ -395,8 +391,8 @@ export function createApp(
       prConflicts,
     ),
   );
-  // What the poller, the classifier and the fixer above have made of every
-  // issue they have seen (US-009). A read over the database, mounted here
+  // What the poller and the classifier above have made of every issue they
+  // have seen (US-009). A read over the database, mounted here
   // rather than beside the settings router so it sits next to the pipeline it
   // reports on.
   api.use(createSentryRouter(db));

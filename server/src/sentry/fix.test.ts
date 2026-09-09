@@ -240,6 +240,12 @@ interface World {
   readonly fixer: SentryFixService;
   readonly repository: Repository;
   issue(fields?: { shortId?: string; attempts?: number }): SentryIssue;
+  /**
+   * The operator's call: every issue this world has made, by id, in the order
+   * they were made. Nothing scans any more, so a test that seeds no issue asks
+   * for no session.
+   */
+  fix(issues?: SentryIssue[]): Promise<number>;
   reload(issue: SentryIssue): SentryIssue;
   prd(sessionName: string): string;
 }
@@ -269,6 +275,7 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
   );
 
   let seq = 0;
+  const seeded: SentryIssue[] = [];
   return {
     db,
     config,
@@ -291,14 +298,20 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
         firstSeen: '2026-08-01T10:00:00.000Z',
         lastSeen: '2026-09-04T22:15:00.000Z',
       });
-      // The classifier's verdict: queued, explained, attempts back to zero.
-      const queued = updateSentryIssue(db, row.id, {
-        status: 'planned',
+      // Where the operator's button finds an issue: planned by the classifier,
+      // explained, and approved by somebody.
+      const approved = updateSentryIssue(db, row.id, {
+        status: 'approved',
         explanation: 'The handler never checks x.',
+        plan: 'Guard the read in app/handlers.ts.',
         attempts: fields.attempts ?? 0,
       });
-      assert.ok(queued !== null);
-      return queued;
+      assert.ok(approved !== null);
+      seeded.push(approved);
+      return approved;
+    },
+    fix(issues) {
+      return fixer.createFixSessions((issues ?? seeded).map((issue) => issue.id));
     },
     reload(issue) {
       const row = getSentryIssue(db, issue.id);
@@ -324,7 +337,7 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       const issue = w.issue({ shortId: 'PROJ-123' });
 
-      assert.equal(await w.fixer.createFixSessions(), 1);
+      assert.equal(await w.fix(), 1);
 
       assert.deepEqual(w.sessions.created, [
         {
@@ -355,7 +368,7 @@ describe('the Sentry fix session builder', () => {
       const w = world();
       w.issue({ shortId: 'PROJ-123' });
 
-      await w.fixer.createFixSessions();
+      await w.fix();
 
       const prd = w.prd('sentry-proj-123');
       assert.ok(prd.startsWith('# PRD: Fix the Sentry issue PROJ-123'));
@@ -382,7 +395,7 @@ describe('the Sentry fix session builder', () => {
         const w = world({ baseBranch });
         w.issue();
 
-        await w.fixer.createFixSessions();
+        await w.fix();
 
         assert.equal(w.sessions.created[0]?.baseBranch, baseBranch);
         assert.equal(w.sessions.created[0]?.prTargetBranch, target);
@@ -403,17 +416,17 @@ describe('the Sentry fix session builder', () => {
       });
       w.issue({ shortId: 'PROJ-123' });
 
-      await w.fixer.createFixSessions();
+      await w.fix();
 
       assert.equal(w.sessions.created[0]?.name, 'sentry-proj-123-2');
     });
 
-    it('creates one session per queued issue', async () => {
+    it('creates one session per issue it is given', async () => {
       const w = world();
       w.issue({ shortId: 'PROJ-1' });
       w.issue({ shortId: 'PROJ-2' });
 
-      assert.equal(await w.fixer.createFixSessions(), 2);
+      assert.equal(await w.fix(), 2);
       assert.deepEqual(
         w.sessions.created.map((request) => request.name),
         ['sentry-proj-1', 'sentry-proj-2'],
@@ -422,19 +435,19 @@ describe('the Sentry fix session builder', () => {
   });
 
   describe('never twice', () => {
-    it('leaves a working issue alone on the next tick', async () => {
+    it('leaves a working issue alone when it is named a second time', async () => {
       const w = world();
       const issue = w.issue();
 
-      assert.equal(await w.fixer.createFixSessions(), 1);
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 1);
+      assert.equal(await w.fix(), 0);
 
       assert.equal(w.sessions.created.length, 1);
       assert.equal(listSessions(w.db, {}).length, 1);
       assert.equal(w.reload(issue).status, 'working');
     });
 
-    it('skips a queued issue that somehow already has a session', async () => {
+    it('skips an issue that somehow already has a session', async () => {
       const w = world();
       const issue = w.issue();
       const session = createSession(w.db, {
@@ -449,10 +462,55 @@ describe('the Sentry fix session builder', () => {
       });
       updateSentryIssue(w.db, issue.id, { sessionId: session.id });
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       assert.equal(w.sessions.created.length, 0);
-      assert.equal(w.reload(issue).status, 'planned');
+      assert.equal(w.reload(issue).status, 'approved');
+    });
+
+    it('creates one session when the same id is named twice', async () => {
+      const w = world();
+      const issue = w.issue();
+
+      assert.equal(await w.fix([issue, issue]), 1);
+
+      assert.equal(w.sessions.created.length, 1);
+    });
+  });
+
+  describe('only the issues it is given (US-003)', () => {
+    it('leaves an approved issue nobody named alone', async () => {
+      const w = world();
+      const named = w.issue({ shortId: 'PROJ-1' });
+      const other = w.issue({ shortId: 'PROJ-2' });
+
+      assert.equal(await w.fix([named]), 1);
+
+      assert.deepEqual(
+        w.sessions.created.map((request) => request.name),
+        ['sentry-proj-1'],
+      );
+      assert.equal(w.reload(other).status, 'approved');
+      assert.equal(w.reload(other).sessionId, null);
+    });
+
+    it('skips an id nothing is known about', async () => {
+      const w = world();
+      const issue = w.issue();
+
+      assert.equal(await w.fixer.createFixSessions(['no-such-issue', issue.id]), 1);
+
+      assert.equal(w.sessions.created.length, 1);
+      assert.equal(w.reload(issue).status, 'working');
+    });
+
+    it('does nothing at all when every id is unknown', async () => {
+      const w = world();
+
+      assert.equal(await w.fixer.createFixSessions(['no-such-issue']), 0);
+
+      assert.equal(w.sentry.calls.length, 0);
+      assert.equal(w.sessions.created.length, 0);
     });
   });
 
@@ -463,7 +521,7 @@ describe('the Sentry fix session builder', () => {
       w.builds.queueBeforeFailing = true;
       w.builds.failure = new BuildError(429, 'usage_limit_hold', 'Queued behind the hold.');
 
-      assert.equal(await w.fixer.createFixSessions(), 1);
+      assert.equal(await w.fix(), 1);
 
       // The refusal came after the queueing, so there is nothing to undo: the
       // pump starts it when the hold lifts.
@@ -483,17 +541,17 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.builds.failure = new BuildError(409, 'session_not_ready', 'The session is finished.');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
 
       w.builds.failure = null;
-      assert.equal(await w.fixer.createFixSessions(), 1);
+      assert.equal(await w.fix(), 1);
       assert.equal(w.reload(issue).status, 'working');
     });
 
@@ -502,7 +560,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
       w.builds.failure = new BuildError(500, 'container_failed', 'no docker daemon');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'cannot_fix');
@@ -515,21 +573,21 @@ describe('the Sentry fix session builder', () => {
   });
 
   describe('when the session cannot be created', () => {
-    it('leaves the issue queued and retries next tick', async () => {
+    it('leaves the issue approved so the operator can ask again', async () => {
       const w = world();
       const issue = w.issue();
       w.sessions.createFailure = new Error('"demo" has no private key on the data volume.');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
       assert.equal(row.explanation, 'The handler never checks x.');
 
       w.sessions.createFailure = null;
-      assert.equal(await w.fixer.createFixSessions(), 1);
+      assert.equal(await w.fix(), 1);
       assert.equal(w.reload(issue).status, 'working');
     });
 
@@ -538,7 +596,7 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue({ attempts: MAX_FIX_ATTEMPTS - 1 });
       w.sessions.createFailure = new Error('no private key');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
       assert.equal(row.status, 'cannot_fix');
@@ -554,12 +612,12 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sessions.setupOk = false;
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
     });
@@ -569,10 +627,10 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sentry.failure = new SentryApiError('sentry_unreachable', 'Sentry is down.');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 0);
       assert.equal(w.sessions.created.length, 0);
     });
@@ -582,17 +640,17 @@ describe('the Sentry fix session builder', () => {
       const issue = w.issue();
       w.sentry.failure = new SentryApiError('sentry_not_found', 'No such issue.');
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       assert.equal(w.reload(issue).attempts, 1);
     });
   });
 
   describe('when there is nothing to do', () => {
-    it('does not look the token up without a queued issue', async () => {
+    it('does not look the token up when it is given no ids', async () => {
       const w = world();
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
       assert.equal(w.sentry.calls.length, 0);
     });
 
@@ -600,10 +658,10 @@ describe('the Sentry fix session builder', () => {
       const w = world({ token: false });
       const issue = w.issue();
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 0);
     });
 
@@ -611,10 +669,10 @@ describe('the Sentry fix session builder', () => {
       const w = world({ link: false });
       const issue = w.issue();
 
-      assert.equal(await w.fixer.createFixSessions(), 0);
+      assert.equal(await w.fix(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'planned');
+      assert.equal(row.status, 'approved');
       assert.equal(row.attempts, 0);
       assert.equal(w.sessions.created.length, 0);
     });

@@ -11,7 +11,6 @@ import { getSentryPollIntervalMs } from '../settings/index.js';
 import type { SentryClassifier } from './classify.js';
 import { createSentryClient, SentryApiError, type SentryIssueSummary } from './client.js';
 import type { SentryCompleter } from './complete.js';
-import type { SentryFixer } from './fix.js';
 
 /**
  * The front of the Sentry pipeline (US-005): every linked project's unresolved
@@ -27,12 +26,14 @@ import type { SentryFixer } from './fix.js';
  * ## What a tick may do to a row
  *
  * Exactly two things. An issue Sentry has and this database does not is
- * inserted as `pending`, which is what puts it in front of the classifier
- * (US-006). An issue that is already here has its cached upstream fields — the
- * event count, `last_seen`, and the title Sentry may have re-grouped —
- * refreshed. It never has its `status`, `explanation`, `session_id` or
- * `attempts` touched: an issue being fixed must not fall back to `pending`
- * because it fired one more event. `createSentryIssue` is what enforces that
+ * inserted as `pending`, which is what puts it in front of the planning pass
+ * (US-006). That pass is where a tick ends: it proposes a fix plan and stops,
+ * and no tick has ever created a session or opened a pull request. An issue
+ * that is already here has its cached upstream fields — the event count,
+ * `last_seen`, and the title Sentry may have re-grouped — refreshed. It never
+ * has its `status`, `explanation`, `session_id` or `attempts` touched: an
+ * issue being fixed must not fall back to `pending` because it fired one more
+ * event. `createSentryIssue` is what enforces that
  * split, so the poller cannot get it wrong.
  *
  * Nothing is ever deleted here. An issue resolved in Sentry stops arriving,
@@ -104,19 +105,12 @@ export class SentrySyncService implements SentrySync {
      */
     private readonly classifier: SentryClassifier | null = null,
     /**
-     * What is done with the `queued` rows the classifier leaves behind
-     * (US-007): a build session each, seeded with a generated PRD. Hung off the
-     * same beat for the same reason the classifier is — an issue is worth a
-     * session exactly once it has been judged fixable, which happened moments
-     * ago in this very tick.
-     */
-    private readonly fixer: SentryFixer | null = null,
-    /**
-     * What is done with the `working` rows the fixer leaves behind (US-008):
-     * a look at what became of each fix session, and a resolve call to Sentry
-     * for every fix that landed. Same beat again — a merge is worth noticing
-     * exactly as often as an error is worth polling for — but unlike the two
-     * above it runs *before* the poll and outside the idle checks, because it
+     * What is done with the `working` rows the operator's fix sessions leave
+     * behind (US-008): a look at what became of each fix session, and a resolve
+     * call to Sentry for every fix that landed. Same beat again — a merge is
+     * worth noticing exactly as often as an error is worth polling for — but
+     * unlike the pass above it runs *before* the poll and outside the idle
+     * checks, because it
      * is local work until something needs reporting: a session that merged
      * must be recorded even on an install whose token was just removed.
      */
@@ -210,10 +204,10 @@ export class SentrySyncService implements SentrySync {
     // the classifier should see in the same beat, and a repository whose list
     // call failed has left nothing new to judge.
     await this.classify();
-    // And the rows *that* pass leaves behind: a fixable issue with no session
-    // is one nothing is happening to, whether it was queued a second ago or
-    // three ticks back.
-    await this.createFixSessions();
+    // And there the tick stops. A fixable issue leaves the planning pass as
+    // `planned` with a proposed plan against it, and nothing automatic takes
+    // it any further: the session that fixes it is created by an operator who
+    // approved the plan and pressed the button (US-006).
     return inserted;
   }
 
@@ -228,20 +222,6 @@ export class SentrySyncService implements SentrySync {
       await this.classifier.classifyPending();
     } catch (cause) {
       logger.error('the Sentry issue classification pass failed', { error: describe(cause) });
-    }
-  }
-
-  /**
-   * The fix-session pass, which must never be able to fail a poll either: an
-   * issue whose session could not be created is still `queued`, which is
-   * exactly where the next tick expects it.
-   */
-  private async createFixSessions(): Promise<void> {
-    if (this.fixer === null) return;
-    try {
-      await this.fixer.createFixSessions();
-    } catch (cause) {
-      logger.error('the Sentry fix session pass failed', { error: describe(cause) });
     }
   }
 
@@ -351,10 +331,9 @@ export function createSentrySync(
   db: Database,
   clients: SentryGatewayFactory = createSentryClient,
   classifier: SentryClassifier | null = null,
-  fixer: SentryFixer | null = null,
   completer: SentryCompleter | null = null,
 ): SentrySyncService {
-  return new SentrySyncService(db, clients, classifier, fixer, completer);
+  return new SentrySyncService(db, clients, classifier, completer);
 }
 
 function describe(cause: unknown): string {

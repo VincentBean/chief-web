@@ -8,9 +8,13 @@ import {
   type Database,
   findSentryIssue,
   IN_MEMORY,
+  listBuildQueue,
   listSentryIssues,
+  listSessions,
   openDatabase,
   type Repository,
+  type SentryIssue,
+  type SentryIssueStatus,
   setSetting,
   updateRepository,
   updateSentryIssue,
@@ -109,6 +113,44 @@ function world(options: { token?: string | null; link?: boolean } = {}): World {
       return other;
     },
   };
+}
+
+/**
+ * An issue the classifier has already ruled on, or an operator has already
+ * approved — the two states a tick has to walk past without acting.
+ */
+function seed(
+  db: Database,
+  repository: Repository,
+  sentryIssueId: string,
+  shortId: string,
+  status: SentryIssueStatus,
+): SentryIssue {
+  const row = createSentryIssue(db, {
+    repositoryId: repository.id,
+    sentryIssueId,
+    shortId,
+    title: 'TypeError: cannot read property x of undefined',
+    culprit: 'app/handlers.ts in handle',
+    permalink: `https://sentry.io/organizations/acme/issues/${sentryIssueId}/`,
+    level: 'error',
+    eventCount: 12,
+    firstSeen: '2026-08-01T10:00:00.000Z',
+    lastSeen: '2026-09-04T22:15:00.000Z',
+  });
+  const planned = updateSentryIssue(db, row.id, {
+    status,
+    explanation: 'The handler never checks x.',
+    plan: 'Guard the read in app/handlers.ts.',
+    planProposedAt: '2026-09-05T09:00:00.000Z',
+  });
+  assert.ok(planned !== null);
+  return planned;
+}
+
+/** How many sessions a tick handed to the build loop. */
+function queuedBuilds(db: Database): number {
+  return listBuildQueue(db).length;
 }
 
 function hasToken(db: Database): boolean {
@@ -444,58 +486,40 @@ describe('the Sentry issue poller', () => {
     });
   });
 
-  describe('the fix session pass hung off it (US-007)', () => {
-    it('runs after the classification pass, in the same tick', async () => {
-      const { db, sentry } = world();
+  describe('where a tick stops (US-003)', () => {
+    it('creates no session and starts no build for planned or approved issues', async () => {
+      // The whole point of the approval flow: whatever the classifier decided,
+      // and whatever an operator has already approved, a poll tick is allowed
+      // to leave behind a plan and nothing else.
+      const { db, repository, sentry } = world();
       sentry.serve('acme', 'web', [summary()]);
-      const order: string[] = [];
-      const sync = new SentrySyncService(
-        db,
-        () => sentry,
-        {
-          classifyPending: () => {
-            order.push('classify');
-            return Promise.resolve(1);
-          },
-        },
-        {
-          createFixSessions: () => {
-            order.push('fix');
-            return Promise.resolve(1);
-          },
-        },
-      );
-
-      assert.equal(await sync.tick(), 1);
-
-      assert.deepEqual(order, ['classify', 'fix']);
-    });
-
-    it('is skipped when there was nothing to poll', async () => {
-      const { db, sentry } = world({ link: false });
+      const planned = seed(db, repository, '9001', 'PROJ-9001', 'planned');
+      const approved = seed(db, repository, '9002', 'PROJ-9002', 'approved');
       let passes = 0;
-      const sync = new SentrySyncService(db, () => sentry, null, {
-        createFixSessions: () => {
+      const sync = new SentrySyncService(db, () => sentry, {
+        classifyPending: () => {
           passes += 1;
           return Promise.resolve(0);
         },
       });
 
-      await sync.tick();
-
-      assert.equal(passes, 0);
-    });
-
-    it('never fails the poll', async () => {
-      const { db, sentry } = world();
-      sentry.serve('acme', 'web', [summary()]);
-      const sync = new SentrySyncService(db, () => sentry, null, {
-        createFixSessions: () => Promise.reject(new Error('no deploy key')),
-      });
-
       assert.equal(await sync.tick(), 1);
 
-      assert.equal(listSentryIssues(db).length, 1);
+      // The planning pass did run: this is a tick that got all the way to the
+      // end, not one that fell over before it could have created anything.
+      assert.equal(passes, 1);
+      assert.equal(listSessions(db, {}).length, 0);
+      assert.equal(queuedBuilds(db), 0);
+      for (const [issue, status] of [
+        [planned, 'planned'],
+        [approved, 'approved'],
+      ] as const) {
+        const row = findSentryIssue(db, issue.sentryIssueId);
+        assert.ok(row !== null);
+        assert.equal(row.status, status);
+        assert.equal(row.sessionId, null);
+        assert.equal(row.attempts, 0);
+      }
     });
   });
 
@@ -510,7 +534,6 @@ describe('the Sentry issue poller', () => {
           order.push('poll');
           return sentry;
         },
-        null,
         null,
         {
           trackCompletions: () => {
@@ -531,7 +554,7 @@ describe('the Sentry issue poller', () => {
       // even still linked.
       const { db, sentry } = world({ link: false });
       let passes = 0;
-      const sync = new SentrySyncService(db, () => sentry, null, null, {
+      const sync = new SentrySyncService(db, () => sentry, null, {
         trackCompletions: () => {
           passes += 1;
           return Promise.resolve(0);
@@ -540,7 +563,7 @@ describe('the Sentry issue poller', () => {
 
       await sync.tick();
       const noToken = world({ token: null });
-      await new SentrySyncService(noToken.db, () => null, null, null, {
+      await new SentrySyncService(noToken.db, () => null, null, {
         trackCompletions: () => {
           passes += 1;
           return Promise.resolve(0);
@@ -553,7 +576,7 @@ describe('the Sentry issue poller', () => {
     it('never fails the poll', async () => {
       const { db, sentry } = world();
       sentry.serve('acme', 'web', [summary()]);
-      const sync = new SentrySyncService(db, () => sentry, null, null, {
+      const sync = new SentrySyncService(db, () => sentry, null, {
         trackCompletions: () => Promise.reject(new Error('Sentry is on fire')),
       });
 
