@@ -53,7 +53,14 @@ export {
   writeSessionPrd,
 } from './fix.js';
 export {
+  batchDateStamp,
+  batchStoryId,
   FIX_STORY_ID,
+  fixBatchPrd,
+  type FixBatchIssue,
+  type FixBatchPrdInput,
+  fixBatchSessionBaseName,
+  fixBatchSessionName,
   fixPrd,
   type FixPrdInput,
   fixSessionBaseName,
