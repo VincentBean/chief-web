@@ -70,6 +70,7 @@ export {
   MAX_EXCEPTIONS,
   MAX_FIELD_CHARS,
   MAX_FRAMES,
+  MAX_PLAN_CHARS,
   MAX_TAGS,
   parseClassification,
   SENTRY_DATA_BEGIN,

@@ -1565,6 +1565,12 @@ export interface SentryIssue {
   status: SentryIssueStatus;
   /** Why the issue cannot be fixed; shown inline on every `cannot_fix` row. */
   explanation: string | null;
+  /** The proposed fix plan the operator judges; null until one is written. */
+  plan: string | null;
+  /** When the classifier proposed the plan; null while there is none. */
+  planProposedAt: string | null;
+  /** When the operator approved or rejected it; null while undecided. */
+  planDecidedAt: string | null;
   sessionId: string | null;
   /** Null when there is no session, or it has been deleted. */
   sessionName: string | null;

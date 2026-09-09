@@ -15,7 +15,9 @@ import {
   deleteSession,
   deleteSetting,
   featureBranchFor,
+  getSentryIssue,
   IN_MEMORY,
+  listSentryIssuesAwaitingResolve,
   openDatabase,
   setSetting,
   updateSentryIssue,
@@ -150,6 +152,165 @@ describe('sentry issues api', () => {
     assert.ok(orphaned);
     assert.equal(orphaned.sessionId, null);
     assert.equal(orphaned.sessionName, null);
+  });
+
+  describe('deciding on a proposed plan (US-004)', () => {
+    const PLAN = 'Guard the null in app/handler.ts before reading .name.';
+
+    /** An issue at the one point where a decision can be made. */
+    const planned = (sentryIssueId = '1', shortId = 'DEMO-1') => {
+      const issue = seed(sentryIssueId, shortId, '2026-09-02T00:00:00.000Z');
+      const updated = updateSentryIssue(db, issue.id, {
+        status: 'planned',
+        plan: PLAN,
+        planProposedAt: '2026-09-02T01:00:00.000Z',
+      });
+      assert.ok(updated);
+      return updated;
+    };
+
+    const post = async (path: string, body?: unknown) =>
+      fetch(`${baseUrl}/api/sentry/${path}`, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body ?? {}),
+      });
+
+    it('reports the plan and both of its timestamps on every issue', async () => {
+      const issue = planned();
+      const [undecided] = (await list()).issues;
+      assert.ok(undecided);
+      assert.equal(undecided.plan, PLAN);
+      assert.equal(undecided.planProposedAt, '2026-09-02T01:00:00.000Z');
+      assert.equal(undecided.planDecidedAt, null);
+
+      assert.equal((await post(`issues/${issue.id}/approve`)).status, 200);
+
+      const [decided] = (await list()).issues;
+      assert.ok(decided);
+      assert.ok(decided.planDecidedAt !== null && Date.parse(decided.planDecidedAt) > 0);
+    });
+
+    it('approves the proposed plan as it stands', async () => {
+      const issue = planned();
+      const response = await post(`issues/${issue.id}/approve`);
+      assert.equal(response.status, 200);
+      const view = (await response.json()) as { status: string; plan: string };
+      assert.equal(view.status, 'approved');
+      assert.equal(view.plan, PLAN);
+
+      const stored = getSentryIssue(db, issue.id);
+      assert.ok(stored);
+      assert.equal(stored.status, 'approved');
+      assert.equal(stored.plan, PLAN);
+      assert.ok(stored.planDecidedAt !== null);
+      // Approval owes Sentry nothing: the issue is still open there.
+      assert.equal(stored.resolveUpstream, false);
+      assert.deepEqual(listSentryIssuesAwaitingResolve(db), []);
+    });
+
+    it('replaces the plan with the operator’s edit before approving it', async () => {
+      const issue = planned();
+      const response = await post(`issues/${issue.id}/approve`, {
+        plan: '  Add the missing await in app/queue.ts.  ',
+      });
+      assert.equal(response.status, 200);
+
+      const stored = getSentryIssue(db, issue.id);
+      assert.ok(stored);
+      assert.equal(stored.status, 'approved');
+      assert.equal(stored.plan, 'Add the missing await in app/queue.ts.');
+      // The edit does not pretend a new plan was proposed.
+      assert.equal(stored.planProposedAt, '2026-09-02T01:00:00.000Z');
+    });
+
+    it('refuses an empty or over-long plan without touching the issue', async () => {
+      const issue = planned();
+      for (const plan of ['', '   \n  ', 'x'.repeat(4001), 42]) {
+        const response = await post(`issues/${issue.id}/approve`, { plan });
+        assert.equal(response.status, 400, `plan ${JSON.stringify(plan).slice(0, 20)}`);
+        const stored = getSentryIssue(db, issue.id);
+        assert.ok(stored);
+        assert.equal(stored.status, 'planned');
+        assert.equal(stored.plan, PLAN);
+        assert.equal(stored.planDecidedAt, null);
+      }
+
+      // The bound is the classifier's own, so a full-length plan is approvable.
+      const ok = await post(`issues/${issue.id}/approve`, { plan: 'y'.repeat(4000) });
+      assert.equal(ok.status, 200);
+    });
+
+    it('rejects the plan, keeps the reason and owes Sentry a resolve call', async () => {
+      const issue = planned();
+      const response = await post(`issues/${issue.id}/reject`, {
+        reason: 'the error comes from a vendored dependency',
+      });
+      assert.equal(response.status, 200);
+
+      const stored = getSentryIssue(db, issue.id);
+      assert.ok(stored);
+      assert.equal(stored.status, 'cannot_fix');
+      assert.equal(stored.explanation, 'plan rejected: the error comes from a vendored dependency');
+      assert.ok(stored.planDecidedAt !== null);
+      // The plan itself stays readable next to the reason it was refused.
+      assert.equal(stored.plan, PLAN);
+      assert.equal(stored.resolveUpstream, true);
+      assert.equal(stored.resolvedInSentry, false);
+      assert.deepEqual(
+        listSentryIssuesAwaitingResolve(db).map((queued) => queued.id),
+        [issue.id],
+      );
+    });
+
+    it('refuses a rejection with no reason', async () => {
+      const issue = planned();
+      for (const body of [{}, { reason: '  ' }, { reason: 7 }, { reason: null }]) {
+        const response = await post(`issues/${issue.id}/reject`, body);
+        assert.equal(response.status, 400, JSON.stringify(body));
+        const stored = getSentryIssue(db, issue.id);
+        assert.ok(stored);
+        assert.equal(stored.status, 'planned');
+        assert.equal(stored.explanation, null);
+        assert.equal(stored.resolveUpstream, false);
+      }
+    });
+
+    it('answers 409 for an issue that is not awaiting a decision', async () => {
+      const issue = planned();
+      for (const status of ['pending', 'approved', 'working', 'fixed', 'cannot_fix'] as const) {
+        updateSentryIssue(db, issue.id, { status });
+        for (const path of ['approve', 'reject']) {
+          const response = await post(`issues/${issue.id}/${path}`, { reason: 'no' });
+          assert.equal(response.status, 409, `${status} ${path}`);
+          const body = (await response.json()) as { error: string; message: string };
+          assert.equal(body.error, 'sentry_issue_not_planned');
+          assert.ok(body.message.includes(status));
+          assert.equal(getSentryIssue(db, issue.id)?.status, status);
+        }
+      }
+    });
+
+    it('answers 404 for an id nobody knows', async () => {
+      for (const path of ['approve', 'reject']) {
+        const response = await post(`issues/does-not-exist/${path}`, { reason: 'no' });
+        assert.equal(response.status, 404);
+        assert.equal(((await response.json()) as { error: string }).error, 'sentry_issue_not_found');
+      }
+    });
+
+    it('rejects an unauthenticated decision', async () => {
+      const issue = planned();
+      for (const path of ['approve', 'reject']) {
+        const response = await fetch(`${baseUrl}/api/sentry/issues/${issue.id}/${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ reason: 'no' }),
+        });
+        assert.equal(response.status, 401);
+      }
+      assert.equal(getSentryIssue(db, issue.id)?.status, 'planned');
+    });
   });
 
   it('rejects an unauthenticated read', async () => {

@@ -259,6 +259,37 @@ describe('the Sentry completion watcher', () => {
       assert.equal(w.reload(issue).resolvedInSentry, true);
     });
 
+    it('retries a rejected plan exactly as it does an unreported fix (US-004)', async () => {
+      const w = world();
+      const issue = w.issue({
+        status: 'cannot_fix',
+        explanation: 'plan rejected: the error is in a vendored dependency',
+        resolveUpstream: true,
+      });
+      w.sentry.fail(new SentryApiError('sentry_unreachable', 'Sentry is unreachable'));
+
+      assert.equal(await w.completer.trackCompletions(), 0);
+
+      // A Sentry that refuses the call never undoes the operator's decision.
+      const failed = w.reload(issue);
+      assert.equal(failed.status, 'cannot_fix');
+      assert.equal(failed.explanation, 'plan rejected: the error is in a vendored dependency');
+      assert.equal(failed.resolvedInSentry, false);
+      assert.equal(w.sentry.calls.length, 1);
+
+      w.sentry.recover();
+      await w.completer.trackCompletions();
+
+      assert.equal(w.sentry.calls.length, 2);
+      const resolved = w.reload(issue);
+      assert.equal(resolved.status, 'cannot_fix');
+      assert.equal(resolved.resolvedInSentry, true);
+
+      // And the poller stops seeing it, so nothing is asked again.
+      await w.completer.trackCompletions();
+      assert.equal(w.sentry.calls.length, 2);
+    });
+
     it('still marks a merge fixed when no Sentry token is configured', async () => {
       const w = world({ token: null });
       const { issue } = w.working({ status: 'merged' });
