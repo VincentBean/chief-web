@@ -293,7 +293,7 @@ function world(options: { token?: boolean; link?: boolean; baseBranch?: string }
       });
       // The classifier's verdict: queued, explained, attempts back to zero.
       const queued = updateSentryIssue(db, row.id, {
-        status: 'queued',
+        status: 'planned',
         explanation: 'The handler never checks x.',
         attempts: fields.attempts ?? 0,
       });
@@ -452,7 +452,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(await w.fixer.createFixSessions(), 0);
 
       assert.equal(w.sessions.created.length, 0);
-      assert.equal(w.reload(issue).status, 'queued');
+      assert.equal(w.reload(issue).status, 'planned');
     });
   });
 
@@ -488,7 +488,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
 
@@ -523,7 +523,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(await w.fixer.createFixSessions(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
       assert.equal(row.explanation, 'The handler never checks x.');
@@ -559,7 +559,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(w.sessions.deleted.length, 1);
       assert.equal(listSessions(w.db, {}).length, 0);
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 1);
       assert.equal(row.sessionId, null);
     });
@@ -572,7 +572,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(await w.fixer.createFixSessions(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 0);
       assert.equal(w.sessions.created.length, 0);
     });
@@ -603,7 +603,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(await w.fixer.createFixSessions(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 0);
     });
 
@@ -614,7 +614,7 @@ describe('the Sentry fix session builder', () => {
       assert.equal(await w.fixer.createFixSessions(), 0);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.attempts, 0);
       assert.equal(w.sessions.created.length, 0);
     });

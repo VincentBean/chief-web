@@ -43,7 +43,7 @@ const SECTIONS: readonly {
     key: 'working',
     title: 'Working',
     icon: 'sync',
-    statuses: ['pending', 'queued', 'working'],
+    statuses: ['pending', 'planned', 'approved', 'working'],
     empty: 'Nothing is in flight. New unresolved issues appear here on the next poll.',
   },
   {

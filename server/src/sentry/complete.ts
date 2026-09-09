@@ -150,11 +150,17 @@ export class SentryCompletionService implements SentryCompleter {
   }
 
   /**
-   * The merge. Only the status is written here — Sentry is told in the resolve
+   * The merge. Only the row is written here — Sentry is told in the resolve
    * pass, so that a failing API call is a retry rather than a lost fix.
+   * `resolveUpstream` is what puts the issue on that pass's list.
    */
   private fixed(issue: SentryIssue, session: Session): boolean {
-    updateSentryIssue(this.db, issue.id, { status: 'fixed', explanation: null, attempts: 0 });
+    updateSentryIssue(this.db, issue.id, {
+      status: 'fixed',
+      explanation: null,
+      attempts: 0,
+      resolveUpstream: true,
+    });
     logger.info('a Sentry issue was fixed by a merged pull request', {
       issue: issue.shortId,
       session: session.id,

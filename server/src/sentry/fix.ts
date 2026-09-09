@@ -26,7 +26,7 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
 /**
  * Turning a fixable Sentry issue into a build session (US-007).
  *
- * Runs after the classification pass, over the `queued` rows it left behind.
+ * Runs after the classification pass, over the `planned` rows it left behind.
  * Each one becomes a real session: the repository's default base branch, code
  * review on so the existing review + PR-feedback pipeline runs, a generated
  * `prd.md` holding everything Sentry knows about the error, "Mark ready", and
@@ -47,14 +47,14 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
  * ## Why there is no cap here
  *
  * There is one upstream. {@link import('./classify.js').MAX_ISSUES_PER_TICK}
- * decides how many issues reach `queued` per tick, and the build queue decides
+ * decides how many issues reach `planned` per tick, and the build queue decides
  * how many sessions run at once. A second cap in the middle would only leave
  * sessions un-created while slots sat empty.
  *
  * ## Exactly one session per issue
  *
- * The row leaves `queued` in the same beat the session is created, so the next
- * tick's `listSentryIssuesByStatus(db, 'queued')` no longer returns it. An issue
+ * The row leaves `planned` in the same beat the session is created, so the next
+ * tick's `listSentryIssuesByStatus(db, 'planned')` no longer returns it. An issue
  * that somehow still carries a `session_id` is skipped outright rather than
  * given a second one.
  *
@@ -62,7 +62,7 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
  *
  * Per issue, and never destructive. A missing deploy key, a clone that was
  * refused, a PRD that would not write: the error is logged, the issue stays
- * `queued` with one more attempt against it, and the next tick tries again. At
+ * `planned` with one more attempt against it, and the next tick tries again. At
  * {@link MAX_FIX_ATTEMPTS} it becomes `cannot_fix` with the failure named, so
  * the Sentry tab says what went wrong rather than "nothing happened". A session
  * that was created before the failure is deleted, so the retry starts clean —
@@ -162,7 +162,7 @@ export class SentryFixService implements SentryFixer {
   ) {}
 
   async createFixSessions(): Promise<number> {
-    const queued = listSentryIssuesByStatus(this.db, 'queued');
+    const queued = listSentryIssuesByStatus(this.db, 'planned');
     if (queued.length === 0) return 0;
 
     // Only now, so an install with nothing queued never looks the token up.
@@ -195,7 +195,7 @@ export class SentryFixService implements SentryFixer {
     return created;
   }
 
-  /** One issue. Returns whether it left `queued` with a session behind it. */
+  /** One issue. Returns whether it left `planned` with a session behind it. */
   private async createFor(
     issue: SentryIssue,
     repository: Repository,
@@ -345,7 +345,7 @@ export class SentryFixService implements SentryFixer {
   }
 
   /**
-   * One failed attempt. The issue stays `queued` and comes back on the next
+   * One failed attempt. The issue stays `planned` and comes back on the next
    * tick until the attempts run out, at which point it is given up on with the
    * failure named — `attempts` is the counter the classification pass reset to
    * zero when it said the issue was fixable.

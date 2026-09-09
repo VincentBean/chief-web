@@ -1535,7 +1535,14 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
 /* ------------------------------------------------------------------ sentry */
 
 /** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
-export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+export const SENTRY_ISSUE_STATUSES = [
+  'pending',
+  'planned',
+  'approved',
+  'working',
+  'fixed',
+  'cannot_fix',
+] as const;
 
 export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
 
@@ -1591,8 +1598,10 @@ export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
   switch (status) {
     case 'pending':
       return 'awaiting classification';
-    case 'queued':
-      return 'queued';
+    case 'planned':
+      return 'plan proposed';
+    case 'approved':
+      return 'approved, awaiting a session';
     case 'working':
       return 'session running';
     case 'fixed':

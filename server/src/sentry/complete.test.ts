@@ -251,7 +251,7 @@ describe('the Sentry completion watcher', () => {
 
     it('picks up a fix that was marked before this feature could report it', async () => {
       const w = world();
-      const issue = w.issue({ status: 'fixed', resolvedInSentry: false });
+      const issue = w.issue({ status: 'fixed', resolveUpstream: true, resolvedInSentry: false });
 
       assert.equal(await w.completer.trackCompletions(), 0);
 
@@ -290,8 +290,8 @@ describe('the Sentry completion watcher', () => {
 
     it('carries on to the next issue when one resolve call fails', async () => {
       const w = world();
-      const first = w.issue({ status: 'fixed' });
-      const second = w.issue({ status: 'fixed' });
+      const first = w.issue({ status: 'fixed', resolveUpstream: true });
+      const second = w.issue({ status: 'fixed', resolveUpstream: true });
       let calls = 0;
       const flaky: SentryResolveGateway = {
         resolveIssue(_org, issueId) {
@@ -403,9 +403,9 @@ describe('the Sentry completion watcher', () => {
   it('does nothing at all when no issue is working or awaiting a resolve', async () => {
     const w = world();
     w.issue({ status: 'pending' });
-    w.issue({ status: 'queued' });
+    w.issue({ status: 'planned' });
     w.issue({ status: 'cannot_fix', explanation: 'not a code problem' });
-    w.issue({ status: 'fixed', resolvedInSentry: true });
+    w.issue({ status: 'fixed', resolveUpstream: true, resolvedInSentry: true });
 
     assert.equal(await w.completer.trackCompletions(), 0);
 

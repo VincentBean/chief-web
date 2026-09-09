@@ -305,7 +305,7 @@ describe('the Sentry issue poller', () => {
         firstSeen: '2026-08-01T10:00:00.000Z',
         lastSeen: '2026-09-01T10:00:00.000Z',
       });
-      updateSentryIssue(db, tracked.id, { status: 'queued' });
+      updateSentryIssue(db, tracked.id, { status: 'planned' });
 
       sentry.fail(
         'acme',
@@ -319,7 +319,7 @@ describe('the Sentry issue poller', () => {
       assert.equal(await sync.tick(), 1);
 
       const untouched = findSentryIssue(db, '4507');
-      assert.equal(untouched?.status, 'queued');
+      assert.equal(untouched?.status, 'planned');
       assert.equal(untouched?.eventCount, 12);
       assert.equal(untouched?.lastSeen, '2026-09-01T10:00:00.000Z');
       assert.ok(findSentryIssue(db, '9000'));

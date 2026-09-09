@@ -302,7 +302,7 @@ export class SentryClassifyService implements SentryClassifier {
   /** Writes the verdict. `attempts` is reset: the next phase counts its own. */
   private record(issue: SentryIssue, verdict: Classification, model: string): void {
     updateSentryIssue(this.db, issue.id, {
-      status: verdict.fixable ? 'queued' : 'cannot_fix',
+      status: verdict.fixable ? 'planned' : 'cannot_fix',
       explanation: verdict.explanation,
       attempts: 0,
     });

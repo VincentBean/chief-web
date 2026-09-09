@@ -260,7 +260,7 @@ describe('the Sentry issue classifier', () => {
       assert.equal(await w.classifier.classifyPending(), 1);
 
       const row = w.reload(issue);
-      assert.equal(row.status, 'queued');
+      assert.equal(row.status, 'planned');
       assert.equal(row.explanation, 'The handler never checks x.');
       assert.equal(row.attempts, 0);
     });
@@ -324,8 +324,8 @@ describe('the Sentry issue classifier', () => {
 
       assert.equal(await w.classifier.classifyPending(), 2);
 
-      assert.equal(w.reload(first).status, 'queued');
-      assert.equal(w.reload(second).status, 'queued');
+      assert.equal(w.reload(first).status, 'planned');
+      assert.equal(w.reload(second).status, 'planned');
       assert.equal(w.reload(third).status, 'pending');
       assert.equal(w.reload(third).attempts, 0);
       // One container for the pair, and only one.
@@ -342,7 +342,7 @@ describe('the Sentry issue classifier', () => {
       await w.classifier.classifyPending();
       assert.equal(await w.classifier.classifyPending(), 1);
 
-      assert.equal(w.reload(third).status, 'queued');
+      assert.equal(w.reload(third).status, 'planned');
     });
   });
 
@@ -385,7 +385,7 @@ describe('the Sentry issue classifier', () => {
 
       assert.equal(await w.classifier.classifyPending(), 1);
 
-      assert.equal(w.reload(mine).status, 'queued');
+      assert.equal(w.reload(mine).status, 'planned');
     });
   });
 
@@ -514,8 +514,8 @@ describe('the Sentry issue classifier', () => {
 
       assert.equal(await w.classifier.classifyPending(), 2);
 
-      assert.equal(w.reload(mine).status, 'queued');
-      assert.equal(w.reload(theirs).status, 'queued');
+      assert.equal(w.reload(mine).status, 'planned');
+      assert.equal(w.reload(theirs).status, 'planned');
       assert.deepEqual(w.containers.started.map((run) => run.repositoryId), [
         w.repository.id,
         other.id,

@@ -907,6 +907,112 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN pr_description TEXT;
     `,
   },
+  {
+    id: '0015_sentry_issue_plans',
+    sql: `
+      -- An operator now decides every fix before it is built (US-001): the
+      -- triage call writes a proposed plan, the operator approves or rejects
+      -- it, and only an approval can become a session. That needs a plan on
+      -- the row, the two timestamps around the decision, and two new statuses
+      -- the old CHECK does not allow.
+
+      -- The proposed fix plan, and when it was written. NULL is "none yet":
+      -- every row that predates the feature reads back that way, and so does
+      -- every issue still awaiting classification.
+      ALTER TABLE sentry_issues ADD COLUMN plan TEXT;
+      ALTER TABLE sentry_issues ADD COLUMN plan_proposed_at TEXT;
+      -- When the operator approved or rejected that plan; NULL while undecided.
+      ALTER TABLE sentry_issues ADD COLUMN plan_decided_at TEXT;
+      -- Whether Sentry is owed a resolve call. Split out of \`status\` because a
+      -- rejected plan owes one too, and a rejection lands on \`cannot_fix\`,
+      -- which most of the time owes nothing.
+      ALTER TABLE sentry_issues ADD COLUMN resolve_upstream INTEGER NOT NULL DEFAULT 0;
+
+      -- Everything already \`fixed\` owed Sentry a resolve call under the old
+      -- \`status = 'fixed' AND resolved_in_sentry = 0\` query. Backfill the flag
+      -- before the resolve pass starts reading it, or the ones whose call had
+      -- not got through yet would silently never be reported.
+      UPDATE sentry_issues SET resolve_upstream = 1 WHERE status = 'fixed';
+
+      -- SQLite cannot widen a CHECK in place, so \`sentry_issues\` is rebuilt
+      -- the way 0005 rebuilt \`sessions\`. Nothing references this table, so
+      -- the rows go straight across; the indexes go with the old table and are
+      -- recreated below.
+      CREATE TABLE sentry_issues_backup AS SELECT * FROM sentry_issues;
+
+      DROP TABLE sentry_issues;
+
+      CREATE TABLE sentry_issues (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE CASCADE,
+        sentry_issue_id    TEXT NOT NULL UNIQUE,
+        short_id           TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        culprit            TEXT,
+        permalink          TEXT NOT NULL,
+        level              TEXT,
+        event_count        INTEGER NOT NULL DEFAULT 0,
+        first_seen         TEXT NOT NULL,
+        last_seen          TEXT NOT NULL,
+        -- pending    -> fetched, awaiting classification
+        -- planned    -> classified fixable, carrying a plan, awaiting a decision
+        -- approved   -> the operator said yes; a session is built when asked for
+        -- working    -> session created and linked
+        -- fixed      -> the linked session's pull request was merged
+        -- cannot_fix -> the classifier said no, the operator rejected the plan,
+        --               or the session never landed
+        status             TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (status IN
+                               ('pending', 'planned', 'approved', 'working', 'fixed',
+                                'cannot_fix')),
+        explanation        TEXT,
+        plan               TEXT,
+        plan_proposed_at   TEXT,
+        plan_decided_at    TEXT,
+        session_id         TEXT
+                             REFERENCES sessions (id) ON DELETE SET NULL,
+        resolve_upstream   INTEGER NOT NULL DEFAULT 0,
+        resolved_in_sentry INTEGER NOT NULL DEFAULT 0,
+        attempts           INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+
+      -- \`queued\` is gone: it meant "judged fixable, awaiting a session", and
+      -- there is no such state any more. Those rows go back to \`pending\` with
+      -- no plan so the next triage pass writes one and an operator gets to
+      -- decide, rather than a session appearing for a plan nobody ever saw.
+      -- Every other status, and every other column, comes across untouched.
+      INSERT INTO sentry_issues
+        (id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
+         event_count, first_seen, last_seen, status, explanation, plan, plan_proposed_at,
+         plan_decided_at, session_id, resolve_upstream, resolved_in_sentry, attempts,
+         created_at, updated_at)
+      SELECT
+         id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
+         event_count, first_seen, last_seen,
+         CASE WHEN status = 'queued' THEN 'pending' ELSE status END,
+         explanation, plan, plan_proposed_at,
+         plan_decided_at, session_id, resolve_upstream, resolved_in_sentry, attempts,
+         created_at, updated_at
+      FROM sentry_issues_backup;
+
+      DROP TABLE sentry_issues_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_repository
+        ON sentry_issues (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_status
+        ON sentry_issues (status);
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_session
+        ON sentry_issues (session_id)
+        WHERE session_id IS NOT NULL;
+      -- The resolve pass reads exactly this pair, every tick.
+      CREATE INDEX IF NOT EXISTS idx_sentry_issues_resolve_upstream
+        ON sentry_issues (resolve_upstream, resolved_in_sentry)
+        WHERE resolve_upstream = 1 AND resolved_in_sentry = 0;
+    `,
+  },
 ];
 
 /**
