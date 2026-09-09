@@ -102,6 +102,37 @@ creates is an ordinary session and uses the **Build** model, the **Review**
 model and the agent timeout from [Settings → Models](interface.md#settings) like
 every other session.
 
+#### Duplicate detection
+
+The same call answers a second question, when there is one to ask: **is this the
+same defect as something chief-web is already working on?** One deploy can turn
+one broken line into five Sentry issues — the same crash reached from five entry
+points — and without this each of them would get its own session and its own
+pull request, all changing the same code.
+
+The check has two stages, and only the first one runs for every candidate:
+
+1. **A cheap deterministic shortlist.** Every issue of the same repository that
+   is queued, building, or was fixed in the last 30 days is scored against the
+   new one with plain string and stack-frame comparison: same exception type,
+   same culprit, how much of the top of the stack they share, how much of the
+   title survives once quoted strings, ids, hex and numbers are flattened. No
+   model, no network — arithmetic over text chief-web already has. Everything
+   below the threshold is dropped, and **at most the three best** go on.
+2. **One model verdict.** The shortlist is named in the *same single haiku call*
+   that judges fixability — there is no second call, no second container and no
+   embedding service. The prompt lists those candidates' reports and asks which,
+   if any, this issue repeats; the answer comes back in the same JSON object as
+   the fixability verdict. The scoring in stage 1 only decides what is worth
+   asking about; this is the part that can tell "the same bug seen from two
+   entry points" from "two different bugs that both throw `TypeError`".
+
+If the model names one, the issue becomes `duplicate` and stops there: no
+session, no pull request, and a link to the original on the Sentry tab. A
+duplicate verdict wins over fixability — the fix is already being built. If it
+names nothing, or there was nothing to name, classification is exactly what it
+was before this existed.
+
 #### The polling interval
 
 One tick, at the default of fifteen minutes, costs Sentry:
@@ -114,7 +145,11 @@ One tick, at the default of fifteen minutes, costs Sentry:
 - **one resolve call per merged fix** still owed to Sentry.
 
 So a tick over three linked projects costs at most about ten requests, which is
-nowhere near Sentry's limits. Lowering the interval mostly shortens the delay
+nowhere near Sentry's limits. **Duplicate detection does not change that
+budget** — it adds no Sentry request of any kind, because a candidate's report
+is assembled from chief-web's own database row (its title, culprit and stored
+signature) rather than fetched from Sentry again. The three calls above are
+still the whole per-tick cost. Lowering the interval mostly shortens the delay
 between an error appearing and a session starting; it does not make
 classification go faster, because the 2-per-tick cap is what paces that. A tick
 with nothing linked costs nothing — not even the token lookup.
@@ -146,13 +181,17 @@ about.
 
 ## The status lifecycle
 
-Every issue chief-web has ever seen is a row with one of five statuses. It only
-ever moves forward:
+Every issue chief-web has ever seen is a row with one of six statuses.
+Classification is where the walk forks: an issue is either worth a session
+(`queued`), the same defect as one already being worked on (`duplicate`), or
+nothing a code change fixes (`cannot_fix`).
 
 ```
 pending ──► queued ──► working ──► fixed
-   │           │          │
-   └───────────┴──────────┴──────► cannot_fix
+   │ │         │          │
+   │ └─────────┴──────────┴──────► cannot_fix
+   │
+   └──────────────────────────────► duplicate
 ```
 
 | Status | Shown as | What it means | What moves it on |
@@ -161,9 +200,10 @@ pending ──► queued ──► working ──► fixed
 | **`queued`** | *queued* | Classified **fixable**. | The next pass creates the build session — usually the same tick. |
 | **`working`** | *session running* | A build session exists, has been marked ready and started, and is building or waiting in the normal build queue. | The session's own outcome. |
 | **`fixed`** | Fixed | The session's pull request was **merged**. | Nothing. It is terminal. |
+| **`duplicate`** | *duplicate* | The same underlying defect as another issue that is already queued, building or recently fixed — one change fixes both, so this one gets no session of its own. Put there by the classification pass, which asks about the shortlisted candidates in the same call that judges fixability; the row carries the classifier's explanation and a link to the original. | The original. If it merges, this issue is resolved in Sentry alongside it and stays `duplicate`; if it never lands, this issue is released back to `pending` and classified again on its own merits. |
 | **`cannot_fix`** | Cannot fix | Either the classifier said no, or the attempt died. Always carries a written explanation. | Nothing. It is terminal, and deliberately final. |
 
-Two things worth knowing about the ends of that walk:
+Three things worth knowing about the ends of that walk:
 
 - **`fixed` and "resolved in Sentry" are separate.** Marking the issue fixed
   here is local and instant; telling Sentry is an API call that can fail. Every
@@ -175,6 +215,16 @@ Two things worth knowing about the ends of that walk:
   the event count climbs, not by hand — there is no button. An issue Sentry
   reopens after we resolved it is not re-ingested either. If you want chief-web
   to try again, that is a session you create yourself.
+- **`duplicate` is the one status that can go backwards**, and it is the only
+  one. When the original a duplicate points at never lands — its session failed,
+  its pull request was closed unmerged, someone deleted it — the original becomes
+  `cannot_fix` and every issue folded into it is released back to `pending`,
+  with its explanation cleared and its attempt count reset, so it is classified
+  again on its own merits. That is deliberately narrow: it is a rule about
+  `duplicate` rows, whose "wait for the other issue" was always provisional. It
+  is **not** an exception to the line above — the `cannot_fix` original itself is
+  never re-classified, and no `cannot_fix` row is ever moved by this or anything
+  else.
 
 An issue that stops arriving in the poll (you resolved or ignored it in Sentry
 yourself) keeps whatever row it had. Issues already resolved or ignored in
@@ -239,13 +289,20 @@ deleted`.
 ## The Sentry tab
 
 **Sentry** in the sidebar (`g y`) lists every issue chief-web has ever tracked,
-in three panels:
+in four panels:
 
 | Panel | Rows |
 | --- | --- |
 | **Working** | `pending`, `queued` and `working` — the ones still in the pipeline, each badged with which of the three it is |
 | **Fixed** | `fixed`, badged `resolved in Sentry` once Sentry has been told |
 | **Cannot fix** | `cannot_fix`, each with its explanation printed underneath |
+| **Duplicates** | `duplicate`, each naming the issue it was folded into — *Duplicate of `PROJ-123`*, linked to that issue in Sentry — with the classifier's reasoning printed underneath, and badged `resolved in Sentry` once the original merged and Sentry was told |
+
+A duplicate appears in the **Duplicates** panel only; it is not also listed under
+Working, and it never carries the pulsing *session running* badge, because it has
+no session. If the original was deleted from chief-web the row says so rather
+than naming it. An issue released back to `pending` leaves this panel and
+reappears under Working at the next load.
 
 Every row's title links to the issue in Sentry, and a row with a session links
 to that session here. The meta line carries the short id, the repository, the
@@ -270,8 +327,8 @@ username; a tag can contain a URL. Someone who can make your application throw
 can choose some of that text, and that text is put in front of agents that run
 with `--dangerously-skip-permissions` and open pull requests.
 
-chief-web applies the same three-part defence at each of the two places that
-text lands, because they have different delimiters and different readers:
+chief-web applies the same defence at each of the places that text lands,
+because they have different delimiters and different readers:
 
 - **In the classification prompt**, everything Sentry-derived sits in one block
   between explicit `SENTRY_DATA_BEGIN` / `SENTRY_DATA_END` markers, the rule
@@ -279,6 +336,15 @@ text lands, because they have different delimiters and different readers:
   stated **before** the block opens, and both markers are defanged inside the
   data so an error message cannot close the block and start speaking in
   chief-web's voice. Every field is length-bounded.
+- **In the duplicate candidates**, the same fencing, because a candidate report
+  is Sentry-derived text too — it is another production error, carried over from
+  chief-web's database rather than fetched again, which makes it no more
+  trustworthy. The shortlisted candidates' reports sit together in a second
+  `SENTRY_DATA_BEGIN` / `SENTRY_DATA_END` block, with the same defanging and the
+  same length bounds. The **short ids the model may answer with are written
+  outside that block, in chief-web's own voice**, and an answer naming anything
+  else is discarded — so a short id that appears inside untrusted text cannot
+  make chief-web fold one issue into another of the error's choosing.
 - **In the generated PRD**, the whole report sits inside one ```` ```text ````
   fence, every run of three or more backticks or tildes in the data is defanged,
   and nothing outside the fence is upstream text — the headings use the slugged
