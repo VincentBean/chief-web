@@ -18,10 +18,11 @@ import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.ts
  * Every Sentry issue chief-web is tracking, and how far the auto-fixer got
  * with it (US-009).
  *
- * Three sections rather than one list: an operator comes here to ask "what is
+ * Four sections rather than one list: an operator comes here to ask "what is
  * it doing, and what has it given up on", and those are different questions
- * from "what has it already fixed". Within a section the newest error is the
- * one worth reading first, so each is ordered by when Sentry last saw it.
+ * from "what has it already fixed" or "what was folded into something else".
+ * Within a section the newest error is the one worth reading first, so each is
+ * ordered by when Sentry last saw it.
  *
  * Like the pull request list and unlike the session list, nothing here polls.
  * The pipeline behind it moves on a fifteen-minute tick, so a three-second
@@ -31,11 +32,11 @@ import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.ts
 
 const REVALIDATE_AFTER_MS = 120_000;
 
-/** The three groups the page renders, and which pipeline states feed each. */
+/** The four groups the page renders, and which pipeline states feed each. */
 const SECTIONS: readonly {
   readonly key: string;
   readonly title: string;
-  readonly icon: 'sync' | 'check-circle' | 'x-circle';
+  readonly icon: 'sync' | 'check-circle' | 'x-circle' | 'copy';
   readonly statuses: readonly SentryIssueStatus[];
   readonly empty: string;
 }[] = [
@@ -59,6 +60,15 @@ const SECTIONS: readonly {
     icon: 'x-circle',
     statuses: ['cannot_fix'],
     empty: 'Nothing has been given up on.',
+  },
+  // A duplicate is deliberately absent from Working: nothing is running for it,
+  // and eight rows for one defect is exactly what the fold exists to prevent.
+  {
+    key: 'duplicate',
+    title: 'Duplicates',
+    icon: 'copy',
+    statuses: ['duplicate'],
+    empty: 'Nothing has been folded into another issue.',
   },
 ];
 
@@ -196,13 +206,20 @@ function IssueRow({ issue, showState }: { readonly issue: SentryIssue; readonly 
               <Icon name="link-external" />
             </a>
             {/* Only the Working section needs the internal state spelled out:
-                in the other two the section heading already says it. */}
+                in the others the section heading already says it. */}
             {showState && (
               <Badge tone={issue.status === 'working' ? 'active' : 'wait'} pulse={issue.status === 'working'}>
                 {sentryIssueStatusLabel(issue.status)}
               </Badge>
             )}
-            {issue.status === 'fixed' && issue.resolvedInSentry && <Badge tone="done">resolved in Sentry</Badge>}
+            {/* Never the pulsing `active` tone: nothing is running for a
+                duplicate, its original carries the work. */}
+            {issue.status === 'duplicate' && <Badge tone="wait">duplicate</Badge>}
+            {/* A duplicate is resolved upstream alongside the original it was
+                folded into, so it wears the same badge as a fixed issue. */}
+            {(issue.status === 'fixed' || issue.status === 'duplicate') && issue.resolvedInSentry && (
+              <Badge tone="done">resolved in Sentry</Badge>
+            )}
             {issue.level !== null && <Badge>{issue.level}</Badge>}
           </span>
           <span className="row__meta">
@@ -226,9 +243,31 @@ function IssueRow({ issue, showState }: { readonly issue: SentryIssue; readonly 
               </>
             )}
           </span>
-          {/* Why it was given up on is the whole point of the section, so it is
-              read without a click. */}
-          {issue.explanation !== null && issue.status === 'cannot_fix' && (
+          {/* Which issue absorbed this one, named and linked — the operator
+              should never have to guess where the fix is being made. */}
+          {issue.status === 'duplicate' && (
+            <p className="row__meta">
+              {issue.duplicateOfShortId === null ? (
+                'Folded into another issue, which is no longer tracked.'
+              ) : (
+                <>
+                  {'Duplicate of '}
+                  {issue.duplicateOfPermalink === null ? (
+                    <span className="mono">{issue.duplicateOfShortId}</span>
+                  ) : (
+                    <a className="link mono" href={issue.duplicateOfPermalink} target="_blank" rel="noreferrer">
+                      {issue.duplicateOfShortId}
+                      <Icon name="link-external" />
+                    </a>
+                  )}
+                </>
+              )}
+            </p>
+          )}
+          {/* Why it was given up on — or why it is the same defect as another
+              issue — is the whole point of the section, so both are read
+              without a click. */}
+          {issue.explanation !== null && (issue.status === 'cannot_fix' || issue.status === 'duplicate') && (
             <p className="row__meta">{issue.explanation}</p>
           )}
         </div>

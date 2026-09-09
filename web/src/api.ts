@@ -1535,7 +1535,7 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
 /* ------------------------------------------------------------------ sentry */
 
 /** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
-export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix', 'duplicate'] as const;
 
 export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
 
@@ -1561,6 +1561,15 @@ export interface SentryIssue {
   sessionId: string | null;
   /** Null when there is no session, or it has been deleted. */
   sessionName: string | null;
+  /** The row id of the issue this one duplicates; null unless `duplicate`. */
+  duplicateOf: string | null;
+  /**
+   * The original's short id and permalink, so a duplicate row can name and
+   * link the issue it was folded into. Both are null when `duplicateOf` is,
+   * and also when the original is no longer tracked.
+   */
+  duplicateOfShortId: string | null;
+  duplicateOfPermalink: string | null;
   resolvedInSentry: boolean;
   attempts: number;
   createdAt: string;
@@ -1599,5 +1608,7 @@ export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
       return 'fixed';
     case 'cannot_fix':
       return 'cannot fix';
+    case 'duplicate':
+      return 'duplicate';
   }
 }
