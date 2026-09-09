@@ -18,6 +18,7 @@ export function ConfirmDialog({
   confirmLabel,
   busyLabel = 'Working…',
   busy = false,
+  confirmDisabled = false,
   danger = false,
   onConfirm,
   onCancel,
@@ -28,6 +29,8 @@ export function ConfirmDialog({
   readonly confirmLabel: string;
   readonly busyLabel?: string;
   readonly busy?: boolean;
+  /** The confirmation is not yet a valid one — e.g. a required reason is blank. */
+  readonly confirmDisabled?: boolean;
   /** A destructive confirmation is red, so the eye checks before the hand. */
   readonly danger?: boolean;
   readonly onConfirm: () => void;
@@ -64,7 +67,7 @@ export function ConfirmDialog({
           type="button"
           className={danger ? 'button button--danger-solid' : 'button button--primary'}
           onClick={onConfirm}
-          disabled={busy}
+          disabled={busy || confirmDisabled}
         >
           {busy ? busyLabel : confirmLabel}
         </button>

@@ -1,49 +1,71 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  approveSentryPlan,
   fetchSentryIssues,
+  MAX_SENTRY_PLAN_CHARS,
+  rejectSentryPlan,
   type SentryIssue,
   type SentryIssueList,
   type SentryIssueStatus,
   sentryIssueStatusLabel,
   sessionPath,
 } from '../api.ts';
+import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { describeError, redirectIfUnauthorised } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { since } from '../schedule.ts';
+import { useToast } from '../toast.tsx';
 import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
 
 /**
- * Every Sentry issue chief-web is tracking, and how far the auto-fixer got
- * with it (US-009).
+ * Every Sentry issue chief-web is tracking, how far the pipeline got with it
+ * (US-009), and — since nothing is fixed without a decision — the plan
+ * proposed for it and the two buttons that settle it (US-008).
  *
- * Three sections rather than one list: an operator comes here to ask "what is
- * it doing, and what has it given up on", and those are different questions
- * from "what has it already fixed". Within a section the newest error is the
- * one worth reading first, so each is ordered by when Sentry last saw it.
+ * Five sections rather than one list, because an operator arrives with one of
+ * five questions: what is waiting on me, what have I said yes to, what is
+ * running, what is done, what has been given up on. The first is the one that
+ * costs them time, so it is at the top and carries the whole plan as text: a
+ * decision that needs a click to read is a decision that gets postponed.
  *
- * Like the pull request list and unlike the session list, nothing here polls.
- * The pipeline behind it moves on a fifteen-minute tick, so a three-second
- * poll would ask fifty times for the same answer; the page loads once,
- * refreshes on demand, and revalidates when the tab comes back into view.
+ * Like the pull request list and unlike the session list, nothing here polls —
+ * not even after a decision. The pipeline behind it moves on a fifteen-minute
+ * tick, so a three-second poll would ask fifty times for the same answer; the
+ * page loads once, refreshes on demand, revalidates when the tab comes back
+ * into view, and patches in the one row the server just answered with.
  */
 
 const REVALIDATE_AFTER_MS = 120_000;
 
-/** The three groups the page renders, and which pipeline states feed each. */
+/** The five groups the page renders, and which pipeline states feed each. */
 const SECTIONS: readonly {
   readonly key: string;
   readonly title: string;
-  readonly icon: 'sync' | 'check-circle' | 'x-circle';
+  readonly icon: 'tasklist' | 'check' | 'sync' | 'check-circle' | 'x-circle';
   readonly statuses: readonly SentryIssueStatus[];
   readonly empty: string;
 }[] = [
   {
+    key: 'planned',
+    title: 'Needs your decision',
+    icon: 'tasklist',
+    statuses: ['planned'],
+    empty: 'No plan is waiting on you. One lands here as soon as an issue is triaged as fixable.',
+  },
+  {
+    key: 'approved',
+    title: 'Approved',
+    icon: 'check',
+    statuses: ['approved'],
+    empty: 'Nothing is approved and waiting. An approved plan sits here until its session is started.',
+  },
+  {
     key: 'working',
     title: 'Working',
     icon: 'sync',
-    statuses: ['pending', 'planned', 'approved', 'working'],
+    statuses: ['pending', 'working'],
     empty: 'Nothing is in flight. New unresolved issues appear here on the next poll.',
   },
   {
@@ -58,7 +80,7 @@ const SECTIONS: readonly {
     title: 'Cannot fix',
     icon: 'x-circle',
     statuses: ['cannot_fix'],
-    empty: 'Nothing has been given up on.',
+    empty: 'Nothing has been given up on, and no plan has been rejected.',
   },
 ];
 
@@ -68,6 +90,7 @@ function byLastSeen(a: SentryIssue, b: SentryIssue): number {
 }
 
 export function Sentry() {
+  const toast = useToast();
   const [list, setList] = useState<SentryIssueList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -103,6 +126,18 @@ export function Sentry() {
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [load]);
+
+  /**
+   * A decided issue comes back from the server whole, so the row moves to its
+   * new section without a reload — the page still asks Sentry for nothing.
+   */
+  const replace = useCallback((issue: SentryIssue): void => {
+    setList((current) =>
+      current === null
+        ? current
+        : { ...current, issues: current.issues.map((row) => (row.id === issue.id ? issue : row)) },
+    );
+  }, []);
 
   const issues = list?.issues ?? [];
 
@@ -153,8 +188,8 @@ export function Sentry() {
             </Link>
           }
         >
-          Unresolved issues on the Sentry projects linked to your repositories appear here, each one classified as working, fixed
-          or impossible to fix from the code.
+          Unresolved issues on the Sentry projects linked to your repositories appear here, each one triaged into a proposed fix
+          plan for you to approve, or an explanation of why it cannot be fixed from the code.
         </EmptyState>
       )}
 
@@ -172,9 +207,20 @@ export function Sentry() {
               {rows.length === 0 && <p className="muted">{section.empty}</p>}
               {rows.length > 0 && (
                 <ul className="rows rows--divided">
-                  {rows.map((issue) => (
-                    <IssueRow key={issue.id} issue={issue} showState={section.key === 'working'} />
-                  ))}
+                  {rows.map((issue) =>
+                    section.key === 'planned' ? (
+                      <PlannedRow
+                        key={issue.id}
+                        issue={issue}
+                        onDecided={(decided, message) => {
+                          replace(decided);
+                          toast.ok(message);
+                        }}
+                      />
+                    ) : (
+                      <IssueRow key={issue.id} issue={issue} showState={section.key === 'working'} />
+                    ),
+                  )}
                 </ul>
               )}
             </Panel>
@@ -184,7 +230,180 @@ export function Sentry() {
   );
 }
 
-function IssueRow({ issue, showState }: { readonly issue: SentryIssue; readonly showState: boolean }) {
+/**
+ * A proposed plan, with the two decisions on it (US-008).
+ *
+ * The state is the row's own: two rows being edited at once is normal — a plan
+ * is read, half-rewritten, left alone while the next one is read — and a
+ * failure belongs beside the button that caused it rather than at the top of
+ * the page. Nothing is optimistic: the row only moves when the server has said
+ * it moved, so a refused decision leaves the plan, the edit and the buttons
+ * exactly as they were.
+ */
+function PlannedRow({
+  issue,
+  onDecided,
+}: {
+  readonly issue: SentryIssue;
+  readonly onDecided: (issue: SentryIssue, message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(issue.plan ?? '');
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const edited = draft.trim();
+  const tooLong = edited.length > MAX_SENTRY_PLAN_CHARS;
+  const emptyEdit = editing && edited === '';
+
+  const settle = (work: Promise<SentryIssue>, kind: 'approve' | 'reject', message: string): void => {
+    setBusy(kind);
+    setError(null);
+    work
+      .then((decided) => {
+        setRejecting(false);
+        onDecided(decided, message);
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        // The row keeps its plan, its edit and its buttons; only the reason
+        // dialog closes, so the error is not hidden behind it.
+        setRejecting(false);
+        setError(describeError(cause));
+      })
+      .finally(() => setBusy(null));
+  };
+
+  const approve = (): void => {
+    if (emptyEdit || tooLong) return;
+    // An untouched plan is approved as it stands; sending it back unchanged
+    // would only risk a normalisation the operator never asked for.
+    const plan = editing && edited !== (issue.plan ?? '') ? edited : undefined;
+    settle(approveSentryPlan(issue.id, plan), 'approve', `Approved the plan for ${issue.shortId}.`);
+  };
+
+  const reject = (): void => {
+    const text = reason.trim();
+    if (text === '') return;
+    settle(rejectSentryPlan(issue.id, text), 'reject', `Rejected the plan for ${issue.shortId}.`);
+  };
+
+  return (
+    <IssueRow issue={issue} showState={false}>
+      {editing ? (
+        <div className="field">
+          <textarea
+            className="field__input field__textarea"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            rows={10}
+            spellCheck={false}
+            aria-label={`Fix plan for ${issue.shortId}`}
+          />
+          <p className="field__hint">
+            {tooLong
+              ? `A plan can be at most ${MAX_SENTRY_PLAN_CHARS.toLocaleString()} characters; this one is ${edited.length.toLocaleString()}.`
+              : emptyEdit
+                ? 'A plan cannot be empty. Reject the issue instead of emptying its plan.'
+                : 'Approving sends this text, and the fix session is given exactly what you leave here.'}
+          </p>
+        </div>
+      ) : issue.plan === null ? (
+        <p className="row__meta">No plan was stored with this proposal.</p>
+      ) : (
+        <pre className="output output--wrap">{issue.plan}</pre>
+      )}
+
+      {error !== null && (
+        <p className="row__meta text-danger" role="alert">
+          {error}
+        </p>
+      )}
+
+      <div className="row__actions">
+        <button
+          type="button"
+          className="button button--quiet"
+          onClick={() => {
+            setDraft(issue.plan ?? '');
+            setEditing(!editing);
+          }}
+          disabled={busy !== null}
+        >
+          <Icon name="pencil" />
+          {editing ? 'Discard edit' : 'Edit plan'}
+        </button>
+        <button
+          type="button"
+          className="button button--danger"
+          onClick={() => {
+            setReason('');
+            setRejecting(true);
+          }}
+          disabled={busy !== null}
+        >
+          <Icon name="x" />
+          Reject
+        </button>
+        <button
+          type="button"
+          className="button button--primary"
+          onClick={approve}
+          disabled={busy !== null || emptyEdit || tooLong}
+        >
+          <Icon name="check" />
+          {busy === 'approve' ? 'Approving…' : 'Approve'}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={rejecting}
+        title={`Reject the plan for ${issue.shortId}?`}
+        confirmLabel="Reject plan"
+        busyLabel="Rejecting…"
+        busy={busy === 'reject'}
+        confirmDisabled={reason.trim() === '' || reason.trim().length > MAX_SENTRY_PLAN_CHARS}
+        danger
+        onConfirm={reject}
+        onCancel={() => setRejecting(false)}
+      >
+        <p>
+          The issue moves to <strong>Cannot fix</strong> with your reason on it, and chief-web also resolves it in Sentry so the
+          poller does not bring it back and propose the same plan again.
+        </p>
+        <div className="field">
+          <label className="field__label" htmlFor={`reject-reason-${issue.id}`}>
+            Why this plan is wrong
+          </label>
+          <textarea
+            id={`reject-reason-${issue.id}`}
+            className="field__input field__textarea"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            rows={4}
+            placeholder="The stack trace is in a vendored file we do not own."
+          />
+          <p className="field__hint">
+            {reason.trim() === '' ? 'A reason is required — it is all that is left on the issue afterwards.' : 'Kept as the issue’s explanation.'}
+          </p>
+        </div>
+      </ConfirmDialog>
+    </IssueRow>
+  );
+}
+
+function IssueRow({
+  issue,
+  showState,
+  children,
+}: {
+  readonly issue: SentryIssue;
+  readonly showState: boolean;
+  /** The plan, the decision buttons and their errors, under the meta line. */
+  readonly children?: ReactNode;
+}) {
   return (
     <li className="row row--stacked">
       <div className="row__line">
@@ -196,7 +415,7 @@ function IssueRow({ issue, showState }: { readonly issue: SentryIssue; readonly 
               <Icon name="link-external" />
             </a>
             {/* Only the Working section needs the internal state spelled out:
-                in the other two the section heading already says it. */}
+                in the other sections the heading already says it. */}
             {showState && (
               <Badge tone={issue.status === 'working' ? 'active' : 'wait'} pulse={issue.status === 'working'}>
                 {sentryIssueStatusLabel(issue.status)}
@@ -226,13 +445,14 @@ function IssueRow({ issue, showState }: { readonly issue: SentryIssue; readonly 
               </>
             )}
           </span>
-          {/* Why it was given up on is the whole point of the section, so it is
-              read without a click. */}
+          {/* Why it was given up on — or why its plan was rejected — is the
+              whole point of the section, so it is read without a click. */}
           {issue.explanation !== null && issue.status === 'cannot_fix' && (
             <p className="row__meta">{issue.explanation}</p>
           )}
         </div>
       </div>
+      {children}
     </li>
   );
 }

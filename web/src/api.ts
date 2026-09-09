@@ -1599,11 +1599,43 @@ export async function fetchSentryIssues(signal?: AbortSignal): Promise<SentryIss
   return api<SentryIssueList>('/api/sentry/issues', signal ? { signal } : {});
 }
 
+/**
+ * The longest plan or rejection reason the server will take, mirroring the
+ * classifier's own `MAX_PLAN_CHARS`. An edit past it is a 400, so the
+ * textarea says so before the request is made.
+ */
+export const MAX_SENTRY_PLAN_CHARS = 4000;
+
+/**
+ * Approves the proposed plan (US-004), optionally replacing its text first.
+ *
+ * Editing and approving are one request on purpose: whatever is stored when
+ * the decision lands is what the fix session is given, so an operator who
+ * corrects a plan cannot approve the version they just rewrote away.
+ */
+export async function approveSentryPlan(id: string, plan?: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(plan === undefined ? {} : { plan }),
+  });
+}
+
+/**
+ * Rejects the proposed plan; the reason becomes the issue's explanation and
+ * the issue is also owed a resolve call to Sentry (US-004).
+ */
+export async function rejectSentryPlan(id: string, reason: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
 /** What the operator reads for each pipeline state. */
 export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
   switch (status) {
     case 'pending':
-      return 'awaiting classification';
+      return 'awaiting plan';
     case 'planned':
       return 'plan proposed';
     case 'approved':
