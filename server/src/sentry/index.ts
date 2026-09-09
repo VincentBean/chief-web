@@ -77,6 +77,21 @@ export {
   sentryReport,
 } from './prompts.js';
 export {
+  candidateSignature,
+  DUPLICATE_SCORE_THRESHOLD,
+  type IssueSignature,
+  issueSignature,
+  MAX_DUPLICATE_CANDIDATES,
+  MAX_SIGNATURE_FRAMES,
+  normalizeFramePath,
+  parseSignature,
+  rankCandidates,
+  scoreSignatures,
+  serializeSignature,
+  signatureFromIssue,
+  titleKey,
+} from './similarity.js';
+export {
   createSentrySync,
   type SentryGatewayFactory,
   type SentryIssueGateway,
