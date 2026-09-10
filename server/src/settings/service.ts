@@ -52,6 +52,19 @@ export const MAX_SENTRY_POLL_INTERVAL_MINUTES = 1440;
 /** How often Sentry is polled when the operator has not chosen (US-002). */
 export const DEFAULT_SENTRY_POLL_INTERVAL_MINUTES = 15;
 
+/**
+ * Bounds on how many issues one planning pass may plan (US-010). One is the
+ * floor because a pass that plans nothing is a pass that has been turned off
+ * without saying so — the Sentry poll interval is where "less often" belongs —
+ * and ten is the ceiling because every plan is an agent in its own right, so
+ * an error storm at a higher number is a fleet rather than a queue.
+ */
+export const MIN_SENTRY_PLANS_PER_TICK = 1;
+export const MAX_SENTRY_PLANS_PER_TICK = 10;
+
+/** How many issues a pass plans when the operator has not chosen (US-010). */
+export const DEFAULT_SENTRY_PLANS_PER_TICK = 2;
+
 /** Sentry's own hosted API; overridden per install for self-hosted Sentry. */
 export const DEFAULT_SENTRY_BASE_URL = 'https://sentry.io/api/0/';
 
@@ -76,10 +89,11 @@ export function isAgentModel(value: string): value is AgentModel {
 }
 
 /**
- * Which model classifies a Sentry issue as fixable or not (US-002). One cheap
- * one-shot call per issue, so this defaults to the cheapest family rather than
- * to "let the CLI choose" — a classification pass accidentally running on Opus
- * is the expensive mistake this default exists to prevent.
+ * Which model plans a Sentry issue — the one call that triages it and writes
+ * its proposed fix plan (US-002, presented as the *planning model* since
+ * US-010). One cheap one-shot call per issue, so this defaults to the cheapest
+ * family rather than to "let the CLI choose" — a planning pass accidentally
+ * running on Opus is the expensive mistake this default exists to prevent.
  */
 export const DEFAULT_SENTRY_MODEL: AgentModel = 'haiku';
 
@@ -120,8 +134,10 @@ export interface AppSettings {
   readonly sentryToken: GithubTokenView;
   /** How often Sentry is polled for new unresolved issues, in minutes. */
   readonly sentryPollIntervalMinutes: number;
-  /** Model the one-shot issue classification runs on; never `null`. */
+  /** Model the one-shot triage-and-plan call runs on; never `null`. */
   readonly sentryModel: AgentModel;
+  /** How many issues one planning pass may plan, across every repository. */
+  readonly sentryPlansPerTick: number;
   /** Root of the Sentry API; a self-hosted install points this at itself. */
   readonly sentryBaseUrl: string;
   readonly maxConcurrentSessions: number;
@@ -151,8 +167,9 @@ export interface AppSettingsUpdate {
   /** The same rules as `githubToken` above, for Sentry (US-002). */
   readonly sentryToken?: string | null;
   readonly sentryPollIntervalMinutes?: number;
-  /** There is no "let the CLI choose" for the classifier, so no `null`. */
+  /** There is no "let the CLI choose" for the planning pass, so no `null`. */
   readonly sentryModel?: AgentModel;
+  readonly sentryPlansPerTick?: number;
   /** `null` restores Sentry's own hosted API. */
   readonly sentryBaseUrl?: string | null;
   readonly maxConcurrentSessions?: number;
@@ -197,6 +214,15 @@ export function isValidSentryBaseUrl(value: string): boolean {
     return false;
   }
   return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+/** A number of plans per pass the operator is allowed to save (US-010). */
+export function isValidSentryPlansPerTick(value: number): boolean {
+  return (
+    Number.isInteger(value) &&
+    value >= MIN_SENTRY_PLANS_PER_TICK &&
+    value <= MAX_SENTRY_PLANS_PER_TICK
+  );
 }
 
 /** A poll interval the operator is allowed to save (US-002). */
@@ -248,14 +274,30 @@ export function getSentryPollIntervalMs(db: Database): number {
 }
 
 /**
- * Which model the issue classifier runs on (US-002). A hand-edited row naming
- * a model chief-web does not offer reads as the default, the same fail-safe as
- * {@link getPlanningModel} — except that here the fallback is a real model,
- * because the classifier always has to run on something.
+ * Which model the Sentry planning pass runs on (US-002). A hand-edited row
+ * naming a model chief-web does not offer reads as the default, the same
+ * fail-safe as {@link getPlanningModel} — except that here the fallback is a
+ * real model, because the pass always has to run on something.
  */
 export function getSentryModel(db: Database): AgentModel {
   const stored = getSetting(db, 'sentry_model');
   return stored !== null && isAgentModel(stored) ? stored : DEFAULT_SENTRY_MODEL;
+}
+
+/**
+ * How many issues one planning pass may plan (US-010).
+ *
+ * Read at the start of every pass, so a change applies from the next tick with
+ * no restart. An absent or unparseable row reads as
+ * {@link DEFAULT_SENTRY_PLANS_PER_TICK} and a stored value is clamped to the
+ * bounds the settings route validates — a hand-edited `0` would otherwise
+ * wedge the pass on a cap no issue can ever fit under, which is silently
+ * indistinguishable from Sentry having nothing to say.
+ */
+export function getSentryPlansPerTick(db: Database): number {
+  const stored = getSettingNumber(db, 'sentry_plans_per_tick', 0);
+  if (stored <= 0) return DEFAULT_SENTRY_PLANS_PER_TICK;
+  return Math.min(MAX_SENTRY_PLANS_PER_TICK, Math.max(MIN_SENTRY_PLANS_PER_TICK, stored));
 }
 
 /**
@@ -426,6 +468,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     sentryToken: sentryToken === null ? NO_TOKEN : maskToken(sentryToken),
     sentryPollIntervalMinutes: getSentryPollIntervalMinutes(db),
     sentryModel: getSentryModel(db),
+    sentryPlansPerTick: getSentryPlansPerTick(db),
     sentryBaseUrl: getSentryBaseUrl(db),
     // The env var is only the default: once saved, the settings row wins.
     maxConcurrentSessions: getSettingNumber(
@@ -464,6 +507,10 @@ export function updateAppSettings(
     }
 
     if (update.sentryModel !== undefined) setSetting(db, 'sentry_model', update.sentryModel);
+
+    if (update.sentryPlansPerTick !== undefined) {
+      setSettingNumber(db, 'sentry_plans_per_tick', update.sentryPlansPerTick);
+    }
 
     // `null` clears the row, which makes the hosted Sentry API apply again.
     if (update.sentryBaseUrl === null) deleteSetting(db, 'sentry_base_url');

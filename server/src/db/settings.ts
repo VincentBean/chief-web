@@ -60,11 +60,19 @@ export const SETTING_KEYS = [
    */
   'sentry_poll_interval_minutes',
   /**
-   * `--model` for the one-shot "can this be fixed?" classification (US-002).
-   * Unlike the other model rows an absent one is not "let the CLI choose" but
-   * the built-in `haiku` — the classifier is a cheap pass by design.
+   * `--model` for the planning pass, which triages an issue and writes its
+   * proposed fix plan (US-002; renamed in the UI by US-010, key kept so
+   * existing installs keep their choice). Unlike the other model rows an
+   * absent one is not "let the CLI choose" but the built-in `haiku` — the
+   * planning pass is a cheap one-shot call by design.
    */
   'sentry_model',
+  /**
+   * How many issues one planning pass may plan, across every repository
+   * (US-010). An absent row means the built-in default of 2; a stored value
+   * outside 1–10 is clamped on the way out.
+   */
+  'sentry_plans_per_tick',
   /**
    * Base URL of the Sentry API, for self-hosted installations (US-002). An
    * absent row means `https://sentry.io/api/0/`.

@@ -61,8 +61,10 @@ background, instead of babysitting one terminal per feature.
   conflicts with the base branch by itself.
   [Merge conflicts](docs/merge-conflicts.md)
 - **Fixes Sentry errors.** Link a Sentry project and it works out which errors
-  a code change can fix, then opens a pull request for them. Merge it and the
-  issue is resolved in Sentry too. [Sentry](docs/sentry.md)
+  a code change can fix and proposes a plan for each. Nothing is built until you
+  approve one: tick the approved issues you want and they become a single
+  session behind a single pull request. Merge it and the issues are resolved in
+  Sentry too. [Sentry](docs/sentry.md)
 - **Gives you a terminal in the browser.** A real shell inside any running
   container. Close the tab, come back, the output is still there.
   [Terminals](docs/interface.md#browser-terminals)
@@ -264,7 +266,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
-| [Sentry auto-fixer](docs/sentry.md) | linking a project, what gets fixed, and what does not |
+| [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |
 | [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
 | [Claude authentication](docs/claude-auth.md) | the one-time login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |

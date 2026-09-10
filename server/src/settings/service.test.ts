@@ -20,11 +20,13 @@ import {
   getReviewModel,
   getSentryBaseUrl,
   getSentryModel,
+  getSentryPlansPerTick,
   getSentryPollIntervalMinutes,
   getSentryPollIntervalMs,
   getSentryToken,
   isAgentModel,
   isValidSentryBaseUrl,
+  isValidSentryPlansPerTick,
   isValidSentryPollIntervalMinutes,
   readAppSettings,
   updateAppSettings,
@@ -220,6 +222,7 @@ describe('sentry settings (US-002)', () => {
     deleteSetting(db, 'sentry_token');
     deleteSetting(db, 'sentry_poll_interval_minutes');
     deleteSetting(db, 'sentry_model');
+    deleteSetting(db, 'sentry_plans_per_tick');
     deleteSetting(db, 'sentry_base_url');
   });
 
@@ -314,6 +317,45 @@ describe('sentry settings (US-002)', () => {
     assert.equal(isAgentModel('gpt-5'), false);
     assert.equal(getSentryModel(db), 'haiku');
     assert.equal(readAppSettings(db, config).sentryModel, 'haiku');
+  });
+
+  it('plans two issues a poll until another number is chosen (US-010)', () => {
+    assert.equal(getSentryPlansPerTick(db), 2);
+    assert.equal(readAppSettings(db, config).sentryPlansPerTick, 2);
+  });
+
+  it('stores a chosen number of plans per poll and reads it back (US-010)', () => {
+    const saved = updateAppSettings(db, config, { sentryPlansPerTick: 7 });
+
+    assert.equal(saved.sentryPlansPerTick, 7);
+    assert.equal(getSentryPlansPerTick(db), 7);
+    assert.equal(getSetting(db, 'sentry_plans_per_tick'), '7');
+  });
+
+  it('accepts only whole numbers from one to ten (US-010)', () => {
+    assert.equal(isValidSentryPlansPerTick(0), false);
+    assert.equal(isValidSentryPlansPerTick(-1), false);
+    assert.equal(isValidSentryPlansPerTick(1), true);
+    assert.equal(isValidSentryPlansPerTick(10), true);
+    assert.equal(isValidSentryPlansPerTick(11), false);
+    assert.equal(isValidSentryPlansPerTick(2.5), false);
+  });
+
+  it('clamps a hand-edited row so a bad value cannot wedge the pass (US-010)', () => {
+    // Zero would stop every planning pass before it looked at a single issue,
+    // which is indistinguishable from Sentry having nothing to say.
+    setSetting(db, 'sentry_plans_per_tick', '0');
+    assert.equal(getSentryPlansPerTick(db), 2, 'non-positive falls back to the default');
+
+    setSetting(db, 'sentry_plans_per_tick', '-3');
+    assert.equal(getSentryPlansPerTick(db), 2);
+
+    setSetting(db, 'sentry_plans_per_tick', '9999');
+    assert.equal(getSentryPlansPerTick(db), 10);
+    assert.equal(readAppSettings(db, config).sentryPlansPerTick, 10);
+
+    setSetting(db, 'sentry_plans_per_tick', 'not a number');
+    assert.equal(getSentryPlansPerTick(db), 2);
   });
 
   it('talks to the hosted API until a base URL is stored', () => {

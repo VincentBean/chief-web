@@ -45,6 +45,22 @@ import { createSentryClient, SentryApiError } from './client.js';
  * Nothing is building that fix any more, and nothing ever will, so the issue is
  * closed with exactly that said.
  *
+ * ## A session is a batch (US-007)
+ *
+ * Several issues share one `session_id` — one branch, one pull request, one set
+ * of stories — so the pass walks sessions rather than issues, and the session's
+ * end decides every issue pointing at it. That makes a batch all-or-nothing:
+ * a merge fixes all of them, and each of the three bad ends gives up on all of
+ * them with the same explanation. Nothing here reads a story's own
+ * `**Status:**` out of the PRD; whether the agent ticked a story off is a
+ * question for the pull request's review, not a reason to close one issue of a
+ * merged batch differently from its neighbours.
+ *
+ * Only the local transition is shared, though. Resolving is still per issue:
+ * each carries its own `resolve_upstream` flag and its own Sentry call, so one
+ * issue's failing call costs that issue a tick and leaves the rest of its batch
+ * reported.
+ *
  * ## Resolving, and why it is a flag
  *
  * `resolved_in_sentry` is not a status. The pull request is merged whatever
@@ -104,74 +120,91 @@ export class SentryCompletionService implements SentryCompleter {
   }
 
   /**
-   * Every issue a session is supposed to be fixing. Returns how many of them
-   * reached a terminal status — purely local work, so it runs whether or not
-   * Sentry is reachable or even configured.
+   * Every issue a session is supposed to be fixing, one batch at a time.
+   * Returns how many of them reached a terminal status — purely local work, so
+   * it runs whether or not Sentry is reachable or even configured.
    */
   private trackWorking(): number {
     let ended = 0;
-    for (const issue of listSentryIssuesByStatus(this.db, 'working')) {
-      if (this.trackIssue(issue)) ended += 1;
+    for (const batch of bySession(listSentryIssuesByStatus(this.db, 'working'))) {
+      ended += this.trackBatch(batch);
     }
     return ended;
   }
 
-  /** One working issue. Returns whether it reached a terminal status. */
-  private trackIssue(issue: SentryIssue): boolean {
-    if (issue.sessionId === null) {
-      // `ON DELETE SET NULL`: the row outlived the session that was fixing it,
-      // and nothing is going to pick that work back up on its own.
-      return this.cannotFix(issue, SESSION_DELETED);
-    }
-
-    const session = getSession(this.db, issue.sessionId);
-    if (session === null) {
-      // Not reachable through the foreign key, but a link pointing at nothing
-      // means exactly what a null one does.
-      return this.cannotFix(issue, SESSION_DELETED);
-    }
+  /**
+   * One batch: every working issue that shares a `session_id`. Returns how many
+   * of them reached a terminal status, which is either all of them or none.
+   */
+  private trackBatch(batch: SentryIssue[]): number {
+    // The one link they share, read off the first — that is what grouped them.
+    const sessionId = batch[0]?.sessionId ?? null;
+    // `ON DELETE SET NULL`: the rows outlived the session that was fixing them,
+    // and nothing is going to pick that work back up on its own. A link
+    // pointing at nothing is not reachable through the foreign key, but means
+    // exactly what a null one does.
+    const session = sessionId === null ? null : getSession(this.db, sessionId);
+    if (session === null) return this.cannotFix(batch, SESSION_DELETED);
 
     switch (session.status) {
       case 'merged':
-        return this.fixed(issue, session);
+        return this.fixed(batch, session);
       case 'failed':
         return this.cannotFix(
-          issue,
+          batch,
           failedSessionExplanation(session.failureStage, session.lastError),
         );
       case 'finished':
         // The pull request sync puts a session back here when its pull request
         // was closed unmerged; a build that opened none ends here too.
-        return this.cannotFix(issue, closedPullRequestExplanation(session.prUrl));
+        return this.cannotFix(batch, closedPullRequestExplanation(session.prUrl));
       default:
         // Still queued, building, waiting, reviewing or open: nothing to say.
-        return false;
+        return 0;
     }
   }
 
   /**
-   * The merge. Only the status is written here — Sentry is told in the resolve
-   * pass, so that a failing API call is a retry rather than a lost fix.
+   * The merge, for every issue of the batch (US-007). The session's outcome is
+   * the whole answer: one branch behind one pull request fixed all of them
+   * together, so nothing here reads a story's own status out of the PRD — a
+   * story the agent left `todo` is a code review's problem, not a reason to
+   * leave one issue of a merged batch open.
+   *
+   * Only the rows are written here — Sentry is told in the resolve pass, so
+   * that a failing API call is a retry rather than a lost fix.
+   * `resolveUpstream` is what puts each issue on that pass's list, and each is
+   * reported on its own.
    */
-  private fixed(issue: SentryIssue, session: Session): boolean {
-    updateSentryIssue(this.db, issue.id, { status: 'fixed', explanation: null, attempts: 0 });
-    logger.info('a Sentry issue was fixed by a merged pull request', {
-      issue: issue.shortId,
+  private fixed(batch: SentryIssue[], session: Session): number {
+    for (const issue of batch) {
+      updateSentryIssue(this.db, issue.id, {
+        status: 'fixed',
+        explanation: null,
+        attempts: 0,
+        resolveUpstream: true,
+      });
+    }
+    logger.info('Sentry issues were fixed by a merged pull request', {
+      issues: batch.map((issue) => issue.shortId),
       session: session.id,
       name: session.name,
       prUrl: session.prUrl,
     });
-    return true;
+    return batch.length;
   }
 
-  private cannotFix(issue: SentryIssue, explanation: string): boolean {
-    updateSentryIssue(this.db, issue.id, { status: 'cannot_fix', explanation, attempts: 0 });
-    logger.info('a Sentry issue was given up on: its fix session ended without a merge', {
-      issue: issue.shortId,
-      session: issue.sessionId,
+  /** The other three ends, which cost every issue of the batch alike. */
+  private cannotFix(batch: SentryIssue[], explanation: string): number {
+    for (const issue of batch) {
+      updateSentryIssue(this.db, issue.id, { status: 'cannot_fix', explanation, attempts: 0 });
+    }
+    logger.info('Sentry issues were given up on: their fix session ended without a merge', {
+      issues: batch.map((issue) => issue.shortId),
+      session: batch[0]?.sessionId ?? null,
       explanation,
     });
-    return true;
+    return batch.length;
   }
 
   /**
@@ -245,4 +278,20 @@ export function createSentryCompleter(
 
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * The working issues grouped into batches, one per `session_id`, in the order
+ * the rows came back. Every issue whose link is null shares the last group:
+ * they have no session between them, but they all end the same way and there is
+ * no session to look up for any of them.
+ */
+function bySession(issues: SentryIssue[]): SentryIssue[][] {
+  const batches = new Map<string | null, SentryIssue[]>();
+  for (const issue of issues) {
+    const batch = batches.get(issue.sessionId);
+    if (batch === undefined) batches.set(issue.sessionId, [issue]);
+    else batch.push(issue);
+  }
+  return [...batches.values()];
 }

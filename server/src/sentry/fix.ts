@@ -6,7 +6,7 @@ import type { Config } from '../config.js';
 import {
   type Database,
   getRepository,
-  listSentryIssuesByStatus,
+  getSentryIssue,
   listSessions,
   type PrTargetBranch,
   type Repository,
@@ -21,18 +21,32 @@ import { sessionPrdFile } from '../sessions/index.js';
 
 import { createSentryClient, SentryApiError, type SentryIssueDetails } from './client.js';
 import type { SentryDetailsFactory, SentryDetailsGateway } from './classify.js';
-import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
+import { fixBatchPrd, fixBatchSessionName } from './prd.js';
 
 /**
- * Turning a fixable Sentry issue into a build session (US-007).
+ * Turning a batch of approved Sentry issues into one build session (US-006).
  *
- * Runs after the classification pass, over the `queued` rows it left behind.
- * Each one becomes a real session: the repository's default base branch, code
- * review on so the existing review + PR-feedback pipeline runs, a generated
- * `prd.md` holding everything Sentry knows about the error, "Mark ready", and
- * then the very call the Start button makes. From that point on nothing about
- * it is special — the slot cap, the queue, the delivery and the pull request
- * are the ones every other session gets.
+ * Nothing here scans for work. The only way in is
+ * {@link SentryFixService.createFixSession}, which is handed an explicit list
+ * of issue ids by the operator's "Create fix session" API — the poll tick ends
+ * at a proposed plan and never reaches this file. That is the whole point of
+ * the approval flow: a pull request exists because somebody asked for it, not
+ * because an error fired.
+ *
+ * ## Why one session for the whole batch
+ *
+ * Because a session is a pull request and a review. Ten issues fixed one at a
+ * time cost ten of each, and a reviewer reading ten near-identical pull
+ * requests reads none of them properly. One session takes the batch as one
+ * PRD, a story per issue in the order the operator ticked them, and delivers
+ * the lot as a single branch.
+ *
+ * The session itself is nothing special: the repository's default base branch,
+ * code review on so the existing review + PR-feedback pipeline runs, a
+ * generated `prd.md` holding the approved plan and everything Sentry knows
+ * about each error, "Mark ready", and then the very call the Start button
+ * makes. From that point on the slot cap, the queue, the delivery and the pull
+ * request are the ones every other session gets.
  *
  * ## Why the start is made here
  *
@@ -41,33 +55,33 @@ import { fixPrd, fixSessionBaseName, uniqueFixSessionName } from './prd.js';
  * scheduler's tick only fires sessions that have a `scheduled_start_at`; and
  * the build queue only drains sessions that have a `queued_at`, which nothing
  * but `BuildService.start` sets. A fix session that was merely marked ready
- * would sit at `ready` for good, with its issue stuck on `working` and the
+ * would sit at `ready` for good, with its issues stuck on `working` and the
  * completion pass waiting on a build that never began.
  *
  * ## Why there is no cap here
  *
- * There is one upstream. {@link import('./classify.js').MAX_ISSUES_PER_TICK}
- * decides how many issues reach `queued` per tick, and the build queue decides
- * how many sessions run at once. A second cap in the middle would only leave
- * sessions un-created while slots sat empty.
+ * There is one on either side. The API caps a batch at ten ids, and the build
+ * queue decides how many sessions run at once. A second cap in the middle
+ * would only leave sessions un-created while slots sat empty.
  *
  * ## Exactly one session per issue
  *
- * The row leaves `queued` in the same beat the session is created, so the next
- * tick's `listSentryIssuesByStatus(db, 'queued')` no longer returns it. An issue
- * that somehow still carries a `session_id` is skipped outright rather than
- * given a second one.
+ * Every issue of the batch leaves `approved` for `working` in the same beat
+ * the session is created, so a second call naming any of them finds an issue
+ * that already has one — and the whole request is refused rather than half of
+ * it built, because half a batch is not what was asked for.
  *
  * ## Failure
  *
- * Per issue, and never destructive. A missing deploy key, a clone that was
- * refused, a PRD that would not write: the error is logged, the issue stays
- * `queued` with one more attempt against it, and the next tick tries again. At
- * {@link MAX_FIX_ATTEMPTS} it becomes `cannot_fix` with the failure named, so
- * the Sentry tab says what went wrong rather than "nothing happened". A session
- * that was created before the failure is deleted, so the retry starts clean —
- * and because `session_id` is `ON DELETE SET NULL`, the issue is unlinked by
- * the deletion itself.
+ * All or nothing, and never destructive. A missing deploy key, a clone that
+ * was refused, a PRD that would not write: the error is logged, every issue of
+ * the batch keeps the status it came in with and one more attempt against it,
+ * and the operator can press the button again. At {@link MAX_FIX_ATTEMPTS} an
+ * issue becomes `cannot_fix` with the failure named, so the Sentry tab says
+ * what went wrong rather than "nothing happened". A session that was created
+ * before the failure is deleted, so the retry starts clean — and because
+ * `session_id` is `ON DELETE SET NULL`, an issue is unlinked by the deletion
+ * itself.
  */
 
 /** Failed attempts at building a fix session before the issue is given up on. */
@@ -99,10 +113,34 @@ export interface FixBuildService {
   start(sessionId: string): Promise<unknown>;
 }
 
-/** What the poller calls once the classification pass is done. */
+/** The session the batch became: what the API answers the operator with. */
+export interface FixSessionCreated {
+  readonly ok: true;
+  readonly session: { readonly id: string; readonly name: string };
+}
+
+/**
+ * Nothing was created, and the reason why in words an operator can act on.
+ *
+ * Whether the refusal counted against the issues' attempts is deliberately not
+ * said here: it is on the rows, which the Sentry tab is showing anyway.
+ */
+export interface FixSessionRefused {
+  readonly ok: false;
+  readonly reason: string;
+}
+
+export type FixSessionResult = FixSessionCreated | FixSessionRefused;
+
+/** What the operator's "Create fix session" API (US-006) calls. */
 export interface SentryFixer {
-  /** One pass over the queued issues. Returns how many sessions were created. */
-  createFixSessions(): Promise<number>;
+  /**
+   * One session for exactly the issues named, or nothing at all. An id nothing
+   * is known about is skipped — the API is what refuses one — but everything
+   * else is all-or-nothing: the batch is one session, one PRD and one pull
+   * request, so half of it is never built.
+   */
+  createFixSession(issueIds: string[]): Promise<FixSessionResult>;
 }
 
 /**
@@ -152,6 +190,12 @@ export function writeSessionPrd(
   return file;
 }
 
+/** One issue of the batch, once Sentry has been asked what it knows about it. */
+interface BatchEntry {
+  readonly issue: SentryIssue;
+  readonly details: SentryIssueDetails;
+}
+
 export class SentryFixService implements SentryFixer {
   constructor(
     private readonly config: Pick<Config, 'workspacesDir'>,
@@ -161,67 +205,84 @@ export class SentryFixService implements SentryFixer {
     private readonly clients: SentryDetailsFactory = createSentryClient,
   ) {}
 
-  async createFixSessions(): Promise<number> {
-    const queued = listSentryIssuesByStatus(this.db, 'queued');
-    if (queued.length === 0) return 0;
+  async createFixSession(issueIds: string[]): Promise<FixSessionResult> {
+    // The caller's order is kept — it is the order the operator ticked the
+    // rows in, and so the order the stories are fixed in — but an id named
+    // twice is one issue, not two stories.
+    const wanted = [...new Set(issueIds)];
+    const asked = wanted
+      .map((id) => getSentryIssue(this.db, id))
+      .filter((issue): issue is SentryIssue => issue !== null);
+    if (asked.length === 0) return refused('none of the issues named exist any more');
 
-    // Only now, so an install with nothing queued never looks the token up.
+    // Belt and braces: the API refuses anything that is not `approved`, and an
+    // issue with a session left `approved` long ago.
+    const already = asked.filter((issue) => issue.sessionId !== null);
+    if (already.length > 0) {
+      return refused(
+        `${shortIds(already).join(', ')} already has a fix session; nothing was created`,
+      );
+    }
+
+    // One batch is one branch, so it is one repository. The API says so with a
+    // 400; this is what keeps the invariant true for any other caller.
+    const [first] = asked;
+    if (first === undefined) return refused('none of the issues named exist any more');
+    if (asked.some((issue) => issue.repositoryId !== first.repositoryId)) {
+      return refused('a fix session covers one repository, and these issues span several');
+    }
+
+    const repository = getRepository(this.db, first.repositoryId);
+    // A repository that is gone, or whose Sentry link was removed, is not a
+    // failure of these issues: they wait, untouched, for the link to come back.
+    if (repository === null) return refused('the repository these issues belong to is gone');
+    const org = repository.sentryOrg;
+    if (org === null || repository.sentryProject === null) {
+      return refused('the repository is no longer linked to a Sentry project');
+    }
+
+    // Only now, so a call with nothing to do never looks the token up.
     const client = this.clients(this.db);
     if (client === null) {
-      logger.debug('sentry fix sessions cannot be created: no Sentry token is configured', {
-        queued: queued.length,
+      logger.debug('a Sentry fix session cannot be created: no Sentry token is configured', {
+        asked: asked.length,
       });
-      return 0;
+      return refused('no Sentry token is configured');
     }
 
-    let created = 0;
-    for (const issue of queued) {
-      if (issue.sessionId !== null) {
-        // Belt and braces: the status alone already keeps a second tick away.
-        logger.warn('a queued Sentry issue already has a session; leaving it alone', {
-          issue: issue.shortId,
-          session: issue.sessionId,
-        });
-        continue;
-      }
-      const repository = getRepository(this.db, issue.repositoryId);
-      // A repository that is gone, or whose Sentry link was removed, is not a
-      // failure of this issue: it waits, untouched, for the link to come back.
-      if (repository === null) continue;
-      if (repository.sentryOrg === null || repository.sentryProject === null) continue;
-
-      if (await this.createFor(issue, repository, client)) created += 1;
-    }
-    return created;
+    return this.createFor(asked, repository, org, client);
   }
 
-  /** One issue. Returns whether it left `queued` with a session behind it. */
+  /** The whole batch, in one session. All of it or none of it. */
   private async createFor(
-    issue: SentryIssue,
+    issues: readonly SentryIssue[],
     repository: Repository,
+    org: string,
     client: SentryDetailsGateway,
-  ): Promise<boolean> {
-    const org = repository.sentryOrg;
-    if (org === null) return false;
-
-    let details: SentryIssueDetails;
-    try {
-      details = await client.getIssueDetails(org, issue.sentryIssueId);
-    } catch (cause) {
-      if (isTransient(cause)) {
-        // Sentry is down or has had enough of us. Nothing about this issue is
-        // in question, so it keeps its attempts and waits for the next tick.
-        logger.warn('a Sentry issue could not be read for its fix session', {
-          issue: issue.shortId,
-          error: describe(cause),
-        });
-        return false;
+  ): Promise<FixSessionResult> {
+    const batch: BatchEntry[] = [];
+    for (const issue of issues) {
+      try {
+        batch.push({ issue, details: await client.getIssueDetails(org, issue.sentryIssueId) });
+      } catch (cause) {
+        if (isTransient(cause)) {
+          // Sentry is down or has had enough of us. Nothing about these issues
+          // is in question, so they keep their attempts and the operator can
+          // ask again in a minute.
+          logger.warn('a Sentry issue could not be read for its fix session', {
+            issue: issue.shortId,
+            error: describe(cause),
+          });
+          return refused(`Sentry could not be read: ${describe(cause)}`);
+        }
+        return this.failed(
+          issues,
+          `${issue.shortId} could not be read from Sentry: ${describe(cause)}`,
+        );
       }
-      this.failed(issue, `the issue could not be read from Sentry: ${describe(cause)}`);
-      return false;
     }
 
-    const name = this.sessionName(repository.id, issue.shortId);
+    const name = this.sessionName(repository.id, shortIds(issues));
 
     let setup: SessionSetupView;
     try {
@@ -237,16 +298,14 @@ export class SentryFixService implements SentryFixer {
       });
     } catch (cause) {
       // A missing deploy key, a name the database refused: nothing was created.
-      this.failed(issue, describe(cause));
-      return false;
+      return this.failed(issues, describe(cause));
     }
 
     if (!setup.setup.ok) {
       // The row exists but its clone does not, so there is nothing to build in
       // and nothing to write a PRD into.
       await this.discard(setup.session.id);
-      this.failed(issue, `the repository could not be cloned: ${setup.setup.message}`);
-      return false;
+      return this.failed(issues, `the repository could not be cloned: ${setup.setup.message}`);
     }
 
     const session = { id: setup.session.id, name: setup.session.name };
@@ -254,12 +313,16 @@ export class SentryFixService implements SentryFixer {
       writeSessionPrd(
         this.config,
         session,
-        fixPrd({ sessionName: session.name, details, explanation: issue.explanation }),
+        fixBatchPrd({
+          sessionName: session.name,
+          // The plan is the one on the row: the classifier's proposal, or the
+          // operator's rewrite of it, whichever was approved.
+          issues: batch.map((entry) => ({ details: entry.details, plan: entry.issue.plan })),
+        }),
       );
     } catch (cause) {
       await this.discard(session.id);
-      this.failed(issue, `the generated PRD could not be written: ${describe(cause)}`);
-      return false;
+      return this.failed(issues, `the generated PRD could not be written: ${describe(cause)}`);
     }
 
     let ready: ReadyResult;
@@ -267,19 +330,17 @@ export class SentryFixService implements SentryFixer {
       ready = await this.sessions.markReady(session.id);
     } catch (cause) {
       await this.discard(session.id);
-      this.failed(issue, `the session could not be marked ready: ${describe(cause)}`);
-      return false;
+      return this.failed(issues, `the session could not be marked ready: ${describe(cause)}`);
     }
     if (!ready.ok) {
       // chief-web generated this PRD, so a PRD that does not parse is a bug
       // here rather than something an operator can fix — say so with the line
       // numbers, and let the attempts run out.
       await this.discard(session.id);
-      this.failed(
-        issue,
+      return this.failed(
+        issues,
         `the generated PRD did not parse: ${ready.prd.errors.map((error) => error.message).join(' ')}`,
       );
-      return false;
     }
 
     // The one thing "Mark ready" does not do: put the session in the build
@@ -290,47 +351,46 @@ export class SentryFixService implements SentryFixer {
     } catch (cause) {
       if (!queuedForHold(cause)) {
         await this.discard(session.id);
-        this.failed(issue, `the fix session could not be started: ${describe(cause)}`);
-        return false;
+        return this.failed(issues, `the fix session could not be started: ${describe(cause)}`);
       }
       // Claude's usage limit is on (US-005). The refusal came *after* the
       // session was put in the queue, and the pump hands it a slot the moment
       // the hold lifts, so there is nothing to undo and nothing to retry.
       logger.info('a Sentry fix session is waiting behind Claude’s usage limit', {
-        issue: issue.shortId,
+        issues: shortIds(issues),
         session: session.id,
       });
     }
 
-    // Only here, and in one write: from now on the issue is `working` and no
-    // tick will look at it again.
-    updateSentryIssue(this.db, issue.id, {
-      sessionId: session.id,
-      status: 'working',
-      attempts: 0,
-    });
-    logger.info('a fix session was created for a Sentry issue', {
-      issue: issue.shortId,
+    // Only here: from now on every issue of the batch is `working` and the
+    // completion pass is the only thing that touches it again.
+    for (const issue of issues) {
+      updateSentryIssue(this.db, issue.id, {
+        sessionId: session.id,
+        status: 'working',
+        attempts: 0,
+      });
+    }
+    logger.info('a fix session was created for a batch of Sentry issues', {
+      issues: shortIds(issues),
       repository: repository.id,
       session: session.id,
       name: session.name,
       stories: ready.stories.length,
     });
-    return true;
+    return { ok: true, session };
   }
 
-  /** `sentry-proj-123`, or the first free numeric suffix after it. */
-  private sessionName(repositoryId: string, shortId: string): string {
-    const taken = new Set(
-      listSessions(this.db, { repositoryId }).map((session) => session.name),
-    );
-    return uniqueFixSessionName(fixSessionBaseName(shortId), taken);
+  /** `sentry-proj-123` or `sentry-batch-20260909`, plus a suffix if it is taken. */
+  private sessionName(repositoryId: string, batch: readonly string[]): string {
+    const taken = new Set(listSessions(this.db, { repositoryId }).map((session) => session.name));
+    return fixBatchSessionName(batch, taken);
   }
 
   /**
-   * Throws away a session created for an issue that then failed, so the retry
+   * Throws away a session created for a batch that then failed, so the retry
    * starts from nothing. Best effort: a deletion that fails leaves a pending
-   * session an operator can see and remove, which is better than an issue that
+   * session an operator can see and remove, which is better than a batch that
    * never gets another attempt.
    */
   private async discard(sessionId: string): Promise<void> {
@@ -345,33 +405,43 @@ export class SentryFixService implements SentryFixer {
   }
 
   /**
-   * One failed attempt. The issue stays `queued` and comes back on the next
-   * tick until the attempts run out, at which point it is given up on with the
-   * failure named — `attempts` is the counter the classification pass reset to
-   * zero when it said the issue was fixable.
+   * One failed attempt, against every issue of the batch. They keep the status
+   * they came in with, so the operator can press the button again, until the
+   * attempts run out — at which point an issue is given up on with the failure
+   * named. `attempts` is the counter the classification pass reset to zero when
+   * it said the issue was fixable.
    */
-  private failed(issue: SentryIssue, reason: string): void {
-    const attempts = issue.attempts + 1;
-    if (attempts >= MAX_FIX_ATTEMPTS) {
-      updateSentryIssue(this.db, issue.id, {
-        status: 'cannot_fix',
-        explanation: fixSessionFailedExplanation(reason),
-        attempts,
-      });
-      logger.error('a Sentry issue was given up on after repeated session failures', {
-        issue: issue.shortId,
-        attempts,
-        error: reason,
-      });
-      return;
+  private failed(issues: readonly SentryIssue[], reason: string): FixSessionRefused {
+    const given: string[] = [];
+    for (const issue of issues) {
+      const attempts = issue.attempts + 1;
+      if (attempts >= MAX_FIX_ATTEMPTS) {
+        updateSentryIssue(this.db, issue.id, {
+          status: 'cannot_fix',
+          explanation: fixSessionFailedExplanation(reason),
+          attempts,
+        });
+        given.push(issue.shortId);
+        continue;
+      }
+      updateSentryIssue(this.db, issue.id, { attempts });
     }
-    updateSentryIssue(this.db, issue.id, { attempts });
-    logger.error('a fix session could not be created for a Sentry issue', {
-      issue: issue.shortId,
-      attempts,
+    logger.error('a fix session could not be created for a batch of Sentry issues', {
+      issues: shortIds(issues),
       error: reason,
+      ...(given.length === 0 ? {} : { givenUpOn: given }),
     });
+    return refused(reason);
   }
+}
+
+/** Nothing was created; this is why. */
+function refused(reason: string): FixSessionRefused {
+  return { ok: false, reason };
+}
+
+function shortIds(issues: readonly SentryIssue[]): string[] {
+  return issues.map((issue) => issue.shortId);
 }
 
 /**

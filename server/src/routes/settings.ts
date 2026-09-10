@@ -12,16 +12,19 @@ import {
   isValidGitAuthorEmail,
   isValidGitAuthorName,
   isValidSentryBaseUrl,
+  isValidSentryPlansPerTick,
   isValidSentryPollIntervalMinutes,
   MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
   MAX_PR_CONFLICT_INTERVAL_MINUTES,
   MAX_PR_SYNC_INTERVAL_MINUTES,
+  MAX_SENTRY_PLANS_PER_TICK,
   MAX_SENTRY_POLL_INTERVAL_MINUTES,
   MIN_AGENT_TIMEOUT_MINUTES,
   MIN_CONCURRENT_SESSIONS,
   MIN_PR_CONFLICT_INTERVAL_MINUTES,
   MIN_PR_SYNC_INTERVAL_MINUTES,
+  MIN_SENTRY_PLANS_PER_TICK,
   MIN_SENTRY_POLL_INTERVAL_MINUTES,
   readAppSettings,
   updateAppSettings,
@@ -125,6 +128,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     sentryToken?: string | null;
     sentryPollIntervalMinutes?: number;
     sentryModel?: AgentModel;
+    sentryPlansPerTick?: number;
     sentryBaseUrl?: string | null;
     maxConcurrentSessions?: number;
     agentTimeoutMinutes?: number;
@@ -189,8 +193,8 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     update.sentryPollIntervalMinutes = raw;
   }
 
-  // Unlike the three model fields below there is no `null` here: the classifier
-  // always runs on a model chief-web chose, defaulting to the cheapest.
+  // Unlike the three model fields below there is no `null` here: the planning
+  // pass always runs on a model chief-web chose, defaulting to the cheapest.
   if ('sentryModel' in input && input['sentryModel'] !== undefined) {
     const raw = input['sentryModel'];
     if (typeof raw !== 'string' || !isAgentModel(raw)) {
@@ -200,6 +204,17 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.sentryModel = raw;
+  }
+
+  if ('sentryPlansPerTick' in input && input['sentryPlansPerTick'] !== undefined) {
+    const raw = input['sentryPlansPerTick'];
+    if (typeof raw !== 'number' || !isValidSentryPlansPerTick(raw)) {
+      return {
+        error: 'invalid_sentry_plans_per_tick',
+        message: `Plans per poll must be a whole number between ${MIN_SENTRY_PLANS_PER_TICK} and ${MAX_SENTRY_PLANS_PER_TICK}.`,
+      };
+    }
+    update.sentryPlansPerTick = raw;
   }
 
   if ('sentryBaseUrl' in input && input['sentryBaseUrl'] !== undefined) {

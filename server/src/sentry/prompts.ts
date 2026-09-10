@@ -7,10 +7,11 @@ import type { SentryEvent, SentryIssueDetails } from './client.js';
  * read back out of.
  *
  * The judgement is deliberately cheap: one `claude -p` on haiku, in a checkout
- * of the repository's base branch, asked for one boolean and one sentence.
- * Everything expensive — the PRD, the session, the build loop, the pull
- * request — happens only after this said yes, which is the whole point of
- * asking: an error storm must not turn into a hundred build sessions.
+ * of the repository's base branch, asked for one boolean, one sentence and,
+ * when the boolean is true, a short proposed fix plan (US-002). Everything
+ * expensive — the PRD, the session, the build loop, the pull request — happens
+ * only after an operator has read that plan and approved it, which is the whole
+ * point of asking: an error storm must not turn into a hundred build sessions.
  *
  * ## Why the Sentry text is fenced
  *
@@ -38,6 +39,15 @@ export const MAX_TAGS = 25;
 export const MAX_BREADCRUMBS = 20;
 export const MAX_EXCEPTIONS = 3;
 
+/**
+ * Cap on the proposed fix plan read back out of the answer (US-002).
+ *
+ * The prompt asks for at most ten lines; this is the bound that holds when the
+ * model ignores that. Same number as the one the operator's own edit is held
+ * to, so a plan can be approved unchanged.
+ */
+export const MAX_PLAN_CHARS = 4000;
+
 export interface ClassificationPromptInput {
   readonly details: SentryIssueDetails;
   /** The branch that is checked out in the container; the agent is told which. */
@@ -49,6 +59,15 @@ export interface Classification {
   readonly fixable: boolean;
   /** 1–3 sentences, in the operator's words; stored on the issue row. */
   readonly explanation: string;
+  /**
+   * The proposed fix plan, bounded by {@link MAX_PLAN_CHARS}; `null` when the
+   * answer is not fixable, where there is nothing to plan.
+   *
+   * This is the model's *reading* of untrusted data, not trusted text: it is
+   * shown to an operator to judge and, once approved, fenced and defanged
+   * wherever it is put in front of another agent, exactly as the report is.
+   */
+  readonly plan: string | null;
 }
 
 export function classificationPrompt(input: ClassificationPromptInput): string {
@@ -91,12 +110,20 @@ ${SENTRY_DATA_END}
 Reply with a single JSON object and nothing else — no preamble, no markdown fence, no commentary \
 after it:
 
-{"fixable": true, "explanation": "One to three sentences."}
+{"fixable": true, "explanation": "One to three sentences.", "plan": "The plan, at most ten lines."}
 
 - \`fixable\` is a boolean, never a string.
 - \`explanation\` is 1 to 3 plain sentences. When \`fixable\` is true, say what is wrong and where. \
 When it is false, say why no change to this repository would fix it — this text is shown to an \
-operator as the whole reason nothing was done.`;
+operator as the whole reason nothing was done.
+- \`plan\` is required when \`fixable\` is true and ignored when it is false. It is at most ten lines \
+of plain prose — no headings, no code blocks, newlines written as \\n inside the JSON string — \
+naming the suspected root cause, the files or areas of this repository you would change, and what \
+the change would do. Write it for an operator who will approve or reject it without opening the \
+stack trace: concrete about where, honest about what you are unsure of, and never longer than it \
+needs to be. Do not write the patch itself, and do not restate the error.
+
+An answer with \`fixable\` true and no plan is not an answer, and will be thrown away.`;
 }
 
 /**
@@ -199,10 +226,15 @@ function defang(marker: string): string {
  * Reads the verdict back out of whatever the agent printed.
  *
  * Strict about the shape and forgiving about the surroundings: the answer has
- * to be one JSON object with a real boolean and a non-empty explanation, but a
- * model that wrapped it in a markdown fence or said "here you go" first has
- * still answered. The *last* valid object wins, because a model that reasons
- * out loud tends to quote the shape before it fills it in.
+ * to be one JSON object with a real boolean, a non-empty explanation and — when
+ * it says fixable — a non-empty plan, but a model that wrapped it in a markdown
+ * fence or said "here you go" first has still answered. The *last* valid object
+ * wins, because a model that reasons out loud tends to quote the shape before
+ * it fills it in.
+ *
+ * A fixable verdict with no plan is deliberately `null` rather than a verdict
+ * with an empty plan: the whole point of the call is the plan an operator
+ * approves, so an answer without one costs an attempt and is asked again.
  */
 export function parseClassification(output: string): Classification | null {
   let found: Classification | null = null;
@@ -266,5 +298,21 @@ function toClassification(value: unknown): Classification | null {
   if (typeof explanation !== 'string') return null;
   const trimmed = explanation.trim();
   if (trimmed === '') return null;
-  return { fixable, explanation: trimmed };
+  // Nothing is planned for an issue no code change can fix, so whatever the
+  // model put there is dropped and that path stays exactly as it was.
+  if (!fixable) return { fixable, explanation: trimmed, plan: null };
+  const plan = toPlan(record.plan);
+  if (plan === null) return null;
+  return { fixable, explanation: trimmed, plan };
+}
+
+/** The plan, trimmed and bounded; `null` when there is not one to store. */
+function toPlan(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.replace(/\r/g, '').trim();
+  if (trimmed === '') return null;
+  // The ellipsis counts: a plan of MAX_PLAN_CHARS + 1 characters is one the
+  // approve route refuses and the plan textarea marks too long before the
+  // operator has touched it.
+  return trimmed.length <= MAX_PLAN_CHARS ? trimmed : `${trimmed.slice(0, MAX_PLAN_CHARS - 1)}…`;
 }

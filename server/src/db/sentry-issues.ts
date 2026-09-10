@@ -21,14 +21,17 @@ import {
  */
 
 /**
- * `pending` → fetched, awaiting classification. `queued` → judged fixable,
- * awaiting session creation. `working` → a session is building the fix.
- * `fixed` → that session's pull request was merged. `cannot_fix` → the
- * classifier said no, or the fix never landed; always with an explanation.
+ * `pending` → fetched, awaiting classification. `planned` → judged fixable
+ * and carrying a proposed fix plan, awaiting the operator's decision.
+ * `approved` → the operator said yes, awaiting a session someone asks for.
+ * `working` → a session is building the fix. `fixed` → that session's pull
+ * request was merged. `cannot_fix` → the classifier said no, the operator
+ * rejected the plan, or the fix never landed; always with an explanation.
  */
 export const SENTRY_ISSUE_STATUSES = [
   'pending',
-  'queued',
+  'planned',
+  'approved',
   'working',
   'fixed',
   'cannot_fix',
@@ -52,8 +55,20 @@ export interface SentryIssue {
   readonly status: SentryIssueStatus;
   /** Why the issue is `cannot_fix`, in the operator's words. */
   readonly explanation: string | null;
+  /** The proposed fix plan the operator judges; NULL until one is written. */
+  readonly plan: string | null;
+  /** When the classifier wrote {@link plan}; NULL while there is none. */
+  readonly planProposedAt: string | null;
+  /** When the operator approved or rejected that plan; NULL while undecided. */
+  readonly planDecidedAt: string | null;
   /** The build session working on the fix; NULL once that session is deleted. */
   readonly sessionId: string | null;
+  /**
+   * Whether Sentry is owed a resolve call for this issue. Set when the fix
+   * lands and when an operator rejects the plan, and deliberately separate
+   * from *why* it is owed, so the resolve pass never has to read `status`.
+   */
+  readonly resolveUpstream: boolean;
   /** Whether the "resolve it upstream" call has succeeded yet. */
   readonly resolvedInSentry: boolean;
   /** Failed tries at the issue's current phase; at three it goes `cannot_fix`. */
@@ -85,7 +100,11 @@ export interface UpdateSentryIssueInput {
   readonly lastSeen?: string;
   readonly status?: SentryIssueStatus;
   readonly explanation?: string | null;
+  readonly plan?: string | null;
+  readonly planProposedAt?: string | null;
+  readonly planDecidedAt?: string | null;
   readonly sessionId?: string | null;
+  readonly resolveUpstream?: boolean;
   readonly resolvedInSentry?: boolean;
   readonly attempts?: number;
 }
@@ -100,7 +119,11 @@ const COLUMNS: Record<keyof UpdateSentryIssueInput, string> = {
   lastSeen: 'last_seen',
   status: 'status',
   explanation: 'explanation',
+  plan: 'plan',
+  planProposedAt: 'plan_proposed_at',
+  planDecidedAt: 'plan_decided_at',
   sessionId: 'session_id',
+  resolveUpstream: 'resolve_upstream',
   resolvedInSentry: 'resolved_in_sentry',
   attempts: 'attempts',
 };
@@ -120,7 +143,11 @@ export function mapSentryIssue(row: Row): SentryIssue {
     lastSeen: text(row, 'last_seen'),
     status: enumeration(row, 'status', SENTRY_ISSUE_STATUSES),
     explanation: nullableText(row, 'explanation'),
+    plan: nullableText(row, 'plan'),
+    planProposedAt: nullableText(row, 'plan_proposed_at'),
+    planDecidedAt: nullableText(row, 'plan_decided_at'),
     sessionId: nullableText(row, 'session_id'),
+    resolveUpstream: integer(row, 'resolve_upstream') !== 0,
     resolvedInSentry: integer(row, 'resolved_in_sentry') !== 0,
     attempts: integer(row, 'attempts'),
     createdAt: text(row, 'created_at'),
@@ -167,7 +194,11 @@ export function createSentryIssue(db: Database, input: CreateSentryIssueInput): 
     lastSeen: input.lastSeen,
     status: 'pending',
     explanation: null,
+    plan: null,
+    planProposedAt: null,
+    planDecidedAt: null,
     sessionId: null,
+    resolveUpstream: false,
     resolvedInSentry: false,
     attempts: 0,
     createdAt: now,
@@ -177,9 +208,10 @@ export function createSentryIssue(db: Database, input: CreateSentryIssueInput): 
   db.prepare(
     `INSERT INTO sentry_issues
        (id, repository_id, sentry_issue_id, short_id, title, culprit, permalink, level,
-        event_count, first_seen, last_seen, status, explanation, session_id,
-        resolved_in_sentry, attempts, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        event_count, first_seen, last_seen, status, explanation, plan, plan_proposed_at,
+        plan_decided_at, session_id, resolve_upstream, resolved_in_sentry, attempts,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     issue.id,
     issue.repositoryId,
@@ -194,7 +226,11 @@ export function createSentryIssue(db: Database, input: CreateSentryIssueInput): 
     issue.lastSeen,
     issue.status,
     issue.explanation,
+    issue.plan,
+    issue.planProposedAt,
+    issue.planDecidedAt,
     issue.sessionId,
+    issue.resolveUpstream ? 1 : 0,
     issue.resolvedInSentry ? 1 : 0,
     issue.attempts,
     issue.createdAt,
@@ -275,16 +311,19 @@ export function deleteSentryIssue(db: Database, id: string): boolean {
 }
 
 /**
- * The `fixed` issues Sentry has not been told about yet, oldest first (US-008).
+ * The issues Sentry is owed a resolve call for, oldest first (US-008).
  *
- * `resolved_in_sentry` is deliberately a flag rather than a status: the fix
- * landed whatever Sentry says, so a resolve call that failed must leave the
- * issue `fixed` and merely stay on this list until a later tick gets through.
+ * Two flags rather than a status: `resolve_upstream` records that the call is
+ * owed -- the fix landed, or the operator rejected the plan -- and
+ * `resolved_in_sentry` records that it has been made. Neither is a status,
+ * because the local decision stands whatever Sentry says: a resolve call that
+ * failed leaves the issue where it is and merely keeps it on this list until a
+ * later tick gets through.
  */
 export function listSentryIssuesAwaitingResolve(db: Database): SentryIssue[] {
   return db
     .prepare(
-      "SELECT * FROM sentry_issues WHERE status = 'fixed' AND resolved_in_sentry = 0 " +
+      'SELECT * FROM sentry_issues WHERE resolve_upstream = 1 AND resolved_in_sentry = 0 ' +
         'ORDER BY created_at ASC',
     )
     .all()

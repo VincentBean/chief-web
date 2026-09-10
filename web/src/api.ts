@@ -65,8 +65,10 @@ export interface Settings {
   sentryToken: { configured: boolean; last4: string | null };
   /** How often Sentry is polled for new unresolved issues (US-002). */
   sentryPollIntervalMinutes: number;
-  /** Model the issue classification runs on; never `null`, defaults to haiku. */
+  /** Model the triage-and-plan call runs on; never `null`, defaults to haiku. */
   sentryModel: AgentModel;
+  /** How many issues one planning pass may plan, across repositories (US-010). */
+  sentryPlansPerTick: number;
   /** Root of the Sentry API; self-hosted installs point this at themselves. */
   sentryBaseUrl: string;
   maxConcurrentSessions: number;
@@ -97,8 +99,9 @@ export interface SettingsUpdate {
   /** The same rules as `githubToken`, for Sentry (US-002). */
   sentryToken?: string | null;
   sentryPollIntervalMinutes?: number;
-  /** No "let Claude Code choose" here — the classifier always has a model. */
+  /** No "let Claude Code choose" here — the planning pass always has a model. */
   sentryModel?: AgentModel;
+  sentryPlansPerTick?: number;
   /** `null` restores Sentry's own hosted API. */
   sentryBaseUrl?: string | null;
   maxConcurrentSessions?: number;
@@ -1535,7 +1538,14 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
 /* ------------------------------------------------------------------ sentry */
 
 /** Mirrors the server's `SENTRY_ISSUE_STATUSES`. */
-export const SENTRY_ISSUE_STATUSES = ['pending', 'queued', 'working', 'fixed', 'cannot_fix'] as const;
+export const SENTRY_ISSUE_STATUSES = [
+  'pending',
+  'planned',
+  'approved',
+  'working',
+  'fixed',
+  'cannot_fix',
+] as const;
 
 export type SentryIssueStatus = (typeof SENTRY_ISSUE_STATUSES)[number];
 
@@ -1558,6 +1568,12 @@ export interface SentryIssue {
   status: SentryIssueStatus;
   /** Why the issue cannot be fixed; shown inline on every `cannot_fix` row. */
   explanation: string | null;
+  /** The proposed fix plan the operator judges; null until one is written. */
+  plan: string | null;
+  /** When the classifier proposed the plan; null while there is none. */
+  planProposedAt: string | null;
+  /** When the operator approved or rejected it; null while undecided. */
+  planDecidedAt: string | null;
   sessionId: string | null;
   /** Null when there is no session, or it has been deleted. */
   sessionName: string | null;
@@ -1586,13 +1602,73 @@ export async function fetchSentryIssues(signal?: AbortSignal): Promise<SentryIss
   return api<SentryIssueList>('/api/sentry/issues', signal ? { signal } : {});
 }
 
+/**
+ * The longest plan or rejection reason the server will take, mirroring the
+ * classifier's own `MAX_PLAN_CHARS`. An edit past it is a 400, so the
+ * textarea says so before the request is made.
+ */
+export const MAX_SENTRY_PLAN_CHARS = 4000;
+
+/**
+ * Approves the proposed plan (US-004), optionally replacing its text first.
+ *
+ * Editing and approving are one request on purpose: whatever is stored when
+ * the decision lands is what the fix session is given, so an operator who
+ * corrects a plan cannot approve the version they just rewrote away.
+ */
+export async function approveSentryPlan(id: string, plan?: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(plan === undefined ? {} : { plan }),
+  });
+}
+
+/**
+ * Rejects the proposed plan; the reason becomes the issue's explanation and
+ * the issue is also owed a resolve call to Sentry (US-004).
+ */
+export async function rejectSentryPlan(id: string, reason: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/**
+ * Most issues one fix session may cover, mirroring the server's
+ * `MAX_FIX_BATCH`. A longer batch is a 400, so the tab stops ticking there.
+ */
+export const MAX_SENTRY_FIX_BATCH = 10;
+
+/** Mirrors the server's `FixSessionCreatedView`: the session the batch became. */
+export interface SentryFixSession {
+  id: string;
+  name: string;
+}
+
+/**
+ * Starts one fix session covering a batch of approved issues (US-006).
+ *
+ * Unlike the two decisions, this answers with the *session* rather than with
+ * the issues, so the caller reloads the list afterwards: every issue in the
+ * batch has moved to `working` and carries the new session's id.
+ */
+export async function createSentryFixSession(issueIds: readonly string[]): Promise<SentryFixSession> {
+  return api<SentryFixSession>('/api/sentry/fix-sessions', {
+    method: 'POST',
+    body: JSON.stringify({ issueIds }),
+  });
+}
+
 /** What the operator reads for each pipeline state. */
 export function sentryIssueStatusLabel(status: SentryIssueStatus): string {
   switch (status) {
     case 'pending':
-      return 'awaiting classification';
-    case 'queued':
-      return 'queued';
+      return 'awaiting plan';
+    case 'planned':
+      return 'plan proposed';
+    case 'approved':
+      return 'approved, awaiting a session';
     case 'working':
       return 'session running';
     case 'fixed':
