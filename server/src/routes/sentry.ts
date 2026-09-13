@@ -114,7 +114,7 @@ export function createSentryRouter(db: Database, fixer: SentryFixer): Router {
       return;
     }
 
-    const issue = decidable(db, req.params.id, res);
+    const issue = inStatus(db, req.params.id, res, ['planned']);
     if (issue === null) return;
 
     const updated = updateSentryIssue(db, issue.id, {
@@ -127,7 +127,44 @@ export function createSentryRouter(db: Database, fixer: SentryFixer): Router {
   });
 
   /**
-   * Rejects the proposed plan, with the reason kept as the explanation.
+   * Replaces the plan's text without deciding anything.
+   *
+   * An approved plan is still only a plan until a session is created from it,
+   * so it stays editable up to that point: whatever is stored when the batch is
+   * created is what the fix session is given.
+   */
+  router.put('/sentry/issues/:id/plan', (req, res) => {
+    const plan = parsePlan(req.body);
+    if (plan === undefined) {
+      res.status(400).json({ error: 'invalid_plan', message: 'The plan cannot be empty.' });
+      return;
+    }
+    if (typeof plan !== 'string') {
+      res.status(400).json(plan);
+      return;
+    }
+
+    const issue = inStatus(db, req.params.id, res, ['planned', 'approved']);
+    if (issue === null) return;
+
+    respondWith(db, res, updateSentryIssue(db, issue.id, { plan }));
+  });
+
+  /**
+   * Takes an approved issue back to `planned`, out of the batch picker and
+   * into the decision list again. Nothing had been spent on it past the plan,
+   * so there is nothing to undo but the decision itself.
+   */
+  router.post('/sentry/issues/:id/unapprove', (req, res) => {
+    const issue = inStatus(db, req.params.id, res, ['approved']);
+    if (issue === null) return;
+
+    respondWith(db, res, updateSentryIssue(db, issue.id, { status: 'planned', planDecidedAt: null }));
+  });
+
+  /**
+   * Rejects the plan — proposed or already approved — with the operator's
+   * reason, if they gave one, kept as the explanation.
    *
    * A rejection is the end of the issue here, so Sentry is owed a resolve call
    * — otherwise the poller would fetch the same issue back on the next tick
@@ -137,17 +174,17 @@ export function createSentryRouter(db: Database, fixer: SentryFixer): Router {
    */
   router.post('/sentry/issues/:id/reject', (req, res) => {
     const reason = parseReason(req.body);
-    if (typeof reason !== 'string') {
+    if (reason !== undefined && typeof reason !== 'string') {
       res.status(400).json(reason);
       return;
     }
 
-    const issue = decidable(db, req.params.id, res);
+    const issue = inStatus(db, req.params.id, res, ['planned', 'approved']);
     if (issue === null) return;
 
     const updated = updateSentryIssue(db, issue.id, {
       status: 'cannot_fix',
-      explanation: `plan rejected: ${reason}`,
+      explanation: reason === undefined ? 'plan rejected' : `plan rejected: ${reason}`,
       planDecidedAt: nowIso(),
       resolveUpstream: true,
     });
@@ -267,20 +304,26 @@ function batchRefusal(db: Database, issueIds: readonly string[]): Invalid | null
 }
 
 /**
- * The issue both decisions may be made on, or `null` once the answer has been
- * written: 404 for an id nobody knows, 409 for an issue that is past — or not
- * yet at — the point where there is a plan to judge.
+ * The issue, if it is in one of the statuses the action may be taken from, or
+ * `null` once the answer has been written: 404 for an id nobody knows, 409 for
+ * an issue that is past — or not yet at — that point. Once a session has been
+ * created from a plan, nothing here touches the plan again.
  */
-function decidable(db: Database, id: string, res: Response): SentryIssue | null {
+function inStatus(
+  db: Database,
+  id: string,
+  res: Response,
+  statuses: readonly SentryIssueStatus[],
+): SentryIssue | null {
   const issue = getSentryIssue(db, id);
   if (issue === null) {
     res.status(404).json({ error: 'sentry_issue_not_found', message: 'No such Sentry issue.' });
     return null;
   }
-  if (issue.status !== 'planned') {
+  if (!statuses.includes(issue.status)) {
     res.status(409).json({
-      error: 'sentry_issue_not_planned',
-      message: `This issue is ${issue.status}, not awaiting a decision on a proposed plan.`,
+      error: 'sentry_issue_wrong_status',
+      message: `This issue is ${issue.status}; this can only be done while it is ${statuses.join(' or ')}.`,
     });
     return null;
   }
@@ -341,18 +384,20 @@ function parsePlan(body: unknown): string | undefined | Invalid {
   return plan;
 }
 
-/** The required rejection reason; it becomes the issue's explanation. */
-function parseReason(body: unknown): string | Invalid {
+/**
+ * The optional rejection reason; it becomes part of the issue's explanation.
+ * `undefined` when none was given, blank included.
+ */
+function parseReason(body: unknown): string | undefined | Invalid {
   const field = readField(body, 'reason');
   if ('error' in field) return field;
+  if (field.value === undefined || field.value === null) return undefined;
   if (typeof field.value !== 'string') {
-    return { error: 'invalid_reason', message: 'A reason for the rejection is required.' };
+    return { error: 'invalid_reason', message: 'The reason must be a string.' };
   }
 
   const reason = normalise(field.value);
-  if (reason.length === 0) {
-    return { error: 'invalid_reason', message: 'A reason for the rejection is required.' };
-  }
+  if (reason.length === 0) return undefined;
   if (reason.length > MAX_PLAN_CHARS) {
     return {
       error: 'invalid_reason',

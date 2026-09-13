@@ -7,12 +7,14 @@ import {
   MAX_SENTRY_FIX_BATCH,
   MAX_SENTRY_PLAN_CHARS,
   rejectSentryPlan,
+  saveSentryPlan,
   type SentryFixSession,
   type SentryIssue,
   type SentryIssueList,
   type SentryIssueStatus,
   sentryIssueStatusLabel,
   sessionPath,
+  unapproveSentryPlan,
 } from '../api.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { describeError, redirectIfUnauthorised } from '../data.tsx';
@@ -144,6 +146,11 @@ export function Sentry() {
 
   const issues = list?.issues ?? [];
 
+  const changed = (issue: SentryIssue, message: string): void => {
+    replace(issue);
+    toast.ok(message);
+  };
+
   return (
     <div className="page">
       <PageHeader
@@ -206,6 +213,7 @@ export function Sentry() {
                 key={section.key}
                 section={section}
                 rows={rows}
+                onChanged={changed}
                 onStarted={(session, count) => {
                   toast.ok(`${session.name} is fixing ${String(count)} ${count === 1 ? 'issue' : 'issues'}.`);
                   // The 201 carries the session, not the issues, so the list is
@@ -227,14 +235,7 @@ export function Sentry() {
                 <ul className="rows rows--divided">
                   {rows.map((issue) =>
                     section.key === 'planned' ? (
-                      <PlannedRow
-                        key={issue.id}
-                        issue={issue}
-                        onDecided={(decided, message) => {
-                          replace(decided);
-                          toast.ok(message);
-                        }}
-                      />
+                      <PlanRow key={issue.id} issue={issue} onChanged={changed} />
                     ) : (
                       <IssueRow key={issue.id} issue={issue} showState={section.key === 'working'} />
                     ),
@@ -267,10 +268,12 @@ export function Sentry() {
 function ApprovedSection({
   section,
   rows,
+  onChanged,
   onStarted,
 }: {
   readonly section: (typeof SECTIONS)[number];
   readonly rows: readonly SentryIssue[];
+  readonly onChanged: (issue: SentryIssue, message: string) => void;
   readonly onStarted: (session: SentryFixSession, count: number) => void;
 }) {
   const [ticked, setTicked] = useState<readonly string[]>([]);
@@ -343,10 +346,13 @@ function ApprovedSection({
         <>
           <ul className="rows rows--divided">
             {rows.map((issue) => (
-              <IssueRow
+              <PlanRow
                 key={issue.id}
                 issue={issue}
-                showState={false}
+                // The session is built from the plans as they stand when it is
+                // created, so nothing on a row may change while that happens.
+                locked={busy}
+                onChanged={onChanged}
                 select={
                   <label className="checkbox">
                     <input
@@ -392,7 +398,9 @@ function ApprovedSection({
 }
 
 /**
- * A proposed plan, with the two decisions on it (US-008).
+ * A plan that no session has been built from yet — proposed or approved — and
+ * everything that can still be done to it (US-008): edit it, approve it, send
+ * an approved one back for review, or reject it.
  *
  * The state is the row's own: two rows being edited at once is normal — a plan
  * is read, half-rewritten, left alone while the next one is read — and a
@@ -401,35 +409,44 @@ function ApprovedSection({
  * it moved, so a refused decision leaves the plan, the edit and the buttons
  * exactly as they were.
  */
-function PlannedRow({
+function PlanRow({
   issue,
-  onDecided,
+  select,
+  locked = false,
+  onChanged,
 }: {
   readonly issue: SentryIssue;
-  readonly onDecided: (issue: SentryIssue, message: string) => void;
+  /** The batch checkbox, on approved rows. */
+  readonly select?: ReactNode;
+  /** Every button off, while a session is being created from the batch. */
+  readonly locked?: boolean;
+  readonly onChanged: (issue: SentryIssue, message: string) => void;
 }) {
+  const approved = issue.status === 'approved';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(issue.plan ?? '');
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
+  const [busy, setBusy] = useState<'approve' | 'save' | 'unapprove' | 'reject' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const edited = draft.trim();
-  // What Approve would send: an untouched plan is left alone, so the cap is a
-  // check on the edit rather than on the plan. A plan the classifier itself
-  // wrote up to the cap is still approvable as it stands.
+  // What Approve or Save would send: an untouched plan is left alone, so the
+  // cap is a check on the edit rather than on the plan. A plan the classifier
+  // itself wrote up to the cap is still approvable as it stands.
   const submission = editing && edited !== (issue.plan ?? '') ? edited : undefined;
   const tooLong = submission !== undefined && submission.length > MAX_SENTRY_PLAN_CHARS;
   const emptyEdit = editing && edited === '';
+  const disabled = locked || busy !== null;
 
-  const settle = (work: Promise<SentryIssue>, kind: 'approve' | 'reject', message: string): void => {
+  const settle = (work: Promise<SentryIssue>, kind: NonNullable<typeof busy>, message: string): void => {
     setBusy(kind);
     setError(null);
     work
-      .then((decided) => {
+      .then((updated) => {
         setRejecting(false);
-        onDecided(decided, message);
+        setEditing(false);
+        onChanged(updated, message);
       })
       .catch((cause: unknown) => {
         if (redirectIfUnauthorised(cause)) return;
@@ -448,14 +465,30 @@ function PlannedRow({
     settle(approveSentryPlan(issue.id, submission), 'approve', `Approved the plan for ${issue.shortId}.`);
   };
 
+  const save = (): void => {
+    if (emptyEdit || tooLong) return;
+    if (submission === undefined) {
+      setEditing(false);
+      return;
+    }
+    settle(saveSentryPlan(issue.id, submission), 'save', `Saved the plan for ${issue.shortId}.`);
+  };
+
+  const unapprove = (): void => {
+    settle(unapproveSentryPlan(issue.id), 'unapprove', `Moved ${issue.shortId} back to Needs your decision.`);
+  };
+
   const reject = (): void => {
     const text = reason.trim();
-    if (text === '') return;
-    settle(rejectSentryPlan(issue.id, text), 'reject', `Rejected the plan for ${issue.shortId}.`);
+    settle(
+      rejectSentryPlan(issue.id, text === '' ? undefined : text),
+      'reject',
+      `Rejected the plan for ${issue.shortId}.`,
+    );
   };
 
   return (
-    <IssueRow issue={issue} showState={false}>
+    <IssueRow issue={issue} showState={false} select={select}>
       {editing ? (
         <div className="field">
           <textarea
@@ -471,7 +504,9 @@ function PlannedRow({
               ? `A plan can be at most ${MAX_SENTRY_PLAN_CHARS.toLocaleString()} characters; this one is ${edited.length.toLocaleString()}.`
               : emptyEdit
                 ? 'A plan cannot be empty. Reject the issue instead of emptying its plan.'
-                : 'Approving sends this text, and the fix session is given exactly what you leave here.'}
+                : approved
+                  ? 'Saving replaces the approved plan; the fix session is given exactly what you leave here.'
+                  : 'Approving sends this text, and the fix session is given exactly what you leave here.'}
           </p>
         </div>
       ) : issue.plan === null ? (
@@ -494,11 +529,17 @@ function PlannedRow({
             setDraft(issue.plan ?? '');
             setEditing(!editing);
           }}
-          disabled={busy !== null}
+          disabled={disabled}
         >
           <Icon name="pencil" />
           {editing ? 'Discard edit' : 'Edit plan'}
         </button>
+        {approved && !editing && (
+          <button type="button" className="button button--quiet" onClick={unapprove} disabled={disabled}>
+            <Icon name="arrow-left" />
+            {busy === 'unapprove' ? 'Moving back…' : 'Back to review'}
+          </button>
+        )}
         <button
           type="button"
           className="button button--danger"
@@ -506,20 +547,34 @@ function PlannedRow({
             setReason('');
             setRejecting(true);
           }}
-          disabled={busy !== null}
+          disabled={disabled}
         >
           <Icon name="x" />
           Reject
         </button>
-        <button
-          type="button"
-          className="button button--primary"
-          onClick={approve}
-          disabled={busy !== null || emptyEdit || tooLong}
-        >
-          <Icon name="check" />
-          {busy === 'approve' ? 'Approving…' : 'Approve'}
-        </button>
+        {approved ? (
+          editing && (
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={save}
+              disabled={disabled || emptyEdit || tooLong}
+            >
+              <Icon name="check" />
+              {busy === 'save' ? 'Saving…' : 'Save plan'}
+            </button>
+          )
+        ) : (
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={approve}
+            disabled={disabled || emptyEdit || tooLong}
+          >
+            <Icon name="check" />
+            {busy === 'approve' ? 'Approving…' : 'Approve'}
+          </button>
+        )}
       </div>
 
       <ConfirmDialog
@@ -528,18 +583,18 @@ function PlannedRow({
         confirmLabel="Reject plan"
         busyLabel="Rejecting…"
         busy={busy === 'reject'}
-        confirmDisabled={reason.trim() === '' || reason.trim().length > MAX_SENTRY_PLAN_CHARS}
+        confirmDisabled={reason.trim().length > MAX_SENTRY_PLAN_CHARS}
         danger
         onConfirm={reject}
         onCancel={() => setRejecting(false)}
       >
         <p>
-          The issue moves to <strong>Cannot fix</strong> with your reason on it, and chief-web also resolves it in Sentry so the
-          poller does not bring it back and propose the same plan again.
+          The issue moves to <strong>Cannot fix</strong>, and chief-web also resolves it in Sentry so the poller does not bring it
+          back and propose the same plan again.
         </p>
         <div className="field">
           <label className="field__label" htmlFor={`reject-reason-${issue.id}`}>
-            Why this plan is wrong
+            Reason (optional)
           </label>
           <textarea
             id={`reject-reason-${issue.id}`}
@@ -550,7 +605,9 @@ function PlannedRow({
             placeholder="The stack trace is in a vendored file we do not own."
           />
           <p className="field__hint">
-            {reason.trim() === '' ? 'A reason is required — it is all that is left on the issue afterwards.' : 'Kept as the issue’s explanation.'}
+            {reason.trim().length > MAX_SENTRY_PLAN_CHARS
+              ? `A reason can be at most ${MAX_SENTRY_PLAN_CHARS.toLocaleString()} characters.`
+              : 'Kept as the issue’s explanation when given.'}
           </p>
         </div>
       </ConfirmDialog>

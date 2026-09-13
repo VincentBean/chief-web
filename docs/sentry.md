@@ -168,11 +168,12 @@ about.
 
 ## The status lifecycle
 
-Every issue chief-web has ever seen is a row with one of six statuses. It only
-ever moves forward, and the two middle steps are yours:
+Every issue chief-web has ever seen is a row with one of six statuses. It moves
+forward, except that you can send an approved issue back for review, and the two
+middle steps are yours:
 
 ```
-pending ──► planned ──► approved ──► working ──► fixed
+pending ──► planned ◄─► approved ──► working ──► fixed
    │           │            │           │
    └───────────┴────────────┴───────────┴──────► cannot_fix
 ```
@@ -181,7 +182,7 @@ pending ──► planned ──► approved ──► working ──► fixed
 | --- | --- | --- | --- |
 | **`pending`** | *awaiting plan* | The poller has seen the issue and written it down. Nothing has been spent on it yet. | The planning pass, **Plans per poll** issues per tick, oldest first. |
 | **`planned`** | *plan proposed* | Triaged **fixable**, with a proposed fix plan attached. It is waiting on you and nothing else. | **Approve** or **Reject** on the Sentry tab. Nothing moves it on its own, ever. |
-| **`approved`** | *approved, awaiting a session* | You approved the plan, as proposed or as you edited it. Still nothing built. | Ticking it into a batch and pressing **Create fix session**. |
+| **`approved`** | *approved, awaiting a session* | You approved the plan, as proposed or as you edited it. Still nothing built. | Ticking it into a batch and pressing **Create fix session** — or **Back to review** or **Reject** on the Sentry tab. Its plan stays editable. |
 | **`working`** | *session running* | A build session covering this issue — and possibly others in the same batch — exists, has been marked ready and started, and is building or waiting in the normal build queue. | The session's own outcome, for the whole batch at once. |
 | **`fixed`** | Fixed | The batch's pull request was **merged**. | Nothing. It is terminal. |
 | **`cannot_fix`** | Cannot fix | The planner said no, you rejected the plan, or the attempt died. Always carries a written explanation. | Nothing. It is terminal, and deliberately final. |
@@ -225,7 +226,7 @@ The explanation on the row always says which of these it was:
 | Reason | The explanation reads |
 | --- | --- |
 | The planner judged it not fixable by a code change | whatever it wrote — a config problem, a third-party outage, an error in a dependency, not enough information in the event |
-| **You rejected the proposed plan** | `plan rejected: <the reason you typed>` |
+| **You rejected the plan** | `plan rejected`, followed by `: <your reason>` if you typed one |
 | Planning failed three times (container, checkout, timeout, an unparseable answer, a fixable verdict with no plan) | `classification failed` — the stored wording predates the rename |
 | The session could not be created three times | `No fix session could be created for this issue: …` |
 | The build session failed | `build session failed at the <stage> stage: <error>` |
@@ -262,13 +263,16 @@ proposed plan in full, under the issue it belongs to.
   proposal is wrong in a detail you can fix — an edited plan is the plan the
   session is built from, and an untouched one is approved exactly as it stands.
   Approving is a decision, not a start: nothing is built yet.
-- **Reject** asks for a reason and moves the issue to `cannot_fix` with
-  `plan rejected: <your reason>`, and marks it for resolving in Sentry so the
-  poller cannot fetch the same error back next tick and pay for another plan.
+- **Reject** asks for an optional reason and moves the issue to `cannot_fix`
+  with `plan rejected` (or `plan rejected: <your reason>` when you gave one),
+  and marks it for resolving in Sentry so the poller cannot fetch the same error
+  back next tick and pay for another plan.
 
-A decision is final. There is no un-approve and no un-reject; both calls refuse
-anything that is not `planned`, so a second click on a decided row is an error
-rather than a second decision.
+Approving is not final until a session is created. An approved issue still
+shows its plan under **Approved**, with **Edit plan** (saved in place — the
+issue stays approved), **Back to review** (returns it to **Needs your
+decision**, plan and all) and **Reject**. Once an issue is `working`, none of
+these apply any more, and a rejection is final: there is no un-reject.
 
 ### 3. You pick a batch
 
@@ -359,10 +363,10 @@ in five panels — one per status, except that `pending` and `working` share one
 | Panel | Rows |
 | --- | --- |
 | **Needs your decision** | `planned` — each with its proposed plan printed in full, **Edit plan**, **Approve** and **Reject** |
-| **Approved** | `approved` — each with a checkbox, and **Create fix session** above them |
+| **Approved** | `approved` — each with a checkbox, its plan, **Edit plan**, **Back to review** and **Reject**, and **Create fix session** above them |
 | **Working** | `pending` and `working` — the ones chief-web is doing something about without you, badged with which of the two it is |
 | **Fixed** | `fixed`, badged `resolved in Sentry` once Sentry has been told |
-| **Cannot fix** | `cannot_fix`, each with its explanation printed underneath — including the reason you typed when you rejected a plan |
+| **Cannot fix** | `cannot_fix`, each with its explanation printed underneath — including the reason, if you typed one, when you rejected a plan |
 
 Every row's title links to the issue in Sentry, and a row with a session links
 to that session here. The meta line carries the short id, the repository, the
@@ -378,9 +382,9 @@ you just batched appear under **Working** with the session linked. If no token
 is configured the page says so and links to the settings panel, which is what
 tells "nothing is broken" apart from "this was never set up".
 
-The controls are the decision buttons and the batch checkboxes, and that is all.
-There is no retry, no force-fix and no dismiss, and a decided issue is never
-offered for decision again.
+The controls are the plan buttons and the batch checkboxes, and that is all.
+There is no retry and no force-fix, and an issue that has reached `working` or
+been rejected is never offered for decision again.
 
 ## Untrusted error data
 

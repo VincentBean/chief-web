@@ -1624,13 +1624,32 @@ export async function approveSentryPlan(id: string, plan?: string): Promise<Sent
 }
 
 /**
- * Rejects the proposed plan; the reason becomes the issue's explanation and
- * the issue is also owed a resolve call to Sentry (US-004).
+ * Replaces the plan of a planned or approved issue without deciding anything;
+ * the fix session is given whatever is stored when it is created.
  */
-export async function rejectSentryPlan(id: string, reason: string): Promise<SentryIssue> {
+export async function saveSentryPlan(id: string, plan: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/plan`, {
+    method: 'PUT',
+    body: JSON.stringify({ plan }),
+  });
+}
+
+/** Moves an approved issue back to awaiting a decision, plan and all. */
+export async function unapproveSentryPlan(id: string): Promise<SentryIssue> {
+  return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/unapprove`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/**
+ * Rejects a proposed or approved plan; the optional reason becomes part of the
+ * issue's explanation and the issue is also owed a resolve call to Sentry.
+ */
+export async function rejectSentryPlan(id: string, reason?: string): Promise<SentryIssue> {
   return api<SentryIssue>(`/api/sentry/issues/${encodeURIComponent(id)}/reject`, {
     method: 'POST',
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify(reason === undefined ? {} : { reason }),
   });
 }
 
