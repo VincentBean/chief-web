@@ -214,8 +214,13 @@ export function Sentry() {
                 section={section}
                 rows={rows}
                 onChanged={changed}
-                onStarted={(session, count) => {
-                  toast.ok(`${session.name} is fixing ${String(count)} ${count === 1 ? 'issue' : 'issues'}.`);
+                onStarted={(sessions, count) => {
+                  const issuesText = `${String(count)} ${count === 1 ? 'issue' : 'issues'}`;
+                  toast.ok(
+                    sessions.length === 1
+                      ? `${sessions[0]?.name ?? 'A session'} is fixing ${issuesText}.`
+                      : `${String(sessions.length)} sessions are fixing ${issuesText}.`,
+                  );
                   // The 201 carries the session, not the issues, so the list is
                   // read again: every issue of the batch is `working` now.
                   load({ refresh: true });
@@ -264,6 +269,10 @@ export function Sentry() {
  * the first tick decides which, and the rest of the rows go quiet until the
  * selection is cleared. The server enforces the same rule; the checkbox exists
  * so the operator never has to be told off for it.
+ *
+ * **Create fix session for all** skips the ticking: it sends every approved
+ * issue, one session per repository and at most {@link MAX_SENTRY_FIX_BATCH}
+ * issues per session, one request after the other.
  */
 function ApprovedSection({
   section,
@@ -274,10 +283,10 @@ function ApprovedSection({
   readonly section: (typeof SECTIONS)[number];
   readonly rows: readonly SentryIssue[];
   readonly onChanged: (issue: SentryIssue, message: string) => void;
-  readonly onStarted: (session: SentryFixSession, count: number) => void;
+  readonly onStarted: (sessions: readonly SentryFixSession[], count: number) => void;
 }) {
   const [ticked, setTicked] = useState<readonly string[]>([]);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<'selected' | 'all' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -298,25 +307,41 @@ function ApprovedSection({
     setTicked(on ? [...selected, id] : selected.filter((other) => other !== id));
   };
 
-  const start = (): void => {
-    if (selected.length === 0) return;
-    const count = selected.length;
+  const allBatches = batchesByRepository(rows);
+
+  /**
+   * Creates one session per batch, in order. A failure stops the run: the
+   * sessions already created stand, their issues are `working`, and the rest
+   * stay approved for the next press.
+   */
+  const run = (batches: readonly (readonly string[])[]): void => {
+    if (batches.length === 0) return;
     setBusy(true);
     setError(null);
-    createSentryFixSession(selected)
-      .then((session) => {
-        setConfirming(false);
+    void (async () => {
+      const created: SentryFixSession[] = [];
+      let count = 0;
+      try {
+        for (const ids of batches) {
+          created.push(await createSentryFixSession(ids));
+          count += ids.length;
+        }
         setTicked([]);
-        onStarted(session, count);
-      })
-      .catch((cause: unknown) => {
+      } catch (cause: unknown) {
         if (redirectIfUnauthorised(cause)) return;
-        // The dialog closes so the error is not hidden behind it; the ticks
-        // stay, because pressing the button again is the whole retry.
-        setConfirming(false);
-        setError(describeError(cause));
-      })
-      .finally(() => setBusy(false));
+        // The ticks stay, because pressing the button again is the whole retry.
+        setError(
+          created.length === 0
+            ? describeError(cause)
+            : `${describeError(cause)} (${String(created.length)} of ${String(batches.length)} sessions were created before this)`,
+        );
+      } finally {
+        // The dialog closes so an error is not hidden behind it.
+        setConfirming(null);
+        setBusy(false);
+        if (created.length > 0) onStarted(created, count);
+      }
+    })();
   };
 
   return (
@@ -325,15 +350,26 @@ function ApprovedSection({
       icon={section.icon}
       meta={<span className="panel__meta muted">{String(rows.length)}</span>}
       actions={
-        <button
-          type="button"
-          className="button button--primary"
-          onClick={() => setConfirming(true)}
-          disabled={busy || selected.length === 0}
-        >
-          <Icon name="play" />
-          {selected.length === 0 ? 'Create fix session' : `Create fix session (${String(selected.length)})`}
-        </button>
+        <>
+          <button
+            type="button"
+            className="button"
+            onClick={() => setConfirming('all')}
+            disabled={busy || rows.length === 0}
+          >
+            <Icon name="play" />
+            Create fix session for all
+          </button>
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() => setConfirming('selected')}
+            disabled={busy || selected.length === 0}
+          >
+            <Icon name="play" />
+            {selected.length === 0 ? 'Create fix session' : `Create fix session (${String(selected.length)})`}
+          </button>
+        </>
       }
     >
       {error !== null && (
@@ -378,14 +414,14 @@ function ApprovedSection({
       )}
 
       <ConfirmDialog
-        open={confirming}
+        open={confirming === 'selected'}
         title={`Create one session fixing ${String(selected.length)} ${selected.length === 1 ? 'issue' : 'issues'} in ${repository?.repositoryName ?? 'this repository'}?`}
         confirmLabel="Create fix session"
         busyLabel="Creating…"
         busy={busy}
         confirmDisabled={selected.length === 0}
-        onConfirm={start}
-        onCancel={() => setConfirming(false)}
+        onConfirm={() => run([selected])}
+        onCancel={() => setConfirming(null)}
       >
         <p>
           One agent session fixes all of them on one branch and opens one pull request, so they are reviewed and merged together.
@@ -393,8 +429,60 @@ function ApprovedSection({
         </p>
         <p className="row__meta mono">{batch.map((issue) => issue.shortId).join(', ')}</p>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirming === 'all'}
+        title={
+          allBatches.length === 1
+            ? `Create one session fixing all ${String(rows.length)} approved ${rows.length === 1 ? 'issue' : 'issues'}?`
+            : `Create ${String(allBatches.length)} sessions fixing all ${String(rows.length)} approved issues?`
+        }
+        confirmLabel={allBatches.length === 1 ? 'Create fix session' : `Create ${String(allBatches.length)} fix sessions`}
+        busyLabel="Creating…"
+        busy={busy}
+        confirmDisabled={rows.length === 0}
+        onConfirm={() => run(allBatches)}
+        onCancel={() => setConfirming(null)}
+      >
+        <p>
+          {allBatches.length === 1
+            ? 'One agent session fixes all of them on one branch and opens one pull request.'
+            : `A session covers one repository and at most ${String(MAX_SENTRY_FIX_BATCH)} issues, so they are split into one session per batch below, each with its own pull request.`}{' '}
+          Each issue moves to <strong>Working</strong> and links to its session.
+        </p>
+        {allBatches.map((ids) => {
+          const issuesInBatch = rows.filter((row) => ids.includes(row.id));
+          return (
+            <p key={ids[0]} className="row__meta">
+              {issuesInBatch[0]?.repositoryName}:{' '}
+              <span className="mono">{issuesInBatch.map((issue) => issue.shortId).join(', ')}</span>
+            </p>
+          );
+        })}
+      </ConfirmDialog>
     </Panel>
   );
+}
+
+/**
+ * Every approved issue as the batches the server accepts: grouped by
+ * repository, in the order the rows are listed, and cut into chunks of at most
+ * {@link MAX_SENTRY_FIX_BATCH}.
+ */
+function batchesByRepository(rows: readonly SentryIssue[]): string[][] {
+  const byRepository = new Map<string, string[]>();
+  for (const row of rows) {
+    const ids = byRepository.get(row.repositoryId) ?? [];
+    ids.push(row.id);
+    byRepository.set(row.repositoryId, ids);
+  }
+  const batches: string[][] = [];
+  for (const ids of byRepository.values()) {
+    for (let start = 0; start < ids.length; start += MAX_SENTRY_FIX_BATCH) {
+      batches.push(ids.slice(start, start + MAX_SENTRY_FIX_BATCH));
+    }
+  }
+  return batches;
 }
 
 /**

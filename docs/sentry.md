@@ -281,6 +281,13 @@ session** button above them. Tick between 1 and 10 issues — **all in the same
 repository**, because one session is one branch — and press it. The
 confirmation names the repository and lists the short ids about to be built.
 
+**Create fix session for all** skips the ticking and sends every approved
+issue: one session per repository, and a repository with more than 10 approved
+issues gets several sessions of at most 10. The confirmation lists each session's
+issues before anything is created. The sessions are created one after another;
+if one fails, the ones already created stand and the rest of the issues stay
+approved.
+
 ### 4. One session, one pull request
 
 The batch becomes a single build session, and that session is where this flow
@@ -363,7 +370,7 @@ in five panels — one per status, except that `pending` and `working` share one
 | Panel | Rows |
 | --- | --- |
 | **Needs your decision** | `planned` — each with its proposed plan printed in full, **Edit plan**, **Approve** and **Reject** |
-| **Approved** | `approved` — each with a checkbox, its plan, **Edit plan**, **Back to review** and **Reject**, and **Create fix session** above them |
+| **Approved** | `approved` — each with a checkbox, its plan, **Edit plan**, **Back to review** and **Reject**, and **Create fix session** and **Create fix session for all** above them |
 | **Working** | `pending` and `working` — the ones chief-web is doing something about without you, badged with which of the two it is |
 | **Fixed** | `fixed`, badged `resolved in Sentry` once Sentry has been told |
 | **Cannot fix** | `cannot_fix`, each with its explanation printed underneath — including the reason, if you typed one, when you rejected a plan |
