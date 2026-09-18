@@ -219,6 +219,18 @@
     margin: 0;
   }
 
+  /*
+   * A rejection that belongs to one field rather than to the save as a whole.
+   * Same metrics as .field__hint so it sits where the hint does; only the
+   * colour says it is a problem.
+   */
+  .field__error {
+    color: var(--color-status-danger);
+    font-size: var(--text-sm);
+    line-height: 1.25rem;
+    margin: 0;
+  }
+
   .field__actions {
     align-items: center;
     display: flex;

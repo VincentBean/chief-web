@@ -5,6 +5,7 @@ import {
   type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
+  ApiError,
   fetchClaudeState,
   fetchSettings,
   saveSettings,
@@ -57,6 +58,13 @@ export function Settings() {
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
   const [advisorModel, setAdvisorModel] = useState('');
+  /**
+   * The server's own words for a build-model/advisor pair Claude Code would
+   * refuse at launch (US-006), shown under the advisor select. A toast is the
+   * wrong home for it: the operator has to change one of two fields to get
+   * past it, and a message that scrolls away does not say which.
+   */
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
   const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
@@ -203,8 +211,19 @@ export function Settings() {
     // An untouched (empty) token field must not wipe the stored token.
     if (token.trim() !== '') update.githubToken = token.trim();
     if (sentryToken.trim() !== '') update.sentryToken = sentryToken.trim();
+    setAdvisorError(null);
     run('save', async () => {
-      applyLoaded(await saveSettings(update));
+      // One rejection is about a *pair* of fields rather than the save as a
+      // whole, so it is caught here and re-thrown: the toast still fires, and
+      // the message also stays put under the field the operator has to change.
+      applyLoaded(
+        await saveSettings(update).catch((error: unknown) => {
+          if (error instanceof ApiError && error.code === 'invalid_advisor_pairing') {
+            setAdvisorError(error.message);
+          }
+          throw error;
+        }),
+      );
       setToken('');
       setSentryToken('');
       return 'Settings saved.';
@@ -510,7 +529,7 @@ export function Settings() {
               <label className="field__label" htmlFor="build-model">
                 Build
               </label>
-              <select id="build-model" name="build-model" value={buildModel} onChange={(event) => setBuildModel(event.target.value)} className="field__input">
+              <select id="build-model" name="build-model" value={buildModel} onChange={(event) => { setBuildModel(event.target.value); setAdvisorError(null); }} className="field__input">
                 <option value="">Let Claude Code choose</option>
                 {AGENT_MODELS.map((model) => (
                   <option key={model} value={model}>
@@ -538,7 +557,7 @@ export function Settings() {
               <label className="field__label" htmlFor="advisor-model">
                 Advisor
               </label>
-              <select id="advisor-model" name="advisor-model" value={advisorModel} onChange={(event) => setAdvisorModel(event.target.value)} className="field__input">
+              <select id="advisor-model" name="advisor-model" value={advisorModel} onChange={(event) => { setAdvisorModel(event.target.value); setAdvisorError(null); }} className="field__input">
                 <option value="">No advisor</option>
                 {ADVISOR_MODELS.map((model) => (
                   <option key={model} value={model}>
@@ -546,6 +565,7 @@ export function Settings() {
                   </option>
                 ))}
               </select>
+              {advisorError !== null && <p className="field__error">{advisorError}</p>}
               <p className="field__hint">
                 A second model consulted during build runs only — planning, review and Sentry never use it. It spends extra tokens at the advisor model's own
                 rates, and it is an experimental Claude Code feature.

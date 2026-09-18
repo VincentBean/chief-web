@@ -6,11 +6,15 @@ import { fetchGithubUser, GithubApiError } from '../lib/github.js';
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
+  advisorsForModel,
   AGENT_MODELS,
   type AgentModel,
   type AppSettingsUpdate,
+  getAdvisorModel,
+  getBuildModel,
   getGithubToken,
   isAdvisorModel,
+  isAdvisorPairingAllowed,
   isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
@@ -76,6 +80,12 @@ export function createSettingsRouter(
       return;
     }
 
+    const pairing = checkAdvisorPairing(db, parsed);
+    if (pairing !== null) {
+      res.status(400).json(pairing);
+      return;
+    }
+
     const saved = updateAppSettings(db, config, parsed);
     // The cap moved: give the queue whatever that just freed, now rather than
     // on the next scheduler tick. Lowering it is harmless — the pump finds no
@@ -119,6 +129,28 @@ export function createSettingsRouter(
   });
 
   return router;
+}
+
+/**
+ * Refuses a build-model/advisor pair Claude Code would reject at launch
+ * (US-006), returning `null` when the pair is fine.
+ *
+ * The check is on the pair that would be *in force* after the save, not on
+ * what the request happens to carry: either half may be omitted, and an
+ * omitted half keeps its stored value. That is what makes the two directions
+ * one rule — moving the build model down onto a stored advisor is the same
+ * mistake as moving the advisor up onto a stored build model, and both are
+ * refused here rather than discovered when the next iteration fails to launch.
+ */
+function checkAdvisorPairing(db: Database, update: AppSettingsUpdate): Invalid | null {
+  const advisor = update.advisorModel !== undefined ? update.advisorModel : getAdvisorModel(db);
+  if (advisor === null) return null;
+  const buildModel = update.buildModel !== undefined ? update.buildModel : getBuildModel(db);
+  if (isAdvisorPairingAllowed(buildModel, advisor)) return null;
+  return {
+    error: 'invalid_advisor_pairing',
+    message: `Claude Code will not let ${advisor} advise a ${buildModel ?? 'default'} build model — an advisor has to be at least as capable as the model it advises. Choose ${advisorsForModel(buildModel).join(' or ')} as the advisor, or no advisor at all.`,
+  };
 }
 
 function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
