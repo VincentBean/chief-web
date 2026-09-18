@@ -81,6 +81,7 @@ describe('settings api', () => {
     deleteSetting(db, 'git_author_name');
     deleteSetting(db, 'git_author_email');
     deleteSetting(db, 'review_model');
+    deleteSetting(db, 'advisor_model');
     deleteSetting(db, 'code_review_default');
     deleteSetting(db, 'sentry_token');
     deleteSetting(db, 'sentry_poll_interval_minutes');
@@ -381,6 +382,47 @@ describe('settings api', () => {
     };
     assert.equal(cleared.reviewModel, null);
     assert.equal(cleared.planningModel, 'opus');
+    assert.equal(cleared.buildModel, 'sonnet');
+  });
+
+  it('persists the advisor model and rejects models the CLI refuses (US-003)', async () => {
+    // Absent until the operator picks one: no advisor is the status quo.
+    assert.equal(
+      ((await (await get()).json()) as { advisorModel: string | null }).advisorModel,
+      null,
+    );
+
+    assert.equal((await put({ advisorModel: 'opus' })).status, 200);
+    assert.equal(
+      ((await (await get()).json()) as { advisorModel: string | null }).advisorModel,
+      'opus',
+    );
+
+    // "haiku" is a real --model, so it would pass the wider allowlist — but the
+    // CLI refuses it as an advisor at launch, which kills the iteration.
+    for (const value of ['haiku', 'claude-opus-5', 'Opus', 'gpt-5', '', 3, true]) {
+      const response = await put({ advisorModel: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      assert.equal(((await response.json()) as { error: string }).error, 'invalid_advisor_model');
+    }
+
+    // A rejected write leaves the stored value alone, and so does an update
+    // that simply omits the field.
+    await put({ buildModel: 'sonnet' });
+    const kept = (await (await get()).json()) as {
+      advisorModel: string | null;
+      buildModel: string | null;
+    };
+    assert.equal(kept.advisorModel, 'opus');
+    assert.equal(kept.buildModel, 'sonnet');
+
+    // null means no advisor at all, and clearing it disturbs nothing else.
+    assert.equal((await put({ advisorModel: null })).status, 200);
+    const cleared = (await (await get()).json()) as {
+      advisorModel: string | null;
+      buildModel: string | null;
+    };
+    assert.equal(cleared.advisorModel, null);
     assert.equal(cleared.buildModel, 'sonnet');
   });
 
