@@ -161,8 +161,96 @@ describe('the stream-json formatter', () => {
     assert.equal(renderLine('{"type":'), '{"type":\n');
   });
 
-  it('drops an envelope of a kind it does not know', () => {
-    assert.equal(renderLine(JSON.stringify({ type: 'stream_event', event: {} })), '');
+  it('renders an advisor consultation as one line naming the model, then its guidance', () => {
+    // Shaped like the CLI's own advisor blocks: the call is a server-side
+    // `tool_use` named `advisor`, and the answer comes back in the same
+    // assistant message as an `advisor_tool_result`.
+    const line = renderLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'server_tool_use', id: 'srvtoolu_01', name: 'advisor', model: 'opus', input: {} },
+            {
+              type: 'advisor_tool_result',
+              tool_use_id: 'srvtoolu_01',
+              content: [{ type: 'advisor_message', text: 'Write the test first.' }],
+            },
+          ],
+        },
+      }),
+    );
+
+    assert.equal(line, '[advisor] consulting opus\nWrite the test first.\n');
+  });
+
+  it("clips the advisor's guidance like any other tool result", () => {
+    const line = renderLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'advisor_tool_result', content: 'one\ntwo\nthree\nfour\nfive' },
+          ],
+        },
+      }),
+    );
+
+    assert.equal(line, 'one\ntwo\nthree\n…\n');
+  });
+
+  it('says so when the advisor answered with no guidance at all', () => {
+    const line = renderLine(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'server_tool_use', name: 'advisor', input: {} },
+            { type: 'advisor_tool_result_error', error_code: 'unavailable' },
+          ],
+        },
+      }),
+    );
+
+    assert.equal(
+      line,
+      '[advisor] consulting the advisor model\n[advisor] no guidance returned (unavailable)\n',
+    );
+  });
+
+  it('renders an envelope of a kind it does not know instead of dropping it', () => {
+    // The default branch used to return '', which is how a consultation
+    // arriving as its own event kind would vanish from the only log there is.
+    assert.equal(
+      renderLine(JSON.stringify({ type: 'stream_event', event: { kind: 'x' } })),
+      '[stream_event] {"event":{"kind":"x"}}\n',
+    );
+    assert.equal(renderLine(JSON.stringify({ type: 'heartbeat' })), '[heartbeat]\n');
+    assert.equal(
+      renderLine(JSON.stringify({ type: 'advisor_result', model: 'fable', text: 'Ship it.' })),
+      '[advisor] consulting fable\nShip it.\n',
+    );
+  });
+
+  it('never throws on a malformed advisor event, whatever shape it arrives in', () => {
+    const shapes = [
+      { type: 'assistant', message: { content: [{ type: 'server_tool_use', name: 'advisor' }] } },
+      { type: 'assistant', message: { content: [{ type: 'advisor_tool_result', content: null }] } },
+      { type: 'assistant', message: { content: [{ type: 'advisor_tool_result', content: [7, null] }] } },
+      { type: 'assistant', message: { content: [{ type: 'advisor', model: 42, input: 'nope' }] } },
+      { type: 'advisor_tool_result' },
+      { type: 'advisor', content: { content: [{ text: 'nested' }] } },
+    ];
+
+    for (const shape of shapes) {
+      const line = renderLine(JSON.stringify(shape));
+      assert.equal(typeof line, 'string');
+      if (line !== '') assert.ok(line.endsWith('\n'), `missing newline: ${line}`);
+    }
+    assert.equal(
+      renderLine(JSON.stringify({ type: 'advisor', content: { content: [{ text: 'nested' }] } })),
+      'nested\n',
+    );
   });
 
   it('renders only whole lines, holding a half-received event back', () => {

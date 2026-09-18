@@ -2162,6 +2162,37 @@ describe('the container agent runner', () => {
     assert.equal(without.cmd.includes('--advisor'), false);
   });
 
+  it("puts the CLI's advisor warning in the live log verbatim", async () => {
+    // The pairing the CLI refuses is announced on *stderr*, not in the
+    // stream-json — so nothing parses it, and nothing has to: stderr chunks
+    // reach the log untouched. This pins that, because it is the operator's
+    // only notice that the advisor they chose is not advising.
+    const warning =
+      '[AdvisorTool] "sonnet" cannot advise "opus" (the advisor must be at least as capable ' +
+      'as the main model). The advisor will not be used for the main model.\n';
+    daemon.onExec = () => ({
+      stdout: `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false })}\n`,
+      stderr: warning,
+      exitCode: 0,
+    });
+    const streamed: string[] = [];
+
+    const result = await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 4,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'opus',
+      advisor: 'sonnet',
+      onOutput: (text) => streamed.push(text),
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.ok(streamed.join('').includes(warning));
+    daemon.onExec = null;
+  });
+
   it('reaps with SIGTERM, a grace period, and then SIGKILL', async () => {
     // An agent was there and answered the sweep.
     daemon.onExec = () => ({ stdout: `${AGENT_SIGNALLED}\n`, exitCode: 0 });

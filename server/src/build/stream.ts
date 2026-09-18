@@ -13,6 +13,10 @@
  *   `claude` writes to stderr, a crash, a warning from the runner image — the
  *   log is the only place they can appear, and swallowing them would make a
  *   failing iteration look silent.
+ * - **An envelope of an unknown kind is summarised, not dropped.** A newer
+ *   Claude Code (or an experimental tool like the advisor) emits event kinds
+ *   this parser has never seen; showing one clipped line is what keeps a
+ *   consultation the operator paid for from vanishing out of the log.
  * - **Nothing is buffered until the end.** `push()` renders every *complete*
  *   line it has and keeps the partial one for the next chunk.
  */
@@ -23,6 +27,20 @@ export const MAX_TOOL_INPUT_CHARS = 200;
 /** How much of a tool's result is echoed under it. */
 export const MAX_TOOL_RESULT_CHARS = 400;
 const MAX_TOOL_RESULT_LINES = 3;
+
+/**
+ * The advisor tool (US-008).
+ *
+ * `--advisor` turns on a *server-side* tool: the agent calls `advisor()`, the
+ * whole conversation goes to a stronger model, and its guidance comes back as
+ * a block the agent then acts on. It reaches the stream under a family of
+ * names — the call is a `tool_use` / `server_tool_use` named `advisor`, the
+ * answer an `advisor_tool_result` (or `advisor_result`, or
+ * `advisor_tool_result_error` when the advisor refused) — and an experimental
+ * tool is free to rename any of them, so everything starting with `advisor` is
+ * treated as one, whether it arrives as a content block or as its own envelope.
+ */
+const ADVISOR_NAME_PREFIX = 'advisor';
 
 export class AgentOutputFormatter {
   /** The tail of the last chunk, up to the first newline of the next one. */
@@ -64,9 +82,7 @@ export function renderLine(line: string): string {
     case 'result':
       return renderResult(event);
     default:
-      // A known envelope of an unknown kind: a newer Claude Code emitting an
-      // event this parser has never seen is not worth a wall of raw JSON.
-      return '';
+      return renderUnknown(event);
   }
 }
 
@@ -80,16 +96,95 @@ function renderSystem(event: Record<string, unknown>): string {
 function renderAssistant(event: Record<string, unknown>): string {
   let out = '';
   for (const part of contentOf(event)) {
-    if (part['type'] === 'text') {
+    const type = part['type'];
+    if (type === 'text') {
       const text = (asString(part['text']) ?? '').trim();
       if (text !== '') out += `${text}\n`;
-    } else if (part['type'] === 'tool_use') {
-      out += `[tool] ${asString(part['name']) ?? 'tool'}${toolArguments(part['input'])}\n`;
+    } else if (type === 'tool_use' || type === 'server_tool_use') {
+      out += isAdvisorName(part['name'])
+        ? renderAdvisorCall(part)
+        : `[tool] ${asString(part['name']) ?? 'tool'}${toolArguments(part['input'])}\n`;
+    } else if (isAdvisorName(type)) {
+      // The advisor answers inside the same assistant message that called it:
+      // a server-side tool's result is a content block, not a `user` event.
+      out += renderAdvisorResult(part);
     }
     // `thinking` blocks are deliberately dropped: they are long, and the log is
     // there to show what the agent *did*.
   }
   return out;
+}
+
+/** True for any block or envelope of the advisor family; false for anything else. */
+function isAdvisorName(value: unknown): boolean {
+  return (asString(value) ?? '').toLowerCase().startsWith(ADVISOR_NAME_PREFIX);
+}
+
+/**
+ * `[advisor] consulting opus` — one line, naming the model that was asked.
+ *
+ * The call itself carries no arguments worth showing (the tool takes none: the
+ * conversation so far *is* the input), so the model is the whole story. It is
+ * looked for in the places a server-side tool block can carry it, and the line
+ * still reads when none of them is there.
+ */
+function renderAdvisorCall(part: Record<string, unknown>): string {
+  return `[advisor] consulting ${advisorModelOf(part) ?? 'the advisor model'}\n`;
+}
+
+/** The advisor's guidance, under the same clipping every other tool result gets. */
+function renderAdvisorResult(part: Record<string, unknown>): string {
+  const guidance = abbreviate(toolResultText(part['content'] ?? part['text']));
+  if (guidance !== '') return `${guidance}\n`;
+  // No text at all: refused, redacted, or an error block. Say so rather than
+  // leaving the consultation as a call with no answer under it.
+  const reason = asString(part['error_code'] ?? part['error'] ?? part['subtype']);
+  return `[advisor] no guidance returned${reason === null ? '' : ` (${reason})`}\n`;
+}
+
+function advisorModelOf(part: Record<string, unknown>): string | null {
+  const input = asRecord(part['input']);
+  return (
+    asString(part['model']) ??
+    asString(part['advisor_model']) ??
+    asString(input?.['model']) ??
+    asString(input?.['advisor']) ??
+    null
+  );
+}
+
+/**
+ * An envelope whose `type` this parser does not know.
+ *
+ * Dropping it is how an advisor consultation — or anything else a newer CLI
+ * grows — goes missing from a log that is the operator's only view of the run.
+ * One clipped line names the kind and shows the rest of the payload; an
+ * advisor-shaped envelope gets the advisor's own rendering instead.
+ */
+function renderUnknown(event: Record<string, unknown>): string {
+  const type = asString(event['type']) ?? 'event';
+  if (isAdvisorName(type)) return renderAdvisorEnvelope(event);
+  const rest: Record<string, unknown> = { ...event };
+  delete rest['type'];
+  const detail = collapse(safeJson(rest));
+  return detail === '' || detail === '{}'
+    ? `[${type}]\n`
+    : `[${type}] ${clip(detail, MAX_TOOL_INPUT_CHARS)}\n`;
+}
+
+/** An advisor consultation that arrived as its own envelope rather than a block. */
+function renderAdvisorEnvelope(event: Record<string, unknown>): string {
+  const model = advisorModelOf(event);
+  const head = model === null ? '' : `[advisor] consulting ${model}\n`;
+  const guidance = abbreviate(
+    toolResultText(event['content'] ?? event['text'] ?? event['result'] ?? messageContentOf(event)),
+  );
+  if (guidance !== '') return `${head}${guidance}\n`;
+  return head === '' ? renderAdvisorResult(event) : head;
+}
+
+function messageContentOf(event: Record<string, unknown>): unknown {
+  return asRecord(event['message'])?.['content'];
 }
 
 function renderUser(event: Record<string, unknown>): string {
@@ -136,15 +231,37 @@ function toolArguments(input: unknown): string {
   return keys.length === 0 ? '' : `: ${clip(collapse(JSON.stringify(record)), MAX_TOOL_INPUT_CHARS)}`;
 }
 
-/** A tool result is either a string or the content blocks of one. */
-function toolResultText(content: unknown): string {
+/**
+ * A tool result is either a string, the content blocks of one, or — as the
+ * advisor answers — a single block wrapping its text one level down.
+ */
+function toolResultText(content: unknown, depth = 0): string {
   const direct = asString(content);
   if (direct !== null) return direct;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((part) => asString(asRecord(part)?.['text']) ?? '')
-    .filter((text) => text !== '')
-    .join('\n');
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => textOfBlock(asRecord(part), depth))
+      .filter((text) => text !== '')
+      .join('\n');
+  }
+  return textOfBlock(asRecord(content), depth);
+}
+
+function textOfBlock(block: Record<string, unknown> | null, depth: number): string {
+  if (block === null) return '';
+  const text = asString(block['text']);
+  if (text !== null) return text;
+  // `{ content: [...] }` around the text; bounded so no shape can loop here.
+  return depth >= 2 ? '' : toolResultText(block['content'], depth + 1);
+}
+
+/** `JSON.stringify` that answers with `''` rather than throwing or `undefined`. */
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '';
+  }
 }
 
 /** The first few lines of a long block, so one tool cannot flood the log. */
