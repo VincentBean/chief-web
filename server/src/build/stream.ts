@@ -156,20 +156,16 @@ function advisorModelOf(part: Record<string, unknown>): string | null {
 /**
  * An envelope whose `type` this parser does not know.
  *
- * Dropping it is how an advisor consultation — or anything else a newer CLI
- * grows — goes missing from a log that is the operator's only view of the run.
- * One clipped line names the kind and shows the rest of the payload; an
- * advisor-shaped envelope gets the advisor's own rendering instead.
+ * Dropping an advisor consultation is how a second opinion goes missing from
+ * a log that is the operator's only view of the run, so an advisor-shaped
+ * envelope gets the advisor's own rendering. Everything else is still dropped:
+ * the CLI emits a `rate_limit_event` per API turn, and rendering those as raw
+ * JSON would bury the run in hundreds of lines nobody asked for. A newer kind
+ * worth showing is worth a case of its own here.
  */
 function renderUnknown(event: Record<string, unknown>): string {
   const type = asString(event['type']) ?? 'event';
-  if (isAdvisorName(type)) return renderAdvisorEnvelope(event);
-  const rest: Record<string, unknown> = { ...event };
-  delete rest['type'];
-  const detail = collapse(safeJson(rest));
-  return detail === '' || detail === '{}'
-    ? `[${type}]\n`
-    : `[${type}] ${clip(detail, MAX_TOOL_INPUT_CHARS)}\n`;
+  return isAdvisorName(type) ? renderAdvisorEnvelope(event) : '';
 }
 
 /** An advisor consultation that arrived as its own envelope rather than a block. */
@@ -253,15 +249,6 @@ function textOfBlock(block: Record<string, unknown> | null, depth: number): stri
   if (text !== null) return text;
   // `{ content: [...] }` around the text; bounded so no shape can loop here.
   return depth >= 2 ? '' : toolResultText(block['content'], depth + 1);
-}
-
-/** `JSON.stringify` that answers with `''` rather than throwing or `undefined`. */
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? '';
-  } catch {
-    return '';
-  }
 }
 
 /** The first few lines of a long block, so one tool cannot flood the log. */

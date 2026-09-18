@@ -1,7 +1,6 @@
 export {
   ADVISOR_MODELS,
   type AdvisorModel,
-  advisorsForModel,
   AGENT_MODELS,
   type AgentModel,
   type AppSettings,
@@ -34,7 +33,6 @@ export {
   type GitIdentity,
   type GithubTokenView,
   isAdvisorModel,
-  isAdvisorPairingAllowed,
   isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,

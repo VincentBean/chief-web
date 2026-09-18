@@ -95,7 +95,15 @@ export function isAgentModel(value: string): value is AgentModel {
  * the CLI refuses it outright — `The model "haiku" cannot be used as an
  * advisor.` — and it refuses at launch, which kills the whole build iteration
  * rather than degrading it. Keeping Haiku out of this list is what makes an
- * unusable pairing unsavable instead of unbuildable.
+ * unusable advisor unsavable instead of unbuildable.
+ *
+ * This is the whole rule (US-006). The CLI also wants an advisor to be at
+ * least as capable as the model it advises, but it treats a weaker advisor as
+ * a warning rather than a launch failure: `--model opus --advisor sonnet`
+ * prints `"sonnet" cannot advise "claude-opus-5" … The advisor will not be
+ * used for the main model.` on stderr and runs the iteration to completion,
+ * exit 0. chief-web does not refuse those pairs, because refusing them would
+ * reject a configuration that works.
  */
 export const ADVISOR_MODELS = ['opus', 'sonnet', 'fable'] as const;
 
@@ -103,48 +111,6 @@ export type AdvisorModel = (typeof ADVISOR_MODELS)[number];
 
 export function isAdvisorModel(value: string): value is AdvisorModel {
   return (ADVISOR_MODELS as readonly string[]).includes(value);
-}
-
-/**
- * Which advisors Claude Code accepts for each main model, by alias (US-006).
- *
- * The CLI's own rule is that the advisor must be at least as capable as the
- * model it advises, and that Haiku may never advise at all — so the table is
- * the capability order read as an allowlist. It is written out row by row
- * rather than derived from a rank, because the order is a documented property
- * of the CLI rather than something chief-web is free to infer: when a new
- * family lands, the right change is a row here, not a number somewhere.
- *
- * A pair outside these rows is not a degraded run. `--advisor haiku` exits 1
- * before the iteration starts, which costs the whole story.
- */
-const ADVISORS_BY_MODEL: Record<AgentModel, readonly AdvisorModel[]> = {
-  fable: ['fable'],
-  opus: ['opus', 'fable'],
-  sonnet: ['sonnet', 'opus', 'fable'],
-  haiku: ['sonnet', 'opus', 'fable'],
-};
-
-/** Which advisors a main model accepts; everything for an unknown model. */
-export function advisorsForModel(buildModel: string | null): readonly AdvisorModel[] {
-  if (buildModel !== null && isAgentModel(buildModel)) return ADVISORS_BY_MODEL[buildModel];
-  // No stored build model means "let the CLI choose", and chief-web does not
-  // know what it will choose. An unknown name reads the same way. Neither is
-  // a pairing chief-web can rule on, so neither is one it refuses.
-  return ADVISOR_MODELS;
-}
-
-/**
- * Whether Claude Code would launch a build iteration with this pair (US-006).
- *
- * Pure, and deliberately total: `advisor` of `null` is "no advisor", which
- * always launches, and a `buildModel` chief-web does not recognise is treated
- * as unknown rather than as refused.
- */
-export function isAdvisorPairingAllowed(buildModel: string | null, advisor: string | null): boolean {
-  if (advisor === null) return true;
-  if (!isAdvisorModel(advisor)) return false;
-  return advisorsForModel(buildModel).includes(advisor);
 }
 
 /**

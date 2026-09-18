@@ -13,9 +13,7 @@ import {
 } from '../db/index.js';
 import {
   ADVISOR_MODELS,
-  advisorsForModel,
   AGENT_MODELS,
-  type AgentModel,
   getAdvisorModel,
   getBuildModel,
   getCodeReviewDefault,
@@ -30,7 +28,6 @@ import {
   getSentryPollIntervalMs,
   getSentryToken,
   isAdvisorModel,
-  isAdvisorPairingAllowed,
   isAgentModel,
   isValidSentryBaseUrl,
   isValidSentryPlansPerTick,
@@ -170,71 +167,41 @@ describe('advisor model setting (US-002)', () => {
   });
 });
 
-describe('advisor pairing rules (US-006)', () => {
+describe('advisor allowlist (US-006)', () => {
   /**
-   * The documented alias-level rule, written out once as a table so the test
-   * asserts the rows rather than re-deriving them: every main model paired
-   * with every advisor chief-web could offer, allowed listed, everything else
-   * refused. `haiku` appears as an advisor nowhere, and as a main model it
-   * accepts the same three as `sonnet`.
+   * The rule is about the advisor alone, not about the pair. Verified against
+   * the CLI: `--advisor haiku` exits 1 with `The model "haiku" cannot be used
+   * as an advisor.`, while an advisor less capable than the main model — the
+   * only other thing the CLI has an opinion about — merely warns on stderr and
+   * runs the iteration to completion. So chief-web's allowlist is the whole
+   * rule, and no build model narrows it.
    */
-  const ALLOWED: Record<AgentModel, readonly string[]> = {
-    fable: ['fable'],
-    opus: ['opus', 'fable'],
-    sonnet: ['sonnet', 'opus', 'fable'],
-    haiku: ['sonnet', 'opus', 'fable'],
-  };
-
-  it('accepts exactly the documented pairs and refuses every other one', () => {
-    for (const buildModel of AGENT_MODELS) {
-      for (const advisor of AGENT_MODELS) {
-        assert.equal(
-          isAdvisorPairingAllowed(buildModel, advisor),
-          ALLOWED[buildModel].includes(advisor),
-          `${buildModel} main with ${advisor} advisor`,
-        );
-      }
-    }
-  });
-
-  it('refuses a haiku advisor under every main model', () => {
-    // The one pair the CLI rejects outright rather than merely warning about.
-    for (const buildModel of AGENT_MODELS) {
-      assert.equal(isAdvisorPairingAllowed(buildModel, 'haiku'), false);
-    }
-    assert.equal(isAdvisorPairingAllowed(null, 'haiku'), false);
-  });
-
-  it('treats an unknown build model as unknown rather than as refused', () => {
-    // `null` is "let the CLI choose" and chief-web does not know what it will
-    // choose; a hand-edited row is no more knowable. Neither is a pairing it
-    // can rule on, so neither is one it refuses.
+  it('accepts every offered advisor under every build model', () => {
     for (const advisor of ADVISOR_MODELS) {
-      assert.equal(isAdvisorPairingAllowed(null, advisor), true);
-      assert.equal(isAdvisorPairingAllowed('claude-opus-5', advisor), true);
+      assert.equal(isAdvisorModel(advisor), true, `${advisor} as advisor`);
     }
-    assert.deepEqual([...advisorsForModel(null)], [...ADVISOR_MODELS]);
-    assert.deepEqual([...advisorsForModel('gpt-5')], [...ADVISOR_MODELS]);
+    // Including the pairs the CLI warns about: opus built with a sonnet
+    // advisor, or fable built with anything that is not fable, both run.
+    assert.equal(isAdvisorModel('sonnet'), true);
+    assert.equal(isAdvisorModel('opus'), true);
   });
 
-  it('always allows no advisor at all, which is what null means', () => {
-    for (const buildModel of AGENT_MODELS) {
-      assert.equal(isAdvisorPairingAllowed(buildModel, null), true);
+  it('refuses haiku, the one advisor the CLI rejects at launch', () => {
+    assert.equal(isAdvisorModel('haiku'), false);
+  });
+
+  it('refuses a name that is not a model chief-web offers', () => {
+    assert.equal(isAdvisorModel('gpt-5'), false);
+    assert.equal(isAdvisorModel('Opus'), false);
+    assert.equal(isAdvisorModel(''), false);
+    assert.equal(isAdvisorModel('claude-opus-5'), false);
+  });
+
+  it('offers a strict subset of the build models', () => {
+    for (const advisor of ADVISOR_MODELS) {
+      assert.equal((AGENT_MODELS as readonly string[]).includes(advisor), true);
     }
-    assert.equal(isAdvisorPairingAllowed(null, null), true);
-  });
-
-  it('refuses a name that is not a model at all', () => {
-    assert.equal(isAdvisorPairingAllowed('sonnet', 'gpt-5'), false);
-    assert.equal(isAdvisorPairingAllowed('sonnet', 'Opus'), false);
-    assert.equal(isAdvisorPairingAllowed('sonnet', ''), false);
-  });
-
-  it('reports the advisors a main model accepts, for the rejection message', () => {
-    assert.deepEqual([...advisorsForModel('fable')], ['fable']);
-    assert.deepEqual([...advisorsForModel('opus')], ['opus', 'fable']);
-    assert.deepEqual([...advisorsForModel('sonnet')], ['sonnet', 'opus', 'fable']);
-    assert.deepEqual([...advisorsForModel('haiku')], ['sonnet', 'opus', 'fable']);
+    assert.equal(ADVISOR_MODELS.length < AGENT_MODELS.length, true);
   });
 });
 

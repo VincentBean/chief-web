@@ -112,13 +112,14 @@ no advisor line does not mean the flag was missing.
   says. Claude Code also turns the tool on through a feature flag it fetches
   from Anthropic, so a container that disables flag fetching (`DISABLE_TELEMETRY`
   and friends) silently gets none either.
-- **A main model that supports it.** Not every pairing is legal: `fable` accepts
-  only a `fable` advisor, `opus` accepts `opus` or `fable`, and `sonnet` and
-  `haiku` accept `sonnet`, `opus` or `fable`. Haiku can never *be* an advisor,
-  which is why it is not among the choices. Settings refuses a pair Claude Code
-  would reject, and a stored pair that a later rule change made illegal is
-  dropped at launch with one line in the build log rather than being allowed to
-  kill the iteration — an advisor is worth less than the story.
+- **A model Claude Code accepts as an advisor.** Haiku can never *be* one — the
+  CLI exits 1 with `The model "haiku" cannot be used as an advisor.` before the
+  iteration starts — which is why it is not among the choices, and why a stored
+  value the CLI would refuse is dropped at launch with one line in the build log
+  rather than being allowed to kill the iteration; an advisor is worth less than
+  the story. That is the only refusal. An advisor *weaker* than the build model
+  is a pair chief-web saves and launches: the CLI only warns about it (see
+  below).
 - **Tokens, on top of the main model's.** Every consultation re-reads the entire
   transcript at the advisor model's own rates and none of it is cached, so an
   Opus advisor over a long run is not free. It is billed in addition to the
@@ -129,8 +130,11 @@ no advisor line does not mean the flag was missing.
 A consultation shows up in the log as `[advisor] consulting <model>`, with the
 guidance that came back underneath it, clipped like any other tool result. One
 more thing arrives on stderr rather than as a failure: pairing an advisor that
-is *weaker* than the main model is legal, runs normally, and prints a warning
-saying the advisor will not be used — which lands in the live log verbatim.
+is *weaker* than the main model runs normally and prints a warning saying the
+advisor will not be used for the main model — for example `"sonnet" cannot
+advise "claude-opus-5" …` for a build model of `opus` with a `sonnet` advisor —
+which lands in the live log verbatim and is the only sign the setting had no
+effect.
 
 ## The live log
 

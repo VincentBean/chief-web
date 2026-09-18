@@ -753,8 +753,13 @@ describe('the build loop', () => {
     assert.match(log, /without an advisor/);
     assert.match(log, /haiku/);
 
-    // The same guard on the other rejection: a stored advisor that is a real
-    // advisor model, paired with a build model too strong for it.
+    // Nothing was repaired behind the operator's back: the row they saved is
+    // still the row they saved.
+    assert.equal(getSetting(world.db, 'advisor_model'), 'haiku');
+
+    // And the case the CLI only *warns* about is not dropped: an advisor less
+    // capable than the build model runs the iteration to completion, so the
+    // flag goes on the argv and no line is written about it.
     setSetting(world.db, 'build_model', 'fable');
     setSetting(world.db, 'advisor_model', 'sonnet');
     updateSession(world.db, world.session.id, { status: 'ready' });
@@ -762,13 +767,9 @@ describe('the build loop', () => {
     await after.start(world.session.id);
     await after.whenIdle(world.session.id);
 
-    assert.equal(world.runner.invocations.at(-1)?.advisor ?? null, null);
+    assert.equal(world.runner.invocations.at(-1)?.advisor, 'sonnet');
     const second = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
-    assert.match(second, /will not let sonnet advise a fable build model/);
-
-    // Nothing was repaired behind the operator's back: the row they saved is
-    // still the row they saved, and a build model raised again honours it.
-    assert.equal(getSetting(world.db, 'advisor_model'), 'sonnet');
+    assert.equal(second.includes('will not let sonnet advise'), false);
   });
 
   it('passes a valid advisor through even when it is no stronger than the build model (US-007)', async () => {
@@ -2163,7 +2164,7 @@ describe('the container agent runner', () => {
   });
 
   it("puts the CLI's advisor warning in the live log verbatim", async () => {
-    // The pairing the CLI refuses is announced on *stderr*, not in the
+    // The pairing the CLI warns about is announced on *stderr*, not in the
     // stream-json — so nothing parses it, and nothing has to: stderr chunks
     // reach the log untouched. This pins that, because it is the operator's
     // only notice that the advisor they chose is not advising.

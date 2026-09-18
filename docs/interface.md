@@ -198,11 +198,10 @@ the `settings` table so it can be changed without a restart:
   feature is off: no flag is passed and the iteration is exactly what it was
   before. Unlike the three model fields it applies to build iterations only —
   never to planning, review, PR descriptions, PR feedback, merge-conflict fixes
-  or Sentry — and it is read per iteration like the build model. Not every pair
-  is legal (`fable` takes only a `fable` advisor, `opus` takes `opus` or
-  `fable`, `sonnet` and `haiku` take `sonnet`, `opus` or `fable`), and
-  saving one Claude Code would refuse at launch is rejected with the reason
-  shown under the field. It needs the **Anthropic API** — it is unavailable on
+  or Sentry — and it is read per iteration like the build model. An advisor
+  weaker than the build model is allowed: Claude Code runs the iteration
+  normally and prints a warning on stderr saying the advisor will not be used,
+  which shows up in the build log. It needs the **Anthropic API** — it is unavailable on
   Bedrock, Vertex/Agent Platform and Foundry — and a main model that supports
   it. Every consultation re-reads the whole transcript at the advisor model's
   rates, uncached, so it is billed **in addition to** the build model. The

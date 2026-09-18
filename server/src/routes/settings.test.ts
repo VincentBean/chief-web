@@ -426,50 +426,41 @@ describe('settings api', () => {
     assert.equal(cleared.buildModel, 'sonnet');
   });
 
-  it('refuses a pairing the CLI would reject at launch (US-006)', async () => {
-    // Fable main takes only a fable advisor, and the offending value here
-    // arrives as the advisor.
-    await put({ buildModel: 'fable', advisorModel: null });
-    const asAdvisor = await put({ advisorModel: 'opus' });
+  it('saves every advisor the CLI runs with, whatever the build model is (US-006)', async () => {
+    // The CLI refuses exactly one advisor — haiku — and refuses it whatever it
+    // is advising. An advisor less capable than the build model is not a
+    // refusal: it warns on stderr and runs the iteration, so a save that
+    // rejected it would reject a configuration that works.
+    for (const buildModel of ['fable', 'opus', 'sonnet', 'haiku', null]) {
+      for (const advisorModel of ['opus', 'sonnet', 'fable', null]) {
+        const response = await put({ buildModel, advisorModel });
+        assert.equal(
+          response.status,
+          200,
+          `build model ${String(buildModel)} with advisor ${String(advisorModel)}`,
+        );
+        const saved = (await (await get()).json()) as {
+          advisorModel: string | null;
+          buildModel: string | null;
+        };
+        assert.equal(saved.buildModel, buildModel);
+        assert.equal(saved.advisorModel, advisorModel);
+      }
+    }
 
-    assert.equal(asAdvisor.status, 400);
-    const rejected = (await asAdvisor.json()) as { error: string; message: string };
-    assert.equal(rejected.error, 'invalid_advisor_pairing');
-    // The message has to name the way out, since it is shown next to the field.
-    assert.match(rejected.message, /fable/);
-    assert.equal(
-      ((await (await get()).json()) as { advisorModel: string | null }).advisorModel,
-      null,
-    );
+    // A rejected advisor is rejected on its own account, not on the pair's, and
+    // it takes the rest of the save down with it rather than half-applying.
+    await put({ buildModel: 'sonnet', advisorModel: 'opus' });
+    const refused = await put({ buildModel: 'fable', advisorModel: 'haiku' });
 
-    // The same pair, arriving in one request, is the same refusal.
-    assert.equal((await put({ buildModel: 'fable', advisorModel: 'sonnet' })).status, 400);
-
-    // And the other direction: the stored advisor is fine, the *build model*
-    // moving underneath it is what breaks the pair.
-    assert.equal((await put({ buildModel: 'sonnet', advisorModel: 'opus' })).status, 200);
-    const asBuildModel = await put({ buildModel: 'fable' });
-
-    assert.equal(asBuildModel.status, 400);
-    assert.equal(
-      ((await asBuildModel.json()) as { error: string }).error,
-      'invalid_advisor_pairing',
-    );
-    // A refused save changes nothing — not even the half that was acceptable.
+    assert.equal(refused.status, 400);
+    assert.equal(((await refused.json()) as { error: string }).error, 'invalid_advisor_model');
     const kept = (await (await get()).json()) as {
       advisorModel: string | null;
       buildModel: string | null;
     };
     assert.equal(kept.buildModel, 'sonnet');
     assert.equal(kept.advisorModel, 'opus');
-
-    // Clearing the advisor in the same request is how the operator gets there.
-    assert.equal((await put({ buildModel: 'fable', advisorModel: null })).status, 200);
-
-    // No advisor at all never trips the check, whatever the build model is.
-    for (const buildModel of ['fable', 'opus', 'sonnet', 'haiku', null]) {
-      assert.equal((await put({ buildModel })).status, 200, `build model ${String(buildModel)}`);
-    }
   });
 
   it('persists the agent timeout and rejects out-of-range values (US-019)', async () => {

@@ -218,18 +218,25 @@ describe('the stream-json formatter', () => {
     );
   });
 
-  it('renders an envelope of a kind it does not know instead of dropping it', () => {
-    // The default branch used to return '', which is how a consultation
-    // arriving as its own event kind would vanish from the only log there is.
-    assert.equal(
-      renderLine(JSON.stringify({ type: 'stream_event', event: { kind: 'x' } })),
-      '[stream_event] {"event":{"kind":"x"}}\n',
-    );
-    assert.equal(renderLine(JSON.stringify({ type: 'heartbeat' })), '[heartbeat]\n');
+  it('renders an advisor envelope of a kind it does not know, and drops the rest', () => {
+    // An advisor consultation arriving as its own event kind would otherwise
+    // vanish from the only log there is.
     assert.equal(
       renderLine(JSON.stringify({ type: 'advisor_result', model: 'fable', text: 'Ship it.' })),
       '[advisor] consulting fable\nShip it.\n',
     );
+
+    // Every other unknown kind is still dropped. The CLI emits one
+    // `rate_limit_event` per API turn, and a log that showed them as raw JSON
+    // would bury the run the operator is trying to watch.
+    assert.equal(
+      renderLine(
+        JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }),
+      ),
+      '',
+    );
+    assert.equal(renderLine(JSON.stringify({ type: 'stream_event', event: { kind: 'x' } })), '');
+    assert.equal(renderLine(JSON.stringify({ type: 'heartbeat' })), '');
   });
 
   it('never throws on a malformed advisor event, whatever shape it arrives in', () => {

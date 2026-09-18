@@ -59,10 +59,10 @@ export function Settings() {
   const [reviewModel, setReviewModel] = useState('');
   const [advisorModel, setAdvisorModel] = useState('');
   /**
-   * The server's own words for a build-model/advisor pair Claude Code would
-   * refuse at launch (US-006), shown under the advisor select. A toast is the
-   * wrong home for it: the operator has to change one of two fields to get
-   * past it, and a message that scrolls away does not say which.
+   * The server's own words for an advisor Claude Code would refuse at launch
+   * (US-006), shown under the advisor select. A toast is the wrong home for it:
+   * the operator has to change that one field to get past it, and a message
+   * that scrolls away does not say which.
    */
   const [advisorError, setAdvisorError] = useState<string | null>(null);
   const [codeReviewDefault, setCodeReviewDefault] = useState(false);
@@ -213,12 +213,12 @@ export function Settings() {
     if (sentryToken.trim() !== '') update.sentryToken = sentryToken.trim();
     setAdvisorError(null);
     run('save', async () => {
-      // One rejection is about a *pair* of fields rather than the save as a
-      // whole, so it is caught here and re-thrown: the toast still fires, and
-      // the message also stays put under the field the operator has to change.
+      // One rejection names a single field rather than the save as a whole, so
+      // it is caught here and re-thrown: the toast still fires, and the message
+      // also stays put under the field the operator has to change.
       applyLoaded(
         await saveSettings(update).catch((error: unknown) => {
-          if (error instanceof ApiError && error.code === 'invalid_advisor_pairing') {
+          if (error instanceof ApiError && error.code === 'invalid_advisor_model') {
             setAdvisorError(error.message);
           }
           throw error;
