@@ -190,6 +190,24 @@ the `settings` table so it can be changed without a restart:
   deliberate, because `--model` accepts any string and only warns on one it does
   not recognise, so an unchecked typo would run a whole build on the fallback
   rather than failing.
+- **Advisor** — an experimental second model that a *build* iteration's agent
+  may consult on its own initiative at hard decision points; its guidance comes
+  back into the same run. It is passed as `--advisor` next to `--model`, and
+  the choices are `opus`, `sonnet` and `fable` — Haiku is absent because it
+  cannot act as an advisor. The default is **No advisor**, which means the
+  feature is off: no flag is passed and the iteration is exactly what it was
+  before. Unlike the three model fields it applies to build iterations only —
+  never to planning, review, PR descriptions, PR feedback, merge-conflict fixes
+  or Sentry — and it is read per iteration like the build model. Not every pair
+  is legal (`fable` takes only a `fable` advisor, `opus` takes `opus` or
+  `fable`, `sonnet` and `haiku` take `sonnet`, `opus` or `fable`), and
+  saving one Claude Code would refuse at launch is rejected with the reason
+  shown under the field. It needs the **Anthropic API** — it is unavailable on
+  Bedrock, Vertex/Agent Platform and Foundry — and a main model that supports
+  it. Every consultation re-reads the whole transcript at the advisor model's
+  rates, uncached, so it is billed **in addition to** the build model. The
+  feature is experimental. See [The advisor](build-loop.md#the-advisor) and
+  [Claude Code's advisor docs](https://code.claude.com/docs/en/advisor).
 - **Run code review on new sessions** — the starting value of the **Code
   review** checkbox on the new-session form, and what a session created through
   `POST /api/sessions` without a `codeReview` field gets. It is only a default:

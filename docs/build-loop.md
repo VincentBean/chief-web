@@ -11,8 +11,10 @@ the [FIFO queue](scheduling.md#concurrency-and-the-build-queue). One iteration i
 2. Write `**Status:** in-progress` for that story, into the file *and* the row.
 3. Exec `claude --dangerously-skip-permissions --output-format stream-json --verbose -p "<prompt>"`
    in `/workspace/repo` inside the session container, with `--model` in front
-   when a build model is set (**Settings → Build model**). The prompt is chief's
-   `embed/prompt.txt`, ported verbatim into `server/src/build/templates.ts`,
+   when a build model is set (**Settings → Build model**), and `--advisor`
+   after it when an advisor model is set (**Settings → Advisor**; see
+   [The advisor](#the-advisor)). The prompt is chief's `embed/prompt.txt`,
+   ported verbatim into `server/src/build/templates.ts`,
    with the story inlined as JSON plus a chief-web addendum carrying the PRD's
    own context, the current `progress.md`, and what the agent has to leave
    behind: a commit `feat: US-xxx - <title>`, `**Status:** done` with the
@@ -71,6 +73,64 @@ See [The usage-limit hold](#the-usage-limit-hold).
 A **failed** session shows the stored reason at the top of its page, along with
 the **stage** it failed at, and one **Retry** button. See
 [Failure and recovery](#failure-and-recovery).
+
+## The advisor
+
+Claude Code ships an experimental **advisor tool**: a second, stronger model the
+main model may consult mid-run. The agent calls it on its own initiative —
+before committing to an approach, when the same error keeps recurring, before
+declaring the work done — and the advisor is handed the whole conversation and
+answers with guidance the agent then applies. chief-web writes no prompt and no
+agent for this; it only decides which model is offered, by adding
+`--advisor <model>` to the launch. See
+[Claude Code's advisor docs](https://code.claude.com/docs/en/advisor).
+
+**It is off until a model is chosen.** With **Settings → Advisor** left at
+**No advisor** — which is the default — no `--advisor` token appears in the
+argv at all and an iteration runs byte-for-byte as it did before the feature
+existed. There is no "let Claude Code choose" for this field the way there is
+for the model ones: empty means the feature is off.
+
+**Build iterations only.** The flag is added at the one call site in
+`server/src/build/service.ts` that launches a story iteration. The planning
+terminal, the [code review](code-review.md) pass,
+[pull request descriptions](pr-descriptions.md), PR feedback runs, the
+[merge conflict fixer](merge-conflicts.md) and [Sentry](sentry.md) planning all
+keep launching `claude` exactly as they do now. Planning is interactive anyway,
+so a human at that terminal can type `/advisor` themselves.
+
+**Nobody chooses when it is called.** Claude does, from inside the run.
+chief-web adds nothing to the prompt asking for more or fewer consultations, so
+a story may be built with several consultations, or with none — a build log with
+no advisor line does not mean the flag was missing.
+
+**What it needs, and what it costs:**
+
+- **The Anthropic API.** The advisor is a server-executed tool and is not
+  available on Bedrock, Vertex/Agent Platform or Foundry. An install pointed at
+  one of those, or at a gateway, gets no advisor no matter what the setting
+  says. Claude Code also turns the tool on through a feature flag it fetches
+  from Anthropic, so a container that disables flag fetching (`DISABLE_TELEMETRY`
+  and friends) silently gets none either.
+- **A main model that supports it.** Not every pairing is legal: `fable` accepts
+  only a `fable` advisor, `opus` accepts `opus` or `fable`, and `sonnet` and
+  `haiku` accept `sonnet`, `opus` or `fable`. Haiku can never *be* an advisor,
+  which is why it is not among the choices. Settings refuses a pair Claude Code
+  would reject, and a stored pair that a later rule change made illegal is
+  dropped at launch with one line in the build log rather than being allowed to
+  kill the iteration — an advisor is worth less than the story.
+- **Tokens, on top of the main model's.** Every consultation re-reads the entire
+  transcript at the advisor model's own rates and none of it is cached, so an
+  Opus advisor over a long run is not free. It is billed in addition to the
+  build model, never instead of it.
+- **Experimental status.** It is an experimental Claude Code feature: the flag,
+  the pairing rules and the event shapes are all upstream's to change.
+
+A consultation shows up in the log as `[advisor] consulting <model>`, with the
+guidance that came back underneath it, clipped like any other tool result. One
+more thing arrives on stderr rather than as a failure: pairing an advisor that
+is *weaker* than the main model is legal, runs normally, and prints a warning
+saying the advisor will not be used — which lands in the live log verbatim.
 
 ## The live log
 
