@@ -30,6 +30,7 @@ export {
   getSentryPollIntervalMinutes,
   getSentryPollIntervalMs,
   getSentryToken,
+  getStoredAdvisorModel,
   type GitIdentity,
   type GithubTokenView,
   isAdvisorModel,

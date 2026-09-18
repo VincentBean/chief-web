@@ -510,6 +510,18 @@ export function getAdvisorModel(db: Database): AdvisorModel | null {
   return stored !== null && isAdvisorModel(stored) ? stored : null;
 }
 
+/**
+ * The advisor exactly as it is stored, whether or not it is usable (US-007).
+ *
+ * {@link getAdvisorModel} sanitises, which is what every caller that only wants
+ * a value to hand the CLI needs. The build loop needs the unusable value too:
+ * dropping an advisor is something it says out loud in the build log, and it
+ * cannot name a value it was never shown.
+ */
+export function getStoredAdvisorModel(db: Database): string | null {
+  return getSetting(db, 'advisor_model');
+}
+
 function readModel(
   db: Database,
   key: 'planning_model' | 'build_model' | 'review_model',

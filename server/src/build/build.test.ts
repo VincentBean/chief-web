@@ -17,6 +17,7 @@ import {
   enqueueBuild,
   getQueuedBuild,
   getSession,
+  getSetting,
   IN_MEMORY,
   listBuildQueue,
   listSessions,
@@ -721,6 +722,88 @@ describe('the build loop', () => {
     await after.start(world.session.id);
     await after.whenIdle(world.session.id);
     assert.equal(world.runner.invocations.at(-1)?.model, null);
+  });
+
+  it('drops an advisor the CLI would refuse, and runs the iteration anyway (US-007)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // A row the settings page would no longer accept: Haiku may not advise
+    // anything, and `--advisor haiku` is refused at launch rather than
+    // downgraded, so passing it on would cost the story the whole iteration.
+    setSetting(world.db, 'build_model', 'sonnet');
+    setSetting(world.db, 'advisor_model', 'haiku');
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+
+    const refused = world.runner.invocations.at(-1);
+    // The iteration happened, which is the whole point: the advisor is what
+    // was dropped, not the work.
+    assert.ok(world.runner.invocations.length >= 1);
+    assert.equal(refused?.advisor ?? null, null);
+    assert.equal(refused?.model, 'sonnet');
+    // And the argv that would be built from it carries no flag at all.
+    assert.equal(
+      agentCommand(refused?.prompt ?? '', refused?.model, refused?.advisor).includes('--advisor'),
+      false,
+    );
+
+    // The operator is told, once, inside the iteration that ran without it.
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(log, /without an advisor/);
+    assert.match(log, /haiku/);
+
+    // The same guard on the other rejection: a stored advisor that is a real
+    // advisor model, paired with a build model too strong for it.
+    setSetting(world.db, 'build_model', 'fable');
+    setSetting(world.db, 'advisor_model', 'sonnet');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const after = serviceFor(world);
+    await after.start(world.session.id);
+    await after.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.at(-1)?.advisor ?? null, null);
+    const second = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(second, /will not let sonnet advise a fable build model/);
+
+    // Nothing was repaired behind the operator's back: the row they saved is
+    // still the row they saved, and a build model raised again honours it.
+    assert.equal(getSetting(world.db, 'advisor_model'), 'sonnet');
+  });
+
+  it('passes a valid advisor through even when it is no stronger than the build model (US-007)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // Claude Code accepts this pair and warns that the advisor adds nothing.
+    // That warning is the CLI's to give: an iteration that runs with a
+    // pointless advisor is a working iteration, so nothing is stripped here.
+    setSetting(world.db, 'build_model', 'sonnet');
+    setSetting(world.db, 'advisor_model', 'sonnet');
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+
+    const invocation = world.runner.invocations.at(-1);
+    assert.equal(invocation?.advisor, 'sonnet');
+    assert.deepEqual(
+      agentCommand(invocation?.prompt ?? '', invocation?.model, invocation?.advisor).slice(0, 5),
+      ['claude', '--model', 'sonnet', '--advisor', 'sonnet'],
+    );
+
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.equal(log.includes('without an advisor'), false);
+
+    // Nor is a build model chief-web cannot rule on grounds to strip one: the
+    // CLI knows which model it picked and warns if the advisor is beneath it,
+    // and a warning is not a dead iteration.
+    setSetting(world.db, 'build_model', 'no-such-model');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const unknown = serviceFor(world);
+    await unknown.start(world.session.id);
+    await unknown.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.at(-1)?.model, null);
+    assert.equal(world.runner.invocations.at(-1)?.advisor, 'sonnet');
   });
 
   it('records the stage a failure happened at, and clears it on the retry (US-019)', async () => {
