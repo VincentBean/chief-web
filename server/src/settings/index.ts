@@ -1,4 +1,6 @@
 export {
+  ADVISOR_MODELS,
+  type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
   type AppSettings,
@@ -9,6 +11,7 @@ export {
   DEFAULT_SENTRY_MODEL,
   DEFAULT_SENTRY_PLANS_PER_TICK,
   DEFAULT_SENTRY_POLL_INTERVAL_MINUTES,
+  getAdvisorModel,
   getAgentTimeoutMs,
   getBuildModel,
   getCodeReviewDefault,
@@ -28,6 +31,7 @@ export {
   getSentryToken,
   type GitIdentity,
   type GithubTokenView,
+  isAdvisorModel,
   isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
