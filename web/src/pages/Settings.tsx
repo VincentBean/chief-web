@@ -1,6 +1,8 @@
 import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
 
 import {
+  ADVISOR_MODELS,
+  type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
   fetchClaudeState,
@@ -30,6 +32,8 @@ const MODEL_LABELS: Record<AgentModel, string> = {
 
 const asModel = (value: string): AgentModel | null => (value === '' ? null : (value as AgentModel));
 
+const asAdvisor = (value: string): AdvisorModel | null => (value === '' ? null : (value as AdvisorModel));
+
 // xterm.js only matters once an operator actually signs Claude in.
 const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
 
@@ -52,6 +56,7 @@ export function Settings() {
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
+  const [advisorModel, setAdvisorModel] = useState('');
   const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
@@ -108,6 +113,7 @@ export function Settings() {
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
+    setAdvisorModel(loaded.advisorModel ?? '');
     setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
@@ -183,6 +189,7 @@ export function Settings() {
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
+      advisorModel: asAdvisor(advisorModel),
       codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
@@ -306,6 +313,7 @@ export function Settings() {
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
+    advisorModel !== (settings.advisorModel ?? '') ||
     codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
     authorEmail !== settings.gitAuthorEmail ||
@@ -525,6 +533,23 @@ export function Settings() {
                 ))}
               </select>
               <p className="field__hint">The code review left on a session's pull request. One pass over the finished branch.</p>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="advisor-model">
+                Advisor
+              </label>
+              <select id="advisor-model" name="advisor-model" value={advisorModel} onChange={(event) => setAdvisorModel(event.target.value)} className="field__input">
+                <option value="">No advisor</option>
+                {ADVISOR_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {MODEL_LABELS[model]}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">
+                A second model consulted during build runs only — planning, review and Sentry never use it. It spends extra tokens at the advisor model's own
+                rates, and it is an experimental Claude Code feature.
+              </p>
             </div>
           </div>
 
