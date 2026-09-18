@@ -216,6 +216,28 @@ describe('the agent command', () => {
     assert.equal(agentCommand('p', 'opus').at(-1), 'p');
   });
 
+  it('passes the configured advisor right after the model, and nothing when there is none', () => {
+    assert.deepEqual(agentCommand('p', 'sonnet', 'opus'), [
+      'claude',
+      '--model',
+      'sonnet',
+      '--advisor',
+      'opus',
+      '--dangerously-skip-permissions',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '-p',
+      'p',
+    ]);
+    // No advisor means no token at all: the flag is never bare and never
+    // carries an empty value, which is how an iteration launches today.
+    assert.equal(agentCommand('p', 'sonnet', null).includes('--advisor'), false);
+    assert.equal(agentCommand('p', 'sonnet').includes('--advisor'), false);
+    assert.equal(agentCommand('p').includes('--advisor'), false);
+    assert.deepEqual(agentCommand('p', null, 'opus').slice(0, 3), ['claude', '--advisor', 'opus']);
+  });
+
   it('records the agent pid before exec-ing it, under a file of its own', () => {
     const wrapped = wrapAgentCommand('abc', 3, ['claude', '-p', 'hi']);
     assert.deepEqual(wrapped.slice(0, 2), ['/bin/sh', '-c']);
@@ -2020,6 +2042,41 @@ describe('the container agent runner', () => {
     assert.equal(exec.cmd[3], 'chief-build');
     assert.ok(exec.cmd.includes('stream-json'));
     daemon.onExec = null;
+  });
+
+  it("threads the invocation's advisor into the argv it execs", async () => {
+    await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 2,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'sonnet',
+      advisor: 'opus',
+    });
+
+    const withAdvisor = daemon.execs().at(-1);
+    assert.ok(withAdvisor);
+    assert.deepEqual(withAdvisor.cmd.slice(4, 9), [
+      'claude',
+      '--model',
+      'sonnet',
+      '--advisor',
+      'opus',
+    ]);
+
+    await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 3,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'sonnet',
+    });
+
+    const without = daemon.execs().at(-1);
+    assert.ok(without);
+    assert.equal(without.cmd.includes('--advisor'), false);
   });
 
   it('reaps with SIGTERM, a grace period, and then SIGKILL', async () => {

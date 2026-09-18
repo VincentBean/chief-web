@@ -54,6 +54,7 @@ import {
   storyInputOf,
 } from '../sessions/index.js';
 import {
+  getAdvisorModel,
   getAgentTimeoutMs,
   getBuildModel,
   getMaxConcurrentSessions,
@@ -1110,9 +1111,10 @@ export class BuildService {
         // The model is read the same way and for the same reason: a run
         // switched to a cheaper model mid-build picks it up at the next story,
         // not at the next restart, and stories already committed are untouched
-        // either way.
+        // either way. The advisor is read here for exactly that reason too.
         timeoutMs,
         model: getBuildModel(this.db),
+        advisor: getAdvisorModel(this.db),
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {
