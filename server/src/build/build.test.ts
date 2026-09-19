@@ -17,6 +17,7 @@ import {
   enqueueBuild,
   getQueuedBuild,
   getSession,
+  getSetting,
   IN_MEMORY,
   listBuildQueue,
   listSessions,
@@ -214,6 +215,28 @@ describe('the agent command', () => {
     assert.equal(agentCommand('p').includes('--model'), false);
     // The prompt stays the single trailing argument either way.
     assert.equal(agentCommand('p', 'opus').at(-1), 'p');
+  });
+
+  it('passes the configured advisor right after the model, and nothing when there is none', () => {
+    assert.deepEqual(agentCommand('p', 'sonnet', 'opus'), [
+      'claude',
+      '--model',
+      'sonnet',
+      '--advisor',
+      'opus',
+      '--dangerously-skip-permissions',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '-p',
+      'p',
+    ]);
+    // No advisor means no token at all: the flag is never bare and never
+    // carries an empty value, which is how an iteration launches today.
+    assert.equal(agentCommand('p', 'sonnet', null).includes('--advisor'), false);
+    assert.equal(agentCommand('p', 'sonnet').includes('--advisor'), false);
+    assert.equal(agentCommand('p').includes('--advisor'), false);
+    assert.deepEqual(agentCommand('p', null, 'opus').slice(0, 3), ['claude', '--advisor', 'opus']);
   });
 
   it('records the agent pid before exec-ing it, under a file of its own', () => {
@@ -699,6 +722,89 @@ describe('the build loop', () => {
     await after.start(world.session.id);
     await after.whenIdle(world.session.id);
     assert.equal(world.runner.invocations.at(-1)?.model, null);
+  });
+
+  it('drops an advisor the CLI would refuse, and runs the iteration anyway (US-007)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // A row the settings page would no longer accept: Haiku may not advise
+    // anything, and `--advisor haiku` is refused at launch rather than
+    // downgraded, so passing it on would cost the story the whole iteration.
+    setSetting(world.db, 'build_model', 'sonnet');
+    setSetting(world.db, 'advisor_model', 'haiku');
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+
+    const refused = world.runner.invocations.at(-1);
+    // The iteration happened, which is the whole point: the advisor is what
+    // was dropped, not the work.
+    assert.ok(world.runner.invocations.length >= 1);
+    assert.equal(refused?.advisor ?? null, null);
+    assert.equal(refused?.model, 'sonnet');
+    // And the argv that would be built from it carries no flag at all.
+    assert.equal(
+      agentCommand(refused?.prompt ?? '', refused?.model, refused?.advisor).includes('--advisor'),
+      false,
+    );
+
+    // The operator is told, once, inside the iteration that ran without it.
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(log, /without an advisor/);
+    assert.match(log, /haiku/);
+
+    // Nothing was repaired behind the operator's back: the row they saved is
+    // still the row they saved.
+    assert.equal(getSetting(world.db, 'advisor_model'), 'haiku');
+
+    // And the case the CLI only *warns* about is not dropped: an advisor less
+    // capable than the build model runs the iteration to completion, so the
+    // flag goes on the argv and no line is written about it.
+    setSetting(world.db, 'build_model', 'fable');
+    setSetting(world.db, 'advisor_model', 'sonnet');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const after = serviceFor(world);
+    await after.start(world.session.id);
+    await after.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.at(-1)?.advisor, 'sonnet');
+    const second = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.equal(second.includes('will not let sonnet advise'), false);
+  });
+
+  it('passes a valid advisor through even when it is no stronger than the build model (US-007)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+
+    // Claude Code accepts this pair and warns that the advisor adds nothing.
+    // That warning is the CLI's to give: an iteration that runs with a
+    // pointless advisor is a working iteration, so nothing is stripped here.
+    setSetting(world.db, 'build_model', 'sonnet');
+    setSetting(world.db, 'advisor_model', 'sonnet');
+    await serviceFor(world).start(world.session.id);
+    await serviceFor(world).whenIdle(world.session.id);
+
+    const invocation = world.runner.invocations.at(-1);
+    assert.equal(invocation?.advisor, 'sonnet');
+    assert.deepEqual(
+      agentCommand(invocation?.prompt ?? '', invocation?.model, invocation?.advisor).slice(0, 5),
+      ['claude', '--model', 'sonnet', '--advisor', 'sonnet'],
+    );
+
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.equal(log.includes('without an advisor'), false);
+
+    // Nor is a build model chief-web cannot rule on grounds to strip one: the
+    // CLI knows which model it picked and warns if the advisor is beneath it,
+    // and a warning is not a dead iteration.
+    setSetting(world.db, 'build_model', 'no-such-model');
+    updateSession(world.db, world.session.id, { status: 'ready' });
+    const unknown = serviceFor(world);
+    await unknown.start(world.session.id);
+    await unknown.whenIdle(world.session.id);
+
+    assert.equal(world.runner.invocations.at(-1)?.model, null);
+    assert.equal(world.runner.invocations.at(-1)?.advisor, 'sonnet');
   });
 
   it('records the stage a failure happened at, and clears it on the retry (US-019)', async () => {
@@ -2019,6 +2125,72 @@ describe('the container agent runner', () => {
     assert.ok(exec);
     assert.equal(exec.cmd[3], 'chief-build');
     assert.ok(exec.cmd.includes('stream-json'));
+    daemon.onExec = null;
+  });
+
+  it("threads the invocation's advisor into the argv it execs", async () => {
+    await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 2,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'sonnet',
+      advisor: 'opus',
+    });
+
+    const withAdvisor = daemon.execs().at(-1);
+    assert.ok(withAdvisor);
+    assert.deepEqual(withAdvisor.cmd.slice(4, 9), [
+      'claude',
+      '--model',
+      'sonnet',
+      '--advisor',
+      'opus',
+    ]);
+
+    await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 3,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'sonnet',
+    });
+
+    const without = daemon.execs().at(-1);
+    assert.ok(without);
+    assert.equal(without.cmd.includes('--advisor'), false);
+  });
+
+  it("puts the CLI's advisor warning in the live log verbatim", async () => {
+    // The pairing the CLI warns about is announced on *stderr*, not in the
+    // stream-json — so nothing parses it, and nothing has to: stderr chunks
+    // reach the log untouched. This pins that, because it is the operator's
+    // only notice that the advisor they chose is not advising.
+    const warning =
+      '[AdvisorTool] "sonnet" cannot advise "opus" (the advisor must be at least as capable ' +
+      'as the main model). The advisor will not be used for the main model.\n';
+    daemon.onExec = () => ({
+      stdout: `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false })}\n`,
+      stderr: warning,
+      exitCode: 0,
+    });
+    const streamed: string[] = [];
+
+    const result = await createAgentRunner(docker).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 4,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+      model: 'opus',
+      advisor: 'sonnet',
+      onOutput: (text) => streamed.push(text),
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.ok(streamed.join('').includes(warning));
     daemon.onExec = null;
   });
 

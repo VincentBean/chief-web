@@ -29,6 +29,12 @@ export interface AgentInvocation {
   /** `--model` for this iteration; `null`/absent leaves the choice to the CLI. */
   readonly model?: string | null;
   /**
+   * `--advisor` for this iteration: the stronger model the CLI consults while
+   * the iteration works. `null`/absent passes no flag at all, which is how the
+   * iteration is launched when no advisor is configured.
+   */
+  readonly advisor?: string | null;
+  /**
    * Called with the agent's output as it is produced, already rendered from
    * `stream-json` into the lines a person reads (US-016).
    */
@@ -82,6 +88,7 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.iteration,
       invocation.prompt,
       invocation.model,
+      invocation.advisor,
     );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {

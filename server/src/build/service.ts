@@ -54,9 +54,13 @@ import {
   storyInputOf,
 } from '../sessions/index.js';
 import {
+  ADVISOR_MODELS,
+  type AdvisorModel,
   getAgentTimeoutMs,
   getBuildModel,
   getMaxConcurrentSessions,
+  getStoredAdvisorModel,
+  isAdvisorModel,
 } from '../settings/index.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
@@ -1089,6 +1093,13 @@ export class BuildService {
     // else: the file in the workspace is the record, and whoever is watching
     // the session page is reading over its shoulder.
     const log = this.logs.begin(session, state.iteration, story.storyId);
+    // The model and its advisor are read here, one line above the launch, so a
+    // settings change lands at the next story rather than at the next restart
+    // (US-005) — and so the pair the rules are applied to is the pair that is
+    // actually about to be used (US-007).
+    const buildModel = getBuildModel(this.db);
+    const advisor = advisorFor(this.db);
+    if (advisor.dropped !== null) log.write(`${advisor.dropped}\n`);
     // Read per iteration, so a timeout changed on the settings page applies to
     // the next one without a restart (US-019). The agent is told the same
     // number it is held to: it is the only one of the two that can decide not
@@ -1107,12 +1118,9 @@ export class BuildService {
           prd: snapshot.parsed,
           progress: this.readProgress(session),
         }),
-        // The model is read the same way and for the same reason: a run
-        // switched to a cheaper model mid-build picks it up at the next story,
-        // not at the next restart, and stories already committed are untouched
-        // either way.
         timeoutMs,
-        model: getBuildModel(this.db),
+        model: buildModel,
+        advisor: advisor.model,
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {
@@ -1570,6 +1578,52 @@ function promptStory(story: Story, parsed: ParsedPrd | null): PrdStory {
  * hold. It names the limit and the moment work resumes, because those are the
  * two things someone looking at a paused build wants to know.
  */
+/** The advisor an iteration launches with, and what became of the stored one. */
+interface AdvisorChoice {
+  /** What goes on the argv; `null` passes no `--advisor` at all. */
+  readonly model: AdvisorModel | null;
+  /** The log line owed to the operator, or `null` when nothing was dropped. */
+  readonly dropped: string | null;
+}
+
+/**
+ * The advisor the iteration launches with, dropping one the CLI would refuse
+ * (US-007).
+ *
+ * The settings page cannot save a model the CLI refuses as an advisor
+ * (US-006), but a row can outlive the rule that rejected it: a value saved
+ * before Haiku was excluded, or a family dropped from a later runner image.
+ * That does not degrade an iteration — `--advisor` is validated at launch, so
+ * the CLI exits 1 before the agent does any work, and the story burns a retry
+ * on a wall it cannot climb. Dropping the advisor costs the run a second
+ * opinion; keeping it costs the run the iteration, so the check is made once
+ * more here, against the value about to be used.
+ *
+ * An advisor weaker than the build model is *not* one of those cases and is
+ * not dropped: the CLI warns on stderr — `"sonnet" cannot advise
+ * "claude-opus-5" … The advisor will not be used for the main model.` — and
+ * runs the iteration to completion. The warning lands in the build log like
+ * any other stderr line, which is the operator's cue to change the pair.
+ *
+ * Nothing is repaired in the database: the operator's saved intent stays where
+ * they put it, and the log says why it was not honoured this time.
+ */
+function advisorFor(db: Database): AdvisorChoice {
+  const stored = getStoredAdvisorModel(db);
+  if (stored === null) return { model: null, dropped: null };
+
+  if (!isAdvisorModel(stored)) {
+    return {
+      model: null,
+      dropped:
+        `chief-web: running this iteration without an advisor — Claude Code does not accept ${stored} ` +
+        `as one, and would refuse to start rather than run without it. Choose ${ADVISOR_MODELS.join(' or ')} ` +
+        'on the settings page.',
+    };
+  }
+  return { model: stored, dropped: null };
+}
+
 function holdMessage(until: string): string {
   return (
     'Claude’s usage limit was reached, so this build is held until ' +

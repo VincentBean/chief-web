@@ -12,6 +12,9 @@ import {
   setSetting,
 } from '../db/index.js';
 import {
+  ADVISOR_MODELS,
+  AGENT_MODELS,
+  getAdvisorModel,
   getBuildModel,
   getCodeReviewDefault,
   getConflictFixEnabled,
@@ -24,6 +27,7 @@ import {
   getSentryPollIntervalMinutes,
   getSentryPollIntervalMs,
   getSentryToken,
+  isAdvisorModel,
   isAgentModel,
   isValidSentryBaseUrl,
   isValidSentryPlansPerTick,
@@ -91,6 +95,113 @@ describe('review model setting (US-001)', () => {
     assert.equal(getPlanningModel(db), 'opus');
     assert.equal(getBuildModel(db), 'sonnet');
     assert.equal(getReviewModel(db), null);
+  });
+});
+
+describe('advisor model setting (US-002)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'advisor_model');
+  });
+
+  it('reads as null until one is stored, which is "no --advisor flag at all"', () => {
+    assert.equal(getAdvisorModel(db), null);
+    assert.equal(readAppSettings(db, config).advisorModel, null);
+  });
+
+  it('writes the row and reads it back', () => {
+    const saved = updateAppSettings(db, config, { advisorModel: 'opus' });
+
+    assert.equal(saved.advisorModel, 'opus');
+    assert.equal(getAdvisorModel(db), 'opus');
+    assert.equal(getSetting(db, 'advisor_model'), 'opus');
+  });
+
+  it('clears the row on null, which is how "no advisor" is stored', () => {
+    updateAppSettings(db, config, { advisorModel: 'sonnet' });
+
+    const cleared = updateAppSettings(db, config, { advisorModel: null });
+
+    assert.equal(cleared.advisorModel, null);
+    assert.equal(getSetting(db, 'advisor_model'), null);
+  });
+
+  it('leaves the stored value alone when the field is omitted', () => {
+    updateAppSettings(db, config, { advisorModel: 'fable' });
+
+    assert.equal(updateAppSettings(db, config, { maxConcurrentSessions: 4 }).advisorModel, 'fable');
+  });
+
+  it('offers every model but haiku, which the CLI refuses as an advisor', () => {
+    assert.deepEqual([...ADVISOR_MODELS], ['opus', 'sonnet', 'fable']);
+    assert.equal(isAdvisorModel('haiku'), false);
+    assert.equal(isAdvisorModel('gpt-5'), false);
+    for (const model of ADVISOR_MODELS) assert.equal(isAdvisorModel(model), true);
+  });
+
+  it('reads a hand-edited model the CLI would refuse as null', () => {
+    // 'haiku' is a real --model value, so only the advisor guard catches it;
+    // passing it through would fail the iteration at launch.
+    setSetting(db, 'advisor_model', 'haiku');
+    assert.equal(getAdvisorModel(db), null);
+    assert.equal(readAppSettings(db, config).advisorModel, null);
+
+    setSetting(db, 'advisor_model', 'gpt-5');
+    assert.equal(getAdvisorModel(db), null);
+    assert.equal(readAppSettings(db, config).advisorModel, null);
+  });
+
+  it('is independent of the build model', () => {
+    updateAppSettings(db, config, { buildModel: 'sonnet', advisorModel: 'opus' });
+
+    updateAppSettings(db, config, { advisorModel: null });
+
+    assert.equal(getBuildModel(db), 'sonnet');
+    assert.equal(getAdvisorModel(db), null);
+  });
+});
+
+describe('advisor allowlist (US-006)', () => {
+  /**
+   * The rule is about the advisor alone, not about the pair. Verified against
+   * the CLI: `--advisor haiku` exits 1 with `The model "haiku" cannot be used
+   * as an advisor.`, while an advisor less capable than the main model — the
+   * only other thing the CLI has an opinion about — merely warns on stderr and
+   * runs the iteration to completion. So chief-web's allowlist is the whole
+   * rule, and no build model narrows it.
+   */
+  it('accepts every offered advisor under every build model', () => {
+    for (const advisor of ADVISOR_MODELS) {
+      assert.equal(isAdvisorModel(advisor), true, `${advisor} as advisor`);
+    }
+    // Including the pairs the CLI warns about: opus built with a sonnet
+    // advisor, or fable built with anything that is not fable, both run.
+    assert.equal(isAdvisorModel('sonnet'), true);
+    assert.equal(isAdvisorModel('opus'), true);
+  });
+
+  it('refuses haiku, the one advisor the CLI rejects at launch', () => {
+    assert.equal(isAdvisorModel('haiku'), false);
+  });
+
+  it('refuses a name that is not a model chief-web offers', () => {
+    assert.equal(isAdvisorModel('gpt-5'), false);
+    assert.equal(isAdvisorModel('Opus'), false);
+    assert.equal(isAdvisorModel(''), false);
+    assert.equal(isAdvisorModel('claude-opus-5'), false);
+  });
+
+  it('offers a strict subset of the build models', () => {
+    for (const advisor of ADVISOR_MODELS) {
+      assert.equal((AGENT_MODELS as readonly string[]).includes(advisor), true);
+    }
+    assert.equal(ADVISOR_MODELS.length < AGENT_MODELS.length, true);
   });
 });
 

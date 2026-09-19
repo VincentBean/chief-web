@@ -28,6 +28,13 @@ export const SETTING_KEYS = [
   /** `--model` for the automatic pull-request code review; same absent-row rule. */
   'review_model',
   /**
+   * `--advisor` for each build iteration: the second, stronger model the main
+   * model consults at its own decision points. An absent row means no
+   * `--advisor` flag at all, so the iteration launches exactly as it does
+   * today — there is no value here standing for "no advisor".
+   */
+  'advisor_model',
+  /**
    * Whether a new session gets its code-review flag set when the request does
    * not say (US-004). Stored as `1`/`0`; an absent row means off.
    */

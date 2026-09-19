@@ -58,6 +58,16 @@ export const AGENT_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
 
 export type AgentModel = (typeof AGENT_MODELS)[number];
 
+/**
+ * Models Claude Code accepts as an `--advisor`, mirroring the server's
+ * `ADVISOR_MODELS`. A strict subset of {@link AGENT_MODELS}: Haiku is absent
+ * because the CLI refuses it as an advisor and refuses at launch, which would
+ * kill the whole build iteration.
+ */
+export const ADVISOR_MODELS = ['opus', 'sonnet', 'fable'] as const;
+
+export type AdvisorModel = (typeof ADVISOR_MODELS)[number];
+
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
@@ -86,6 +96,8 @@ export interface Settings {
   buildModel: AgentModel | null;
   /** Model the pull request review runs on; `null` lets Claude Code choose. */
   reviewModel: AgentModel | null;
+  /** Second model advising each build iteration; `null` means no advisor. */
+  advisorModel: AdvisorModel | null;
   /** Whether new sessions start with their code-review flag on (US-004). */
   codeReviewDefault: boolean;
   /** Commit identity used by agents inside session containers (US-006). */
@@ -113,6 +125,8 @@ export interface SettingsUpdate {
   planningModel?: AgentModel | null;
   buildModel?: AgentModel | null;
   reviewModel?: AgentModel | null;
+  /** `null` turns the advisor off again; it is off unless chosen. */
+  advisorModel?: AdvisorModel | null;
   codeReviewDefault?: boolean;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;

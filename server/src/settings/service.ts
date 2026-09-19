@@ -89,6 +89,31 @@ export function isAgentModel(value: string): value is AgentModel {
 }
 
 /**
+ * Models Claude Code accepts as an `--advisor`.
+ *
+ * A strict subset of {@link AGENT_MODELS}: Haiku is deliberately absent because
+ * the CLI refuses it outright — `The model "haiku" cannot be used as an
+ * advisor.` — and it refuses at launch, which kills the whole build iteration
+ * rather than degrading it. Keeping Haiku out of this list is what makes an
+ * unusable advisor unsavable instead of unbuildable.
+ *
+ * This is the whole rule (US-006). The CLI also wants an advisor to be at
+ * least as capable as the model it advises, but it treats a weaker advisor as
+ * a warning rather than a launch failure: `--model opus --advisor sonnet`
+ * prints `"sonnet" cannot advise "claude-opus-5" … The advisor will not be
+ * used for the main model.` on stderr and runs the iteration to completion,
+ * exit 0. chief-web does not refuse those pairs, because refusing them would
+ * reject a configuration that works.
+ */
+export const ADVISOR_MODELS = ['opus', 'sonnet', 'fable'] as const;
+
+export type AdvisorModel = (typeof ADVISOR_MODELS)[number];
+
+export function isAdvisorModel(value: string): value is AdvisorModel {
+  return (ADVISOR_MODELS as readonly string[]).includes(value);
+}
+
+/**
  * Which model plans a Sentry issue — the one call that triages it and writes
  * its proposed fix plan (US-002, presented as the *planning model* since
  * US-010). One cheap one-shot call per issue, so this defaults to the cheapest
@@ -155,6 +180,8 @@ export interface AppSettings {
   readonly buildModel: AgentModel | null;
   /** Model the automatic code review runs on; `null` leaves the CLI to choose. */
   readonly reviewModel: AgentModel | null;
+  /** Model advising each build iteration; `null` means no advisor at all. */
+  readonly advisorModel: AdvisorModel | null;
   /** Whether new sessions are created with the code-review flag already on. */
   readonly codeReviewDefault: boolean;
   readonly gitAuthorName: string;
@@ -181,6 +208,8 @@ export interface AppSettingsUpdate {
   readonly planningModel?: AgentModel | null;
   readonly buildModel?: AgentModel | null;
   readonly reviewModel?: AgentModel | null;
+  /** `null` means no advisor at all; omitted leaves the stored value. */
+  readonly advisorModel?: AdvisorModel | null;
   readonly codeReviewDefault?: boolean;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
@@ -431,6 +460,34 @@ export function getReviewModel(db: Database): AgentModel | null {
   return readModel(db, 'review_model');
 }
 
+/**
+ * Which model advises the headless `claude -p` of each build iteration, or
+ * `null` to pass no `--advisor` at all and launch the iteration exactly as it
+ * is launched today.
+ *
+ * Read the same fail-safe way as {@link getBuildModel}, against the narrower
+ * {@link ADVISOR_MODELS}: a row naming a model the CLI would refuse — a
+ * hand-edited `haiku`, or a family dropped from a later runner image — reads as
+ * `null`. An iteration with no advisor still builds; one launched with a
+ * rejected `--advisor` does not.
+ */
+export function getAdvisorModel(db: Database): AdvisorModel | null {
+  const stored = getSetting(db, 'advisor_model');
+  return stored !== null && isAdvisorModel(stored) ? stored : null;
+}
+
+/**
+ * The advisor exactly as it is stored, whether or not it is usable (US-007).
+ *
+ * {@link getAdvisorModel} sanitises, which is what every caller that only wants
+ * a value to hand the CLI needs. The build loop needs the unusable value too:
+ * dropping an advisor is something it says out loud in the build log, and it
+ * cannot name a value it was never shown.
+ */
+export function getStoredAdvisorModel(db: Database): string | null {
+  return getSetting(db, 'advisor_model');
+}
+
 function readModel(
   db: Database,
   key: 'planning_model' | 'build_model' | 'review_model',
@@ -483,6 +540,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     planningModel: getPlanningModel(db),
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
+    advisorModel: getAdvisorModel(db),
     codeReviewDefault: getCodeReviewDefault(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
@@ -552,6 +610,13 @@ export function updateAppSettings(
 
     if (update.reviewModel === null) deleteSetting(db, 'review_model');
     else if (update.reviewModel !== undefined) setSetting(db, 'review_model', update.reviewModel);
+
+    // The same two branches, except that here the cleared row means "no
+    // advisor at all" rather than "let the CLI choose".
+    if (update.advisorModel === null) deleteSetting(db, 'advisor_model');
+    else if (update.advisorModel !== undefined) {
+      setSetting(db, 'advisor_model', update.advisorModel);
+    }
 
     if (update.codeReviewDefault !== undefined) {
       setSetting(db, 'code_review_default', update.codeReviewDefault ? '1' : '0');

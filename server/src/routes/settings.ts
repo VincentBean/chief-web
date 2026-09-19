@@ -4,10 +4,13 @@ import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
 import { fetchGithubUser, GithubApiError } from '../lib/github.js';
 import {
+  ADVISOR_MODELS,
+  type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
   type AppSettingsUpdate,
   getGithubToken,
+  isAdvisorModel,
   isAgentModel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
@@ -118,6 +121,15 @@ export function createSettingsRouter(
   return router;
 }
 
+/*
+ * There is no build-model/advisor *pair* rule to enforce here (US-006).
+ * `--advisor haiku` is the only value Claude Code refuses at launch, and
+ * {@link ADVISOR_MODEL_RULE} already rejects it field by field. An advisor
+ * weaker than the build model — `opus` built with a `sonnet` advisor, say —
+ * only warns on stderr and runs the iteration normally, so refusing that pair
+ * would reject a configuration that works.
+ */
+
 function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { error: 'invalid_body', message: 'Expected a JSON object.' };
@@ -138,6 +150,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     planningModel?: AgentModel | null;
     buildModel?: AgentModel | null;
     reviewModel?: AgentModel | null;
+    advisorModel?: AdvisorModel | null;
     codeReviewDefault?: boolean;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
@@ -313,17 +326,21 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     update.conflictFixEnabled = raw;
   }
 
-  const planning = parseModelField(input, 'planningModel');
+  const planning = parseModelField(input, 'planningModel', AGENT_MODEL_RULE);
   if ('error' in planning) return planning;
   if (planning.present) update.planningModel = planning.value;
 
-  const build = parseModelField(input, 'buildModel');
+  const build = parseModelField(input, 'buildModel', AGENT_MODEL_RULE);
   if ('error' in build) return build;
   if (build.present) update.buildModel = build.value;
 
-  const review = parseModelField(input, 'reviewModel');
+  const review = parseModelField(input, 'reviewModel', AGENT_MODEL_RULE);
   if ('error' in review) return review;
   if (review.present) update.reviewModel = review.value;
+
+  const advisor = parseModelField(input, 'advisorModel', ADVISOR_MODEL_RULE);
+  if ('error' in advisor) return advisor;
+  if (advisor.present) update.advisorModel = advisor.value;
 
   if ('codeReviewDefault' in input && input['codeReviewDefault'] !== undefined) {
     const raw = input['codeReviewDefault'];
@@ -356,39 +373,69 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
 }
 
 /** An absent model field is not the same as one explicitly set to `null`. */
-type ModelField =
+type ModelField<M extends string> =
   | { readonly present: false }
-  | { readonly present: true; readonly value: AgentModel | null };
+  | { readonly present: true; readonly value: M | null };
+
+/** Which names a model field accepts, and what it says when it gets another. */
+interface ModelRule<M extends string> {
+  readonly allowed: readonly string[];
+  readonly accepts: (value: string) => value is M;
+  /** What clearing the field means, for the operator reading the rejection. */
+  readonly cleared: string;
+}
+
+/** The three `--model` fields: any family chief-web offers, or the CLI default. */
+const AGENT_MODEL_RULE: ModelRule<AgentModel> = {
+  allowed: AGENT_MODELS,
+  accepts: isAgentModel,
+  cleared: 'Send null to let Claude Code choose.',
+};
+
+/**
+ * The `--advisor` field (US-003): the narrower {@link ADVISOR_MODELS}, because
+ * the CLI refuses Haiku as an advisor and refuses it at launch. Rejecting it
+ * here is what keeps an unusable advisor unsavable rather than unbuildable.
+ */
+const ADVISOR_MODEL_RULE: ModelRule<AdvisorModel> = {
+  allowed: ADVISOR_MODELS,
+  accepts: isAdvisorModel,
+  cleared: 'Send null to run without an advisor.',
+};
 
 /**
  * The model fields all behave alike: omitted leaves the stored value alone,
- * `null` hands the choice back to Claude Code's own default, and a string has
- * to be one chief-web offers.
+ * `null` clears it, and a string has to be one chief-web offers.
  *
  * The allowlist is the point. `--model` takes anything and only warns on a name
  * it does not know, so an unchecked typo here would not fail — it would quietly
  * run a whole build on whatever the CLI fell back to.
  */
-function parseModelField(input: Record<string, unknown>, key: ModelKey): ModelField | Invalid {
+function parseModelField<M extends string>(
+  input: Record<string, unknown>,
+  key: ModelKey,
+  rule: ModelRule<M>,
+): ModelField<M> | Invalid {
   if (!(key in input) || input[key] === undefined) return ABSENT_MODEL;
   const raw = input[key];
   if (raw === null) return { present: true, value: null };
-  if (typeof raw === 'string' && isAgentModel(raw)) return { present: true, value: raw };
+  if (typeof raw === 'string' && rule.accepts(raw)) return { present: true, value: raw };
   return {
     error: MODEL_ERRORS[key],
-    message: `The model must be one of ${AGENT_MODELS.join(', ')}. Send null to let Claude Code choose.`,
+    message: `The model must be one of ${rule.allowed.join(', ')}. ${rule.cleared}`,
   };
 }
 
-type ModelKey = 'planningModel' | 'buildModel' | 'reviewModel';
+type ModelKey = 'planningModel' | 'buildModel' | 'reviewModel' | 'advisorModel';
 
 const MODEL_ERRORS: Record<ModelKey, string> = {
   planningModel: 'invalid_planning_model',
   buildModel: 'invalid_build_model',
   reviewModel: 'invalid_review_model',
+  advisorModel: 'invalid_advisor_model',
 };
 
-const ABSENT_MODEL: ModelField = { present: false };
+const ABSENT_MODEL: ModelField<never> = { present: false };
 
 /** An absent field is not the same as one explicitly set to `null`. */
 type IdentityField =

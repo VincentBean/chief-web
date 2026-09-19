@@ -11,7 +11,7 @@
 FROM node:22-alpine
 
 # Pin the agent CLI so rebuilding the image is reproducible; bump deliberately.
-ARG CLAUDE_CODE_VERSION=2.1.251
+ARG CLAUDE_CODE_VERSION=2.1.276
 
 # git/openssh-client: clone, commit, push over SSH.
 # bash/ripgrep/jq/curl/less: the shell and search tools the agent expects.
