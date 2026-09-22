@@ -159,6 +159,10 @@ container is started from. The first build takes a few minutes. Add `-d` to
 leave it running in the background, and use `docker compose logs -f server` to
 watch the logs.
 
+The runner image installs the newest Claude Code release every time it is
+built. To update, run `docker compose build runner`. The rebuild only happens
+when a new release is out, and sessions started after it use the new version.
+
 ### 3. Log in
 
 Open <http://localhost:8080> and enter your password. There are no user

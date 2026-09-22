@@ -10,8 +10,9 @@
 # ---------------------------------------------------------------------------
 FROM node:22-alpine
 
-# Pin the agent CLI so rebuilding the image is reproducible; bump deliberately.
-ARG CLAUDE_CODE_VERSION=2.1.276
+# Every build installs the newest agent CLI. Pass
+# `--build-arg CLAUDE_CODE_VERSION=<x.y.z>` to pin a release instead.
+ARG CLAUDE_CODE_VERSION=latest
 
 # git/openssh-client: clone, commit, push over SSH.
 # bash/ripgrep/jq/curl/less: the shell and search tools the agent expects.
@@ -29,6 +30,12 @@ RUN apk add --no-cache \
         openssh-client \
         ripgrep \
         tini
+
+# Cache key for the install below: the registry's metadata for the current
+# release. Docker re-fetches it on every build and only reruns the install when
+# it changed, so a plain `docker compose build` picks up a new release without
+# `--no-cache` and reuses the layer when there is none.
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/claude-code-latest.json
 
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force \
