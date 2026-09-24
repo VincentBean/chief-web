@@ -1,12 +1,23 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
 
 import { terminalSocketUrl } from './api.ts';
 
 /** How the pane's own connection is doing, shown above the terminal. */
 export type PaneStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
+
+/** What a parent can do to the pane through its `ref`. */
+export interface TerminalPaneHandle {
+  /**
+   * Types `text` into the PTY and presses Enter. Returns `false`, sending
+   * nothing, when the socket is not open.
+   */
+  send(text: string): boolean;
+  /** Moves keyboard focus to the terminal; a no-op while none is open. */
+  focus(): void;
+}
 
 interface Props {
   /** Terminal id from the server; changing it re-attaches to another PTY. */
@@ -18,6 +29,7 @@ interface Props {
   readonly size?: 'default' | 'tall';
   readonly onStatus?: (status: PaneStatus) => void;
   readonly onExit?: (exitCode: number | null) => void;
+  readonly ref?: Ref<TerminalPaneHandle>;
 }
 
 /** Control frames the server sends as text; output arrives as binary frames. */
@@ -58,9 +70,21 @@ function token(styles: CSSStyleDeclaration, name: string, fallback: string): str
   return /^(#|rgb|hsl|oklch|oklab|color\()/i.test(value) ? value : fallback;
 }
 
-export function TerminalPane({ terminalId, size = 'default', onStatus, onExit }: Props) {
+export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, ref }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // The live terminal, set only while the effect below owns one, so the
+  // handle never acts on a disposed xterm or a socket from a past mount.
+  const live = useRef<TerminalPaneHandle | null>(null);
+  useImperativeHandle(
+    ref,
+    () => ({
+      send: (text) => live.current?.send(text) ?? false,
+      focus: () => live.current?.focus(),
+    }),
+    [],
+  );
 
   // Callbacks are read through a ref so a parent re-render never tears down
   // and reconnects the socket.
@@ -201,6 +225,18 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit }:
     });
     const onResize = term.onResize(({ cols, rows }) => sendResize(cols, rows));
 
+    live.current = {
+      // The same binary frame typed input takes. Not `term.paste()`: xterm
+      // would wrap the text in bracketed-paste markers, and Claude Code treats
+      // a paste as text to edit rather than a line to submit.
+      send: (text) => {
+        if (socket?.readyState !== WebSocket.OPEN) return false;
+        socket.send(encoder.encode(`${text}\r`));
+        return true;
+      },
+      focus: () => term.focus(),
+    };
+
     // Ctrl+Shift+C/V and the Insert variants: the terminal must not swallow
     // them, and the browser's own Ctrl+Shift+C opens devtools instead.
     term.attachCustomKeyEventHandler((event) => {
@@ -242,6 +278,7 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit }:
 
     return () => {
       disposed = true;
+      live.current = null;
       window.clearTimeout(reconnectTimer);
       observer.disconnect();
       window.removeEventListener('resize', refit);
