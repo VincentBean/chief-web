@@ -18,6 +18,7 @@ import {
 } from '../db/index.js';
 import { createSettingsRouter } from './settings.js';
 import {
+  DEFAULT_PLANNING_QUESTIONS,
   getConflictFixEnabled,
   getMaxConcurrentSessions,
   getPrConflictIntervalMs,
@@ -186,6 +187,7 @@ describe('settings api', () => {
       reviewModel: null,
       advisorModel: null,
       codeReviewDefault: false,
+      planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -212,6 +214,7 @@ describe('settings api', () => {
       reviewModel: null,
       advisorModel: null,
       codeReviewDefault: false,
+      planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -255,6 +258,7 @@ describe('settings api', () => {
       reviewModel: null,
       advisorModel: null,
       codeReviewDefault: false,
+      planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });
@@ -282,6 +286,7 @@ describe('settings api', () => {
       reviewModel: null,
       advisorModel: null,
       codeReviewDefault: false,
+      planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
     });

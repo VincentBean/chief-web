@@ -91,6 +91,12 @@ export const SETTING_KEYS = [
    * the past means no hold, so nothing has to sweep the row.
    */
   'claude_limit_until',
+  /**
+   * The standard questions offered in the planning terminal, as a JSON-encoded
+   * array of strings. An absent row, or one that does not decode to such an
+   * array, means `DEFAULT_PLANNING_QUESTIONS`.
+   */
+  'planning_questions',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
