@@ -100,6 +100,8 @@ export interface Settings {
   advisorModel: AdvisorModel | null;
   /** Whether new sessions start with their code-review flag on (US-004). */
   codeReviewDefault: boolean;
+  /** One-click questions offered in the planning terminal; `[]` shows none. */
+  planningQuestions: string[];
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -128,6 +130,8 @@ export interface SettingsUpdate {
   /** `null` turns the advisor off again; it is off unless chosen. */
   advisorModel?: AdvisorModel | null;
   codeReviewDefault?: boolean;
+  /** Trimmed and blank entries dropped by the server; `null` restores the defaults. */
+  planningQuestions?: string[] | null;
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;

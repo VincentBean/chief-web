@@ -128,11 +128,6 @@ const MS_PER_MINUTE = 60_000;
 const VISIBLE_TOKEN_CHARS = 4;
 
 /**
- * Commit identity used inside runner containers (US-006). The same defaults are
- * baked into the runner image, so a container started without these environment
- * variables still commits successfully.
- */
-/**
  * The questions the planning terminal offers when none are stored: the two an
  * operator ends every planning session with.
  */
@@ -140,6 +135,35 @@ export const DEFAULT_PLANNING_QUESTIONS: readonly string[] = [
   'Any open questions?',
   'Re-check the entire PRD for issues, gaps and other unwanted behaviour',
 ];
+
+/** Upper bounds on the planning questions, so the button row stays usable. */
+export const MAX_PLANNING_QUESTIONS = 10;
+export const MAX_PLANNING_QUESTION_CHARS = 500;
+
+/**
+ * Cleans a planning-question list as the operator entered it: every entry is
+ * trimmed and blank ones are dropped. Returns `null` when the list cannot be
+ * stored — too many entries, one too long, or one containing a control
+ * character. A newline is the one that matters: typed into the terminal it
+ * would submit the question halfway through, so it is refused, not stripped.
+ */
+export function normalizePlanningQuestions(entries: readonly unknown[]): string[] | null {
+  const questions: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || /\p{Cc}/u.test(entry)) return null;
+    const question = entry.trim();
+    if (question === '') continue;
+    if (question.length > MAX_PLANNING_QUESTION_CHARS) return null;
+    questions.push(question);
+  }
+  return questions.length > MAX_PLANNING_QUESTIONS ? null : questions;
+}
+
+/**
+ * Commit identity used inside runner containers (US-006). The same defaults are
+ * baked into the runner image, so a container started without these environment
+ * variables still commits successfully.
+ */
 
 export const DEFAULT_GIT_AUTHOR_NAME = 'chief-web';
 export const DEFAULT_GIT_AUTHOR_EMAIL = 'chief-web@localhost';

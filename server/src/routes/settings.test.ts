@@ -89,6 +89,7 @@ describe('settings api', () => {
     deleteSetting(db, 'sentry_model');
     deleteSetting(db, 'sentry_plans_per_tick');
     deleteSetting(db, 'sentry_base_url');
+    deleteSetting(db, 'planning_questions');
     githubReply = { status: 200, body: { login: 'octocat' } };
     githubAuthHeader = undefined;
   });
@@ -158,6 +159,80 @@ describe('settings api', () => {
     // Nothing was stored by the rejected requests.
     const current = (await (await get()).json()) as Record<string, unknown>;
     assert.equal(current['gitAuthorName'], 'chief-web');
+  });
+
+  it('returns the default planning questions when none are stored (US-002)', async () => {
+    const body = (await (await get()).json()) as Record<string, unknown>;
+    assert.deepEqual(body['planningQuestions'], [...DEFAULT_PLANNING_QUESTIONS]);
+  });
+
+  it('saves planning questions, trimming them and dropping blank entries (US-002)', async () => {
+    const response = await put({ planningQuestions: ['  Ready to build?  ', '', '   ', 'Any risks?'] });
+    assert.equal(response.status, 200);
+    const saved = (await response.json()) as Record<string, unknown>;
+    assert.deepEqual(saved['planningQuestions'], ['Ready to build?', 'Any risks?']);
+
+    // The round-trip: a fresh GET returns what was stored, and a PUT without
+    // the field leaves it alone.
+    await put({ maxConcurrentSessions: 5 });
+    const read = (await (await get()).json()) as Record<string, unknown>;
+    assert.deepEqual(read['planningQuestions'], ['Ready to build?', 'Any risks?']);
+  });
+
+  it('keeps an empty list empty and restores the defaults with null (US-002)', async () => {
+    const emptied = (await (await put({ planningQuestions: [] })).json()) as Record<string, unknown>;
+    assert.deepEqual(emptied['planningQuestions'], []);
+    const read = (await (await get()).json()) as Record<string, unknown>;
+    assert.deepEqual(read['planningQuestions'], []);
+
+    // A list of only blank entries is an empty list too, not the defaults.
+    const blank = (await (await put({ planningQuestions: [' '] })).json()) as Record<string, unknown>;
+    assert.deepEqual(blank['planningQuestions'], []);
+
+    const restored = (await (await put({ planningQuestions: null })).json()) as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(restored['planningQuestions'], [...DEFAULT_PLANNING_QUESTIONS]);
+  });
+
+  it('rejects planning questions the terminal cannot take (US-002)', async () => {
+    await put({ planningQuestions: ['Kept?'] });
+
+    const rejected: unknown[] = [
+      ['Line one\nline two'],
+      ['Carriage\rreturn'],
+      ['Trailing newline\n'],
+      ['Tab\tinside'],
+      ['Escape \u001b[2J'],
+      Array.from({ length: 11 }, (_, i) => `Question ${i + 1}`),
+      ['x'.repeat(501)],
+      ['Fine', 42],
+      'Any open questions?',
+      { 0: 'Any open questions?' },
+      true,
+    ];
+    for (const planningQuestions of rejected) {
+      const response = await put({ planningQuestions });
+      assert.equal(response.status, 400, JSON.stringify(planningQuestions));
+      const body = (await response.json()) as Record<string, unknown>;
+      assert.equal(body['error'], 'invalid_planning_questions');
+    }
+
+    // Nothing rejected was stored.
+    const read = (await (await get()).json()) as Record<string, unknown>;
+    assert.deepEqual(read['planningQuestions'], ['Kept?']);
+
+    // The limits themselves are allowed: ten entries of 500 characters.
+    const atLimit = Array.from({ length: 10 }, (_, i) => String(i).repeat(500));
+    const accepted = await put({ planningQuestions: atLimit });
+    assert.equal(accepted.status, 200);
+    const saved = (await accepted.json()) as Record<string, unknown>;
+    assert.deepEqual(saved['planningQuestions'], atLimit);
+
+    // Blank entries do not count towards the ten.
+    const padded = await put({ planningQuestions: [...atLimit, '', '  '] });
+    assert.equal(padded.status, 200);
   });
 
   it('requires authentication', async () => {

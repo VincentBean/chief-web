@@ -20,6 +20,8 @@ import {
   MAX_AGENT_TIMEOUT_MINUTES,
   MAX_CONCURRENT_SESSIONS,
   MAX_PR_CONFLICT_INTERVAL_MINUTES,
+  MAX_PLANNING_QUESTION_CHARS,
+  MAX_PLANNING_QUESTIONS,
   MAX_PR_SYNC_INTERVAL_MINUTES,
   MAX_SENTRY_PLANS_PER_TICK,
   MAX_SENTRY_POLL_INTERVAL_MINUTES,
@@ -29,6 +31,7 @@ import {
   MIN_PR_SYNC_INTERVAL_MINUTES,
   MIN_SENTRY_PLANS_PER_TICK,
   MIN_SENTRY_POLL_INTERVAL_MINUTES,
+  normalizePlanningQuestions,
   readAppSettings,
   updateAppSettings,
 } from '../settings/index.js';
@@ -152,6 +155,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     reviewModel?: AgentModel | null;
     advisorModel?: AdvisorModel | null;
     codeReviewDefault?: boolean;
+    planningQuestions?: string[] | null;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   } = {};
@@ -351,6 +355,20 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.codeReviewDefault = raw;
+  }
+
+  // `null` restores the defaults; `[]` is a real choice — no buttons at all —
+  // and is stored as such rather than read as "use the defaults" (US-002).
+  if ('planningQuestions' in input && input['planningQuestions'] !== undefined) {
+    const raw = input['planningQuestions'];
+    const questions = Array.isArray(raw) ? normalizePlanningQuestions(raw) : null;
+    if (raw !== null && questions === null) {
+      return {
+        error: 'invalid_planning_questions',
+        message: `Planning questions must be a list of at most ${MAX_PLANNING_QUESTIONS} lines of text, each at most ${MAX_PLANNING_QUESTION_CHARS} characters and without line breaks. Send null to restore the defaults.`,
+      };
+    }
+    update.planningQuestions = questions;
   }
 
   const name = parseIdentityField(input, 'gitAuthorName', isValidGitAuthorName, {
