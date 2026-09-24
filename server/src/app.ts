@@ -410,7 +410,7 @@ export function createApp(
   // reports on.
   api.use(createSentryRouter(db, sentryFixer));
   api.use(createSessionsRouter(sessions));
-  api.use(createPlanningRouter(planning));
+  api.use(createPlanningRouter(planning, db));
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));
   // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early

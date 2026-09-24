@@ -542,6 +542,8 @@ export interface Planning {
   nextMode: PlanningMode;
   cwd: string;
   prd: PrdStatus;
+  /** The standard questions from Settings, re-read on every request. */
+  readonly questions: string[];
 }
 
 export async function fetchSession(id: string, signal?: AbortSignal): Promise<Session> {
