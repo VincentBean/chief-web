@@ -256,6 +256,22 @@ export async function checkElevenLabsKey(key?: string): Promise<ElevenLabsKeyChe
   });
 }
 
+export interface SttTestResult {
+  /** What OpenRouter heard; empty when it was silence or a known hallucination. */
+  text: string;
+  /** Server-side round trip of the transcription, in milliseconds. */
+  ms: number;
+}
+
+/** Settings → "Test microphone" (voice US-004): a 16 kHz WAV through the server's STT. */
+export async function testSpeechToText(wav: ArrayBuffer): Promise<SttTestResult> {
+  return api<SttTestResult>('/api/voice/test/stt', {
+    method: 'POST',
+    body: wav,
+    headers: { 'content-type': 'audio/wav' },
+  });
+}
+
 /** Mirrors the server's `ClaudeAuthStatus` (US-008). */
 export interface ClaudeAuthStatus {
   authenticated: boolean;

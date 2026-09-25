@@ -1,4 +1,4 @@
-import { type Response, Router } from 'express';
+import express, { type Response, Router } from 'express';
 
 import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
@@ -18,6 +18,7 @@ import {
   type OpenRouterSlugs,
   VoiceProviderError,
 } from './providers.js';
+import { SttError, SttService } from './stt/index.js';
 
 /** A rejected request body: an error code plus something to show the operator. */
 interface Invalid {
@@ -36,6 +37,7 @@ interface Invalid {
  */
 export function createVoiceRouter(db: Database, config: Config): Router {
   const router = Router();
+  const stt = new SttService(db, config);
 
   // The ElevenLabs voice picker's options, proxied so the key stays here.
   router.get('/voice/voices', (_req, res) => {
@@ -126,7 +128,52 @@ export function createVoiceRouter(db: Database, config: Config): Router {
       .catch((cause: unknown) => sendProviderError(res, cause));
   });
 
+  // Settings → "Test microphone": three seconds of WAV from the browser,
+  // transcribed exactly as a call's utterance would be (voice US-004). Always
+  // OpenRouter, whatever `voice_stt_provider` says: the other two providers
+  // transcribe in the browser and have nothing to test here.
+  router.post(
+    '/voice/test/stt',
+    express.raw({ type: ['audio/wav', 'audio/wave', 'audio/x-wav', 'application/octet-stream'], limit: '3mb' }),
+    (req, res) => {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(400).json({ error: 'invalid_audio', message: 'Send the recording as an audio/wav body.' });
+        return;
+      }
+      const started = performance.now();
+      stt
+        .transcribe(req.body, undefined, { provider: 'openrouter' })
+        .then((result) => {
+          const ms = Math.round(performance.now() - started);
+          if (result.kind === 'rejected') {
+            res.status(400).json({ error: `audio_${result.reason}`, message: result.message });
+            return;
+          }
+          // A dropped hallucination is what a call would do with it: nothing heard.
+          res.status(200).json({ text: result.kind === 'text' ? result.text : '', ms });
+        })
+        .catch((cause: unknown) => sendSttError(res, cause));
+    },
+  );
+
   return router;
+}
+
+/** Same rule as {@link sendProviderError}: never 401. */
+function sendSttError(res: Response, cause: unknown): void {
+  if (!(cause instanceof SttError)) {
+    res.status(500).json({ error: 'stt_failed', message: String(cause) });
+    return;
+  }
+  if (cause.kind === 'unconfigured') {
+    res.status(400).json({ error: 'openrouter_key_missing', message: cause.message });
+    return;
+  }
+  const refused = cause.status === 401 || cause.status === 403;
+  res.status(refused ? 400 : 502).json({
+    error: refused ? 'openrouter_unauthorized' : `stt_${cause.kind}`,
+    message: cause.message,
+  });
 }
 
 function parseBody(body: unknown): Record<string, unknown> | Invalid {

@@ -18,6 +18,7 @@ import {
   type SettingsUpdate,
   startClaudeLogin,
   stopClaudeLogin,
+  testSpeechToText,
   validateGithubToken,
   VOICE_BARGE_IN_MODES,
   VOICE_EVENT_VERBOSITIES,
@@ -30,6 +31,7 @@ import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMe
 import { Icon } from '../Icon.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { recordWav } from '../voice/wav.ts';
 
 /**
  * What each model is worth choosing for. The `<select>` uses `''` for "no
@@ -901,6 +903,8 @@ interface CheckResult {
 
 const credits = new Intl.NumberFormat();
 
+const MIC_TEST_MS = 3_000;
+
 function VoicePanel({
   settings,
   form,
@@ -931,6 +935,8 @@ function VoicePanel({
   const [checking, setChecking] = useState<'openrouter' | 'elevenlabs' | null>(null);
   const [openrouterCheck, setOpenrouterCheck] = useState<CheckResult | null>(null);
   const [elevenlabsCheck, setElevenlabsCheck] = useState<CheckResult | null>(null);
+  const [micTest, setMicTest] = useState<'recording' | 'transcribing' | null>(null);
+  const [micCheck, setMicCheck] = useState<CheckResult | null>(null);
   const [voices, setVoices] = useState<ElevenLabsVoice[] | null>(null);
   const [voicesError, setVoicesError] = useState<string | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
@@ -1024,6 +1030,29 @@ function VoicePanel({
         setElevenlabsCheck({ ok: false, text: describeError(error) });
       })
       .finally(() => setChecking(null));
+  };
+
+  // Three seconds from the microphone, transcribed with the saved key and
+  // model exactly as a call's utterance would be.
+  const onTestMicrophone = (): void => {
+    setMicTest('recording');
+    setMicCheck(null);
+    recordWav(MIC_TEST_MS)
+      .then((wav) => {
+        setMicTest('transcribing');
+        return testSpeechToText(wav);
+      })
+      .then((result) => {
+        setMicCheck({
+          ok: true,
+          text: result.text === '' ? `Heard nothing (${String(result.ms)} ms).` : `“${result.text}” (${String(result.ms)} ms)`,
+        });
+      })
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setMicCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setMicTest(null));
   };
 
   const pickedMissing = form.voiceId !== '' && voices !== null && !voices.some((voice) => voice.voiceId === form.voiceId);
@@ -1200,6 +1229,16 @@ function VoicePanel({
       <div className="field__row">
         {slugField('orSttModel', 'voice-or-stt-model', 'OpenRouter speech-to-text model', 'Any OpenRouter transcription model slug.')}
         {slugField('chiefModel', 'voice-chief-model', 'Chief model', 'Any OpenRouter chat model that supports tool calling.')}
+      </div>
+
+      <div className="field">
+        <div className="field__pair">
+          <button type="button" className="button" onClick={onTestMicrophone} disabled={busy || micTest !== null || !storedOpenrouter.configured}>
+            {micTest === 'recording' ? 'Listening for 3 s…' : micTest === 'transcribing' ? 'Transcribing…' : 'Test microphone'}
+          </button>
+        </div>
+        {checkLine(micCheck)}
+        <p className="field__hint">Records three seconds and transcribes them with the saved OpenRouter key and speech-to-text model; shows what was heard and how long it took.</p>
       </div>
 
       <div className="field__row">

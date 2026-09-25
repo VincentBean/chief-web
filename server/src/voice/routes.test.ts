@@ -91,6 +91,8 @@ describe('voice api (voice US-001)', () => {
 
   after(async () => {
     await new Promise((resolve) => server.close(resolve));
+    // The STT client's keep-alive agent holds idle sockets open.
+    provider.closeAllConnections();
     await new Promise((resolve) => provider.close(resolve));
     closeDatabase(db);
   });
@@ -376,6 +378,76 @@ describe('voice api (voice US-001)', () => {
       assert.equal(response.status, 502);
       assert.equal(body['error'], 'elevenlabs_error');
       assert.match(String(body['message']), /503: upstream overloaded/);
+    });
+  });
+
+  describe('POST /api/voice/test/stt', () => {
+    /** A silent 16 kHz mono PCM16 WAV of `ms` milliseconds. */
+    const wav = (ms: number): Buffer => {
+      const dataBytes = 32 * ms;
+      const out = Buffer.alloc(44 + dataBytes);
+      out.write('RIFF', 0, 'ascii');
+      out.writeUInt32LE(36 + dataBytes, 4);
+      out.write('WAVEfmt ', 8, 'ascii');
+      out.writeUInt32LE(16, 16);
+      out.writeUInt16LE(1, 20);
+      out.writeUInt16LE(1, 22);
+      out.writeUInt32LE(16_000, 24);
+      out.writeUInt32LE(32_000, 28);
+      out.writeUInt16LE(2, 32);
+      out.writeUInt16LE(16, 34);
+      out.write('data', 36, 'ascii');
+      out.writeUInt32LE(dataBytes, 40);
+      return out;
+    };
+    const post = async (body: Buffer): Promise<Response> =>
+      fetch(`${baseUrl}/api/voice/test/stt`, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'audio/wav' },
+        body: new Uint8Array(body),
+      });
+
+    it('transcribes a WAV body and answers text and latency', async () => {
+      setSetting(db, 'openrouter_api_key', 'sk-or-v1-stored');
+      replies['/or/audio/transcriptions'] = { status: 200, body: { text: ' Hallo chief ', usage: { cost: 0.0001, seconds: 3 } } };
+
+      const response = await post(wav(3_000));
+      const body = await json(response);
+
+      assert.equal(response.status, 200);
+      assert.equal(body['text'], 'Hallo chief');
+      assert.equal(typeof body['ms'], 'number');
+      assert.equal(seen['/or/audio/transcriptions']?.['authorization'], 'Bearer sk-or-v1-stored');
+    });
+
+    it('answers 400 for a too-short recording, without calling OpenRouter', async () => {
+      setSetting(db, 'openrouter_api_key', 'sk-or-v1-stored');
+
+      const response = await post(wav(100));
+
+      assert.equal(response.status, 400);
+      assert.equal((await json(response))['error'], 'audio_too_short');
+      assert.equal(seen['/or/audio/transcriptions'], undefined);
+    });
+
+    it('answers 400, never 401, for a refused key and 502 for an outage', async () => {
+      setSetting(db, 'openrouter_api_key', 'sk-or-v1-stored');
+      replies['/or/audio/transcriptions'] = { status: 401, body: { error: { message: 'No auth credentials found' } } };
+      const refused = await post(wav(500));
+      assert.equal(refused.status, 400);
+      assert.equal((await json(refused))['error'], 'openrouter_unauthorized');
+
+      replies['/or/audio/transcriptions'] = { status: 500, body: 'boom' };
+      const outage = await post(wav(500));
+      assert.equal(outage.status, 502);
+      assert.match(String((await json(outage))['message']), /500: boom/);
+    });
+
+    it('answers 400 without a key', async () => {
+      const response = await post(wav(500));
+
+      assert.equal(response.status, 400);
+      assert.equal((await json(response))['error'], 'openrouter_key_missing');
     });
   });
 
