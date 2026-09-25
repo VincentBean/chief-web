@@ -53,6 +53,8 @@ export interface FakeExec {
   readonly terminalId: string | null;
   /** False for a collected `runExec`, whose output is framed rather than raw. */
   readonly tty: boolean;
+  /** Whether stdin was attached; with `tty: false` that is a {@link DockerApi.attachExec}. */
+  readonly attachStdin: boolean;
   readonly pid: number;
   running: boolean;
   exitCode: number;
@@ -70,6 +72,21 @@ export interface ExecScript {
   readonly exitCode?: number;
   /** Model a command that never returns: print nothing and never exit. */
   readonly hang?: boolean;
+  /**
+   * Stdin-attached execs only (`DockerApi.attachExec`): called with each line
+   * written to stdin, without its newline. Answer with
+   * {@link FakeDockerDaemon.emitFramed}, end with {@link FakeDockerDaemon.finish}.
+   * `stdout`/`stderr` are printed once at start, and the process only exits
+   * when finished or when its stdin ends.
+   */
+  readonly onLine?: (line: string) => void;
+  /**
+   * Called when the client ends stdin, with any unterminated last line already
+   * passed to `onLine`. By default the process exits with `exitCode` (0), as
+   * a program reading until EOF does; a handler that does not finish the exec
+   * keeps it running.
+   */
+  readonly onStdinEnd?: () => void;
 }
 
 /** Byte that makes the fake shell exit cleanly, mimicking Ctrl-D. */
@@ -196,6 +213,14 @@ export class FakeDockerDaemon {
     exec.exitCode = exitCode;
     exec.socket?.end();
     exec.socket = null;
+  }
+
+  /**
+   * Drops a live exec's connection without the process reporting an exit, as
+   * a daemon restart would. The exec is left not running, its exit code at 0.
+   */
+  sever(execId: string): void {
+    this.execsById.get(execId)?.socket?.destroy();
   }
 
   async close(): Promise<void> {
@@ -366,6 +391,7 @@ export class FakeDockerDaemon {
           Env?: string[];
           WorkingDir?: string;
           Tty?: boolean;
+          AttachStdin?: boolean;
         };
         const cmd = spec.Cmd ?? [];
         const id = `exec-${this.nextExec++}`;
@@ -377,6 +403,7 @@ export class FakeDockerDaemon {
           workingDir: spec.WorkingDir ?? null,
           terminalId: cmd.join(' ').includes('echo $$') ? pidFileOwner(cmd) : null,
           tty: spec.Tty !== false,
+          attachStdin: spec.AttachStdin !== false,
           pid: this.nextPid++,
           running: false,
           exitCode: 0,
@@ -443,6 +470,14 @@ export class FakeDockerDaemon {
     exec.running = true;
     exec.socket = socket;
 
+    // A long-lived process fed over stdin (`attachExec`): framed output like a
+    // collected command, but it lives until the script finishes it or its
+    // stdin ends.
+    if (!exec.tty && exec.attachStdin) {
+      this.runAttached(exec, req, socket, head);
+      return;
+    }
+
     // A collected command (`runExec`) writes its output in the daemon's
     // multiplexed framing and exits; nothing is ever typed into it.
     if (!exec.tty) {
@@ -474,26 +509,47 @@ export class FakeDockerDaemon {
 
     socket.write(Buffer.from(`# ${exec.cmd.join(' ')}\r\n`, 'utf8'));
 
-    // The request body arrives on the same socket; skip exactly its bytes so
-    // it is not mistaken for keystrokes.
-    let remaining = Number(req.headers['content-length'] ?? 0);
-    const consume = (chunk: Buffer): void => {
-      let payload = chunk;
-      if (remaining > 0) {
-        const skipped = Math.min(remaining, payload.length);
-        remaining -= skipped;
-        payload = payload.subarray(skipped);
-      }
-      if (payload.length === 0) return;
+    readInput(req, socket, head, (payload) => {
       exec.input = Buffer.concat([exec.input, payload]);
       // The fake shell echoes what it is typed, and exits on Ctrl-D.
       const eot = payload.indexOf(FAKE_EOT);
       socket.write(eot === -1 ? payload : payload.subarray(0, eot));
       if (eot !== -1) this.finish(exec.id, 0);
-    };
+    });
+    this.onHangUp(exec, socket);
+  }
 
-    if (head.length > 0) consume(head);
-    socket.on('data', consume);
+  /** Feeds stdin to the script line by line; see {@link ExecScript.onLine}. */
+  private runAttached(exec: FakeExec, req: IncomingMessage, socket: Socket, head: Buffer): void {
+    const script = this.onExec?.(exec) ?? {};
+    if (script.stdout !== undefined && script.stdout !== '') {
+      socket.write(frame(STREAM_STDOUT, script.stdout));
+    }
+    if (script.stderr !== undefined && script.stderr !== '') {
+      socket.write(frame(STREAM_STDERR, script.stderr));
+    }
+
+    let partial = '';
+    readInput(req, socket, head, (payload) => {
+      exec.input = Buffer.concat([exec.input, payload]);
+      const lines = (partial + payload.toString('utf8')).split('\n');
+      partial = lines.pop() ?? '';
+      for (const line of lines) if (exec.running) script.onLine?.(line);
+    });
+    // `http.Server` sockets allow half-open connections, so the process can
+    // still answer after the client ended its stdin.
+    socket.on('end', () => {
+      if (!exec.running) return;
+      if (partial !== '') script.onLine?.(partial);
+      partial = '';
+      if (script.onStdinEnd === undefined) this.finish(exec.id, script.exitCode ?? 0);
+      else script.onStdinEnd();
+    });
+    this.onHangUp(exec, socket);
+  }
+
+  /** A connection that goes away takes the process with it. */
+  private onHangUp(exec: FakeExec, socket: Socket): void {
     socket.on('close', () => {
       this.sockets.delete(socket);
       if (exec.running) {
@@ -516,6 +572,31 @@ function frame(stream: number, payload: string): Buffer {
   header.writeUInt8(stream, 0);
   header.writeUInt32BE(body.length, 4);
   return Buffer.concat([header, body]);
+}
+
+/**
+ * Calls `onPayload` with what the client writes into a hijacked exec. The
+ * `/exec/{id}/start` request body arrives on the same socket, so exactly its
+ * bytes are skipped first, or they would be mistaken for input.
+ */
+function readInput(
+  req: IncomingMessage,
+  socket: Socket,
+  head: Buffer,
+  onPayload: (payload: Buffer) => void,
+): void {
+  let remaining = Number(req.headers['content-length'] ?? 0);
+  const consume = (chunk: Buffer): void => {
+    let payload = chunk;
+    if (remaining > 0) {
+      const skipped = Math.min(remaining, payload.length);
+      remaining -= skipped;
+      payload = payload.subarray(skipped);
+    }
+    if (payload.length > 0) onPayload(payload);
+  };
+  if (head.length > 0) consume(head);
+  socket.on('data', consume);
 }
 
 /** `{"label":["a","b=c"]}` → `['a', 'b=c']`. */

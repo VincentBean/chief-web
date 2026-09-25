@@ -1,5 +1,5 @@
 import http from 'node:http';
-import type { Duplex } from 'node:stream';
+import { Writable, type Duplex } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 
 /**
@@ -139,6 +139,29 @@ export interface StreamExecOptions {
    * consumed everything through `onOutput` wants. Unset keeps all of it.
    */
   readonly maxOutputChars?: number;
+}
+
+/**
+ * A long-lived process started by {@link DockerApi.attachExec}: no PTY, stdin
+ * attached, output still framed so stdout and stderr stay apart.
+ */
+export interface AttachedExec {
+  readonly execId: string;
+  /**
+   * The process's stdin. `end()` half-closes the connection, which the process
+   * reads as end of input; `destroy()` drops the connection altogether. Writes
+   * after the process has gone are discarded rather than raised as errors: the
+   * end of {@link output} is how the owner learns the process is gone.
+   */
+  readonly stdin: Writable;
+  /**
+   * Everything the process prints, decoded as it arrives. It ends — it never
+   * throws — when the process exits, when the connection drops or errors, or
+   * after the caller destroys `stdin`; ask {@link DockerApi.inspectExec} for the
+   * exit code then. Leaving the loop early drops the connection. Iterate it
+   * once.
+   */
+  readonly output: AsyncIterable<ExecChunk>;
 }
 
 export interface ExecState {
@@ -399,6 +422,21 @@ export class DockerApi {
     }
     const state = await this.inspectExec(execId);
     return { exitCode: state.exitCode, stdout: stdout.text, stderr: stderr.text, timedOut: false };
+  }
+
+  /**
+   * Starts a long-lived process with stdin attached and no PTY, for a caller
+   * that talks to it over stdin and reads line-oriented output back — a session
+   * agent's `claude` speaking stream-json. Without a PTY nothing is echoed or
+   * rewritten, and the daemon's framing keeps stderr out of the stdout lines.
+   */
+  async attachExec(container: string, spec: ExecSpec): Promise<AttachedExec> {
+    const execId = await this.createExec(container, { ...spec, tty: false, attachStdin: true });
+    const socket = await this.startExec(execId, undefined, false);
+    // Nobody may be reading yet; an unhandled 'error' would crash the process.
+    // `output` still ends on it, because the socket is destroyed by the error.
+    socket.on('error', () => {});
+    return { execId, stdin: stdinOf(socket), output: framesOf(socket) };
   }
 
   async resizeExec(execId: string, size: TerminalSize): Promise<void> {
@@ -702,6 +740,43 @@ export class FrameDecoder {
     const text = this.decoders[stream].write(payload);
     if (text !== '') out.push({ stream, text });
   }
+}
+
+/** A writable over the hijacked socket that never raises once it is gone. */
+function stdinOf(socket: Duplex): Writable {
+  const gone = (): boolean => socket.destroyed || socket.writableEnded;
+  return new Writable({
+    // Auto-destroying after `end()` would destroy the socket too, and with it
+    // everything the process still has to say.
+    autoDestroy: false,
+    write(chunk: Buffer, _encoding, callback) {
+      if (gone()) {
+        callback();
+        return;
+      }
+      socket.write(chunk, () => callback());
+    },
+    final(callback) {
+      if (!gone()) socket.end();
+      callback();
+    },
+    destroy(error, callback) {
+      socket.destroy();
+      callback(error);
+    },
+  });
+}
+
+/** The decoded output of a framed socket, ending (not throwing) on an error. */
+async function* framesOf(socket: Duplex): AsyncGenerator<ExecChunk> {
+  const decoder = new FrameDecoder();
+  try {
+    for await (const chunk of socket) yield* decoder.push(chunk as Buffer);
+  } catch {
+    // A dropped connection ends the output like an exit does; the caller asks
+    // inspectExec what became of the process.
+  }
+  yield* decoder.flush();
 }
 
 /**
