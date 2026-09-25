@@ -106,13 +106,29 @@ export function planningPrompt(mode: PlanningMode, input: PlanningPromptInput): 
   return mode === 'edit' ? editPlanningPrompt(input.sessionName) : initPlanningPrompt(input);
 }
 
-/** `claude "<prompt>"`: the prompt is one argv element, never shell-parsed. */
-export function planningCommand(prompt: string, model?: string | null): string[] {
+/**
+ * `claude "<prompt>"`: the prompt is one argv element, never shell-parsed.
+ * With `resumeId` it is `claude --resume <id> "<prompt>"`, continuing a
+ * voice planning conversation (voice US-025); the id sits right after the
+ * flag, whose value is optional.
+ */
+export function planningCommand(prompt: string, model?: string | null, resumeId?: string | null): string[] {
   // No `--model` at all when none is configured: an absent flag is what lets
   // Claude Code apply its own default, and there is no name that means that.
   const selected = model == null ? [] : ['--model', model];
-  return ['claude', ...selected, prompt];
+  const resume = resumeId == null ? [] : ['--resume', resumeId];
+  return ['claude', ...selected, ...resume, prompt];
 }
+
+/**
+ * The first message of a planning terminal that resumes a voice planning
+ * conversation: the planning prompt is already in it, only the medium changed.
+ */
+export const VOICE_HANDOVER_PROMPT =
+  'The operator has left the voice call and continues this planning conversation here by typing. ' +
+  'Their messages are no longer transcribed speech, and the voice-call rules about short spoken replies ' +
+  'no longer apply; the PRD rules from the start of the conversation still do. ' +
+  'In two or three sentences, recap where the conversation stands and what you need from them next.';
 
 function planningContext(input: PlanningPromptInput): string {
   const supplied = (input.context ?? '').trim().slice(0, MAX_CONTEXT_LENGTH);

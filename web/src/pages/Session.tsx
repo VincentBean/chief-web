@@ -1,6 +1,7 @@
 import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
 
 import {
+  ApiError,
   backToPlanning,
   type Build,
   clearUsageLimitHold,
@@ -92,7 +93,9 @@ export function Session() {
   const [busy, setBusy] = useState<Busy>(null);
   /** Why the last "Mark ready" was refused; cleared by the next attempt. */
   const [readyErrors, setReadyErrors] = useState<readonly PrdParseError[] | null>(null);
-  const [confirming, setConfirming] = useState<'delete' | 'resume' | 'ready-missed' | null>(null);
+  const [confirming, setConfirming] = useState<'delete' | 'resume' | 'ready-missed' | 'planning-voice' | null>(null);
+  /** What the planning terminal was to start with while its voice agent is being confirmed away. */
+  const [planningContext, setPlanningContext] = useState('');
   const [setupStderr, setSetupStderr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -170,9 +173,18 @@ export function Session() {
     setBuild((current) => (current === null ? current : { ...current, status }));
   };
 
-  const onStartPlanning = (context: string): void =>
+  const onStartPlanning = (context: string, stopVoiceAgent = false): void =>
     run('start', async () => {
-      const next = await startPlanning(id, context);
+      let next: Planning;
+      try {
+        next = await startPlanning(id, context, { stopVoiceAgent });
+      } catch (cause) {
+        // A voice agent has the session (voice US-025): ask before closing it.
+        if (!(cause instanceof ApiError && cause.code === 'session_in_voice_call')) throw cause;
+        setPlanningContext(context);
+        setConfirming('planning-voice');
+        return null;
+      }
       setPlanning(next);
       return next.mode === 'edit'
         ? `Planning resumed with chief’s edit prompt for ${next.prd.path}.`
@@ -366,6 +378,7 @@ export function Session() {
           {busy === 'delivery' ? 'Retrying…' : 'Retry push & PR'}
         </button>
       )}
+      {status !== 'pending' && session.cloned && <VoiceSessionButton sessionId={session.id} label="Ask about this session" />}
       <button
         type="button"
         className="button button--quiet button--danger button--icon"
@@ -580,6 +593,24 @@ export function Session() {
       </ConfirmDialog>
 
       <ConfirmDialog
+        open={confirming === 'planning-voice'}
+        title="Continue in the terminal?"
+        confirmLabel="Close it and open the terminal"
+        busyLabel="Opening…"
+        busy={busy === 'start'}
+        onConfirm={() => {
+          setConfirming(null);
+          onStartPlanning(planningContext, true);
+        }}
+        onCancel={() => setConfirming(null)}
+      >
+        <p>
+          The voice call has this session&rsquo;s agent open. Closing it moves the call back to chief, and the terminal
+          picks up the same planning conversation, so you can go on by typing.
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={confirming === 'ready-missed'}
         title="Mark ready and start now?"
         confirmLabel="Mark ready and build"
@@ -684,6 +715,50 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
 
 /* ------------------------------------------------------------- planning */
 
+/**
+ * Hands the session to its voice agent: **Talk it through** plans a pending
+ * session (voice US-019), **Ask about this session** asks about any other
+ * (voice US-025). A call already running moves its focus here; otherwise a
+ * new one opens on the session. Synchronous in the click, which the call's
+ * audio needs.
+ */
+function VoiceSessionButton({ sessionId, label }: { readonly sessionId: string; readonly label: 'Talk it through' | 'Ask about this session' }) {
+  const call = useCall();
+  if (!call.enabled) return null;
+  const live = call.status === 'live';
+  const joining = call.status === 'connecting' || call.status === 'reconnecting';
+  const talking = (live || joining) && call.focusedOn.kind === 'session' && call.focusedOn.sessionId === sessionId;
+  const planning = label === 'Talk it through';
+
+  const onClick = (): void => {
+    if (live) {
+      call.focus({ sessionId });
+      call.open();
+    } else {
+      call.start({ focus: { kind: 'session', sessionId } });
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="button"
+      onClick={onClick}
+      disabled={talking || joining}
+      title={
+        talking
+          ? 'The call is talking to this session'
+          : planning
+            ? 'Plan this session by voice with its own agent'
+            : 'Ask its own agent about this session by voice; it reads, it does not edit'
+      }
+    >
+      <Icon name="comment" />
+      {talking ? (planning ? 'Talking it through' : 'Talking about it') : label}
+    </button>
+  );
+}
+
 function PlanningPanel({
   sessionId,
   planning,
@@ -715,22 +790,6 @@ function PlanningPanel({
   // Below `lg` the pane is not rendered at all: mounting it would open a
   // WebSocket onto a PTY nothing on screen could show or type into.
   const desktop = useMediaQuery(DESKTOP_QUERY);
-  const call = useCall();
-  const live = call.status === 'live';
-  const joining = call.status === 'connecting' || call.status === 'reconnecting';
-  const talking = (live || joining) && call.focusedOn.kind === 'session' && call.focusedOn.sessionId === sessionId;
-
-  // Voice planning (voice US-019): a call already running moves its focus
-  // here; otherwise a new one opens on this session's agent. Synchronous in
-  // the click, which the call's audio needs.
-  const talkItThrough = (): void => {
-    if (live) {
-      call.focus({ sessionId });
-      call.open();
-    } else {
-      call.start({ focus: { kind: 'session', sessionId } });
-    }
-  };
 
   return (
     <Panel
@@ -754,18 +813,7 @@ function PlanningPanel({
               {busy === 'start' ? 'Starting…' : resume ? 'Resume planning' : 'Start planning'}
             </button>
           )}
-          {!planning.running && call.enabled && (
-            <button
-              type="button"
-              className="button"
-              onClick={talkItThrough}
-              disabled={!cloned || talking || joining}
-              title={talking ? 'The call is talking to this session' : 'Plan this session by voice with its own agent'}
-            >
-              <Icon name="comment" />
-              {talking ? 'Talking it through' : 'Talk it through'}
-            </button>
-          )}
+          {!planning.running && cloned && <VoiceSessionButton sessionId={sessionId} label="Talk it through" />}
           {planning.terminalId !== null && (
             <button
               type="button"

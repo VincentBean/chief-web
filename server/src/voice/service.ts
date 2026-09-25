@@ -263,6 +263,17 @@ export class VoiceService {
     };
   }
 
+  /**
+   * The planning terminal takes the session over (voice US-025, after the
+   * operator confirmed): a call talking to its agent goes back to chief, and
+   * the agent stops, so the terminal can resume its conversation.
+   */
+  async handOverToTerminal(sessionId: string): Promise<void> {
+    const focus = this.active?.focus;
+    if (focus?.kind === 'session' && focus.sessionId === sessionId) this.active?.switchFocus({ kind: 'chief' });
+    await this.deps.sessionAgents?.stop(sessionId);
+  }
+
   /** Ends the call, at shutdown, and the session agents with it. */
   async closeAll(): Promise<void> {
     this.clearResumeTimer();

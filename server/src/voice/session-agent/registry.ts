@@ -6,13 +6,14 @@ import {
   getVoiceSessionAgent,
   type Session,
   upsertVoiceSessionAgent,
+  type VoiceAgentMode,
 } from '../../db/index.js';
 import { logger } from '../../lib/logger.js';
 import { prdPathFor, readPrdStatus } from '../../prd/index.js';
 import { isCloned, type SessionContainers, sessionPrdFile } from '../../sessions/index.js';
 import { getVoiceSettings } from '../../settings/index.js';
-import { type SessionAgentDocker, SessionAgentProcess } from './process.js';
-import { voicePlanningPrompt, voiceRulesPrompt } from './prompt.js';
+import { QA_DISALLOWED_TOOLS, type SessionAgentDocker, SessionAgentProcess } from './process.js';
+import { voicePlanningPrompt, voiceQaPrompt, voiceRulesPrompt } from './prompt.js';
 
 /**
  * The session voice agents that are alive (plan §10.4): at most one per
@@ -21,10 +22,17 @@ import { voicePlanningPrompt, voiceRulesPrompt } from './prompt.js';
  * `VOICE_KEEP_AGENTS_MS`, so calling back a minute later finds the same
  * process; after that everything is stopped, and the next start continues
  * the conversation with `--resume`.
+ *
+ * A `pending` session is planned (`plan` mode); any other is only talked
+ * about (`qa` mode, voice US-025): the Q&A prompt, and the edit tools
+ * disallowed on the command line. A conversation is only resumed in the mode
+ * it was started in, so a planning conversation never carries on as Q&A.
  */
 
-/** Said when a session is not in the state voice planning needs. */
-export const NOT_PENDING_REASON = 'voice planning is for pending sessions';
+/** The mode a session's agent runs in: planning while pending, questions after. */
+export function voiceAgentMode(session: Pick<Session, 'status'>): VoiceAgentMode {
+  return session.status === 'pending' ? 'plan' : 'qa';
+}
 
 /** A refusal with the HTTP status and code a route (or chief) reports. */
 export class SessionAgentError extends Error {
@@ -55,6 +63,8 @@ export interface SessionAgentRegistryDeps {
 
 export class SessionAgentRegistry {
   private readonly agents = new Map<string, SessionAgentProcess>();
+  /** The mode each live agent was started in. */
+  private readonly modes = new Map<string, VoiceAgentMode>();
   private readonly starting = new Map<string, Promise<SessionAgentProcess>>();
   private keepTimer: NodeJS.Timeout | null = null;
 
@@ -81,9 +91,6 @@ export class SessionAgentRegistry {
   check(sessionId: string): Session {
     const session = getSession(this.deps.db, sessionId);
     if (session === null) throw new SessionAgentError(404, 'session_not_found', 'No such session.');
-    if (session.status !== 'pending') {
-      throw new SessionAgentError(409, 'session_not_pending', `${capitalize(NOT_PENDING_REASON)}; ${session.name} is ${session.status}.`);
-    }
     if (!isCloned(this.deps.config, session.id)) {
       throw new SessionAgentError(409, 'session_not_cloned', `${session.name} has no clone yet, so there is nothing to plan against.`);
     }
@@ -101,16 +108,23 @@ export class SessionAgentRegistry {
     return session;
   }
 
-  /** The session's running agent, started (after {@link check}) when there is none. */
+  /**
+   * The session's running agent, started (after {@link check}) when there is
+   * none. One started in the other mode (the session was marked ready, or
+   * sent back to planning, since) is stopped first.
+   */
   acquire(sessionId: string): Promise<SessionAgentProcess> {
+    const inFlight = this.starting.get(sessionId);
+    if (inFlight !== undefined) return inFlight;
     const live = this.live(sessionId);
-    if (live !== null) {
+    const session = live === null ? null : getSession(this.deps.db, sessionId);
+    if (live !== null && (session === null || this.modes.get(sessionId) === voiceAgentMode(session))) {
       live.lastUsedAt = this.now();
       return Promise.resolve(live);
     }
-    const inFlight = this.starting.get(sessionId);
-    if (inFlight !== undefined) return inFlight;
-    const run = this.start(sessionId).finally(() => this.starting.delete(sessionId));
+    const run = (live === null ? this.start(sessionId) : this.stop(sessionId).then(() => this.start(sessionId))).finally(() =>
+      this.starting.delete(sessionId),
+    );
     this.starting.set(sessionId, run);
     return run;
   }
@@ -118,10 +132,14 @@ export class SessionAgentRegistry {
   /**
    * The first stdin message for a fresh conversation: chief's planning prompt
    * in `create` or `edit` mode (whether `prd.md` exists now) plus the voice
-   * overrides, with the operator's first words when there are any.
+   * overrides, or the Q&A prompt for a session that is not pending, with the
+   * operator's first words when there are any.
    */
   openingPrompt(sessionId: string, firstWords: string | null): string {
     const session = this.check(sessionId);
+    if (voiceAgentMode(session) === 'qa') {
+      return voiceQaPrompt({ sessionName: session.name, status: session.status, firstWords });
+    }
     const exists = readPrdStatus(sessionPrdFile(this.deps.config, session), prdPathFor(session.name)).exists;
     return voicePlanningPrompt(exists ? 'edit' : 'create', {
       sessionName: session.name,
@@ -135,6 +153,7 @@ export class SessionAgentRegistry {
   async stop(sessionId: string, signal = 'TERM'): Promise<void> {
     const agent = this.agents.get(sessionId);
     this.agents.delete(sessionId);
+    this.modes.delete(sessionId);
     await agent?.stop(signal);
   }
 
@@ -173,31 +192,42 @@ export class SessionAgentRegistry {
       );
     }
     const settings = getVoiceSettings(this.deps.db);
-    const resumeId = getVoiceSessionAgent(this.deps.db, sessionId)?.claudeSessionId ?? null;
+    const mode = voiceAgentMode(session);
+    const stored = getVoiceSessionAgent(this.deps.db, sessionId);
+    const resumeId = stored !== null && stored.mode === mode ? stored.claudeSessionId : null;
     const agent = await SessionAgentProcess.start(this.deps.docker, {
       sessionId,
       containerId,
-      command: { model: settings.sessionModel, resumeId, systemPrompt: voiceRulesPrompt(settings.language) },
-      onInit: (claudeSessionId) => this.remember(sessionId, claudeSessionId),
+      command: {
+        model: settings.sessionModel,
+        resumeId,
+        systemPrompt: voiceRulesPrompt(settings.language),
+        ...(mode === 'qa' ? { disallowedTools: QA_DISALLOWED_TOOLS } : {}),
+      },
+      onInit: (claudeSessionId) => this.remember(sessionId, claudeSessionId, mode),
       now: () => this.now(),
     });
     this.agents.set(sessionId, agent);
-    logger.info('session voice agent started', { session: sessionId, exec: agent.execId, resumed: resumeId !== null });
+    this.modes.set(sessionId, mode);
+    logger.info('session voice agent started', { session: sessionId, exec: agent.execId, mode, resumed: resumeId !== null });
     this.evict(sessionId);
     return agent;
   }
 
   /** `init` repeats every turn; the row only changes when the conversation does. */
-  private remember(sessionId: string, claudeSessionId: string): void {
-    if (getVoiceSessionAgent(this.deps.db, sessionId)?.claudeSessionId === claudeSessionId) return;
+  private remember(sessionId: string, claudeSessionId: string, mode: VoiceAgentMode): void {
+    const stored = getVoiceSessionAgent(this.deps.db, sessionId);
+    if (stored?.claudeSessionId === claudeSessionId && stored.mode === mode) return;
     if (getSession(this.deps.db, sessionId) === null) return;
-    upsertVoiceSessionAgent(this.deps.db, { sessionId, claudeSessionId, mode: 'plan' });
+    upsertVoiceSessionAgent(this.deps.db, { sessionId, claudeSessionId, mode });
   }
 
   /** Stops the least recently used agents (never `keep`) until the cap holds. */
   private evict(keep: string): void {
     for (const [sessionId, agent] of this.agents) {
-      if (agent.exited) this.agents.delete(sessionId);
+      if (!agent.exited) continue;
+      this.agents.delete(sessionId);
+      this.modes.delete(sessionId);
     }
     const others = [...this.agents.values()].filter((agent) => agent.sessionId !== keep).sort((a, b) => a.lastUsedAt - b.lastUsedAt);
     while (this.agents.size > this.deps.config.voiceMaxSessionAgents) {
@@ -223,8 +253,4 @@ export class SessionAgentRegistry {
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
-}
-
-function capitalize(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }

@@ -1,13 +1,12 @@
-import { NOT_PENDING_REASON } from '../session-agent/registry.js';
 import { guarded } from './actions.js';
 import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
 
 /**
  * `focus_session` (plan §9.2, §11): hands the call to the session's own
- * Claude Code. Voice planning is for `pending` sessions until the Q&A mode
- * (voice US-025). Everything the registry refuses on (no clone, the
- * usage-limit hold, a container that does not start) comes back as its
- * message for chief to say. An open planning terminal is the one case that
+ * Claude Code: it plans a `pending` session and answers questions about any
+ * other (the registry's Q&A mode, voice US-025). Everything the registry
+ * refuses on (no clone, the usage-limit hold, a container that does not
+ * start) comes back as its message for chief to say. An open planning terminal is the one case that
  * asks first: closing it ends a conversation the operator may still want.
  */
 
@@ -30,13 +29,6 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
       guarded('Could not switch to the session', async () => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
-        if (session.status !== 'pending') {
-          return {
-            ok: false,
-            data: { error: 'session_not_pending', reason: NOT_PENDING_REASON, status: session.status },
-            summary: `${session.name} is ${session.status}: ${NOT_PENDING_REASON}`,
-          };
-        }
         // Checked before offering to close the terminal, so a yes is never followed by a refusal.
         const holdUntil = services.hold.until();
         if (holdUntil !== null) {

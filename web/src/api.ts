@@ -778,10 +778,14 @@ export async function fetchPlanning(id: string, signal?: AbortSignal): Promise<P
  * `{{CONTEXT}}` slot and is only used when no `prd.md` exists yet — otherwise
  * the server starts chief's edit prompt instead.
  */
-export async function startPlanning(id: string, context?: string): Promise<Planning> {
+export async function startPlanning(id: string, context?: string, options: { stopVoiceAgent?: boolean } = {}): Promise<Planning> {
   return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, {
     method: 'POST',
-    body: JSON.stringify(context === undefined || context === '' ? {} : { context }),
+    body: JSON.stringify({
+      ...(context === undefined || context === '' ? {} : { context }),
+      // The operator's yes to closing the session's voice agent first (voice US-025).
+      ...(options.stopVoiceAgent === true ? { stopVoiceAgent: true } : {}),
+    }),
   });
 }
 

@@ -280,7 +280,13 @@ export function createApp(
     planning: (): PlanningService => planning,
   });
   const planning: PlanningService =
-    deps.planning ?? createPlanningService(config, db, terminals, orchestrator, events, sessionAgents);
+    deps.planning ??
+    createPlanningService(config, db, terminals, orchestrator, events, {
+      isAlive: (sessionId) => sessionAgents.isAlive(sessionId),
+      // Starting the terminal after the operator's yes (voice US-025). `voice`
+      // is built further down; nothing starts a terminal before it exists.
+      stop: (sessionId) => voice.service.handOverToTerminal(sessionId),
+    });
   // Assigned further down: the review chains into this solver (US-011), and the
   // solver needs the build loop's slot cap, which in turn needs the delivery.
   // The thunk below is what breaks that circle — nothing reads it until a

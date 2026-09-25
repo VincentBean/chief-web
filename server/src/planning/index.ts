@@ -8,6 +8,7 @@ export {
   type PlanningPromptInput,
   planningCommand,
   planningPrompt,
+  VOICE_HANDOVER_PROMPT,
 } from './prompts.js';
 export {
   createPlanningService,

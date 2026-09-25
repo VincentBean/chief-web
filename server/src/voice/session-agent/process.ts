@@ -66,7 +66,16 @@ export interface SessionAgentCommandOptions {
   readonly resumeId: string | null;
   /** Appendix A.2 part 1, the voice rules. */
   readonly systemPrompt: string;
+  /** Tools the CLI must refuse: {@link QA_DISALLOWED_TOOLS} in Q&A mode (voice US-025). */
+  readonly disallowedTools?: readonly string[];
 }
+
+/**
+ * The edit tools a Q&A agent may not use (plan §10.4, FR-25): the build loop
+ * owns the tree of a session that is not pending. Passed as
+ * `--disallowedTools`, checked against `claude --help` of 2.1.280.
+ */
+export const QA_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
 /** `claude` with the flags of plan §10.1. */
 export function sessionAgentCommand(options: SessionAgentCommandOptions): string[] {
@@ -82,6 +91,10 @@ export function sessionAgentCommand(options: SessionAgentCommandOptions): string
     '--verbose',
     '--include-partial-messages',
     ...(options.resumeId === null ? [] : ['--resume', options.resumeId]),
+    // Variadic (`<tools...>`): one comma-joined value, and always followed by another flag.
+    ...(options.disallowedTools === undefined || options.disallowedTools.length === 0
+      ? []
+      : ['--disallowedTools', options.disallowedTools.join(',')]),
     '--append-system-prompt',
     options.systemPrompt,
   ];

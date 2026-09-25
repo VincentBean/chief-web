@@ -61,6 +61,29 @@ export function voicePlanningPrompt(mode: PlanningMode, input: VoicePlanningProm
   return body + voiceModeOverrides(mode, `${containerPrdDir(input.sessionName)}/prd.md`, firstWords);
 }
 
+export interface VoiceQaPromptInput {
+  readonly sessionName: string;
+  readonly status: string;
+  /** The operator's first words to the agent, when the conversation starts with an utterance. */
+  readonly firstWords?: string | null;
+}
+
+/**
+ * The first stdin message for a session that is not pending (Appendix A.3,
+ * voice US-025): questions only, the tree belongs to the build loop. The
+ * command line backs the last sentence up with `--disallowedTools`.
+ */
+export function voiceQaPrompt(input: VoiceQaPromptInput): string {
+  const said = (input.firstWords ?? '').trim();
+  const start =
+    said === ''
+      ? 'Start now by greeting the operator in one sentence and asking what they want to know.'
+      : `The operator opened the conversation by voice: "${said}"`;
+  return `You are answering questions about session ${input.sessionName} (${input.status}). Read the code, \`.chief/\` progress files and git log as needed. Do not modify any files.
+
+${start}`;
+}
+
 /**
  * An utterance as the agent reads it (plan §10.2): `[voice] <text>`, or after
  * an interrupt `[voice] [You were interrupted after saying: "…"] <text>`

@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 
-import { isEnded, useAppData } from '../data.tsx';
+import { useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { Segmented } from '../ui.tsx';
@@ -107,8 +107,9 @@ export function CallPanel() {
     focused.kind === 'chief'
       ? 'Chief'
       : ((sessions ?? []).find((session) => session.id === focused.sessionId)?.name ?? 'Session');
+  // Every cloned session: pending ones are planned, the rest asked about (voice US-025).
   const focusOptions = (sessions ?? []).filter(
-    (session) => !isEnded(session) || (focused.kind === 'session' && focused.sessionId === session.id),
+    (session) => session.cloned || (focused.kind === 'session' && focused.sessionId === session.id),
   );
   const status = statusLabel(call.status, call.phase);
 

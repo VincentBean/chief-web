@@ -32,7 +32,7 @@ import type { CallFocus } from '../protocol.js';
 import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './agent.js';
 import { VOICE_PID_DIR, voicePidFile } from './process.js';
 import { voiceUtterance } from './prompt.js';
-import { NOT_PENDING_REASON, SessionAgentError, SessionAgentRegistry } from './registry.js';
+import { SessionAgentError, SessionAgentRegistry } from './registry.js';
 import { CLAUDE_SESSION, FakeClaude } from './__fixtures__/fake-claude.js';
 
 /* ------------------------------------------------------------------ world */
@@ -228,6 +228,74 @@ describe('session voice agents', () => {
     assert.equal(claude.agentExecs().filter((entry) => entry.containerId === `c-${session.id}`).length, 1);
   });
 
+  describe('Q&A mode (voice US-025)', () => {
+    const argvOf = (execId: string): string[] => daemon.exec(execId)?.cmd.slice(4) ?? [];
+    const flag = (argv: readonly string[], name: string): string | null =>
+      argv.includes(name) ? (argv[argv.indexOf(name) + 1] ?? null) : null;
+
+    it('plans a pending session: the planning prompt, no disallowed tools, mode plan', async () => {
+      const session = newSession('plan-mode');
+      const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call: controls() });
+      await turn(agent, 'hi');
+      const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
+      assert.ok(exec);
+      assert.equal(flag(argvOf(exec.id), '--disallowedTools'), null);
+      assert.match(claude.userTexts(exec.id)[0] as string, /VOICE MODE OVERRIDES/);
+      assert.equal(getVoiceSessionAgent(db, session.id)?.mode, 'plan');
+    });
+
+    for (const status of ['ready', 'building', 'finished'] as const) {
+      it(`answers questions about a ${status} session: the A.3 prompt, edit tools disallowed, mode qa`, async () => {
+        const session = newSession(`qa-${status}`, status);
+        const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call: controls() });
+        const events = await turn(agent, 'what did the build do');
+        assert.equal(spoken(events), 'Heard you. What next?');
+
+        const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
+        assert.ok(exec);
+        const argv = argvOf(exec.id);
+        assert.equal(flag(argv, '--disallowedTools'), 'Edit,Write,MultiEdit,NotebookEdit');
+        // The variadic flag is never last: another flag always ends its values.
+        assert.equal(argv[argv.indexOf('--disallowedTools') + 2], '--append-system-prompt');
+        assert.match(argv.at(-1) as string, /You are on a live voice call/);
+        const [opening] = claude.userTexts(exec.id);
+        assert.match(
+          opening as string,
+          new RegExp(
+            `^You are answering questions about session qa-${status} \\(${status}\\)\\. Read the code, \`\\.chief/\` progress files and git log as needed\\. Do not modify any files\\.`,
+          ),
+        );
+        assert.match(opening as string, /The operator opened the conversation by voice: "\[voice\] what did the build do"/);
+        assert.doesNotMatch(opening as string, /Chief PRD|VOICE MODE OVERRIDES/);
+        assert.equal(getVoiceSessionAgent(db, session.id)?.mode, 'qa');
+      });
+    }
+
+    it('greets with a question when a Q&A conversation starts without words', () => {
+      const session = newSession('qa-greet', 'ready');
+      assert.match(registry.openingPrompt(session.id, null), /asking what they want to know\.$/);
+    });
+
+    it('never resumes a planning conversation as Q&A, nor the reverse', async () => {
+      const session = newSession('mode-swap', 'ready');
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'planned-by-voice', mode: 'plan' });
+      const first = await registry.acquire(session.id);
+      assert.equal(flag(argvOf(first.execId), '--resume'), null);
+      assert.equal(first.opened, false);
+
+      // Back to planning while the Q&A agent is alive: it is replaced by a planning one.
+      updateSession(db, session.id, { status: 'pending' });
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'asked-by-voice', mode: 'qa' });
+      const second = await registry.acquire(session.id);
+      assert.notEqual(second.execId, first.execId);
+      assert.equal(first.exited, true);
+      const argv = argvOf(second.execId);
+      assert.equal(flag(argv, '--resume'), null);
+      assert.equal(flag(argv, '--disallowedTools'), null);
+      assert.equal(await registry.acquire(session.id), second);
+    });
+  });
+
   it('uses the edit prompt once prd.md exists and resumes a known conversation without re-sending it', async () => {
     const session = newSession('has-prd');
     const prd = path.join(sessionRepoDir(config, session.id), '.chief/prds/has-prd/prd.md');
@@ -351,9 +419,9 @@ describe('session voice agents', () => {
     assert.equal(registry.isAlive(session.id), false);
   });
 
-  it('refuses non-pending, unready, held and terminal-locked sessions', async () => {
+  it('refuses unready, held and terminal-locked sessions, but not a session past planning', async () => {
     const ready = newSession('is-ready', 'ready');
-    assert.throws(() => registry.check(ready.id), (error: unknown) => error instanceof SessionAgentError && error.code === 'session_not_pending');
+    assert.equal(registry.check(ready.id).id, ready.id);
 
     const uncloned = newSession('no-clone');
     fs.rmSync(path.join(sessionRepoDir(config, uncloned.id), '.git'), { recursive: true });
@@ -384,6 +452,17 @@ describe('session voice agents', () => {
     assert.equal(registry.isAlive(session.id), false);
   });
 
+  it('stops the voice agent for the terminal once the operator said yes (stopVoiceAgent)', async () => {
+    const session = newSession('voice-to-terminal');
+    const planning = new PlanningService(config, db, new StubTerminals(), containers, null, {
+      isAlive: (id) => registry.isAlive(id),
+      stop: (id) => registry.stop(id),
+    });
+    await registry.acquire(session.id);
+    await planning.start(session.id, { stopVoiceAgent: true });
+    assert.equal(registry.isAlive(session.id), false);
+  });
+
   describe('focus_session', () => {
     const context = (gate: ConfirmationGate, focus: CallFocus[], turnNo = 1): ToolContext => ({
       signal: new AbortController().signal,
@@ -399,12 +478,14 @@ describe('session voice agents', () => {
       return new ConfirmationGate({ holder, now: () => Date.now(), send: () => undefined, newId: () => `confirm-${String(++id)}` });
     };
 
-    it('says voice planning is for pending sessions', async () => {
+    it('hands a finished session to its Q&A agent (voice US-025)', async () => {
       const session = newSession('done-already', 'finished');
+      const focus: CallFocus[] = [];
       const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
-      const result = await tool.handler({ session: session.name }, context(newGate(), []));
-      assert.equal(result.ok, false);
-      assert.equal((result.data as { reason: string }).reason, NOT_PENDING_REASON);
+      const result = await tool.handler({ session: session.name }, context(newGate(), focus));
+      assert.equal(result.ok, true);
+      assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
+      assert.equal(registry.isAlive(session.id), true);
     });
 
     it('starts the agent and moves the focus', async () => {
