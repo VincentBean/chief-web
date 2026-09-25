@@ -72,6 +72,7 @@ import {
 } from './loop.js';
 import { agentPrompt } from './prompts.js';
 import type { AgentResult, AgentRunner } from './runner.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * The Ralph loop (US-013).
@@ -366,6 +367,8 @@ export class BuildService {
      * is arming and reading the same hold.
      */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {
     // Sessions are the one kind this service starts itself; reviews and
     // feedback runs register theirs from above.
@@ -1215,7 +1218,18 @@ export class BuildService {
     // is never more than one story behind what the container has — including
     // when the operator stops the build a moment later, which is why this comes
     // before the stop check rather than after it.
-    if (updated?.status === 'done') await this.completion.push(session);
+    if (updated?.status === 'done') {
+      await this.completion.push(session);
+      const stories = listStories(this.db, session.id);
+      this.events?.publish({
+        kind: 'build.story_done',
+        sessionId: session.id,
+        name: session.name,
+        storyId: story.storyId,
+        done: stories.filter((candidate) => candidate.status === 'done').length,
+        total: stories.length,
+      });
+    }
 
     if (state.stopping) {
       this.returnToReady(session);
@@ -1269,6 +1283,7 @@ export class BuildService {
       name: session.name,
       stories: stories.length,
     });
+    this.events?.publish({ kind: 'build.finished', sessionId: session.id, name: session.name, stories: stories.length });
     await this.completion.complete(session, stories);
   }
 
@@ -1352,6 +1367,7 @@ export class BuildService {
       stage,
       error: message,
     });
+    this.events?.publish({ kind: 'build.failed', sessionId: session.id, name: session.name, message });
     return failSession(this.db, session.id, stage, message) ?? session;
   }
 
@@ -1455,6 +1471,7 @@ export class BuildService {
       attempts: state?.attempts ?? 0,
       until,
     });
+    this.events?.publish({ kind: 'build.waiting', sessionId: session.id, name: session.name, until });
     return (
       updateSession(this.db, session.id, {
         status: 'waiting',
@@ -1549,8 +1566,9 @@ export function createBuildService(
   completion: BuildCompletion = new MarkSessionFinished(db),
   logs: BuildLogs = new NullBuildLogs(),
   hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): BuildService {
-  return new BuildService(config, db, containers, runner, completion, logs, hold);
+  return new BuildService(config, db, containers, runner, completion, logs, hold, events);
 }
 
 /**

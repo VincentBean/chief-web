@@ -29,6 +29,7 @@ import {
   PlanningService,
   planningCommand,
 } from './index.js';
+import type { VoiceBusEvent } from '../voice/events.js';
 
 const PROMPT_INPUT = {
   sessionName: 'add-login',
@@ -297,6 +298,32 @@ describe('planning service', () => {
     assert.match(terminals.created[1]?.command?.[1] ?? '', /Chief PRD Editor/);
     // The exited terminal is dropped rather than left in the registry.
     assert.deepEqual(terminals.removed, [first.terminalId]);
+  });
+
+  it('reports a PRD that has just become valid to the voice bus, once per change (voice US-015)', () => {
+    const seen: VoiceBusEvent[] = [];
+    planning = new PlanningService(config, db, terminals, containers, { publish: (event) => seen.push(event) });
+    clone();
+    writePrd('# PRD: Login\n\nNothing but prose.\n');
+    planning.status(session.id);
+    planning.status(session.id);
+    assert.deepEqual(seen, []);
+
+    writePrd('# PRD: Login\n\n### US-001: Add the form\n**Status:** todo\n\n- [ ] Ships\n');
+    const file = path.join(sessionRepoDir(config, session.id), prdPathFor(session.name));
+    fs.utimesSync(file, new Date(), new Date(Date.now() + 5_000));
+    planning.status(session.id);
+    planning.status(session.id);
+    assert.deepEqual(seen, [{ kind: 'prd.valid', sessionId: session.id, name: 'add-login', stories: 1 }]);
+  });
+
+  it('only takes note of a PRD that was already valid at the first poll', () => {
+    const seen: VoiceBusEvent[] = [];
+    planning = new PlanningService(config, db, terminals, containers, { publish: (event) => seen.push(event) });
+    clone();
+    writePrd('# PRD: Login\n\n### US-001: Add the form\n**Status:** todo\n\n- [ ] Ships\n');
+    planning.status(session.id);
+    assert.deepEqual(seen, []);
   });
 
   it('shows a PRD that exists but does not parse', () => {

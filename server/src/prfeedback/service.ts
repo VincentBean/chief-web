@@ -45,6 +45,7 @@ import { getAgentTimeoutMs, getBuildModel, getGithubToken } from '../settings/in
 import { runPrCheckout } from './checkout.js';
 import { parseOutcome } from './outcome.js';
 import { CONTAINER_OUTCOME_PATH, type FeedbackItem, prFeedbackPrompt } from './prompts.js';
+import { pullRequestOutcome, type VoiceEventSink } from '../voice/events.js';
 
 /**
  * One pass over a pull request's review feedback (US-021).
@@ -237,6 +238,8 @@ export class PrFeedbackService {
      * and a build refused there keeps this run from starting into the wall.
      */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   status(runId: string): PrRunView {
@@ -406,6 +409,9 @@ export class PrFeedbackService {
         this.fail(run.id, 'agent', String(cause));
       })
       .finally(() => {
+        const ended = getPrRun(this.db, run.id);
+        const event = ended === null ? null : pullRequestOutcome(this.db, 'pr.run_finished', ended, 'finished');
+        if (event !== null) this.events?.publish(event);
         this.live.delete(run.id);
         this.starting.delete(run.id);
         void this.containers.removePrRun(run.id);
@@ -1118,6 +1124,7 @@ export function createPrFeedbackService(
   slots: BuildSlots,
   github: PrFeedbackGateway = new GithubPrFeedback(config),
   hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): PrFeedbackService {
   return new PrFeedbackService(
     config,
@@ -1129,6 +1136,7 @@ export function createPrFeedbackService(
     slots,
     () => getGithubToken(db),
     hold,
+    events,
   );
 }
 

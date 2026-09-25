@@ -17,6 +17,7 @@ import {
   planningCommand,
   planningPrompt,
 } from './prompts.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * The planning terminal of a `pending` session (US-011).
@@ -86,6 +87,8 @@ export class PlanningService {
     string,
     { terminalId: string; mode: PlanningMode }
   >();
+  /** What {@link noticePrd} last saw per session: the valid PRD's mtime, or `null`. */
+  private readonly validPrds = new Map<string, string | null>();
   /** Starts in flight, so a double click cannot open two `claude` processes. */
   private readonly starting = new Map<string, Promise<PlanningView>>();
 
@@ -94,11 +97,35 @@ export class PlanningService {
     private readonly db: Database,
     private readonly terminals: PlanningTerminals,
     private readonly containers: SessionContainers,
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
-  /** Cheap enough to poll: a `stat` plus a parse of a small markdown file. */
+  /**
+   * Cheap enough to poll: a `stat` plus a parse of a small markdown file.
+   * The page polls it while planning, which makes it the planning poller the
+   * `prd.valid` event comes from.
+   */
   status(sessionId: string): PlanningView {
-    return this.toView(this.requireSession(sessionId));
+    const view = this.toView(this.requireSession(sessionId));
+    this.noticePrd(view);
+    return view;
+  }
+
+  /**
+   * Tells the voice call when a pending session's PRD has just become valid:
+   * it parses with at least one story, and it was not in that state (with
+   * that modification time) the last time this session was polled. The first
+   * poll after a restart only takes note.
+   */
+  private noticePrd(view: PlanningView): void {
+    const { prd } = view;
+    const valid = view.status === 'pending' && prd.parses && prd.storyCount > 0 ? (prd.updatedAt ?? '') : null;
+    const known = this.validPrds.has(view.sessionId);
+    const previous = this.validPrds.get(view.sessionId);
+    this.validPrds.set(view.sessionId, valid);
+    if (!known || valid === null || valid === previous) return;
+    this.events?.publish({ kind: 'prd.valid', sessionId: view.sessionId, name: view.sessionName, stories: prd.storyCount });
   }
 
   /**
@@ -271,8 +298,9 @@ export function createPlanningService(
   db: Database,
   terminals: PlanningTerminals,
   containers: SessionContainers,
+  events: VoiceEventSink | null = null,
 ): PlanningService {
-  return new PlanningService(config, db, terminals, containers);
+  return new PlanningService(config, db, terminals, containers, events);
 }
 
 function describe(cause: unknown): string {

@@ -27,6 +27,7 @@ import { hasOpenPullRequest, pullRequestNumberOf } from '../prsync/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView } from '../sessions/index.js';
 import { generatedPrd, runSessionName } from './prd.js';
 import { RecurringTaskError } from './service.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * Firing a recurring task into a session (US-004).
@@ -89,6 +90,8 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
      */
     private readonly sessions: () => RecurringTaskSessions | null,
     private readonly builds: RecurringTaskBuilds,
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   async fireDue(now: string = nowIso()): Promise<number> {
@@ -284,6 +287,7 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
     }
 
     logger.info('recurring task fired', { task: task.id, session: run.id, run: run.name });
+    this.events?.publish({ kind: 'task.fired', sessionId: run.id, task: task.name, name: run.name });
     return true;
   }
 
@@ -536,8 +540,9 @@ export function createRecurringTaskRunner(
   db: Database,
   sessions: () => RecurringTaskSessions | null,
   builds: RecurringTaskBuilds,
+  events: VoiceEventSink | null = null,
 ): RecurringTaskRunner {
-  return new RecurringTaskRunner(config, db, sessions, builds);
+  return new RecurringTaskRunner(config, db, sessions, builds, events);
 }
 
 function describe(cause: unknown): string {

@@ -43,6 +43,7 @@ import {
 import { getCodeReviewDefault } from '../settings/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * Session creation and repository setup (US-010).
@@ -238,6 +239,8 @@ export class SessionService {
     private readonly containers: SessionContainers,
     private readonly exec: SessionExecutor,
     private readonly lifecycle: SessionLifecycle = {},
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   list(repositoryId?: string): SessionView[] {
@@ -621,6 +624,13 @@ export class SessionService {
       });
     }
 
+    this.events?.publish({
+      kind: 'session.setup',
+      sessionId: session.id,
+      name: session.name,
+      ok: result.ok,
+      message: result.ok ? null : result.message,
+    });
     const updated = getSession(this.db, session.id) ?? session;
     return { session: this.toView(updated), setup: result };
   }
@@ -736,8 +746,9 @@ export function createSessionService(
   containers: SessionContainers,
   exec: SessionExecutor,
   lifecycle: SessionLifecycle = {},
+  events: VoiceEventSink | null = null,
 ): SessionService {
-  return new SessionService(config, db, containers, exec, lifecycle);
+  return new SessionService(config, db, containers, exec, lifecycle, events);
 }
 
 /**

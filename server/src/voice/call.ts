@@ -12,6 +12,7 @@ import {
 import { logger } from '../lib/logger.js';
 import { getVoiceSettings } from '../settings/index.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
+import { describeEvent, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
 import { matchConfirmIntent } from './intents.js';
 import {
   type AgentKind,
@@ -117,12 +118,10 @@ export interface VoiceCallDeps {
 }
 
 export type { Confirmation } from './chief/confirm.js';
+export type { VoiceEvent } from './events.js';
 
-/** A background event waiting for a quiet moment (US-015). */
-export interface VoiceEvent {
-  readonly kind: string;
-  readonly text: string;
-}
+/** How long both sides must have been quiet before chief speaks a background event (plan §12). */
+export const EVENT_QUIET_MS = 2_000;
 
 /** Plan §5. */
 export interface VoiceCallState {
@@ -174,6 +173,11 @@ export class VoiceCall {
   private hangUpAfter = false;
   private readonly agents = new Map<string, VoiceAgent>();
   private readonly totals = { elChars: 0, sttSeconds: 0, orCostUsd: 0 };
+  /** The last sign of speech in either direction, for the event gate. */
+  private lastActivityAt = 0;
+  /** Set between the operator starting to speak and the utterance (or a misfire). */
+  private speechOpenSince: number | null = null;
+  private drainTimer: unknown = null;
 
   constructor(
     id: string,
@@ -268,6 +272,7 @@ export class VoiceCall {
       startedAt: this.isoNow(),
     });
     this.persisted = true;
+    this.lastActivityAt = this.deps.clock.now();
     this.sendReady(false);
     this.armIdle();
   }
@@ -276,6 +281,7 @@ export class VoiceCall {
   resume(): void {
     this.sendReady(true);
     this.armIdle();
+    this.markActivity();
   }
 
   /**
@@ -333,12 +339,18 @@ export class VoiceCall {
         this.submitText(message.text, this.isoNow());
         return;
       case 'speech.start':
+        // Barge-in on speech start is US-020; for now it is only a sign of
+        // life, and background events wait until the utterance is in.
+        this.speechOpenSince = this.deps.clock.now();
+        this.touch();
+        return;
       case 'speech.cancel':
-        // Barge-in on speech start is US-020; for now it is only a sign of life.
+        this.speechOpenSince = null;
         this.touch();
         return;
       case 'ptt':
-        if (message.down) this.touch();
+        this.speechOpenSince = message.down ? this.deps.clock.now() : null;
+        this.touch();
         return;
       case 'playback.progress': {
         this.touch();
@@ -381,6 +393,7 @@ export class VoiceCall {
   async end(reason: VoiceEndReason, closeCode = WS_CLOSE_CALL_ENDED, closeReason = 'call_ended'): Promise<void> {
     if (this.ended) return;
     this.clearIdle();
+    this.clearDrain();
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
     this.state.activeTurn?.abort(new Error('call ended'));
@@ -401,6 +414,7 @@ export class VoiceCall {
 
   private submitAudio(wav: Buffer): void {
     const speechEnd = this.isoNow();
+    this.speechOpenSince = null;
     this.touch();
     void this.enqueue(async (controller) => {
       const tts = this.tts;
@@ -442,6 +456,7 @@ export class VoiceCall {
 
   /** The `text` path (typed) and `transcript.final` (browser STT): no server STT. */
   private submitText(text: string, tTranscript: string | null): void {
+    this.speechOpenSince = null;
     this.touch();
     void this.enqueue((controller) => this.runTurn(text, controller, { tTranscript }));
   }
@@ -484,27 +499,29 @@ export class VoiceCall {
     controller: AbortController,
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
     clicked?: AgentInput['resolution'],
+    background = false,
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
     if (tts === null) return;
     const turn = ++this.state.turn;
-    const focus = this.state.focus;
+    // Background events are always chief's to speak; the focus stays put.
+    const focus: CallFocus = background ? { kind: 'chief' } : this.state.focus;
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     this.state.spokenSoFar = '';
 
-    this.send({ type: 'user.transcript', turn, text });
+    if (!background) this.send({ type: 'user.transcript', turn, text });
     insertVoiceTurn(this.deps.db, {
       callId: this.id,
       turn,
-      speaker: 'user',
+      speaker: background ? 'event' : 'user',
       sessionId,
       text,
       ...(times.tSpeechEnd === undefined ? {} : { tSpeechEnd: times.tSpeechEnd }),
       ...(times.tTranscript === undefined ? {} : { tTranscript: times.tTranscript }),
     });
 
-    const resolution = clicked ?? this.spokenResolution(text, focus);
+    const resolution = background ? undefined : (clicked ?? this.spokenResolution(text, focus));
     const agent = this.agentFor(focus);
     const marks: { tFirstToken?: string; tFirstChunk?: string; tFirstAudioSent?: string } = {};
     const speaks: Promise<void>[] = [];
@@ -646,11 +663,85 @@ export class VoiceCall {
     return agent;
   }
 
+  /* -------------------------------------------------------------- events */
+
+  /**
+   * A background event (voice US-015; plan §12). It is toasted at once,
+   * whatever happens next. Chief speaks it only if `voice_event_verbosity`
+   * allows the kind and, while a session agent has the focus, only if it is
+   * about that session; then it waits in `state.queue` for a quiet moment.
+   */
+  postEvent(event: VoiceBusEvent): void {
+    if (this.ended || !this.persisted) return;
+    const settings = getVoiceSettings(this.deps.db);
+    const text = describeEvent(event, settings.timezone);
+    this.send({ type: 'ui', action: 'toast', text });
+    if (!isAnnounced(event.kind, settings.eventVerbosity)) return;
+    const queued: VoiceEvent = { kind: event.kind, text, sessionId: eventSessionId(event) };
+    if (!this.concerns(queued)) return;
+    this.state.queue.push(queued);
+    this.scheduleDrain();
+  }
+
+  /** Chief speaks about anything; a focused session agent's call only hears its own session. */
+  private concerns(event: VoiceEvent): boolean {
+    const focus = this.state.focus;
+    return focus.kind === 'chief' || event.sessionId === focus.sessionId;
+  }
+
+  private markActivity(): void {
+    this.lastActivityAt = this.deps.clock.now();
+    if (this.state.queue.length > 0) this.scheduleDrain();
+  }
+
+  /** (Re)arms the one timer that delivers the queue once both sides have been quiet {@link EVENT_QUIET_MS}. */
+  private scheduleDrain(): void {
+    this.clearDrain();
+    if (this.ended || this.state.queue.length === 0) return;
+    const wait = Math.max(0, EVENT_QUIET_MS - (this.deps.clock.now() - this.lastActivityAt));
+    this.drainTimer = this.deps.clock.setTimeout(() => {
+      this.drainTimer = null;
+      this.drain();
+    }, wait);
+  }
+
+  private clearDrain(): void {
+    if (this.drainTimer !== null) this.deps.clock.clearTimeout(this.drainTimer);
+    this.drainTimer = null;
+  }
+
+  /**
+   * Hands every queued event to chief as one `[event]` turn, if the call is
+   * listening and quiet. Otherwise it waits: the end of the turn, the next
+   * sign of speech or a resumed socket arms the timer again.
+   */
+  private drain(): void {
+    if (this.ended || this.state.queue.length === 0) return;
+    if (this.state.phase !== 'listening' || this.state.activeTurn !== null || this.transport === null) return;
+    const now = this.deps.clock.now();
+    if (this.speechOpenSince !== null) {
+      // A speech start with no utterance for longer than one can last was a
+      // lost message, not someone still talking.
+      if (now - this.speechOpenSince < this.deps.config.voiceMaxUtteranceMs) return;
+      this.speechOpenSince = null;
+    }
+    if (now - this.lastActivityAt < EVENT_QUIET_MS) {
+      this.scheduleDrain();
+      return;
+    }
+    // The focus may have moved since the events were queued.
+    const events = this.state.queue.splice(0).filter((event) => this.concerns(event));
+    if (events.length === 0) return;
+    const text = events.map((event) => `[event] ${event.text}`).join('\n');
+    void this.enqueue((controller) => this.runTurn(text, controller, {}, undefined, true));
+  }
+
   /* ---------------------------------------------------------------- idle */
 
   /** Speech in either direction: the idle clock starts over. */
   private touch(): void {
     if (this.idleTimer !== null) this.armIdle();
+    this.markActivity();
   }
 
   private armIdle(): void {
@@ -741,6 +832,7 @@ export class VoiceCall {
     if (this.ended || this.state.phase === phase) return;
     this.state.phase = phase;
     this.sendState();
+    if (phase === 'listening') this.markActivity();
   }
 
   private sendState(): void {

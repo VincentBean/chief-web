@@ -7,7 +7,8 @@ import { createVoiceRouter } from './routes.js';
 import { VoiceService, type VoiceServiceDeps } from './service.js';
 import { createVoiceSocketRoute } from './socket.js';
 
-export { type AgentEvent, type CallClock, type VoiceAgent, VoiceCall, type VoiceCallState } from './call.js';
+export { type AgentEvent, type CallClock, EVENT_QUIET_MS, type VoiceAgent, VoiceCall, type VoiceCallState } from './call.js';
+export * from './events.js';
 export * from './protocol.js';
 export {
   EL_BALANCE_TTL_MS,

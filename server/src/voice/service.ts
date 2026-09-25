@@ -23,6 +23,7 @@ import {
 import { ChiefAgent } from './chief/agent.js';
 import { BasicChiefAgent } from './chief/basic-agent.js';
 import type { ChiefServices } from './chief/tools.js';
+import type { VoiceEventBus } from './events.js';
 import {
   type CallFocus,
   encodeFrame,
@@ -51,6 +52,8 @@ export interface VoiceServiceDeps {
   readonly chief?: ChiefServices;
   readonly clock?: CallClock;
   readonly newCallId?: () => string;
+  /** Background events (US-015) for the active call; without it chief hears none. */
+  readonly events?: VoiceEventBus;
 }
 
 export type VoiceReadiness =
@@ -133,6 +136,9 @@ export class VoiceService {
   ) {
     this.clock = deps.clock ?? systemClock;
     this.stt = deps.stt ?? new SttService(db, config);
+    deps.events?.subscribe((event) => {
+      this.active?.postEvent(event);
+    });
   }
 
   get activeCallId(): string | null {
