@@ -196,6 +196,14 @@
     font-size: var(--text-sm);
   }
 
+  /* Live caption of the words still being spoken (US-022). */
+  .call-transcript__caption {
+    align-self: flex-end;
+    color: var(--color-fg-subtle);
+    font-size: var(--text-sm);
+    font-style: italic;
+  }
+
   .call-line {
     display: flex;
     flex-direction: column;

@@ -52,7 +52,22 @@ export type ClientMessage =
   | { readonly type: 'hangup' }
   /** The pill's Confirm / Cancel button (voice US-011). */
   | { readonly type: 'confirm.resolve'; readonly id: string; readonly accept: boolean }
-  | { readonly type: 'metrics'; readonly turn: number; readonly firstAudioPlayedAt: string };
+  | { readonly type: 'metrics'; readonly turn: number; readonly firstAudioPlayedAt: string }
+  /**
+   * Scribe realtime (US-022): the browser gave up on Scribe (quota, auth, the
+   * session time limit, no token) and sends WAV utterances from now on.
+   */
+  | { readonly type: 'stt.fallback'; readonly reason: string }
+  /** Scribe realtime: seconds of microphone audio streamed since the last report. */
+  | { readonly type: 'scribe.usage'; readonly seconds: number }
+  /**
+   * `voice_speculative_chief`: a partial transcript unchanged for 300 ms.
+   * Chief may start on it; a `transcript.final` with the same text keeps
+   * that answer, anything else throws it away.
+   */
+  | { readonly type: 'transcript.partial'; readonly text: string }
+  /** The words moved on after a `transcript.partial`: drop that answer. */
+  | { readonly type: 'speculation.cancel' };
 
 /* ------------------------------------------------------ server → browser */
 
@@ -198,8 +213,21 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     }
     case 'speech.start':
     case 'speech.cancel':
+    case 'speculation.cancel':
     case 'hangup':
       return { type: m['type'] };
+    case 'transcript.partial': {
+      const text = textOf(m['text']);
+      return text === null ? null : { type: 'transcript.partial', text };
+    }
+    case 'stt.fallback':
+      return { type: 'stt.fallback', reason: typeof m['reason'] === 'string' ? m['reason'].slice(0, 100) : 'unknown' };
+    case 'scribe.usage': {
+      const seconds = m['seconds'];
+      // A report covers a few seconds; anything else is not a report.
+      if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0 || seconds > 3600) return null;
+      return { type: 'scribe.usage', seconds };
+    }
     case 'voice.mute':
       return typeof m['muted'] === 'boolean' ? { type: 'voice.mute', muted: m['muted'] } : null;
     case 'ptt':

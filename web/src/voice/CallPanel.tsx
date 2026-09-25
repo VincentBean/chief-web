@@ -213,6 +213,11 @@ export function CallPanel() {
         {call.transcript.map((entry) => (
           <TranscriptLine key={entry.key} entry={entry} onResolve={call.resolve} />
         ))}
+        {call.caption !== '' && (
+          <li className="call-transcript__caption" aria-live="off">
+            {call.caption}…
+          </li>
+        )}
       </ol>
 
       <footer className="call-panel__foot">

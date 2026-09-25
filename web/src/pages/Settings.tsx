@@ -795,6 +795,7 @@ export interface VoiceForm {
   transcriptRetentionDays: string;
   pttGlobal: boolean;
   liveCaptions: VoiceSettings['liveCaptions'];
+  speculativeChief: boolean;
 }
 
 export function toVoiceForm(voice: VoiceSettings): VoiceForm {
@@ -1249,6 +1250,14 @@ function VoicePanel({
           Send key terms to Scribe
         </label>
         <p className="field__hint">Scribe realtime only: session and repository names are recognised better, for about 20% more credits.</p>
+      </div>
+
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={form.speculativeChief} onChange={(event) => set('speculativeChief', event.target.checked)} />
+          Speculative chief
+        </label>
+        <p className="field__hint">Scribe realtime only: chief starts thinking when your words have not changed for 300 ms, and drops that answer if you keep talking. Faster replies, a few more OpenRouter tokens.</p>
       </div>
 
       <div className="field__row">

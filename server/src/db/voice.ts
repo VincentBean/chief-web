@@ -36,6 +36,8 @@ export interface VoiceCall {
   readonly ttsProvider: string;
   readonly elChars: number;
   readonly sttSeconds: number;
+  /** Microphone seconds the browser streamed to Scribe realtime (US-022). */
+  readonly scribeSeconds: number;
   readonly orCostUsd: number;
   readonly claudeTurns: number;
 }
@@ -55,6 +57,7 @@ export interface UpdateVoiceCallInput {
   readonly ttsProvider?: string;
   readonly elChars?: number;
   readonly sttSeconds?: number;
+  readonly scribeSeconds?: number;
   readonly orCostUsd?: number;
   readonly claudeTurns?: number;
 }
@@ -66,6 +69,7 @@ const CALL_COLUMNS: Record<keyof UpdateVoiceCallInput, string> = {
   ttsProvider: 'tts_provider',
   elChars: 'el_chars',
   sttSeconds: 'stt_seconds',
+  scribeSeconds: 'scribe_seconds',
   orCostUsd: 'or_cost_usd',
   claudeTurns: 'claude_turns',
 };
@@ -86,6 +90,7 @@ export function mapVoiceCall(row: Row): VoiceCall {
     ttsProvider: text(row, 'tts_provider'),
     elChars: integer(row, 'el_chars'),
     sttSeconds: real(row, 'stt_seconds'),
+    scribeSeconds: real(row, 'scribe_seconds'),
     orCostUsd: real(row, 'or_cost_usd'),
     claudeTurns: integer(row, 'claude_turns'),
   };
@@ -101,6 +106,7 @@ export function createVoiceCall(db: Database, input: CreateVoiceCallInput): Voic
     ttsProvider: input.ttsProvider,
     elChars: 0,
     sttSeconds: 0,
+    scribeSeconds: 0,
     orCostUsd: 0,
     claudeTurns: 0,
   };

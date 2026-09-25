@@ -13,6 +13,7 @@ import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
 import { getVoiceSettings } from '../settings/index.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
+import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
 import { describeEvent, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
 import { matchCallIntent, matchConfirmIntent } from './intents.js';
@@ -80,7 +81,15 @@ export interface AgentInput {
    * if it had called it, then speaks about the result. Only chief reads it.
    */
   readonly invoke?: { readonly tool: string; readonly args: Readonly<Record<string, unknown>> };
+  /**
+   * `voice_speculative_chief` (US-022): what the agent's own `speculate`
+   * started for this utterance's partial. Only the agent that made it reads it.
+   */
+  readonly prefetched?: SpeculativeStep;
 }
+
+/** Opaque to the call: whatever an agent's `speculate` hands back. */
+export type SpeculativeStep = object;
 
 /**
  * The focused agent: chief (US-008) or a session agent (US-018). It must stop
@@ -89,6 +98,11 @@ export interface AgentInput {
 export interface VoiceAgent {
   readonly kind: AgentKind;
   run(input: AgentInput): AsyncIterable<AgentEvent>;
+  /**
+   * Starts answering a partial transcript early, with no side effects, or
+   * null when it cannot. Aborting `signal` discards it (US-022).
+   */
+  speculate?(text: string, signal: AbortSignal): SpeculativeStep | null;
 }
 
 /** The slice of `SttService` a call uses. */
@@ -248,7 +262,9 @@ export class VoiceCall {
   /** A session focus whose agent still has to be started and heard (plan §11 step 4–5). */
   private greetPending: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
-  private readonly totals = { elChars: 0, sttSeconds: 0, orCostUsd: 0 };
+  private readonly totals = { elChars: 0, sttSeconds: 0, scribeSeconds: 0, orCostUsd: 0 };
+  /** Chief's early start on a stable partial (US-022), until the commit adopts or drops it. */
+  private speculation: { readonly text: string; readonly controller: AbortController; readonly step: SpeculativeStep } | null = null;
   /** The last sign of speech in either direction, for the event gate. */
   private lastActivityAt = 0;
   /** Set between the operator starting to speak and the utterance (or a misfire). */
@@ -414,6 +430,7 @@ export class VoiceCall {
     this.transport = null;
     this.clearIdle();
     this.state.activeTurn?.abort(new Error('socket closed'));
+    this.dropSpeculation();
     return true;
   }
 
@@ -461,6 +478,23 @@ export class VoiceCall {
         return;
       case 'transcript.final':
         this.submitText(message.text, this.isoNow());
+        return;
+      case 'transcript.partial':
+        this.speculate(message.text);
+        return;
+      case 'speculation.cancel':
+        this.dropSpeculation();
+        return;
+      case 'scribe.usage':
+        if (this.persisted && message.seconds > 0) this.addUsage({ scribeSeconds: message.seconds });
+        return;
+      case 'stt.fallback':
+        // Scribe gave up (quota, auth, session limit): WAV utterances from now on.
+        if (this.sttMode === 'openrouter') return;
+        logger.info('voice call falls back to OpenRouter speech-to-text', { call: this.id, from: this.sttMode, reason: message.reason });
+        this.sttMode = 'openrouter';
+        this.dropSpeculation();
+        if (this.persisted) updateVoiceCall(this.deps.db, this.id, { sttProvider: 'openrouter' });
         return;
       case 'speech.start':
         // Background events wait until the utterance is in.
@@ -519,6 +553,7 @@ export class VoiceCall {
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
     this.state.activeTurn?.abort(new Error('call ended'));
+    this.dropSpeculation();
     this.state.phase = 'ended';
     this.sendState();
     const transport = this.transport;
@@ -783,6 +818,10 @@ export class VoiceCall {
     }
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     const agent = this.agentFor(focus);
+    const prefetched =
+      mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
+        ? this.adoptSpeculation(text, signal)
+        : this.dropSpeculation();
     const marks: { tFirstToken?: string; tFirstChunk?: string; tFirstAudioSent?: string } = {};
     const speaks: Promise<void>[] = [];
     let flushed: string[] | null = null;
@@ -801,6 +840,7 @@ export class VoiceCall {
         signal,
         ...(resolution === undefined ? {} : { resolution }),
         ...(invoke === undefined ? {} : { invoke }),
+        ...(prefetched === undefined ? {} : { prefetched }),
       })) {
         // Past a barge-in only a finished tool's card still goes out.
         const late = signal.aborted;
@@ -1000,6 +1040,41 @@ export class VoiceCall {
     if (pending === null) return undefined;
     const intent = matchConfirmIntent(text);
     return intent === null ? undefined : { confirmationId: pending.id, accept: intent === 'yes' };
+  }
+
+  /**
+   * `transcript.partial` (US-022): chief starts on words that held still for
+   * 300 ms. Only for a plain chief turn in Scribe mode with the setting on,
+   * and never over a running turn.
+   */
+  private speculate(text: string): void {
+    if (this.speculation !== null && sameUtterance(this.speculation.text, text)) return;
+    this.dropSpeculation();
+    if (this.sttMode !== 'elevenlabs-realtime' || !getVoiceSettings(this.deps.db).speculativeChief) return;
+    if (!this.persisted || this.state.activeTurn !== null || this.state.focus.kind !== 'chief') return;
+    const agent = this.agentFor({ kind: 'chief' });
+    if (agent.speculate === undefined) return;
+    const controller = new AbortController();
+    const step = agent.speculate(text, controller.signal);
+    if (step !== null) this.speculation = { text, controller, step };
+  }
+
+  /** Throws the early start away (the words moved on, or the commit said something else). */
+  private dropSpeculation(): undefined {
+    this.speculation?.controller.abort(new Error('speculation discarded'));
+    this.speculation = null;
+    return undefined;
+  }
+
+  /** The early start for `text`, now owned by the turn behind `signal`; undefined when there is none for it. */
+  private adoptSpeculation(text: string, signal: AbortSignal): SpeculativeStep | undefined {
+    const speculation = this.speculation;
+    if (speculation === null || !sameUtterance(speculation.text, text)) return this.dropSpeculation();
+    this.speculation = null;
+    const abort = (): void => speculation.controller.abort(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    return speculation.step;
   }
 
   private agentFor(focus: CallFocus): VoiceAgent {
@@ -1265,9 +1340,10 @@ export class VoiceCall {
     };
   }
 
-  private addUsage(add: { elChars?: number; sttSeconds?: number; orCostUsd?: number }): void {
+  private addUsage(add: { elChars?: number; sttSeconds?: number; scribeSeconds?: number; orCostUsd?: number }): void {
     this.totals.elChars += add.elChars ?? 0;
     this.totals.sttSeconds += add.sttSeconds ?? 0;
+    this.totals.scribeSeconds += add.scribeSeconds ?? 0;
     this.totals.orCostUsd += add.orCostUsd ?? 0;
     if (this.persisted) updateVoiceCall(this.deps.db, this.id, { ...this.totals });
     this.send({ type: 'usage', elCreditsUsed: this.totals.elChars, orCostUsd: this.totals.orCostUsd });

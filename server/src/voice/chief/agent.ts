@@ -9,6 +9,7 @@ import type { CallFocus } from '../protocol.js';
 import { type ChatEvent, type ChatMessage, type ChatToolCall, type StreamChatOptions, streamChat } from './openrouter-client.js';
 import { cancelledResult, CONFIRM_TOOL, type ConfirmationGate, runConfirmation } from './confirm.js';
 import { chiefSystemPrompt } from './prompt.js';
+import { ChatPrefetch, sameUtterance } from './speculation.js';
 import { buildSnapshot } from './snapshot.js';
 import { type ChiefServices, type ChiefTool, createChiefTools, type ToolContext, type ToolResult } from './tools.js';
 
@@ -103,6 +104,29 @@ export class ChiefAgent implements VoiceAgent {
     await this.summarizing;
   }
 
+  /**
+   * Starts the first model step for `text` early (US-022), without touching
+   * the history: `run` with `prefetched` set replays it as that step.
+   * Null when the next message would not be `text` as it stands (a cut-off
+   * note is owed) or a summary is being folded in.
+   */
+  speculate(text: string, signal: AbortSignal): ChatPrefetch | null {
+    if (this.interruptedAfter !== null || this.summarizing !== null) return null;
+    const settings = getVoiceSettings(this.deps.db);
+    const messages: ChatMessage[] = [...this.messages, { role: 'user', content: text }];
+    const source = this.chat({
+      baseUrl: this.deps.config.openrouterApiUrl,
+      apiKey: getOpenRouterApiKey(this.deps.db) ?? '',
+      model: settings.chiefModel,
+      messages: [{ role: 'system', content: this.systemPrompt(settings.language) }, ...this.summaryLine(), ...this.window(messages)],
+      tools: [...this.tools.values()].map((entry) => entry.definition),
+      maxTokens: CHIEF_MAX_TOKENS,
+      temperature: CHIEF_TEMPERATURE,
+      signal,
+    });
+    return new ChatPrefetch(text, this, source);
+  }
+
   async *run(input: AgentInput): AsyncGenerator<AgentEvent> {
     const { signal, turn } = input;
     const settings = getVoiceSettings(this.deps.db);
@@ -112,6 +136,11 @@ export class ChiefAgent implements VoiceAgent {
     }
     const note = this.interruptedAfter;
     this.interruptedAfter = null;
+    // A speculative first step (US-022) stands in for hop 0 when it answered exactly this message.
+    let prefetched =
+      input.prefetched instanceof ChatPrefetch && input.prefetched.owner === this && note === null && sameUtterance(input.prefetched.text, input.text)
+        ? input.prefetched
+        : null;
     this.messages.push({ role: 'user', content: note === null ? input.text : `${cutOffNote(note)} ${input.text}` });
     const definitions = [...this.tools.values()].map((entry) => entry.definition);
     /** Tool calls of the last assistant message still owed a `tool` answer. */
@@ -161,7 +190,7 @@ export class ChiefAgent implements VoiceAgent {
         let text = '';
         const calls: ChatToolCall[] = [];
         try {
-          for await (const event of this.chat({
+          const step = prefetched?.replay() ?? this.chat({
             baseUrl: this.deps.config.openrouterApiUrl,
             apiKey: getOpenRouterApiKey(this.deps.db) ?? '',
             model: settings.chiefModel,
@@ -170,7 +199,9 @@ export class ChiefAgent implements VoiceAgent {
             maxTokens: CHIEF_MAX_TOKENS,
             temperature: CHIEF_TEMPERATURE,
             signal,
-          })) {
+          });
+          prefetched = null;
+          for await (const event of step) {
             if (event.type === 'delta') {
               text += event.text;
               unsaid = text;
@@ -293,8 +324,8 @@ export class ChiefAgent implements VoiceAgent {
   }
 
   /** The last {@link WINDOW_MESSAGES} messages, cut where a user message starts. */
-  private window(): ChatMessage[] {
-    return this.messages.slice(this.windowStart());
+  private window(messages: readonly ChatMessage[] = this.messages): ChatMessage[] {
+    return messages.slice(this.windowStart(messages));
   }
 
   /**
@@ -302,14 +333,14 @@ export class ChiefAgent implements VoiceAgent {
    * {@link WINDOW_MESSAGES}, so an assistant's tool calls are never separated
    * from their answers. One turn longer than the window is kept whole.
    */
-  private windowStart(): number {
-    const length = this.messages.length;
+  private windowStart(messages: readonly ChatMessage[] = this.messages): number {
+    const length = messages.length;
     if (length <= WINDOW_MESSAGES) return 0;
     for (let i = length - WINDOW_MESSAGES; i < length; i++) {
-      if (this.messages[i]?.role === 'user') return i;
+      if (messages[i]?.role === 'user') return i;
     }
     for (let i = length - 1; i >= 0; i--) {
-      if (this.messages[i]?.role === 'user') return i;
+      if (messages[i]?.role === 'user') return i;
     }
     return 0;
   }

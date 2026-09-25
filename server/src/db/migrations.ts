@@ -1065,6 +1065,14 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Seconds of microphone audio the browser streamed to ElevenLabs Scribe
+    // realtime (voice US-022), kept apart from the server's own STT seconds.
+    id: '0017_voice_scribe_seconds',
+    sql: `
+      ALTER TABLE voice_calls ADD COLUMN scribe_seconds REAL NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 /**

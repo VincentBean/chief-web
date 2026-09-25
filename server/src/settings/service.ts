@@ -840,6 +840,8 @@ export const VOICE_FIELDS = {
   },
   pttGlobal: { key: 'voice_ptt_global', codec: boolCodec(false) },
   liveCaptions: { key: 'voice_live_captions', codec: enumCodec(VOICE_LIVE_CAPTIONS, 'off') },
+  /** Scribe only: a partial unchanged for 300 ms starts chief's answer early (US-022). */
+  speculativeChief: { key: 'voice_speculative_chief', codec: boolCodec(false) },
 } as const satisfies Record<string, { key: SettingKey; codec: { readonly expects: string } }>;
 
 export type VoiceField = keyof typeof VOICE_FIELDS;

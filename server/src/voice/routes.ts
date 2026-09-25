@@ -1,7 +1,7 @@
 import express, { type Response, Router } from 'express';
 
 import type { Config } from '../config.js';
-import type { Database } from '../db/index.js';
+import { type Database, listRepositories } from '../db/index.js';
 import {
   getElevenLabsApiKey,
   getOpenRouterApiKey,
@@ -19,12 +19,20 @@ import {
   VoiceProviderError,
 } from './providers.js';
 import type { VoiceService } from './service.js';
+import { MintLimit, mintScribeToken } from './stt/elevenlabs-token.js';
 import { SttError, SttService } from './stt/index.js';
 import { synthesizeOnce, TtsError } from './tts/index.js';
 
 /** The Settings test sentence is one sentence, not a reading of a document. */
 const MAX_TEST_TTS_CHARS = 500;
 const TEST_TTS_TIMEOUT_MS = 20_000;
+
+/** Plan §14.3: single-use Scribe tokens, at most this many per hour. */
+export const SCRIBE_TOKENS_PER_HOUR = 10;
+/** ElevenLabs takes at most 50 key terms. */
+const MAX_KEYTERMS = 50;
+/** Always biased towards, before the repository names (plan §7.2). */
+const BASE_KEYTERMS = ['chief', 'PRD'];
 
 /** A rejected request body: an error code plus something to show the operator. */
 interface Invalid {
@@ -41,9 +49,48 @@ interface Invalid {
  * made from here with the stored key (or, for the checks, a key the operator
  * has typed but not saved yet), and only the provider's answer goes back.
  */
-export function createVoiceRouter(db: Database, config: Config, service: VoiceService): Router {
+export function createVoiceRouter(
+  db: Database,
+  config: Config,
+  service: VoiceService,
+  now: () => number = Date.now,
+): Router {
   const router = Router();
   const stt = new SttService(db, config);
+  const scribeMints = new MintLimit(SCRIBE_TOKENS_PER_HOUR, 60 * 60_000);
+
+  // A single-use token for the browser's Scribe realtime socket (voice
+  // US-022; plan §7.2), with everything else it needs to open one. Minted per
+  // socket: an idle close or a reconnect asks again.
+  router.post('/voice/scribe-token', (_req, res) => {
+    const key = getElevenLabsApiKey(db);
+    if (key === null) {
+      res.status(400).json({ error: 'elevenlabs_key_missing', message: 'Scribe needs an ElevenLabs API key.' });
+      return;
+    }
+    const retryAfter = scribeMints.take(now());
+    if (retryAfter > 0) {
+      res.setHeader('Retry-After', String(retryAfter));
+      res.status(429).json({ error: 'scribe_token_rate_limited', message: 'Too many Scribe tokens this hour.' });
+      return;
+    }
+    const settings = getVoiceSettings(db);
+    mintScribeToken(config.elevenlabsApiUrl, key, new Date(now()))
+      .then((minted) =>
+        res.status(200).json({
+          ...minted,
+          url: `${config.elevenlabsApiUrl.replace(/^http/, 'ws')}/v1/speech-to-text/realtime`,
+          language: settings.language,
+          secondaryLanguage: settings.secondaryLanguage,
+          keyterms: settings.keytermsEnabled ? scribeKeyterms(db) : [],
+          idleCloseMs: config.voiceScribeIdleCloseMs,
+        }),
+      )
+      .catch((cause: unknown) => {
+        scribeMints.release();
+        sendProviderError(res, cause);
+      });
+  });
 
   // Can a call start, on which providers, what is left on ElevenLabs (cached
   // 60 s), and is a call running (voice US-007).
@@ -238,6 +285,13 @@ function sendSttError(res: Response, cause: unknown): void {
     error: refused ? 'openrouter_unauthorized' : `stt_${cause.kind}`,
     message: cause.message,
   });
+}
+
+/** chief, PRD and the repository names, deduplicated, at most {@link MAX_KEYTERMS}. */
+export function scribeKeyterms(db: Database): string[] {
+  const terms = new Set(BASE_KEYTERMS);
+  for (const repository of listRepositories(db)) terms.add(repository.name);
+  return [...terms].slice(0, MAX_KEYTERMS);
 }
 
 function parseBody(body: unknown): Record<string, unknown> | Invalid {

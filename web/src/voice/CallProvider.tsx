@@ -13,7 +13,7 @@ import {
 import { fetchSettings, fetchVoiceStatus, type VoiceSettings, type VoiceStatus } from '../api.ts';
 import { navigate, useLocation } from '../router.tsx';
 import { useToast } from '../toast.tsx';
-import { CallAudio, type TalkMode } from './call-audio.ts';
+import { CallAudio, type SttOptions, type TalkMode } from './call-audio.ts';
 import {
   type AgentKind,
   type CallFocus,
@@ -21,6 +21,7 @@ import {
   type ClientMessage,
   type ConfirmationOutcome,
   type ServerMessage,
+  type SttMode,
   type ToolStatus,
   WS_CLOSE_BAD_ORIGIN,
   WS_CLOSE_CALL_ENDED,
@@ -104,6 +105,8 @@ export interface CallState {
   readonly voiceMuted: boolean;
   readonly mode: TalkMode;
   readonly talking: boolean;
+  /** Live caption of what the operator is saying (Scribe partials or Web Speech), '' when none (US-022). */
+  readonly caption: string;
   readonly usage: CallUsage | null;
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
@@ -260,6 +263,17 @@ function applyToTranscript(entries: readonly TranscriptEntry[], message: ServerM
   }
 }
 
+/**
+ * The STT mode `hello` asks for: the configured provider, except that the
+ * `browser` one (audio goes to the browser vendor) only runs in development.
+ */
+function requestedSttMode(status: VoiceStatus | null): SttMode {
+  const provider = status?.providers.stt;
+  if (provider === 'elevenlabs-realtime') return provider;
+  if (provider === 'browser' && import.meta.env.DEV) return provider;
+  return 'openrouter';
+}
+
 export function CallProvider({ children }: { readonly children: ReactNode }) {
   const toast = useToast();
   const { pathname } = useLocation();
@@ -275,6 +289,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [voiceMuted, setVoiceMuted] = useState(false);
   const [mode, setModeState] = useState<TalkMode>(readMode);
   const [talking, setTalking] = useState(false);
+  const [caption, setCaption] = useState('');
   const [usage, setUsage] = useState<CallUsage | null>(null);
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -287,6 +302,11 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const voiceMutedRef = useRef(false);
   const modeRef = useRef(mode);
   const vadSilenceMs = useRef(DEFAULT_VAD_SILENCE_MS);
+  const availabilityRef = useRef<VoiceStatus | null>(null);
+  availabilityRef.current = availability;
+  /** The STT mode `ready` confirmed, and the settings that shape it (US-022). */
+  const sttMode = useRef<SttMode>('openrouter');
+  const sttOptions = useRef<SttOptions>({ liveCaptions: 'off', speculative: false, language: 'nl' });
   // The latest toaster and handlers, for the socket callbacks.
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -319,6 +339,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     droppedAt.current = null;
     setMicOpen(false);
     setTalking(false);
+    setCaption('');
     setPhase('ended');
     setStatus(next);
   }, []);
@@ -332,6 +353,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
 
       switch (message.type) {
         case 'ready':
+          sttMode.current = message.sttMode;
+          audio.current?.setStt(message.sttMode, sttOptions.current);
           callId.current = message.callId;
           droppedAt.current = null;
           setFocus(message.focus);
@@ -362,6 +385,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           setTranscript((entries) => applyToTranscript(entries, message));
           return;
         default:
+          if (message.type === 'user.transcript') setCaption('');
           setTranscript((entries) => applyToTranscript(entries, message));
       }
     },
@@ -379,8 +403,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
         ws.send(
           JSON.stringify({
             type: 'hello',
-            // Scribe and browser STT are US-022; the server falls back anyway.
-            sttMode: 'openrouter',
+            // What Settings asks for; the server answers the mode in effect in `ready`.
+            sttMode: requestedSttMode(availabilityRef.current),
             sampleRateOut: 24_000,
             clientVersion: CLIENT_VERSION,
           } satisfies ClientMessage),
@@ -459,6 +483,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       setProblem(null);
       setTranscript([]);
       setUsage(null);
+      setCaption('');
+      sttMode.current = 'openrouter';
       setStartedAt(null);
       setPhase('listening');
       setFocus(initial);
@@ -474,6 +500,11 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           binary: (frame) => {
             const ws = socket.current;
             if (ws !== null && ws.readyState === WebSocket.OPEN) ws.send(frame);
+          },
+          caption: setCaption,
+          fallback: (reason) => {
+            sttMode.current = 'openrouter';
+            toastRef.current.warn(`Scribe stopped (${reason.replaceAll('_', ' ')}); the call continues on OpenRouter speech-to-text.`);
           },
         });
       } catch (cause: unknown) {
@@ -496,10 +527,16 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           vadSilenceMs.current = settings.voice.vadSilenceMs;
           pttGlobal = settings.voice.pttGlobal;
           bargeIn = settings.voice.bargeIn;
+          sttOptions.current = {
+            liveCaptions: settings.voice.liveCaptions,
+            speculative: settings.voice.speculativeChief,
+            language: settings.voice.language,
+          };
         } catch {
           // The defaults do.
         }
         if (audio.current !== created) return;
+        created.setStt(sttMode.current, sttOptions.current);
         try {
           await created.start({
             mode: modeRef.current,
@@ -610,6 +647,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       voiceMuted,
       mode,
       talking,
+      caption,
       usage,
       problem,
       panelOpen,
@@ -642,6 +680,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       voiceMuted,
       mode,
       talking,
+      caption,
       usage,
       problem,
       panelOpen,

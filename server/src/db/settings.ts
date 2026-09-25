@@ -120,6 +120,7 @@ export const SETTING_KEYS = [
   'voice_transcript_retention_days',
   'voice_ptt_global',
   'voice_live_captions',
+  'voice_speculative_chief',
   /**
    * ISO timestamp until which calls start on the OpenRouter fallback voice,
    * because ElevenLabs said its credits ran out (plan §8.6). Internal: never

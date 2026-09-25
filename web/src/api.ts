@@ -144,6 +144,7 @@ export interface VoiceSettings {
   transcriptRetentionDays: number;
   pttGlobal: boolean;
   liveCaptions: (typeof VOICE_LIVE_CAPTIONS)[number];
+  speculativeChief: boolean;
 }
 
 export interface SettingsUpdate {

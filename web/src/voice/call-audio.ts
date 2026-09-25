@@ -18,8 +18,11 @@ import {
   FRAME_KIND_UTTERANCE,
   type ClientMessage,
   type ServerMessage,
+  type SttMode,
 } from './protocol.ts';
 import { installSpaceToTalk, PushToTalkRecorder } from './ptt.ts';
+import { BrowserSpeech } from './captions.ts';
+import { ScribeClient } from './scribe.ts';
 import { type BargeInMode, startVad, type Vad } from './vad.ts';
 
 export type TalkMode = 'hands-free' | 'push-to-talk';
@@ -27,6 +30,20 @@ export type TalkMode = 'hands-free' | 'push-to-talk';
 export interface CallAudioSink {
   json(message: ClientMessage): void;
   binary(frame: ArrayBuffer): void;
+  /** Live caption of what is being said ('' clears it), US-022. */
+  caption(text: string): void;
+  /** Scribe gave up; the call continues on OpenRouter speech-to-text. */
+  fallback(reason: string): void;
+}
+
+/** How speech becomes text on this side (US-022). */
+export interface SttOptions {
+  /** `voice_live_captions`: Web Speech captions in OpenRouter mode. */
+  liveCaptions: 'off' | 'browser';
+  /** `voice_speculative_chief`: stable Scribe partials go to chief early. */
+  speculative: boolean;
+  /** `voice_language`, for the Web Speech API. */
+  language: string;
 }
 
 export interface CallAudioOptions {
@@ -52,6 +69,14 @@ export class CallAudio {
   private pttGlobal = false;
   private bargeIn: BargeInMode = 'careful';
   private closed = false;
+  private sttMode: SttMode = 'openrouter';
+  private sttOptions: SttOptions = { liveCaptions: 'off', speculative: false, language: 'nl' };
+  private scribe: ScribeClient | null = null;
+  private speech: BrowserSpeech | null = null;
+  /** A Scribe partial already interrupted the agent for this utterance. */
+  private scribeBargedIn = false;
+  private pttHeld = false;
+  private readonly onBatch = (event: MessageEvent<ArrayBuffer>): void => this.scribe?.push(event.data);
   /** Earcon audio still arriving after `ready`, by segment id (US-021). */
   private readonly incoming = new Map<number, { name: string; sampleRate: number; chunks: Uint8Array[] }>();
   /** Decoded earcons, by name; `earcon` plays one. */
@@ -80,6 +105,93 @@ export class CallAudio {
       up: () => this.pttUp(),
     });
     if (this.mode === 'hands-free') await this.startVad(options.vadSilenceMs);
+    this.applyStt();
+  }
+
+  /**
+   * The mode the server confirmed in `ready` (US-022). Scribe streams the
+   * microphone to ElevenLabs; `browser` and live captions run the Web
+   * Speech API. Safe to call again (a resumed socket sends `ready` again).
+   */
+  setStt(mode: SttMode, options: SttOptions): void {
+    this.sttMode = mode;
+    this.sttOptions = options;
+    this.applyStt();
+  }
+
+  private applyStt(): void {
+    const mic = this.mic;
+    if (mic === null || this.closed) return;
+    if (this.sttMode === 'elevenlabs-realtime' && this.scribe === null) {
+      this.scribe = new ScribeClient(
+        {
+          partial: (text) => {
+            this.sink.caption(text);
+            // Barge-in: the first words over the agent's voice interrupt it.
+            if (this.player.playing && !this.scribeBargedIn) {
+              this.scribeBargedIn = true;
+              this.player.stop();
+              this.sink.json({ type: 'speech.start' });
+            }
+          },
+          committed: (text) => {
+            this.scribeBargedIn = false;
+            this.sink.caption('');
+            this.sink.json({ type: 'transcript.final', text });
+          },
+          seconds: (seconds) => this.sink.json({ type: 'scribe.usage', seconds }),
+          stable: (text) => this.sink.json({ type: 'transcript.partial', text }),
+          unstable: () => this.sink.json({ type: 'speculation.cancel' }),
+          fatal: (reason) => {
+            this.sttMode = 'openrouter';
+            this.sink.caption('');
+            this.sink.json({ type: 'stt.fallback', reason });
+            this.applyStt();
+            this.sink.fallback(reason);
+          },
+        },
+        {
+          // Silence is billed: nothing goes out while the agent talks, unless it can be talked over.
+          paused: () => this.player.playing && this.bargeIn === 'off',
+          speculative: this.sttOptions.speculative,
+        },
+      );
+      mic.node.port.addEventListener('message', this.onBatch);
+      mic.node.port.start();
+    } else if (this.sttMode !== 'elevenlabs-realtime' && this.scribe !== null) {
+      mic.node.port.removeEventListener('message', this.onBatch);
+      const scribe = this.scribe;
+      this.scribe = null;
+      scribe.close();
+    }
+
+    const speech = this.sttMode === 'browser' || (this.sttMode === 'openrouter' && this.sttOptions.liveCaptions === 'browser');
+    if (speech && this.speech === null) {
+      const transcribes = this.sttMode === 'browser';
+      this.speech = new BrowserSpeech(this.sttOptions.language, {
+        interim: (text) => this.sink.caption(text),
+        final: (text) => {
+          if (!transcribes) {
+            this.sink.caption(text);
+            return;
+          }
+          this.sink.caption('');
+          this.sink.json({ type: 'transcript.final', text });
+        },
+        failed: (reason) => {
+          this.speech = null;
+          if (transcribes) {
+            this.sttMode = 'openrouter';
+            this.sink.json({ type: 'stt.fallback', reason: 'browser_speech_failed' });
+            this.sink.fallback(reason);
+          }
+        },
+      });
+      this.speech.start();
+    } else if (!speech && this.speech !== null) {
+      this.speech.stop();
+      this.speech = null;
+    }
   }
 
   setPttGlobal(global: boolean): void {
@@ -116,16 +228,24 @@ export class CallAudio {
    * always interrupts the agent, whatever `voice_barge_in` says.
    */
   pttDown(): void {
-    if (this.recorder === null || this.recorder.active) return;
+    if (this.recorder === null || this.pttHeld) return;
+    this.pttHeld = true;
     this.player.stop();
     this.sink.json({ type: 'ptt', down: true });
+    // Scribe and the browser transcribe what they hear; only OpenRouter takes a WAV.
+    if (this.sttMode !== 'openrouter') {
+      this.scribe?.speechStarted();
+      return;
+    }
     void this.vad?.pause();
     this.recorder.start();
   }
 
   pttUp(): void {
-    if (this.recorder === null || !this.recorder.active) return;
+    if (this.recorder === null || !this.pttHeld) return;
+    this.pttHeld = false;
     this.sink.json({ type: 'ptt', down: false });
+    if (!this.recorder.active) return;
     const recorder = this.recorder;
     void recorder.stop().then(() => {
       if (!this.closed) void this.vad?.resume();
@@ -191,6 +311,10 @@ export class CallAudio {
     this.closed = true;
     this.removeSpace?.();
     this.recorder?.cancel();
+    this.scribe?.close();
+    this.scribe = null;
+    this.speech?.stop();
+    this.speech = null;
     const vad = this.vad;
     this.vad = null;
     await vad?.destroy().catch(() => undefined);
@@ -209,12 +333,19 @@ export class CallAudio {
       playing: () => this.player.playing,
       sink: {
         speechStart: () => {
+          // Scribe: local speech (re)opens the socket; its partials do the barge-in.
+          if (this.sttMode === 'elevenlabs-realtime') {
+            this.scribe?.speechStarted();
+            return;
+          }
           // Barge-in: silent here first (instant), and `stop()` reports what
           // was heard before the server hears about the speech (plan §13.5).
           this.player.stop();
           this.sink.json({ type: 'speech.start' });
         },
-        speechCancel: () => this.sink.json({ type: 'speech.cancel' }),
+        speechCancel: () => {
+          if (this.sttMode !== 'elevenlabs-realtime') this.sink.json({ type: 'speech.cancel' });
+        },
         utterance: (wav) => this.sendUtterance(wav),
       },
     });
@@ -226,6 +357,7 @@ export class CallAudio {
   }
 
   private sendUtterance(wav: ArrayBuffer): void {
-    if (!this.closed) this.sink.binary(encodeFrame(FRAME_KIND_UTTERANCE, 0, wav));
+    // In Scribe and browser mode the words travel as `transcript.final`.
+    if (!this.closed && this.sttMode === 'openrouter') this.sink.binary(encodeFrame(FRAME_KIND_UTTERANCE, 0, wav));
   }
 }

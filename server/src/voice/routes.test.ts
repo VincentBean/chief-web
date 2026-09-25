@@ -381,6 +381,45 @@ describe('voice api (voice US-001)', () => {
     });
   });
 
+  describe('POST /api/voice/scribe-token (voice US-022)', () => {
+    it('refuses without an ElevenLabs key, then mints with the Scribe settings and keyterms, 10 per hour', async () => {
+      const refused = await request('POST', '/api/voice/scribe-token');
+      assert.equal(refused.status, 400);
+      assert.equal((await json(refused))['error'], 'elevenlabs_key_missing');
+
+      setSetting(db, 'elevenlabs_api_key', 'el-key');
+      setSetting(db, 'voice_keyterms_enabled', '1');
+      setSetting(db, 'voice_secondary_language', 'en');
+      db.prepare(
+        `INSERT INTO repositories (id, name, ssh_url, github_slug, default_base_branch, created_at, updated_at)
+         VALUES ('r1', 'billing-api', 'git@github.com:o/billing-api.git', 'o/billing-api', 'main', '2026-09-25T00:00:00Z', '2026-09-25T00:00:00Z')`,
+      ).run();
+      replies['/el/v1/single-use-token/realtime_scribe'] = { status: 200, body: { token: 'sutkn_abc' } };
+
+      const first = await request('POST', '/api/voice/scribe-token');
+      assert.equal(first.status, 200);
+      const body = await json(first);
+      assert.equal(body['token'], 'sutkn_abc');
+      assert.equal(typeof body['expiresAt'], 'string');
+      assert.match(String(body['url']), /^ws:\/\/127\.0\.0\.1:\d+\/el\/v1\/speech-to-text\/realtime$/);
+      assert.equal(body['language'], 'nl');
+      assert.equal(body['secondaryLanguage'], 'en');
+      assert.deepEqual(body['keyterms'], ['chief', 'PRD', 'billing-api']);
+      assert.equal(body['idleCloseMs'], 20_000);
+      assert.equal(seen['/el/v1/single-use-token/realtime_scribe']?.['xi-api-key'], 'el-key');
+
+      // A refused mint is not counted.
+      replies['/el/v1/single-use-token/realtime_scribe'] = { status: 401, body: { detail: 'bad key' } };
+      assert.equal((await request('POST', '/api/voice/scribe-token')).status, 400);
+
+      replies['/el/v1/single-use-token/realtime_scribe'] = { status: 200, body: { token: 'sutkn_abc' } };
+      for (let i = 1; i < 10; i++) assert.equal((await request('POST', '/api/voice/scribe-token')).status, 200);
+      const limited = await request('POST', '/api/voice/scribe-token');
+      assert.equal(limited.status, 429);
+      assert.ok(Number(limited.headers.get('retry-after')) > 0);
+    });
+  });
+
   describe('POST /api/voice/test/stt', () => {
     /** A silent 16 kHz mono PCM16 WAV of `ms` milliseconds. */
     const wav = (ms: number): Buffer => {
