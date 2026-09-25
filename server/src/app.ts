@@ -64,6 +64,7 @@ import { createRetryRouter } from './routes/retry.js';
 import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
+import { createVoiceRouter } from './voice/routes.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -212,6 +213,8 @@ export function createApp(
   // from inside a request — by which point everything below exists. Raising
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
+  // Voice (voice US-001): the provider checks and the voice picker's proxy.
+  api.use(createVoiceRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the

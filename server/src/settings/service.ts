@@ -5,6 +5,7 @@ import {
   getSetting,
   getSettingNumber,
   setSetting,
+  type SettingKey,
   setSettingNumber,
   withTransaction,
 } from '../db/index.js';
@@ -186,6 +187,12 @@ export interface AppSettings {
   readonly codeReviewDefault: boolean;
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
+  /** OpenRouter key for voice speech-to-text, chief and the backup voice. */
+  readonly openrouterApiKey: GithubTokenView;
+  /** ElevenLabs key for the default voice (and Scribe realtime). */
+  readonly elevenlabsApiKey: GithubTokenView;
+  /** Everything else Settings → Voice edits (voice US-001). */
+  readonly voice: VoiceSettings;
 }
 
 export interface AppSettingsUpdate {
@@ -214,6 +221,10 @@ export interface AppSettingsUpdate {
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
+  /** The same rules as `githubToken` above, for the two voice providers. */
+  readonly openrouterApiKey?: string | null;
+  readonly elevenlabsApiKey?: string | null;
+  readonly voice?: VoiceSettingsUpdate;
 }
 
 /**
@@ -269,6 +280,10 @@ export function maskToken(token: string): GithubTokenView {
 }
 
 const NO_TOKEN: GithubTokenView = { configured: false, last4: null };
+
+function masked(token: string | null): GithubTokenView {
+  return token === null ? NO_TOKEN : maskToken(token);
+}
 
 /** The stored PAT, for the code that talks to GitHub on the operator's behalf. */
 export function getGithubToken(db: Database): string | null {
@@ -516,6 +531,418 @@ export function getGitIdentity(db: Database): GitIdentity {
   };
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * Voice calls (voice US-001, plan §14.1)
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Default OpenRouter speech-to-text model. The cheapest entry of OpenRouter's
+ * transcription collection on 2026-09-25 is a three-way tie at $0.00000333/s
+ * (`qwen/qwen3-asr-0.6b`, `nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b`
+ * and this one); Whisper Large V3 Turbo is the one of the three whose listing
+ * guarantees Dutch (99+ languages), and its habit of hallucinating on silence
+ * is already handled by the short-utterance filter of plan §7.1.
+ */
+export const DEFAULT_VOICE_OR_STT_MODEL = 'openai/whisper-large-v3-turbo';
+
+/**
+ * Default OpenRouter chat model for chief. The cheapest tool-calling text model
+ * in OpenRouter's catalog on 2026-09-25 once `:free`, `:batch`, `~…-latest`
+ * aliases, models with an announced expiry and models older than a year are
+ * left out. Chosen on price and tool support only: if its Dutch disappoints,
+ * the operator types another slug in Settings → Voice.
+ */
+export const DEFAULT_VOICE_CHIEF_MODEL = 'inclusionai/ling-3.0-flash';
+
+/**
+ * Default OpenRouter text-to-speech model, the fallback voice of plan §8.4.
+ * The cheapest paid entry of OpenRouter's speech collection on 2026-09-25 that
+ * speaks Dutch: the free Deepgram Flux and the cheaper Kokoro, Orpheus and CSM
+ * voices are English (or at least not Dutch) only, and the `:free` Fish Audio
+ * variant is rate limited for prototyping, which a fallback cannot be.
+ */
+export const DEFAULT_VOICE_OR_TTS_MODEL = 'google/gemini-3.8-flash-lite-tts';
+
+/**
+ * Default voice for {@link DEFAULT_VOICE_OR_TTS_MODEL}. It has to be one of
+ * that model's `supported_voices` — the plan's OpenAI-style `alloy` is not —
+ * or the "Check OpenRouter key" button would reject the shipped default.
+ */
+export const DEFAULT_VOICE_OR_TTS_VOICE = 'Kore';
+
+/** Where speech-to-text comes from (plan §7). */
+export const VOICE_STT_PROVIDERS = ['openrouter', 'elevenlabs-realtime', 'browser'] as const;
+
+/**
+ * ElevenLabs models the multi-context WebSocket of plan §8.3 can stream. The
+ * English-only v2 Flash and Turbo are left out because the default language is
+ * Dutch; `eleven_v3` is left out because it has no WebSocket endpoint.
+ */
+export const VOICE_TTS_MODELS = [
+  'eleven_flash_v2_5',
+  'eleven_turbo_v2_5',
+  'eleven_multilingual_v2',
+] as const;
+
+export const VOICE_BARGE_IN_MODES = ['on', 'careful', 'off'] as const;
+export const VOICE_EVENT_VERBOSITIES = ['important', 'all', 'none'] as const;
+export const VOICE_LIVE_CAPTIONS = ['off', 'browser'] as const;
+
+export const MIN_VOICE_VAD_SILENCE_MS = 400;
+export const MAX_VOICE_VAD_SILENCE_MS = 2000;
+export const MIN_VOICE_TRANSCRIPT_RETENTION_DAYS = 1;
+export const MAX_VOICE_TRANSCRIPT_RETENTION_DAYS = 365;
+/** PCM sample rates worth playing: telephone quality up to studio. */
+export const MIN_VOICE_OR_TTS_SAMPLE_RATE = 8000;
+export const MAX_VOICE_OR_TTS_SAMPLE_RATE = 48000;
+
+/** Caps on the pronunciation map, so a paste accident cannot bloat every reply. */
+export const MAX_VOICE_PRONUNCIATIONS = 200;
+const MAX_PRONUNCIATION_TERM_CHARS = 100;
+const MAX_PRONUNCIATION_SPOKEN_CHARS = 200;
+
+/**
+ * What `voice_pronunciations` reads as until the operator saves a map of their
+ * own. Saving `{}` clears it for good; only a missing row brings this back.
+ */
+export const DEFAULT_VOICE_PRONUNCIATIONS: Readonly<Record<string, string>> = {
+  PRD: 'P R D',
+  PR: 'P R',
+  'US-': 'user story ',
+  CSV: 'C S V',
+  API: 'A P I',
+};
+
+/**
+ * How one voice setting is stored, validated and defaulted. `decode` reads a
+ * stored row and answers `undefined` for one that no longer validates (a
+ * hand-edited row, or a value a later version dropped) so the default applies
+ * — the same fail-safe as {@link getPlanningModel}. `parse` checks a value off
+ * the wire and answers `undefined` to reject it.
+ */
+interface VoiceCodec<T> {
+  readonly default: T;
+  readonly decode: (stored: string) => T | undefined;
+  readonly encode: (value: T) => string;
+  readonly parse: (raw: unknown) => T | undefined;
+  /** What a valid value looks like, for the rejection message. */
+  readonly expects: string;
+}
+
+const boolCodec = (fallback: boolean): VoiceCodec<boolean> => ({
+  default: fallback,
+  decode: (stored) => (stored === '1' ? true : stored === '0' ? false : undefined),
+  encode: (value) => (value ? '1' : '0'),
+  parse: (raw) => (typeof raw === 'boolean' ? raw : undefined),
+  expects: 'true or false',
+});
+
+function enumCodec<const V extends string>(values: readonly V[], fallback: V): VoiceCodec<V> {
+  const accepts = (raw: unknown): V | undefined =>
+    typeof raw === 'string' && (values as readonly string[]).includes(raw) ? (raw as V) : undefined;
+  return {
+    default: fallback,
+    decode: accepts,
+    encode: (value) => value,
+    parse: accepts,
+    expects: `one of ${values.join(', ')}`,
+  };
+}
+
+function intCodec(min: number, max: number, fallback: number): VoiceCodec<number> {
+  const inRange = (value: number): number | undefined =>
+    Number.isInteger(value) && value >= min && value <= max ? value : undefined;
+  return {
+    default: fallback,
+    decode: (stored) => (/^-?\d+$/.test(stored) ? inRange(Number(stored)) : undefined),
+    encode: String,
+    parse: (raw) => (typeof raw === 'number' ? inRange(raw) : undefined),
+    expects: `a whole number between ${min} and ${max}`,
+  };
+}
+
+/** A string field whose value is checked by `isValid` after trimming. */
+function textCodec(
+  isValid: (value: string) => boolean,
+  fallback: string,
+  expects: string,
+): VoiceCodec<string> {
+  return {
+    default: fallback,
+    decode: (stored) => (isValid(stored) ? stored : undefined),
+    encode: (value) => value,
+    parse: (raw) => {
+      if (typeof raw !== 'string') return undefined;
+      const value = raw.trim();
+      return isValid(value) ? value : undefined;
+    },
+    expects,
+  };
+}
+
+/**
+ * As {@link textCodec}, plus `null` for "none". A cleared value is stored as an
+ * empty row rather than deleted, because a missing row means the default — and
+ * for `voice_secondary_language` the default is `en`, not "none".
+ */
+function nullableTextCodec(
+  isValid: (value: string) => boolean,
+  fallback: string | null,
+  expects: string,
+): VoiceCodec<string | null> {
+  return {
+    default: fallback,
+    decode: (stored) => (stored === '' ? null : isValid(stored) ? stored : undefined),
+    encode: (value) => value ?? '',
+    parse: (raw) => {
+      if (raw === null) return null;
+      if (typeof raw !== 'string') return undefined;
+      const value = raw.trim();
+      if (value === '') return null;
+      return isValid(value) ? value : undefined;
+    },
+    expects: `${expects}, or null for none`,
+  };
+}
+
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language', fallback: 'none' });
+
+/** A two-letter ISO 639-1 code that names a real language (`nl`, `en`). */
+export function isValidVoiceLanguage(value: string): boolean {
+  return /^[a-z]{2}$/.test(value) && languageNames.of(value) !== undefined;
+}
+
+/** An IANA time zone this Node's ICU knows, aliases included. */
+export function isValidVoiceTimezone(value: string): boolean {
+  if (value === '' || value.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The shape of an OpenRouter model slug (`openai/whisper-large-v3-turbo`,
+ * `~z-ai/glm-flash-latest`, `deepgram/flux-tts:free`). Only the shape: whether
+ * the model exists is asked of OpenRouter by the Settings page's check button.
+ */
+export function isValidOpenRouterSlug(value: string): boolean {
+  return value.length <= 200 && /^~?[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+}
+
+/** An OpenRouter TTS voice name (`Kore`, `en-US-Harper:MAI-Voice-2`). */
+export function isValidOpenRouterVoice(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value);
+}
+
+/** An ElevenLabs voice id: opaque, alphanumeric, twenty characters today. */
+export function isValidElevenLabsVoiceId(value: string): boolean {
+  return /^[A-Za-z0-9]{1,64}$/.test(value);
+}
+
+/**
+ * A term → spoken-form map (plan §8.2): a plain object of strings, with
+ * non-empty terms. An empty spoken form is allowed — it says "skip this".
+ */
+export function parseVoicePronunciations(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_VOICE_PRONUNCIATIONS) return undefined;
+  const map: Record<string, string> = {};
+  for (const [term, spoken] of entries) {
+    if (typeof spoken !== 'string') return undefined;
+    if (term.trim() === '' || term.length > MAX_PRONUNCIATION_TERM_CHARS) return undefined;
+    if (spoken.length > MAX_PRONUNCIATION_SPOKEN_CHARS) return undefined;
+    map[term] = spoken;
+  }
+  return map;
+}
+
+const pronunciationsCodec: VoiceCodec<Readonly<Record<string, string>>> = {
+  default: DEFAULT_VOICE_PRONUNCIATIONS,
+  decode: (stored) => {
+    try {
+      return parseVoicePronunciations(JSON.parse(stored));
+    } catch {
+      return undefined;
+    }
+  },
+  encode: (value) => JSON.stringify(value),
+  parse: parseVoicePronunciations,
+  expects: `an object of at most ${MAX_VOICE_PRONUNCIATIONS} term → spoken-text strings, terms non-empty`,
+};
+
+/**
+ * Every operator-facing voice setting: its settings row and how that row is
+ * read, written and validated. `voice_el_exhausted_until` is deliberately not
+ * here — it is internal state, so the settings view never shows it and the
+ * settings route never accepts it.
+ */
+export const VOICE_FIELDS = {
+  enabled: { key: 'voice_enabled', codec: boolCodec(false) },
+  sttProvider: { key: 'voice_stt_provider', codec: enumCodec(VOICE_STT_PROVIDERS, 'openrouter') },
+  orSttModel: {
+    key: 'voice_or_stt_model',
+    codec: textCodec(isValidOpenRouterSlug, DEFAULT_VOICE_OR_STT_MODEL, 'an OpenRouter model slug such as openai/whisper-large-v3-turbo'),
+  },
+  language: {
+    key: 'voice_language',
+    codec: textCodec(isValidVoiceLanguage, 'nl', 'a two-letter ISO 639-1 language code such as nl'),
+  },
+  secondaryLanguage: {
+    key: 'voice_secondary_language',
+    codec: nullableTextCodec(isValidVoiceLanguage, 'en', 'a two-letter ISO 639-1 language code such as en'),
+  },
+  keytermsEnabled: { key: 'voice_keyterms_enabled', codec: boolCodec(false) },
+  ttsModel: { key: 'voice_tts_model', codec: enumCodec(VOICE_TTS_MODELS, 'eleven_flash_v2_5') },
+  voiceId: {
+    key: 'voice_voice_id',
+    codec: nullableTextCodec(isValidElevenLabsVoiceId, null, 'an ElevenLabs voice id'),
+  },
+  orTtsModel: {
+    key: 'voice_or_tts_model',
+    codec: textCodec(isValidOpenRouterSlug, DEFAULT_VOICE_OR_TTS_MODEL, 'an OpenRouter model slug'),
+  },
+  orTtsVoice: {
+    key: 'voice_or_tts_voice',
+    codec: textCodec(isValidOpenRouterVoice, DEFAULT_VOICE_OR_TTS_VOICE, 'a voice name of the OpenRouter speech model'),
+  },
+  orTtsSampleRate: {
+    key: 'voice_or_tts_sample_rate',
+    codec: intCodec(MIN_VOICE_OR_TTS_SAMPLE_RATE, MAX_VOICE_OR_TTS_SAMPLE_RATE, 24000),
+  },
+  chiefModel: {
+    key: 'voice_chief_model',
+    codec: textCodec(isValidOpenRouterSlug, DEFAULT_VOICE_CHIEF_MODEL, 'an OpenRouter model slug'),
+  },
+  sessionModel: { key: 'voice_session_model', codec: enumCodec(AGENT_MODELS, 'sonnet') },
+  vadSilenceMs: {
+    key: 'voice_vad_silence_ms',
+    codec: intCodec(MIN_VOICE_VAD_SILENCE_MS, MAX_VOICE_VAD_SILENCE_MS, 800),
+  },
+  bargeIn: { key: 'voice_barge_in', codec: enumCodec(VOICE_BARGE_IN_MODES, 'careful') },
+  eventVerbosity: {
+    key: 'voice_event_verbosity',
+    codec: enumCodec(VOICE_EVENT_VERBOSITIES, 'important'),
+  },
+  timezone: {
+    key: 'voice_timezone',
+    codec: textCodec(isValidVoiceTimezone, 'Europe/Amsterdam', 'an IANA time zone such as Europe/Amsterdam'),
+  },
+  pronunciations: { key: 'voice_pronunciations', codec: pronunciationsCodec },
+  transcriptRetentionDays: {
+    key: 'voice_transcript_retention_days',
+    codec: intCodec(MIN_VOICE_TRANSCRIPT_RETENTION_DAYS, MAX_VOICE_TRANSCRIPT_RETENTION_DAYS, 30),
+  },
+  pttGlobal: { key: 'voice_ptt_global', codec: boolCodec(false) },
+  liveCaptions: { key: 'voice_live_captions', codec: enumCodec(VOICE_LIVE_CAPTIONS, 'off') },
+} as const satisfies Record<string, { key: SettingKey; codec: { readonly expects: string } }>;
+
+export type VoiceField = keyof typeof VOICE_FIELDS;
+
+type CodecValue<C> = C extends VoiceCodec<infer T> ? T : never;
+
+/** The voice settings as the API shows them; the two keys are masked elsewhere. */
+export type VoiceSettings = {
+  readonly [F in VoiceField]: CodecValue<(typeof VOICE_FIELDS)[F]['codec']>;
+};
+
+/** Omitted fields keep their stored value. */
+export type VoiceSettingsUpdate = Partial<VoiceSettings>;
+
+const VOICE_FIELD_NAMES = Object.keys(VOICE_FIELDS) as VoiceField[];
+
+/** The stored OpenRouter API key, for the voice server code only. */
+export function getOpenRouterApiKey(db: Database): string | null {
+  return getSetting(db, 'openrouter_api_key');
+}
+
+/** The stored ElevenLabs API key, for the voice server code only. */
+export function getElevenLabsApiKey(db: Database): string | null {
+  return getSetting(db, 'elevenlabs_api_key');
+}
+
+/** One voice setting, falling back to its default for an absent or bad row. */
+function readVoiceField<F extends VoiceField>(db: Database, field: F): VoiceSettings[F] {
+  const { key, codec } = VOICE_FIELDS[field] as unknown as {
+    key: SettingKey;
+    codec: VoiceCodec<VoiceSettings[F]>;
+  };
+  const stored = getSetting(db, key);
+  if (stored === null) return codec.default;
+  // Not `??`: a decoded `null` is a stored choice ("no secondary language").
+  const decoded = codec.decode(stored);
+  return decoded === undefined ? codec.default : decoded;
+}
+
+export function getVoiceSettings(db: Database): VoiceSettings {
+  const settings: Partial<Record<VoiceField, unknown>> = {};
+  for (const field of VOICE_FIELD_NAMES) settings[field] = readVoiceField(db, field);
+  return settings as VoiceSettings;
+}
+
+/**
+ * Checks the `voice` object of a `PUT /api/settings` body. Every field is
+ * optional; an unknown one — `elExhaustedUntil` included — is rejected rather
+ * than ignored, so a typo in a script does not silently save nothing.
+ */
+export function parseVoiceSettingsUpdate(
+  raw: unknown,
+): VoiceSettingsUpdate | { readonly error: string; readonly message: string } {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { error: 'invalid_voice', message: 'The voice settings must be a JSON object.' };
+  }
+  const update: Partial<Record<VoiceField, unknown>> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(name in VOICE_FIELDS)) {
+      return { error: 'invalid_voice', message: `Unknown voice setting "${name}".` };
+    }
+    if (value === undefined) continue;
+    const field = name as VoiceField;
+    const { key, codec } = VOICE_FIELDS[field] as unknown as {
+      key: string;
+      codec: VoiceCodec<unknown>;
+    };
+    const parsed = codec.parse(value);
+    if (parsed === undefined) {
+      return { error: `invalid_${key}`, message: `${key} must be ${codec.expects}.` };
+    }
+    update[field] = parsed;
+  }
+  return update as VoiceSettingsUpdate;
+}
+
+function writeVoiceSettings(db: Database, update: VoiceSettingsUpdate): void {
+  for (const field of VOICE_FIELD_NAMES) {
+    const value = update[field];
+    if (value === undefined) continue;
+    const { key, codec } = VOICE_FIELDS[field] as unknown as {
+      key: SettingKey;
+      codec: VoiceCodec<unknown>;
+    };
+    setSetting(db, key, codec.encode(value));
+  }
+}
+
+/**
+ * Until when calls start on the OpenRouter fallback voice because ElevenLabs
+ * ran out of credits (plan §8.6), or `null`. A time in the past means no hold,
+ * so nothing has to sweep the row.
+ */
+export function getVoiceElExhaustedUntil(db: Database): string | null {
+  const stored = getSetting(db, 'voice_el_exhausted_until');
+  return stored !== null && !Number.isNaN(Date.parse(stored)) ? stored : null;
+}
+
+export function setVoiceElExhaustedUntil(db: Database, until: string | null): void {
+  if (until === null) deleteSetting(db, 'voice_el_exhausted_until');
+  else setSetting(db, 'voice_el_exhausted_until', until);
+}
+
 export function readAppSettings(db: Database, config: Config): AppSettings {
   const token = getGithubToken(db);
   const identity = getGitIdentity(db);
@@ -544,6 +971,9 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     codeReviewDefault: getCodeReviewDefault(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
+    openrouterApiKey: masked(getOpenRouterApiKey(db)),
+    elevenlabsApiKey: masked(getElevenLabsApiKey(db)),
+    voice: getVoiceSettings(db),
   };
 }
 
@@ -632,6 +1062,19 @@ export function updateAppSettings(
     else if (update.gitAuthorEmail !== undefined) {
       setSetting(db, 'git_author_email', update.gitAuthorEmail);
     }
+
+    // Stored, masked and removed exactly like the GitHub token above.
+    if (update.openrouterApiKey === null) deleteSetting(db, 'openrouter_api_key');
+    else if (update.openrouterApiKey !== undefined) {
+      setSetting(db, 'openrouter_api_key', update.openrouterApiKey);
+    }
+
+    if (update.elevenlabsApiKey === null) deleteSetting(db, 'elevenlabs_api_key');
+    else if (update.elevenlabsApiKey !== undefined) {
+      setSetting(db, 'elevenlabs_api_key', update.elevenlabsApiKey);
+    }
+
+    if (update.voice !== undefined) writeVoiceSettings(db, update.voice);
   });
 
   return readAppSettings(db, config);

@@ -103,6 +103,47 @@ export interface Settings {
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
+  /** Voice provider keys, masked like the GitHub token (voice US-001). */
+  openrouterApiKey: { configured: boolean; last4: string | null };
+  elevenlabsApiKey: { configured: boolean; last4: string | null };
+  voice: VoiceSettings;
+}
+
+/** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
+export const VOICE_STT_PROVIDERS = ['openrouter', 'elevenlabs-realtime', 'browser'] as const;
+export const VOICE_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'] as const;
+export const VOICE_BARGE_IN_MODES = ['on', 'careful', 'off'] as const;
+export const VOICE_EVENT_VERBOSITIES = ['important', 'all', 'none'] as const;
+export const VOICE_LIVE_CAPTIONS = ['off', 'browser'] as const;
+
+/** Mirrors the server's `VoiceSettings` (plan §14.1). */
+export interface VoiceSettings {
+  enabled: boolean;
+  sttProvider: (typeof VOICE_STT_PROVIDERS)[number];
+  /** OpenRouter speech-to-text slug. */
+  orSttModel: string;
+  /** ISO 639-1. */
+  language: string;
+  /** ISO 639-1, or `null` for none. */
+  secondaryLanguage: string | null;
+  keytermsEnabled: boolean;
+  ttsModel: (typeof VOICE_TTS_MODELS)[number];
+  /** ElevenLabs voice every agent speaks with; `null` until one is picked. */
+  voiceId: string | null;
+  orTtsModel: string;
+  orTtsVoice: string;
+  orTtsSampleRate: number;
+  chiefModel: string;
+  sessionModel: AgentModel;
+  vadSilenceMs: number;
+  bargeIn: (typeof VOICE_BARGE_IN_MODES)[number];
+  eventVerbosity: (typeof VOICE_EVENT_VERBOSITIES)[number];
+  /** IANA. */
+  timezone: string;
+  pronunciations: Record<string, string>;
+  transcriptRetentionDays: number;
+  pttGlobal: boolean;
+  liveCaptions: (typeof VOICE_LIVE_CAPTIONS)[number];
 }
 
 export interface SettingsUpdate {
@@ -131,6 +172,10 @@ export interface SettingsUpdate {
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
+  /** Omit to leave the stored key untouched; `null` removes it. */
+  openrouterApiKey?: string | null;
+  elevenlabsApiKey?: string | null;
+  voice?: Partial<VoiceSettings>;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {
@@ -149,6 +194,65 @@ export async function validateGithubToken(token?: string): Promise<{ login: stri
   return api<{ login: string }>('/api/settings/github/validate', {
     method: 'POST',
     body: JSON.stringify(token === undefined ? {} : { token }),
+  });
+}
+
+/** One voice of the operator's ElevenLabs library (voice US-001). */
+export interface ElevenLabsVoice {
+  voiceId: string;
+  name: string;
+  category: string | null;
+  previewUrl: string | null;
+  labels: Record<string, string>;
+}
+
+/** The ElevenLabs voice list, fetched by the server with the stored key. */
+export async function fetchVoiceVoices(signal?: AbortSignal): Promise<ElevenLabsVoice[]> {
+  const { voices } = await api<{ voices: ElevenLabsVoice[] }>('/api/voice/voices', signal ? { signal } : {});
+  return voices;
+}
+
+/** The four OpenRouter names Settings → Voice holds. */
+export interface OpenRouterSlugs {
+  orSttModel: string;
+  chiefModel: string;
+  orTtsModel: string;
+  orTtsVoice: string;
+}
+
+export interface OpenRouterKeyCheck {
+  /** `null` when only the models were checked. */
+  key: {
+    label: string | null;
+    usage: number | null;
+    limit: number | null;
+    limitRemaining: number | null;
+    isFreeTier: boolean;
+  } | null;
+  models: { field: keyof OpenRouterSlugs; value: string; ok: boolean; problem: string | null }[];
+}
+
+/**
+ * Checks an OpenRouter key and validates the slugs against the catalog. Pass
+ * a typed key and typed slugs to check them before saving; omitted ones fall
+ * back to what is stored.
+ */
+export async function checkOpenRouterKey(input: { key?: string; models?: Partial<OpenRouterSlugs>; modelsOnly?: boolean }): Promise<OpenRouterKeyCheck> {
+  return api<OpenRouterKeyCheck>('/api/voice/test/openrouter-key', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export interface ElevenLabsKeyCheck {
+  tier: string | null;
+  characterCount: number;
+  characterLimit: number;
+  remaining: number;
+  resetsAt: string | null;
+}
+
+export async function checkElevenLabsKey(key?: string): Promise<ElevenLabsKeyCheck> {
+  return api<ElevenLabsKeyCheck>('/api/voice/test/elevenlabs-key', {
+    method: 'POST',
+    body: JSON.stringify(key === undefined ? {} : { key }),
   });
 }
 

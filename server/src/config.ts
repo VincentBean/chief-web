@@ -134,6 +134,28 @@ export interface Config {
    * operator has not said, in which case the link-back is plain text.
    */
   readonly publicUrl: string;
+  /**
+   * Voice calls (voice US-001, plan §14.2). The provider keys and preferences
+   * live in Settings → Voice; these are the operational limits around a call.
+   */
+  /** A call nobody has spoken in for this long is ended. */
+  readonly voiceIdleTimeoutMs: number;
+  /** How long session agents a call started stay alive after it ends. */
+  readonly voiceKeepAgentsMs: number;
+  /** Cap on session agents running at once across calls. */
+  readonly voiceMaxSessionAgents: number;
+  /** Cap on one speech-to-text request. */
+  readonly voiceSttTimeoutMs: number;
+  /** Longest utterance sent to speech-to-text; the browser splits before it. */
+  readonly voiceMaxUtteranceMs: number;
+  /** Cap on tool round-trips chief may make for one user turn. */
+  readonly voiceChiefMaxToolHops: number;
+  /** A Scribe realtime socket idle for this long is closed. */
+  readonly voiceScribeIdleCloseMs: number;
+  /** Base URL of the OpenRouter API; only tests point it elsewhere. */
+  readonly openrouterApiUrl: string;
+  /** Base URL of the ElevenLabs API; only tests point it elsewhere. */
+  readonly elevenlabsApiUrl: string;
   /** Directory containing the built frontend assets. */
   readonly webRoot: string;
   readonly nodeEnv: string;
@@ -219,6 +241,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // Voice limits (plan §14.2). The bounds keep a typo from producing a call
+  // that ends before anyone speaks, or one that never gives up on a provider.
+  const bounded = (name: string, fallback: number, min: number, max: number): number => {
+    const value = int(name, fallback);
+    if (value < min || value > max) {
+      throw new Error(
+        `Environment variable ${name} must be between ${String(min)} and ${String(max)}, got "${String(value)}"`,
+      );
+    }
+    return value;
+  };
+
   return {
     port,
     host: str('HOST', '0.0.0.0'),
@@ -259,6 +293,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pullRequestCacheMs: int('PULL_REQUEST_CACHE_MS', 30_000),
     feedbackRunPollMs: int('FEEDBACK_RUN_POLL_MS', 5_000),
     publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
+    voiceIdleTimeoutMs: bounded('VOICE_IDLE_TIMEOUT_MS', 600_000, 60_000, 86_400_000),
+    voiceKeepAgentsMs: bounded('VOICE_KEEP_AGENTS_MS', 900_000, 0, 86_400_000),
+    voiceMaxSessionAgents: bounded('VOICE_MAX_SESSION_AGENTS', 3, 1, 20),
+    voiceSttTimeoutMs: bounded('VOICE_STT_TIMEOUT_MS', 8_000, 1_000, 60_000),
+    // Upstream speech-to-text providers time out around 60 s (plan §7.1).
+    voiceMaxUtteranceMs: bounded('VOICE_MAX_UTTERANCE_MS', 60_000, 1_000, 60_000),
+    voiceChiefMaxToolHops: bounded('VOICE_CHIEF_MAX_TOOL_HOPS', 6, 1, 50),
+    voiceScribeIdleCloseMs: bounded('VOICE_SCRIBE_IDLE_CLOSE_MS', 20_000, 1_000, 600_000),
+    openrouterApiUrl: str('OPENROUTER_API_URL', 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
+    elevenlabsApiUrl: str('ELEVENLABS_API_URL', 'https://api.elevenlabs.io').replace(/\/+$/, ''),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),
     nodeEnv: env['NODE_ENV'] ?? 'development',
   };
