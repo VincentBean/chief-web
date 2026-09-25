@@ -15,6 +15,7 @@ import {
 } from './router.tsx';
 import { ToastProvider } from './toast.tsx';
 import { Skeleton } from './ui.tsx';
+import { CallProvider } from './voice/CallProvider.tsx';
 
 const container = document.getElementById('root');
 if (!container) throw new Error('Root element #root not found');
@@ -70,21 +71,24 @@ function App() {
   const Page = resolve(pathname);
   return (
     <AppDataProvider>
-      <AppShell>
-        <Suspense
-          fallback={
-            <div className="page">
-              <div className="panel">
-                <div className="panel__body">
-                  <Skeleton lines={5} />
+      {/* Above the pages, so a call survives navigation. */}
+      <CallProvider>
+        <AppShell>
+          <Suspense
+            fallback={
+              <div className="page">
+                <div className="panel">
+                  <div className="panel__body">
+                    <Skeleton lines={5} />
+                  </div>
                 </div>
               </div>
-            </div>
-          }
-        >
-          <Page />
-        </Suspense>
-      </AppShell>
+            }
+          >
+            <Page />
+          </Suspense>
+        </AppShell>
+      </CallProvider>
     </AppDataProvider>
   );
 }

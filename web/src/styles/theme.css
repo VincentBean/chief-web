@@ -191,6 +191,17 @@
     }
   }
 
+  --animate-voice-highlight: voice-highlight 1.2s var(--ease-standard) 2;
+  @keyframes voice-highlight {
+    0%,
+    100% {
+      outline-color: var(--color-accent-fg);
+    }
+    50% {
+      outline-color: transparent;
+    }
+  }
+
   --animate-shimmer: shimmer 1.6s linear infinite;
   @keyframes shimmer {
     from {

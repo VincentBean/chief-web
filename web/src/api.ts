@@ -206,6 +206,26 @@ export interface ElevenLabsVoice {
   labels: Record<string, string>;
 }
 
+/** Mirrors the server's `VoiceStatus` (`GET /api/voice/status`, voice US-007). */
+export interface VoiceStatus {
+  configured: boolean;
+  /** `voice_disabled`, `openrouter_key_missing`, … while not configured. */
+  reason: string | null;
+  providers: {
+    stt: string;
+    tts: 'elevenlabs' | 'openrouter';
+    chiefModel: string;
+    openrouter: boolean;
+    elevenlabs: boolean;
+  };
+  elBalance: { remaining: number; limit: number; resetsAt: string | null } | null;
+  activeCallId: string | null;
+}
+
+export async function fetchVoiceStatus(signal?: AbortSignal): Promise<VoiceStatus> {
+  return api<VoiceStatus>('/api/voice/status', signal ? { signal } : {});
+}
+
 /** The ElevenLabs voice list, fetched by the server with the stored key. */
 export async function fetchVoiceVoices(signal?: AbortSignal): Promise<ElevenLabsVoice[]> {
   const { voices } = await api<{ voices: ElevenLabsVoice[] }>('/api/voice/voices', signal ? { signal } : {});

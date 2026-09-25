@@ -6,6 +6,8 @@ import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
 import { countdown } from './schedule.ts';
 import { Gauge, Kbd, Meter } from './ui.tsx';
+import { CallPanel } from './voice/CallPanel.tsx';
+import { useCall } from './voice/CallProvider.tsx';
 
 /**
  * The frame around every authenticated page: a sidebar with the seven places
@@ -52,6 +54,9 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
   const { pathname } = useLocation();
   const { sessions, stats, claude } = useAppData();
   const [open, setOpen] = useState(false);
+  const call = useCall();
+  const inCall = call.status === 'connecting' || call.status === 'live' || call.status === 'reconnecting';
+  const openCall = call.open;
 
   // The drawer closes on navigation, and the page scrolls back to the top the
   // way a full navigation would have.
@@ -63,6 +68,8 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
   useKeyChords({
     ...Object.fromEntries(NAV.map((item) => [`g ${item.key}`, () => navigate(item.href)])),
     'g n': () => navigate('/sessions/new'),
+    // A key press is a user gesture, so the call's audio may start from it.
+    ...(call.enabled ? { 'g v': openCall } : {}),
   });
 
   const active = (sessions ?? []).filter(isActive).length;
@@ -103,6 +110,28 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
             </Link>
           </li>
         ))}
+        {call.enabled && (
+          <li>
+            <button
+              type="button"
+              className={`nav__item nav__item--button${call.panelOpen ? ' nav__item--current' : ''}`}
+              onClick={() => {
+                setOpen(false);
+                openCall();
+              }}
+              aria-pressed={call.panelOpen}
+              title="g then v"
+            >
+              <Icon name="broadcast" />
+              <span className="nav__label">Call</span>
+              {inCall && (
+                <span className="nav__count nav__count--danger" title={call.micOpen ? 'In a call, microphone open' : 'In a call'}>
+                  live
+                </span>
+              )}
+            </button>
+          </li>
+        )}
       </ul>
     </nav>
   );
@@ -220,6 +249,8 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
       <main className="content" id="main">
         {children}
       </main>
+
+      <CallPanel />
     </div>
   );
 }
