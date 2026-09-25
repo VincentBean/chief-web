@@ -115,6 +115,7 @@ export class SessionOrchestrator {
       session,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
+      memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
         claudeAuth: claudeAuthSource(this.config),
         workspaceDir: await this.hostPaths.translate(workspaceDir),
@@ -215,6 +216,7 @@ export class SessionOrchestrator {
       run,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
+      memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
         claudeAuth: claudeAuthSource(this.config),
         workspaceDir: await this.hostPaths.translate(workspaceDir),

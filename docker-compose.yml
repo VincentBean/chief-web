@@ -33,6 +33,9 @@ services:
       # generated pull request back to its session (US-014); optional.
       PUBLIC_URL: ${PUBLIC_URL:-}
       MAX_CONCURRENT_SESSIONS: ${MAX_CONCURRENT_SESSIONS:-3}
+      # Memory cap in MiB on each session and pull-request container, so one
+      # runaway process is OOM-killed instead of hanging the host. 0 = no cap.
+      CONTAINER_MEMORY_LIMIT_MB: ${CONTAINER_MEMORY_LIMIT_MB:-8192}
       # Default cap on one headless agent iteration (US-013/US-019). Only the
       # default: the settings page stores the value the loop actually uses.
       BUILD_ITERATION_TIMEOUT_MS: ${BUILD_ITERATION_TIMEOUT_MS:-1800000}

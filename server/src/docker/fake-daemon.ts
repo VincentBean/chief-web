@@ -35,6 +35,8 @@ export interface FakeContainer {
   readonly binds: readonly string[];
   readonly env: readonly string[];
   readonly workingDir: string | null;
+  /** `HostConfig.Memory` the container was created with; `null` for none. */
+  readonly memoryBytes: number | null;
   /** Set by `POST /containers/{id}/stop`. */
   stopped: boolean;
   /** Whether removal was asked to force-kill a running container. */
@@ -136,6 +138,7 @@ export class FakeDockerDaemon {
       binds: [],
       env: [],
       workingDir: null,
+      memoryBytes: null,
       stopped: false,
       removedForce: false,
     });
@@ -248,7 +251,7 @@ export class FakeDockerDaemon {
           Env?: string[];
           Labels?: Record<string, string>;
           WorkingDir?: string;
-          HostConfig?: { Binds?: string[] };
+          HostConfig?: { Binds?: string[]; Memory?: number };
         };
         const name = url.searchParams.get('name') ?? `generated-${this.nextContainer}`;
         if ([...this.containers.values()].some((existing) => existing.name === name)) {
@@ -265,6 +268,7 @@ export class FakeDockerDaemon {
           binds: spec.HostConfig?.Binds ?? [],
           env: spec.Env ?? [],
           workingDir: spec.WorkingDir ?? null,
+          memoryBytes: spec.HostConfig?.Memory ?? null,
           stopped: false,
           removedForce: false,
         });

@@ -68,6 +68,12 @@ export interface ContainerSpec {
   readonly user?: string;
   /** `source:target[:ro]` entries, exactly as `docker run --volume` takes them. */
   readonly binds?: readonly string[];
+  /**
+   * Hard memory cap in bytes, as `docker run --memory`. Swap is capped at the
+   * same value, so the container cannot page past it either. Omitted or 0
+   * means no limit.
+   */
+  readonly memoryBytes?: number;
 }
 
 export interface ListContainersOptions {
@@ -232,6 +238,11 @@ export class DockerApi {
         // a build nobody is watching; reconciliation decides what comes back.
         RestartPolicy: { Name: 'no' },
         AutoRemove: false,
+        // A runaway process inside the container is OOM-killed by its own
+        // cgroup instead of exhausting the host and hanging every session.
+        ...(spec.memoryBytes !== undefined && spec.memoryBytes > 0
+          ? { Memory: spec.memoryBytes, MemorySwap: spec.memoryBytes }
+          : {}),
       },
     };
     if (spec.cmd !== undefined) body['Cmd'] = [...spec.cmd];

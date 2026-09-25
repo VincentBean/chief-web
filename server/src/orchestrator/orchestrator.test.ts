@@ -217,6 +217,18 @@ describe('session container spec', () => {
     assert.ok(spec.env?.includes('CHIEF_GIT_AUTHOR_NAME=chief-web'));
   });
 
+  it('caps the container memory at the configured MiB, and not at all for 0', () => {
+    const input = {
+      session: { id: 'session-1', name: 'add-login', repositoryId: 'repo-1' },
+      image: 'chief-web-runner:latest',
+      identity: { name: 'chief-web', email: 'chief-web@localhost' },
+      mounts: { claudeAuth: 'chief-web-claude-auth', workspaceDir: '/host/workspaces/session-1' },
+    };
+    assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 4096 }).memoryBytes, 4096 * 1024 * 1024);
+    assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 0 }).memoryBytes, undefined);
+    assert.equal(sessionContainerSpec(input).memoryBytes, undefined);
+  });
+
   it('names containers uniquely per session', () => {
     const name = sessionContainerName({ id: 'abcdef0123456789', name: 'add-login' });
     assert.equal(name, 'chief-web-add-login-abcdef01');
@@ -536,6 +548,7 @@ describe('session container lifecycle', () => {
       `${sessionWorkspaceDir(env.config, session.id)}:${RUNNER_WORKSPACE_DIR}`,
       `${sessionKeyPath(env.config, session.id)}:${RUNNER_SSH_KEY_PATH}:ro`,
     ]);
+    assert.equal(created?.memoryBytes, env.config.containerMemoryLimitMb * 1024 * 1024);
     // The workspace exists before the mount, so it is never created root-owned.
     assert.ok(fs.existsSync(sessionWorkspaceDir(env.config, session.id)));
     // The staged copy is the repository key, readable by the runner user.

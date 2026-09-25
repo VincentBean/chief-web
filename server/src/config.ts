@@ -48,6 +48,12 @@ export interface Config {
   readonly dockerBin: string;
   /** Image sessions and one-off helper containers run (built by US-006). */
   readonly runnerImage: string;
+  /**
+   * Memory cap, in MiB, on every session and pull-request container. A process
+   * that outgrows it (a runaway test, say) is OOM-killed inside its own
+   * container instead of exhausting the host. 0 disables the cap.
+   */
+  readonly containerMemoryLimitMb: number;
   /** Grace period a session container gets to exit before it is killed. */
   readonly sessionStopTimeoutSeconds: number;
   /** Cap on each git command of a session's clone/branch setup (US-010). */
@@ -204,6 +210,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // Below this the runner cannot even hold Claude Code plus a test run, so a
+  // smaller value is a typo, not a choice. 0 is the explicit "no cap".
+  const containerMemoryLimitMb = int('CONTAINER_MEMORY_LIMIT_MB', 8192);
+  if (containerMemoryLimitMb !== 0 && containerMemoryLimitMb < 512) {
+    throw new Error(
+      `Environment variable CONTAINER_MEMORY_LIMIT_MB must be 0 or at least 512, got "${String(containerMemoryLimitMb)}"`,
+    );
+  }
+
   return {
     port,
     host: str('HOST', '0.0.0.0'),
@@ -219,6 +234,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),
+    containerMemoryLimitMb,
     sessionStopTimeoutSeconds: int('SESSION_STOP_TIMEOUT_SECONDS', 10),
     sessionSetupTimeoutMs: int('SESSION_SETUP_TIMEOUT_MS', 600_000),
     buildIterationTimeoutMs: int('BUILD_ITERATION_TIMEOUT_MS', 1_800_000),

@@ -99,6 +99,13 @@ export interface PrRunContainerInput {
   readonly image: string;
   readonly identity: GitIdentity;
   readonly mounts: RunnerMounts;
+  /** Memory cap in MiB; 0 for none. See `Config.containerMemoryLimitMb`. */
+  readonly memoryLimitMb?: number;
+}
+
+/** The `ContainerSpec.memoryBytes` entry for a cap in MiB; empty when uncapped. */
+function memoryCap(limitMb: number | undefined): { memoryBytes?: number } {
+  return limitMb === undefined || limitMb <= 0 ? {} : { memoryBytes: limitMb * 1024 * 1024 };
 }
 
 /** The `POST /containers/create` body for a feedback run. */
@@ -117,6 +124,7 @@ export function prRunContainerSpec(input: PrRunContainerInput): ContainerSpec {
     env,
     workingDir: RUNNER_WORKSPACE_DIR,
     binds: runnerBinds(input.mounts),
+    ...memoryCap(input.memoryLimitMb),
   };
 }
 
@@ -127,6 +135,8 @@ export interface SessionContainerInput {
   readonly identity: GitIdentity;
   /** Host-side sources; see `HostPaths`. */
   readonly mounts: RunnerMounts;
+  /** Memory cap in MiB; 0 for none. See `Config.containerMemoryLimitMb`. */
+  readonly memoryLimitMb?: number;
 }
 
 /**
@@ -148,5 +158,6 @@ export function sessionContainerSpec(input: SessionContainerInput): ContainerSpe
     env,
     workingDir: RUNNER_WORKSPACE_DIR,
     binds: runnerBinds(input.mounts),
+    ...memoryCap(input.memoryLimitMb),
   };
 }

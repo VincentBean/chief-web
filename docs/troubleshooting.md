@@ -108,4 +108,5 @@ Notes that save time:
 | `permission denied … /var/run/docker.sock` in the logs | The host user running compose is not in the `docker` group. |
 | Every session says *Waiting*, nothing runs | Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold): the account is out of usage, so builds are paused for an hour rather than failed. They resume by themselves; **Resume now** on any held session ends the hold early. |
 | Sessions never start, all say *Queued* | The concurrency cap. Raise **Max concurrent building sessions** in Settings; it takes effect at the next free slot with no restart. |
+| The host runs out of memory or hangs while sessions build | Each session and pull-request container is capped at `CONTAINER_MEMORY_LIMIT_MB` (default 8192), so a runaway process should be OOM-killed inside its own container: the agent sees the command die and the host stays up. Keep **Max concurrent building sessions** × that cap below the host's RAM. The cap only applies to containers started after the server picked it up. |
 | Disk filling up | Each session keeps a full clone under the data volume. Delete finished sessions — the branch and PR on GitHub survive it. |
