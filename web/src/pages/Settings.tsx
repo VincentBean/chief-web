@@ -19,6 +19,7 @@ import {
   startClaudeLogin,
   stopClaudeLogin,
   testSpeechToText,
+  testTextToSpeech,
   validateGithubToken,
   VOICE_BARGE_IN_MODES,
   VOICE_EVENT_VERBOSITIES,
@@ -31,6 +32,7 @@ import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMe
 import { Icon } from '../Icon.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { playPcm16 } from '../voice/pcm.ts';
 import { recordWav } from '../voice/wav.ts';
 
 /**
@@ -904,6 +906,8 @@ interface CheckResult {
 const credits = new Intl.NumberFormat();
 
 const MIC_TEST_MS = 3_000;
+/** "Play test voice": one Dutch and one English sentence, as a call mixes them. */
+const TTS_TEST_SENTENCES = ['Hallo, ik ben chief. Zo klink ik in een gesprek.', 'And this is how I sound when we switch to English.'];
 
 function VoicePanel({
   settings,
@@ -937,6 +941,8 @@ function VoicePanel({
   const [elevenlabsCheck, setElevenlabsCheck] = useState<CheckResult | null>(null);
   const [micTest, setMicTest] = useState<'recording' | 'transcribing' | null>(null);
   const [micCheck, setMicCheck] = useState<CheckResult | null>(null);
+  const [voiceTest, setVoiceTest] = useState<'elevenlabs' | 'openrouter' | null>(null);
+  const [voiceCheck, setVoiceCheck] = useState<CheckResult | null>(null);
   const [voices, setVoices] = useState<ElevenLabsVoice[] | null>(null);
   const [voicesError, setVoicesError] = useState<string | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
@@ -1053,6 +1059,25 @@ function VoicePanel({
         setMicCheck({ ok: false, text: describeError(error) });
       })
       .finally(() => setMicTest(null));
+  };
+
+  // The saved voice settings, sentence by sentence: a fetch, then playback.
+  const onPlayTestVoice = (provider: 'elevenlabs' | 'openrouter'): void => {
+    setVoiceTest(provider);
+    setVoiceCheck(null);
+    const play = async (): Promise<void> => {
+      for (const sentence of TTS_TEST_SENTENCES) {
+        const audio = await testTextToSpeech(sentence, provider);
+        await playPcm16(audio.pcm, audio.sampleRate);
+      }
+    };
+    play()
+      .then(() => setVoiceCheck({ ok: true, text: provider === 'elevenlabs' ? 'Played the ElevenLabs voice.' : 'Played the backup voice.' }))
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setVoiceCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setVoiceTest(null));
   };
 
   const pickedMissing = form.voiceId !== '' && voices !== null && !voices.some((voice) => voice.voiceId === form.voiceId);
@@ -1250,6 +1275,19 @@ function VoicePanel({
           </label>
           <input id="voice-or-tts-sample-rate" name="voice-or-tts-sample-rate" type="number" min={8000} max={48000} step={1} value={form.orTtsSampleRate} onChange={(event) => set('orTtsSampleRate', event.target.value)} className="field__input field__input--narrow" />
         </div>
+      </div>
+
+      <div className="field">
+        <div className="field__pair">
+          <button type="button" className="button" onClick={() => onPlayTestVoice('elevenlabs')} disabled={busy || voiceTest !== null || !storedElevenlabs.configured}>
+            {voiceTest === 'elevenlabs' ? 'Playing…' : 'Play test voice'}
+          </button>
+          <button type="button" className="button" onClick={() => onPlayTestVoice('openrouter')} disabled={busy || voiceTest !== null || !storedOpenrouter.configured}>
+            {voiceTest === 'openrouter' ? 'Playing…' : 'Play backup voice'}
+          </button>
+        </div>
+        {checkLine(voiceCheck)}
+        <p className="field__hint">Speaks one Dutch and one English sentence with the saved voice settings. If the backup voice sounds too fast or too slow, fix its sample rate.</p>
       </div>
 
       <div className="field__row">

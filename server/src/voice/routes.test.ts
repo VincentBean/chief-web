@@ -451,6 +451,50 @@ describe('voice api (voice US-001)', () => {
     });
   });
 
+  describe('POST /api/voice/test/tts', () => {
+    it('answers the OpenRouter voice as PCM with its sample rate', async () => {
+      setSetting(db, 'openrouter_api_key', 'sk-or-v1-stored');
+      replies['/or/audio/speech'] = { status: 200, body: 'PCMBYTES' };
+
+      const response = await request('POST', '/api/voice/test/tts', { text: 'Hallo, dit is chief.', provider: 'openrouter' });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('content-type'), 'audio/pcm');
+      assert.equal(response.headers.get('x-sample-rate'), '24000');
+      assert.equal(Buffer.from(await response.arrayBuffer()).toString('utf8'), 'PCMBYTES');
+      assert.equal(seen['/or/audio/speech']?.['authorization'], 'Bearer sk-or-v1-stored');
+    });
+
+    it('answers 400, never 401, for a refused key and 502 for an outage', async () => {
+      setSetting(db, 'openrouter_api_key', 'sk-or-v1-stored');
+      replies['/or/audio/speech'] = { status: 401, body: { error: { message: 'No auth credentials found' } } };
+      const refused = await request('POST', '/api/voice/test/tts', { text: 'Hallo.', provider: 'openrouter' });
+      assert.equal(refused.status, 400);
+      assert.equal((await json(refused))['error'], 'openrouter_unauthorized');
+
+      replies['/or/audio/speech'] = { status: 500, body: 'boom' };
+      const outage = await request('POST', '/api/voice/test/tts', { text: 'Hallo.', provider: 'openrouter' });
+      assert.equal(outage.status, 502);
+      assert.equal((await json(outage))['error'], 'openrouter_http');
+    });
+
+    it('answers 400 for a missing key or voice and a bad body', async () => {
+      const noKey = await request('POST', '/api/voice/test/tts', { text: 'Hallo.', provider: 'elevenlabs' });
+      assert.equal(noKey.status, 400);
+      assert.equal((await json(noKey))['error'], 'elevenlabs_not_configured');
+
+      setSetting(db, 'elevenlabs_api_key', 'sk_el_stored');
+      const noVoice = await request('POST', '/api/voice/test/tts', { text: 'Hallo.', provider: 'elevenlabs' });
+      assert.equal(noVoice.status, 400);
+      assert.match(String((await json(noVoice))['message']), /voice/);
+
+      const badProvider = await request('POST', '/api/voice/test/tts', { text: 'Hallo.', provider: 'browser' });
+      assert.equal((await json(badProvider))['error'], 'invalid_provider');
+      const noText = await request('POST', '/api/voice/test/tts', { text: '  ', provider: 'openrouter' });
+      assert.equal((await json(noText))['error'], 'invalid_text');
+    });
+  });
+
   it('is behind the password', async () => {
     const response = await fetch(`${baseUrl}/api/voice/voices`);
 

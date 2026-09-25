@@ -19,6 +19,11 @@ import {
   VoiceProviderError,
 } from './providers.js';
 import { SttError, SttService } from './stt/index.js';
+import { synthesizeOnce, TtsError } from './tts/index.js';
+
+/** The Settings test sentence is one sentence, not a reading of a document. */
+const MAX_TEST_TTS_CHARS = 500;
+const TEST_TTS_TIMEOUT_MS = 20_000;
 
 /** A rejected request body: an error code plus something to show the operator. */
 interface Invalid {
@@ -156,7 +161,56 @@ export function createVoiceRouter(db: Database, config: Config): Router {
     },
   );
 
+  // The Settings "Play test voice" button: one sentence through one provider,
+  // answered as raw PCM16 with its sample rate in a header.
+  router.post('/voice/test/tts', (req, res) => {
+    const body = parseBody(req.body);
+    if ('error' in body) {
+      res.status(400).json(body);
+      return;
+    }
+    const text = typeof body['text'] === 'string' ? body['text'].trim() : '';
+    if (text === '' || text.length > MAX_TEST_TTS_CHARS) {
+      res.status(400).json({
+        error: 'invalid_text',
+        message: `text must be between 1 and ${String(MAX_TEST_TTS_CHARS)} characters.`,
+      });
+      return;
+    }
+    const provider = body['provider'];
+    if (provider !== 'elevenlabs' && provider !== 'openrouter') {
+      res.status(400).json({ error: 'invalid_provider', message: 'provider must be elevenlabs or openrouter.' });
+      return;
+    }
+    synthesizeOnce(db, config, provider, text, AbortSignal.timeout(TEST_TTS_TIMEOUT_MS))
+      .then(({ audio, format }) => {
+        res
+          .status(200)
+          .set({
+            'content-type': format.kind === 'mp3' ? 'audio/mpeg' : 'audio/pcm',
+            'x-sample-rate': format.kind === 'mp3' ? '' : String(format.sampleRate),
+          })
+          .end(audio);
+      })
+      .catch((cause: unknown) => sendTtsError(res, provider, cause));
+  });
+
   return router;
+}
+
+/** Same rule as {@link sendProviderError}: never 401. */
+function sendTtsError(res: Response, provider: 'elevenlabs' | 'openrouter', cause: unknown): void {
+  if (!(cause instanceof TtsError)) {
+    const timedOut = cause instanceof Error && cause.name === 'TimeoutError';
+    res.status(timedOut ? 502 : 500).json({ error: timedOut ? 'tts_timeout' : 'tts_failed', message: String(cause) });
+    return;
+  }
+  if (cause.kind === 'unconfigured') {
+    res.status(400).json({ error: `${provider}_not_configured`, message: cause.message });
+    return;
+  }
+  const refused = cause.kind === 'unauthorized' || cause.kind === 'quota';
+  res.status(refused ? 400 : 502).json({ error: `${provider}_${cause.kind}`, message: cause.message });
 }
 
 /** Same rule as {@link sendProviderError}: never 401. */

@@ -272,6 +272,34 @@ export async function testSpeechToText(wav: ArrayBuffer): Promise<SttTestResult>
   });
 }
 
+export interface TtsTestAudio {
+  /** Raw PCM16 LE mono. */
+  pcm: ArrayBuffer;
+  sampleRate: number;
+}
+
+/** Settings → "Play test voice" (voice US-006): one sentence through one provider. */
+export async function testTextToSpeech(text: string, provider: 'elevenlabs' | 'openrouter'): Promise<TtsTestAudio> {
+  const response = await fetch('/api/voice/test/tts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, provider }),
+  });
+  if (!response.ok) {
+    let code = `http_${response.status}`;
+    let detail: string | null = null;
+    try {
+      const body = (await response.json()) as { error?: unknown; message?: unknown };
+      if (typeof body.error === 'string') code = body.error;
+      if (typeof body.message === 'string') detail = body.message;
+    } catch {
+      // Non-JSON error body; keep the status-derived code.
+    }
+    throw new ApiError(response.status, code, detail);
+  }
+  return { pcm: await response.arrayBuffer(), sampleRate: Number(response.headers.get('x-sample-rate') ?? '24000') || 24000 };
+}
+
 /** Mirrors the server's `ClaudeAuthStatus` (US-008). */
 export interface ClaudeAuthStatus {
   authenticated: boolean;
