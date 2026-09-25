@@ -10,12 +10,17 @@ import {
   type Session,
   type SessionStatus,
 } from '../../db/index.js';
+import type { PullRequestFeedback } from '../../lib/github-review.js';
+import type { ConflictScan } from '../../prconflicts/index.js';
+import type { PrRunView } from '../../prfeedback/index.js';
+import type { PrReviewView } from '../../prreview/index.js';
 import type { PullRequestListView } from '../../pullrequests/index.js';
 import type { RetryResult } from '../../recovery/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView } from '../../sessions/index.js';
 import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
+import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
 import type { ChatTool } from './openrouter-client.js';
 
 /**
@@ -50,8 +55,23 @@ export interface ChiefServices {
   /** The clock spoken times are read against; the real one when absent. */
   readonly now?: () => Date;
   readonly buildLogs: { history(session: Session): BuildLogHistory };
-  /** The pull request list as last fetched; never a GitHub call. */
-  readonly pullRequests: { cached(): PullRequestListView | null };
+  readonly pullRequests: {
+    /** The pull request list as last fetched; never a GitHub call. */
+    cached(): PullRequestListView | null;
+    /** The list, asked of GitHub once the cache has gone stale. */
+    list(): Promise<PullRequestListView>;
+    /** One pull request read fresh: its state and whether it comes from a fork. */
+    feedback(repositoryId: string, number: number): Promise<PullRequestFeedback>;
+  };
+  readonly prReviews: { start(repositoryId: string, prNumber: number): Promise<PrReviewView> };
+  readonly prFeedback: {
+    start(repositoryId: string, prNumber: number): Promise<PrRunView>;
+    stop(runId: string): Promise<PrRunView>;
+    find(repositoryId: string, prNumber: number): PrRunView | null;
+  };
+  readonly prConflicts: Pick<ConflictScan, 'fixNow' | 'conflicted'>;
+  /** Where a voice change request is posted. */
+  readonly github: VoiceReviewGateway;
   readonly hold: { until(): string | null };
 }
 
@@ -446,6 +466,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       },
     ),
     ...sessionActionTools(services),
+    ...pullRequestTools(services),
   ];
   return withConfirmTool(tools);
 }

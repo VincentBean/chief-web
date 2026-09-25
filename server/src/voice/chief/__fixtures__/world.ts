@@ -15,7 +15,11 @@ import {
   updatePrReview,
   updateSession,
 } from '../../../db/index.js';
+import type { PullRequestFeedback } from '../../../lib/github-review.js';
+import type { FixNowResult } from '../../../prconflicts/index.js';
 import type { PrdParseError } from '../../../prd/index.js';
+import type { PrRunView } from '../../../prfeedback/index.js';
+import type { PrReviewView } from '../../../prreview/index.js';
 import type { PullRequestListView } from '../../../pullrequests/index.js';
 import type { RetryResult } from '../../../recovery/index.js';
 import type { ReadyResult, SessionSetupView, SessionView } from '../../../sessions/index.js';
@@ -48,6 +52,14 @@ export interface ChiefWorld {
     failures: Map<string, Error>;
     /** The parse errors `markReady` refuses with; none means the PRD parses. */
     prdErrors: PrdParseError[];
+    /** Feedback runs `prFeedback.find` knows, keyed `repositoryId#number`. */
+    prRuns: Map<string, PrRunView>;
+    /** What the conflict scan last said, keyed `repositoryId#number`. */
+    conflicts: Map<string, boolean>;
+    /** What `prConflicts.fixNow` answers. */
+    fixNow: FixNowResult;
+    /** How `pullRequests.feedback` reads every pull request. */
+    feedback: Partial<PullRequestFeedback>;
   };
 }
 
@@ -161,6 +173,10 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
     calls: [],
     failures: new Map(),
     prdErrors: [],
+    prRuns: new Map(),
+    conflicts: new Map(),
+    fixNow: { ok: true, prNumber: 0, headBranch: 'chief/x', baseBranch: 'develop' },
+    feedback: {},
   };
   /** Records an action, or throws the failure a test put in for it. */
   const act = (method: string, arg: unknown): void => {
@@ -264,7 +280,61 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
             : [],
       }),
     },
-    pullRequests: { cached: () => state.pullRequests },
+    pullRequests: {
+      cached: () => state.pullRequests,
+      list: () => (state.pullRequests === null ? Promise.reject(new Error('GitHub is unreachable')) : Promise.resolve(state.pullRequests)),
+      feedback: async (repositoryId, number) => {
+        act('pullRequests.feedback', { repositoryId, number });
+        return Promise.resolve({
+          slug: 'acme/shop-api',
+          number,
+          title: 'x',
+          url: `https://github.com/acme/shop-api/pull/${number}`,
+          state: 'OPEN',
+          headRef: `branch-${number}`,
+          headSha: 'head',
+          headSlug: 'acme/shop-api',
+          baseRef: 'develop',
+          fromFork: false,
+          threads: [],
+          reviews: [],
+          truncated: false,
+          ...state.feedback,
+        });
+      },
+    },
+    prReviews: {
+      start: async (repositoryId, prNumber) => {
+        act('prReviews.start', { repositoryId, prNumber });
+        return Promise.resolve({ id: `review-${prNumber}`, status: 'running', queued: false, queuePosition: null } as unknown as PrReviewView);
+      },
+    },
+    prFeedback: {
+      start: async (repositoryId, prNumber) => {
+        act('prFeedback.start', { repositoryId, prNumber });
+        const run = { id: `run-${prNumber}`, repositoryId, prNumber, status: 'running', queued: false, queuePosition: null, threads: [] };
+        state.prRuns.set(`${repositoryId}#${prNumber}`, run as unknown as PrRunView);
+        return Promise.resolve(run as unknown as PrRunView);
+      },
+      stop: async (runId) => {
+        act('prFeedback.stop', runId);
+        return Promise.resolve({ id: runId, status: 'pending', lastError: 'Stopped.' } as unknown as PrRunView);
+      },
+      find: (repositoryId, prNumber) => state.prRuns.get(`${repositoryId}#${prNumber}`) ?? null,
+    },
+    prConflicts: {
+      fixNow: async (repositoryId, prNumber) => {
+        act('prConflicts.fixNow', { repositoryId, prNumber });
+        return Promise.resolve(state.fixNow);
+      },
+      conflicted: (repositoryId, prNumber) => state.conflicts.get(`${repositoryId}#${prNumber}`) ?? null,
+    },
+    github: {
+      postReview: async (repositoryId, prNumber, body) => {
+        act('github.postReview', { repositoryId, prNumber, body });
+        return Promise.resolve({ id: 99, url: `https://github.com/acme/shop-api/pull/${prNumber}#pullrequestreview-99` });
+      },
+    },
     hold: { until: () => state.hold },
   };
 

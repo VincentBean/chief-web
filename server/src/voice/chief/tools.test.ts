@@ -90,21 +90,27 @@ describe('chief read-only tools (voice US-008)', () => {
     const w = chiefWorld();
     const tools = createChiefTools(w.services);
     assert.deepEqual([...tools.keys()].sort(), [
+      'address_pr_feedback',
       'back_to_planning',
       'build_status',
       'confirm',
       'create_session',
       'end_call',
+      'fix_pr_conflicts',
       'get_session',
+      'list_pull_requests',
       'list_repositories',
       'list_sessions',
       'mark_ready',
       'overview',
+      'request_pr_change',
       'retry',
+      'review_pull_request',
       'schedule_start',
       'show',
       'start_build',
       'stop_build',
+      'stop_pr_run',
     ]);
     for (const [name, tool] of tools) {
       assert.equal(tool.definition.type, 'function');

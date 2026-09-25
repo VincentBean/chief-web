@@ -65,6 +65,7 @@ import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createVoice, type VoiceServiceDeps } from './voice/index.js';
+import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -441,7 +442,19 @@ export function createApp(
   // whose chief can retry a session too (voice US-012).
   const retries = createRetryService(db, builds, delivery);
   const voice = createVoice(config, db, {
-    chief: { db, builds, buildLogs, pullRequests, hold, sessions, retries },
+    chief: {
+      db,
+      builds,
+      buildLogs,
+      pullRequests,
+      hold,
+      sessions,
+      retries,
+      prReviews,
+      prFeedback,
+      prConflicts,
+      github: new GithubVoiceReviews(config, db),
+    },
     ...deps.voice,
   });
   api.use(voice.router);
