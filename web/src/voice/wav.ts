@@ -1,14 +1,34 @@
 /**
  * Browser audio → the 16 kHz mono PCM16 WAV the server's speech-to-text takes
  * (voice US-004; plan §7.1). The call's VAD (US-009) hands 16 kHz Float32
- * frames straight to {@link encodeWav}; the Settings microphone test records
+ * frames straight to {@link encodeWav}, push-to-talk its PCM16 batches to
+ * {@link encodeWavPcm16}; the Settings microphone test records
  * at the device rate and goes through {@link recordWav}.
  */
 
 export const WAV_SAMPLE_RATE = 16_000;
 
+/** Float32 samples in [-1, 1] → PCM16, clamped. */
+export function floatToPcm16(samples: Float32Array): Int16Array<ArrayBuffer> {
+  const pcm = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const sample = Math.max(-1, Math.min(1, samples[i] ?? 0));
+    pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return pcm;
+}
+
 /** Float32 samples in [-1, 1] at 16 kHz → a canonical 44-byte-header WAV. */
 export function encodeWav(samples: Float32Array): ArrayBuffer {
+  return encodeWavPcm16(floatToPcm16(samples));
+}
+
+/**
+ * 16 kHz mono PCM16 samples → a canonical WAV: a 44-byte header (`RIFF`,
+ * a 16-byte `fmt ` chunk, `data`) followed by the samples, little-endian.
+ * Push-to-talk feeds the capture worklet's Int16 batches straight in.
+ */
+export function encodeWavPcm16(samples: Int16Array): ArrayBuffer {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
   const ascii = (offset: number, text: string): void => {
@@ -27,10 +47,7 @@ export function encodeWav(samples: Float32Array): ArrayBuffer {
   view.setUint16(34, 16, true);
   ascii(36, 'data');
   view.setUint32(40, samples.length * 2, true);
-  for (let i = 0; i < samples.length; i++) {
-    const sample = Math.max(-1, Math.min(1, samples[i] ?? 0));
-    view.setInt16(44 + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-  }
+  for (let i = 0; i < samples.length; i++) view.setInt16(44 + i * 2, samples[i] ?? 0, true);
   return buffer;
 }
 
