@@ -15,7 +15,10 @@ import {
   updatePrReview,
   updateSession,
 } from '../../../db/index.js';
+import type { PrdParseError } from '../../../prd/index.js';
 import type { PullRequestListView } from '../../../pullrequests/index.js';
+import type { RetryResult } from '../../../recovery/index.js';
+import type { ReadyResult, SessionSetupView, SessionView } from '../../../sessions/index.js';
 import type { ServerMessage } from '../../protocol.js';
 import { ConfirmationGate } from '../confirm.js';
 import type { ChiefServices } from '../tools.js';
@@ -39,6 +42,12 @@ export interface ChiefWorld {
     hold: string | null;
     pullRequests: PullRequestListView | null;
     logText: string;
+    /** Every action a tool took, in order: `sessions.create`, `builds.start`, … with its argument. */
+    calls: { method: string; arg: unknown }[];
+    /** An error an action method throws instead of acting, keyed like `calls[].method`. */
+    failures: Map<string, Error>;
+    /** The parse errors `markReady` refuses with; none means the PRD parses. */
+    prdErrors: PrdParseError[];
   };
 }
 
@@ -149,6 +158,31 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
       ],
     },
     logText: Array.from({ length: 30 }, (_, i) => `line ${i + 1}: ${'x'.repeat(40)}`).join('\n'),
+    calls: [],
+    failures: new Map(),
+    prdErrors: [],
+  };
+  /** Records an action, or throws the failure a test put in for it. */
+  const act = (method: string, arg: unknown): void => {
+    state.calls.push({ method, arg });
+    const failure = state.failures.get(method);
+    if (failure !== undefined) throw failure;
+  };
+  const view = (id: string): SessionView => {
+    const row = getSession(db, id);
+    if (row === null) throw new Error(`No session ${id}`);
+    return { ...row, scheduledStartAt: row.scheduledStartAt } as unknown as SessionView;
+  };
+  const ready = (id: string, ok: boolean): ReadyResult => ({
+    ok,
+    started: false,
+    session: view(id),
+    prd: { path: '.chief/prd.md', exists: true, parses: ok, storyCount: ok ? 3 : 0, errors: ok ? [] : state.prdErrors, updatedAt: null, bytes: 0 },
+    stories: listStories(db, id),
+  });
+  const setStatus = (id: string, status: Session['status']): BuildView => {
+    updateSession(db, id, { status });
+    return buildView(db, id, state.pool);
   };
 
   const services: ChiefServices = {
@@ -156,7 +190,68 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
     builds: {
       pool: () => state.pool,
       status: (sessionId) => buildView(db, sessionId, state.pool),
+      start: async (sessionId) => {
+        act('builds.start', sessionId);
+        return Promise.resolve(setStatus(sessionId, 'building'));
+      },
+      stop: async (sessionId) => {
+        act('builds.stop', sessionId);
+        return Promise.resolve(setStatus(sessionId, 'ready'));
+      },
+      dequeue: (sessionId) => {
+        act('builds.dequeue', sessionId);
+        state.pool = { ...state.pool, queued: 0, queue: state.pool.queue.filter((entry) => entry.refId !== sessionId) };
+        return buildView(db, sessionId, state.pool);
+      },
     },
+    sessions: {
+      // Like the real one: the row is written before the clone, which never ends here.
+      create: async (request) => {
+        act('sessions.create', request);
+        createSession(db, {
+          repositoryId: request.repositoryId,
+          name: request.name,
+          baseBranch: request.baseBranch ?? 'main',
+          prTargetBranch: request.prTargetBranch,
+          status: 'pending',
+        });
+        return new Promise<SessionSetupView>(() => undefined);
+      },
+      markReady: async (id) => {
+        act('sessions.markReady', id);
+        if (state.prdErrors.length > 0) return Promise.resolve(ready(id, false));
+        updateSession(db, id, { status: 'ready' });
+        return Promise.resolve(ready(id, true));
+      },
+      backToPlanning: (id) => {
+        act('sessions.backToPlanning', id);
+        updateSession(db, id, { status: 'pending' });
+        return ready(id, true);
+      },
+      setSchedule: (id, scheduledStartAt) => {
+        act('sessions.setSchedule', { id, scheduledStartAt });
+        updateSession(db, id, { scheduledStartAt });
+        return view(id);
+      },
+    },
+    retries: {
+      retry: async (sessionId): Promise<RetryResult> => {
+        act('retries.retry', sessionId);
+        const build = setStatus(sessionId, 'building');
+        return Promise.resolve({
+          ok: true,
+          sessionId,
+          action: 'build',
+          stage: 'agent',
+          status: 'building',
+          prUrl: null,
+          message: 'Build restarted at the first story that is not done.',
+          build,
+          delivery: null,
+        });
+      },
+    },
+    now: () => NOW,
     buildLogs: {
       history: (s): BuildLogHistory => ({
         path: `.chief/${s.name}.log`,

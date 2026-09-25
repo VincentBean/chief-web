@@ -436,15 +436,16 @@ export function createApp(
   // since US-007 also the call socket, on the gateway's cookie check. Built
   // this late because chief (US-008) reads the build pool, the build logs,
   // the pull request list and the usage-limit hold.
+  // "Retry" on a failed session (US-019): one endpoint over both recoveries,
+  // dispatching on the stage the session failed at. Built ahead of voice,
+  // whose chief can retry a session too (voice US-012).
+  const retries = createRetryService(db, builds, delivery);
   const voice = createVoice(config, db, {
-    chief: { db, builds, buildLogs, pullRequests, hold },
+    chief: { db, builds, buildLogs, pullRequests, hold, sessions, retries },
     ...deps.voice,
   });
   api.use(voice.router);
   deps.gateway?.register(voice.socketRoute);
-  // "Retry" on a failed session (US-019): one endpoint over both recoveries,
-  // dispatching on the stage the session failed at.
-  const retries = createRetryService(db, builds, delivery);
   // Only the half of it that runs an agent needs Claude Code. A session whose
   // *push* or *pull request* failed has nothing left to build, so blocking its
   // retry on credentials it does not use would strand finished work.

@@ -11,8 +11,11 @@ import {
   type SessionStatus,
 } from '../../db/index.js';
 import type { PullRequestListView } from '../../pullrequests/index.js';
+import type { RetryResult } from '../../recovery/index.js';
+import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView } from '../../sessions/index.js';
 import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
+import { sessionActionTools } from './actions.js';
 import type { ChatTool } from './openrouter-client.js';
 
 /**
@@ -27,13 +30,25 @@ import type { ChatTool } from './openrouter-client.js';
  * `confirm` tool runs them in a later turn.
  */
 
-/** The slices of chief-web's services the tools and the snapshot read. */
+/** The slices of chief-web's services the tools and the snapshot read, and the ones the action tools drive. */
 export interface ChiefServices {
   readonly db: Database;
   readonly builds: {
     pool(): BuildPoolView;
     status(sessionId: string): BuildView;
+    start(sessionId: string): Promise<BuildView>;
+    stop(sessionId: string): Promise<BuildView>;
+    dequeue(sessionId: string): BuildView;
   };
+  readonly sessions: {
+    create(request: CreateSessionRequest): Promise<SessionSetupView>;
+    markReady(id: string): Promise<ReadyResult>;
+    backToPlanning(id: string): ReadyResult;
+    setSchedule(id: string, scheduledStartAt: string | null): SessionView;
+  };
+  readonly retries: { retry(sessionId: string): Promise<RetryResult> };
+  /** The clock spoken times are read against; the real one when absent. */
+  readonly now?: () => Date;
   readonly buildLogs: { history(session: Session): BuildLogHistory };
   /** The pull request list as last fetched; never a GitHub call. */
   readonly pullRequests: { cached(): PullRequestListView | null };
@@ -149,7 +164,7 @@ export function resolveName<T extends { readonly id: string; readonly name: stri
   return { kind: 'none', candidates: nearest };
 }
 
-function unresolved(what: 'session' | 'repository', query: string, resolution: Resolution<unknown>): ToolResult {
+export function unresolved(what: 'session' | 'repository', query: string, resolution: Resolution<unknown>): ToolResult {
   const candidates = resolution.kind === 'one' ? [] : resolution.candidates;
   const summary =
     resolution.kind === 'many'
@@ -158,24 +173,24 @@ function unresolved(what: 'session' | 'repository', query: string, resolution: R
   return { ok: false, data: { error: resolution.kind === 'many' ? 'ambiguous' : 'not_found', candidates }, summary };
 }
 
-function stringArg(args: Readonly<Record<string, unknown>>, name: string): string | null {
+export function stringArg(args: Readonly<Record<string, unknown>>, name: string): string | null {
   const value = args[name];
   return typeof value === 'string' && value.trim() !== '' ? value : null;
 }
 
-function missing(name: string): ToolResult {
+export function missing(name: string): ToolResult {
   return { ok: false, data: { error: 'missing_argument', argument: name }, summary: `Missing ${name}` };
 }
 
 /** Resolves the `session` argument, or the result that says why it could not be. */
-function sessionArg(services: ChiefServices, args: Readonly<Record<string, unknown>>): Session | ToolResult {
+export function sessionArg(services: ChiefServices, args: Readonly<Record<string, unknown>>): Session | ToolResult {
   const query = stringArg(args, 'session');
   if (query === null) return missing('session');
   const resolution = resolveName(query, listSessions(services.db));
   return resolution.kind === 'one' ? resolution.item : unresolved('session', query, resolution);
 }
 
-function isResult(value: Session | ToolResult): value is ToolResult {
+export function isResult(value: Session | ToolResult): value is ToolResult {
   return 'summary' in value;
 }
 
@@ -215,13 +230,13 @@ export function summarizeLog(text: string): string {
   return joined.length <= BUILD_LOG_SUMMARY_CHARS ? joined : `…${joined.slice(-(BUILD_LOG_SUMMARY_CHARS - 1))}`;
 }
 
-function sessionPath(id: string): string {
+export function sessionPath(id: string): string {
   return `/sessions/${encodeURIComponent(id)}`;
 }
 
 /* ------------------------------------------------------------------ tools */
 
-function tool(
+export function tool(
   name: string,
   description: string,
   properties: Readonly<Record<string, unknown>>,
@@ -241,7 +256,7 @@ function tool(
   };
 }
 
-const SESSION_PARAM = { type: 'string', description: 'Session id or spoken name' };
+export const SESSION_PARAM = { type: 'string', description: 'Session id or spoken name' };
 
 /** Chief's tools over `services`, keyed by name, `confirm` included. */
 export function createChiefTools(services: ChiefServices): ReadonlyMap<string, ChiefTool> {
@@ -430,6 +445,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
         return { ok: true, data: { ending: true }, summary: 'Ending the call' };
       },
     ),
+    ...sessionActionTools(services),
   ];
   return withConfirmTool(tools);
 }

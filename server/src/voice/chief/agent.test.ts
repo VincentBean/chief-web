@@ -92,7 +92,10 @@ describe('chief agent loop (voice US-008)', () => {
     assert.deepEqual(messagesOf(request).slice(1), [{ role: 'user', content: "What's building?" }]);
     assert.deepEqual(
       ((request['tools'] ?? []) as { function: { name: string } }[]).map((tool) => tool.function.name).sort(),
-      ['build_status', 'confirm', 'end_call', 'get_session', 'list_repositories', 'list_sessions', 'overview', 'show'],
+      [
+        'back_to_planning', 'build_status', 'confirm', 'create_session', 'end_call', 'get_session', 'list_repositories',
+        'list_sessions', 'mark_ready', 'overview', 'retry', 'schedule_start', 'show', 'start_build', 'stop_build',
+      ],
     );
     assert.deepEqual(agent.history.at(-1), {
       role: 'assistant',

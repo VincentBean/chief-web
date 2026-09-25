@@ -660,7 +660,12 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
       {order.map((stage, i) => {
         const state = failedAt === stage ? 'failed' : i < index || (stage === 'deliver' && isEnded(session)) ? 'done' : i === index ? 'current' : 'todo';
         return (
-          <li className={`stage stage--${state}`} key={stage} aria-current={state === 'current' ? 'step' : undefined}>
+          <li
+            className={`stage stage--${state}`}
+            key={stage}
+            aria-current={state === 'current' ? 'step' : undefined}
+            data-voice-target={stage === 'plan' ? 'prd' : undefined}
+          >
             <span className="stage__marker">
               {state === 'done' ? <Icon name="check" /> : state === 'failed' ? <Icon name="x" /> : i + 1}
             </span>

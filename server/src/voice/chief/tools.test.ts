@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { chiefWorld, testGate } from './__fixtures__/world.js';
+import { BuildError } from '../../build/index.js';
+import { RetryError } from '../../recovery/index.js';
+import { SessionError } from '../../sessions/index.js';
+import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
+import { SLUG_MAX, slugify } from './actions.js';
+import { parseStartTime, speakTime } from './time.js';
 import {
   BUILD_LOG_SUMMARY_CHARS,
+  type ChiefTool,
   createChiefTools,
   levenshtein,
   normalizeName,
@@ -80,18 +86,25 @@ describe('chief read-only tools (voice US-008)', () => {
     return { result: await tool.handler(args, context), w };
   }
 
-  it('registers the read-only tools and confirm with OpenAI-shaped definitions', () => {
+  it('registers the read-only tools, the session actions and confirm with OpenAI-shaped definitions', () => {
     const w = chiefWorld();
     const tools = createChiefTools(w.services);
     assert.deepEqual([...tools.keys()].sort(), [
+      'back_to_planning',
       'build_status',
       'confirm',
+      'create_session',
       'end_call',
       'get_session',
       'list_repositories',
       'list_sessions',
+      'mark_ready',
       'overview',
+      'retry',
+      'schedule_start',
       'show',
+      'start_build',
+      'stop_build',
     ]);
     for (const [name, tool] of tools) {
       assert.equal(tool.definition.type, 'function');
@@ -211,5 +224,276 @@ describe('chief read-only tools (voice US-008)', () => {
     const { result } = await call('end_call', {}, ctx(() => (ended += 1)));
     assert.equal(result.ok, true);
     assert.equal(ended, 1);
+  });
+});
+
+/* ------------------------------------------------ session actions (US-012) */
+
+describe('slugify (voice US-012)', () => {
+  it('turns a spoken name into a session name', () => {
+    assert.equal(slugify('CSV export for invoices'), 'csv-export-invoices');
+    assert.equal(slugify('  Dark   mode!! '), 'dark-mode');
+    assert.equal(slugify('Export van de facturen'), 'export-facturen');
+    assert.equal(slugify('Crème brûlée page'), 'creme-brulee-page');
+    assert.equal(slugify('keep_under_scores'), 'keep_under_scores');
+    assert.equal(slugify('The'), 'the');
+    assert.equal(slugify('?!'), '');
+  });
+
+  it('keeps to 40 characters, cut between words', () => {
+    const slug = slugify('Rework the whole onboarding flow for new accountants and their clients');
+    assert.ok(slug.length <= SLUG_MAX, slug);
+    assert.equal(slug, 'rework-whole-onboarding-flow-new');
+    assert.match(slug, /^[a-z0-9_-]+$/);
+    assert.equal(slugify('x'.repeat(60)), 'x'.repeat(40));
+  });
+});
+
+describe('spoken start times (voice US-012)', () => {
+  // 14:02 on Friday 25 September in Amsterdam (UTC+2).
+  const ctx = { now: NOW, timeZone: 'Europe/Amsterdam' };
+  const at = (text: string, context = ctx): string => {
+    const parsed = parseStartTime(text, context);
+    assert.ok(parsed.ok, `${text}: ${parsed.ok ? '' : parsed.message}`);
+    return parsed.at;
+  };
+  const reason = (text: string): string | null => {
+    const parsed = parseStartTime(text, ctx);
+    return parsed.ok ? null : parsed.reason;
+  };
+
+  it('reads ISO timestamps, with an offset as is and without one in the zone', () => {
+    assert.equal(at('2026-09-26T02:00:00Z'), '2026-09-26T02:00:00.000Z');
+    assert.equal(at('2026-09-26T02:00'), '2026-09-26T00:00:00.000Z');
+    assert.equal(at('2026-09-26 02:00+01:00'), '2026-09-26T01:00:00.000Z');
+    // After the clocks go back on 25 October Amsterdam is UTC+1.
+    assert.equal(at('2026-10-26T09:00'), '2026-10-26T08:00:00.000Z');
+  });
+
+  it('reads relative phrases', () => {
+    assert.equal(at('in 3 hours'), '2026-09-25T15:02:00.000Z');
+    assert.equal(at('in an hour'), '2026-09-25T13:02:00.000Z');
+    assert.equal(at('in 20 minutes'), '2026-09-25T12:22:00.000Z');
+    assert.equal(at('over 2 uur'), '2026-09-25T14:02:00.000Z');
+    assert.equal(at('over een half uur'), '2026-09-25T12:32:00.000Z');
+  });
+
+  it('reads days, day parts and clock times in the zone', () => {
+    assert.equal(at('tonight at 2'), '2026-09-26T00:00:00.000Z');
+    assert.equal(at('morgen om 9 uur'), '2026-09-26T07:00:00.000Z');
+    assert.equal(at('tomorrow at 9pm'), '2026-09-26T19:00:00.000Z');
+    assert.equal(at('vanavond om 8'), '2026-09-25T18:00:00.000Z');
+    assert.equal(at("morgen 's avonds om 7"), '2026-09-26T17:00:00.000Z');
+    assert.equal(at('morgen ’s avonds om 7'), '2026-09-26T17:00:00.000Z');
+    assert.equal(at('half 3 vannacht'), '2026-09-26T00:30:00.000Z');
+    assert.equal(at('14:30'), '2026-09-25T12:30:00.000Z');
+    assert.equal(at('monday at 10 am'), '2026-09-28T08:00:00.000Z');
+    assert.equal(at('tomorrow at 9am', { now: NOW, timeZone: 'America/New_York' }), '2026-09-26T13:00:00.000Z');
+  });
+
+  it('rejects what could mean two moments, or none, as ambiguous_time', () => {
+    assert.equal(reason('tomorrow at 9'), 'ambiguous_time');
+    assert.equal(reason('at 3'), 'ambiguous_time');
+    assert.equal(reason('tomorrow'), 'ambiguous_time');
+    assert.equal(reason('friday at 10'), 'ambiguous_time');
+    assert.equal(reason('whenever'), 'ambiguous_time');
+    assert.equal(reason(''), 'ambiguous_time');
+    assert.equal(reason('2026-01-01T10:00'), 'past_time');
+    assert.equal(reason('yesterday at 3pm'), 'past_time');
+  });
+
+  it('reads a time back in the zone', () => {
+    assert.equal(speakTime(new Date('2026-09-26T00:00:00.000Z'), 'Europe/Amsterdam'), 'Saturday 26 September at 02:00');
+  });
+});
+
+describe('chief session actions (voice US-012)', () => {
+  const ctxAt = (gate: ToolContext['confirmations'], turn: number): ToolContext => ({
+    signal: new AbortController().signal,
+    turn,
+    focus: { kind: 'chief' },
+    endCall: () => undefined,
+    confirmations: gate,
+  });
+
+  /** Asks in turn 1, checks nothing ran, confirms in turn 2. */
+  async function roundTrip(
+    name: string,
+    args: Record<string, unknown>,
+    w = chiefWorld(),
+  ): Promise<{ w: ReturnType<typeof chiefWorld>; prompt: string; asked: ToolResult; ran: ToolResult }> {
+    const { gate, sent } = testGate();
+    const tools = createChiefTools(w.services);
+    const tool = tools.get(name);
+    assert.ok(tool, `no tool ${name}`);
+    const asked = await tool.handler(args, ctxAt(gate, 1));
+    assert.equal(asked.ok, true, asked.summary);
+    const confirm = sent.find((message) => message.type === 'confirm');
+    assert.ok(confirm !== undefined && confirm.type === 'confirm');
+    assert.deepEqual(w.state.calls, [], 'nothing runs before the operator answers');
+    const early = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 1));
+    assert.equal(early.ok, false, 'not in the turn that asked');
+    assert.deepEqual(w.state.calls, []);
+    const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 2));
+    return { w, prompt: confirm.prompt, asked, ran };
+  }
+
+  async function ask(name: string, args: Record<string, unknown>, w = chiefWorld()): Promise<{ result: ToolResult; parked: boolean }> {
+    const { gate, sent } = testGate();
+    const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
+    return { result, parked: sent.some((message) => message.type === 'confirm') };
+  }
+
+  it('create_session: slug and repository in the prompt, create with the mapped fields, returns while setup runs', async () => {
+    const { w, prompt, ran } = await roundTrip('create_session', { repository: 'shop api', name: 'CSV export for invoices', code_review: true });
+    assert.match(prompt, /csv-export-invoices/);
+    assert.match(prompt, /shop-api/);
+    assert.deepEqual(w.state.calls, [
+      {
+        method: 'sessions.create',
+        arg: { repositoryId: w.ids['shop'], name: 'csv-export-invoices', baseBranch: 'develop', prTargetBranch: 'main', codeReview: true },
+      },
+    ]);
+    // The fake's setup never finishes, so getting here is the "returns immediately".
+    assert.equal(ran.ok, true, ran.summary);
+    const id = (ran.data as { id: string }).id;
+    assert.deepEqual(ran.ui, [{ action: 'navigate', path: `/sessions/${id}` }]);
+    assert.equal(ran.summary, 'Created session: csv-export-invoices');
+  });
+
+  it('create_session: pr_target and base_branch pass through; code_review is left to the default when not said', async () => {
+    const { w } = await roundTrip('create_session', { repository: 'chief-web', name: 'Dark mode toggle', pr_target: 'develop', base_branch: 'release' });
+    assert.deepEqual(w.state.calls[0]?.arg, {
+      repositoryId: w.ids['web'],
+      name: 'dark-mode-toggle',
+      baseBranch: 'release',
+      prTargetBranch: 'develop',
+    });
+  });
+
+  it("create_session: a service refusal comes back with the service's message", async () => {
+    const w = chiefWorld();
+    w.state.failures.set('sessions.create', new SessionError(400, 'repository_key_missing', '"shop-api" has no private key on the data volume.'));
+    const { ran } = await roundTrip('create_session', { repository: 'shop-api', name: 'Invoices' }, w);
+    assert.deepEqual(ran, {
+      ok: false,
+      data: { error: 'repository_key_missing', status: 400, message: '"shop-api" has no private key on the data volume.' },
+      summary: '"shop-api" has no private key on the data volume.',
+    });
+  });
+
+  it('create_session: an unknown repository, a bad target or a taken name is refused without asking', async () => {
+    for (const args of [
+      { repository: 'marketing', name: 'x' },
+      { repository: 'shop-api', name: 'y', pr_target: 'staging' },
+      { repository: 'shop-api', name: 'Billing export' },
+      { repository: 'shop-api', name: '??' },
+    ]) {
+      const { result, parked } = await ask('create_session', args);
+      assert.equal(result.ok, false, JSON.stringify(args));
+      assert.equal(parked, false);
+    }
+  });
+
+  it('start_build: starts the stored session, and a usage-limit hold is spoken, not thrown', async () => {
+    const { w, prompt, ran } = await roundTrip('start_build', { session: 'onboarding copy' });
+    assert.equal(prompt, 'Start the build of onboarding-copy?');
+    assert.deepEqual(w.state.calls, [{ method: 'builds.start', arg: w.ids['onboarding'] }]);
+    assert.equal(ran.summary, 'Started build: onboarding-copy');
+
+    const held = chiefWorld();
+    held.state.failures.set('builds.start', new BuildError(429, 'usage_limit_hold', 'Claude is on hold until 16:00; onboarding-copy is queued.'));
+    const refused = await roundTrip('start_build', { session: 'onboarding copy' }, held);
+    assert.equal(refused.ran.ok, false);
+    assert.equal(refused.ran.summary, 'Claude is on hold until 16:00; onboarding-copy is queued.');
+  });
+
+  it('stop_build: stops a running build', async () => {
+    const { w, prompt, ran } = await roundTrip('stop_build', { session: 'billing export' });
+    assert.equal(prompt, 'Stop the build of billing-export?');
+    assert.deepEqual(w.state.calls, [{ method: 'builds.stop', arg: w.ids['billing'] }]);
+    assert.equal(ran.summary, 'Stopped build: billing-export');
+  });
+
+  it('stop_build: a queued session is dequeued instead, and the prompt says so', async () => {
+    const { w, prompt, ran } = await roundTrip('stop_build', { session: 'dark mode' });
+    assert.match(prompt, /remove from the queue/i);
+    assert.deepEqual(w.state.calls, [{ method: 'builds.dequeue', arg: w.ids['dark'] }]);
+    assert.equal(ran.summary, 'Removed from the queue: dark-mode');
+  });
+
+  it('mark_ready: highlights the PRD, and returns parse errors as data', async () => {
+    const good = await roundTrip('mark_ready', { session: 'onboarding' });
+    assert.equal(good.ran.ok, true);
+    assert.deepEqual(good.w.state.calls, [{ method: 'sessions.markReady', arg: good.w.ids['onboarding'] }]);
+    assert.ok(good.ran.ui?.some((action) => action.action === 'highlight' && action.target === 'prd'));
+
+    const w = chiefWorld();
+    w.state.prdErrors = [{ line: 12, message: 'Story US-002 has no acceptance criteria.' }];
+    const bad = await roundTrip('mark_ready', { session: 'onboarding' }, w);
+    assert.equal(bad.ran.ok, false);
+    assert.deepEqual((bad.ran.data as { errors: unknown }).errors, [{ line: 12, message: 'Story US-002 has no acceptance criteria.' }]);
+    assert.match(bad.ran.summary, /onboarding-copy/);
+    assert.ok(bad.ran.ui?.some((action) => action.action === 'highlight' && action.target === 'prd'));
+  });
+
+  it('back_to_planning: returns a ready session to planning', async () => {
+    const { w, ran } = await roundTrip('back_to_planning', { session: 'dark-mode' });
+    assert.deepEqual(w.state.calls, [{ method: 'sessions.backToPlanning', arg: w.ids['dark'] }]);
+    assert.equal(ran.summary, 'Back to planning: dark-mode');
+  });
+
+  it('schedule_start: parses the time in voice_timezone, reads it back, and sets it', async () => {
+    const { w, prompt, ran } = await roundTrip('schedule_start', { session: 'dark mode', at: 'tonight at 2' });
+    assert.equal(prompt, 'Schedule dark-mode to start Saturday 26 September at 02:00?');
+    assert.deepEqual(w.state.calls, [{ method: 'sessions.setSchedule', arg: { id: w.ids['dark'], scheduledStartAt: '2026-09-26T00:00:00.000Z' } }]);
+    assert.equal(ran.summary, 'Scheduled: dark-mode, Saturday 26 September at 02:00');
+  });
+
+  it('schedule_start: clear sets the schedule to null', async () => {
+    const { w, prompt } = await roundTrip('schedule_start', { session: 'dark mode', clear: true });
+    assert.equal(prompt, 'Clear the scheduled start of dark-mode?');
+    assert.deepEqual(w.state.calls, [{ method: 'sessions.setSchedule', arg: { id: w.ids['dark'], scheduledStartAt: null } }]);
+  });
+
+  it('schedule_start: an ambiguous time asks again instead of parking anything', async () => {
+    const { result, parked } = await ask('schedule_start', { session: 'dark mode', at: 'tomorrow at 9' });
+    assert.equal(result.ok, false);
+    assert.equal((result.data as { reason: string }).reason, 'ambiguous_time');
+    assert.equal(parked, false);
+    assert.equal((await ask('schedule_start', { session: 'dark mode' })).result.ok, false);
+  });
+
+  it('retry: retries the failed session; a 404 comes back as a result', async () => {
+    const { w, ran } = await roundTrip('retry', { session: 'billing exports' });
+    assert.deepEqual(w.state.calls, [{ method: 'retries.retry', arg: w.ids['exports'] }]);
+    assert.equal(ran.ok, true);
+    assert.equal(ran.summary, 'Retried: billing-exports');
+
+    const gone = chiefWorld();
+    gone.state.failures.set('retries.retry', new RetryError(404, 'session_not_found', 'This session no longer exists.'));
+    const missingOne = await roundTrip('retry', { session: 'billing exports' }, gone);
+    assert.deepEqual(missingOne.ran, {
+      ok: false,
+      data: { error: 'session_not_found', status: 404, message: 'This session no longer exists.' },
+      summary: 'This session no longer exists.',
+    });
+  });
+
+  it('an unknown or ambiguous session is refused before anything is parked', async () => {
+    for (const name of ['start_build', 'stop_build', 'mark_ready', 'back_to_planning', 'retry']) {
+      const { result, parked } = await ask(name, { session: 'billing' });
+      assert.equal(result.ok, false, name);
+      assert.equal((result.data as { error: string }).error, 'ambiguous');
+      assert.equal(parked, false);
+    }
+  });
+
+  it('a thrown non-service error is a failed result too', async () => {
+    const w = chiefWorld();
+    w.state.failures.set('builds.stop', new Error('docker went away'));
+    const { ran } = await roundTrip('stop_build', { session: 'billing export' }, w);
+    assert.equal(ran.ok, false);
+    assert.match(ran.summary, /billing-export: docker went away/);
   });
 });
