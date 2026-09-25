@@ -160,7 +160,7 @@ export class VoiceService {
       if (active !== null) {
         // Taken over, or a dropped call nobody came back for.
         this.clearResumeTimer();
-        void active.end(active.attached ? 'taken_over' : 'error', WS_CLOSE_TAKEN_OVER, 'taken_over');
+        active.endSoon(active.attached ? 'taken_over' : 'error', WS_CLOSE_TAKEN_OVER, 'taken_over');
       }
       call = this.newCall(parseFocus(query.get('focus')));
       this.active = call;
@@ -187,20 +187,20 @@ export class VoiceService {
       }
       call.start(effectiveSttMode(this.db, message.sttMode)).catch((cause: unknown) => {
         logger.error('voice call could not start', { call: call.id, error: String(cause) });
-        void call.end('error', 1011, 'start_failed');
+        call.endSoon('error', 1011, 'start_failed');
       });
     });
 
     socket.on('close', () => {
       if (!call.detach(transport) || call.ended) return;
       if (!call.started) {
-        void call.end('error');
+        call.endSoon('error');
         return;
       }
       this.clearResumeTimer();
       this.resumeTimer = this.clock.setTimeout(() => {
         this.resumeTimer = null;
-        if (!call.attached) void call.end('error');
+        if (!call.attached) call.endSoon('error');
       }, RESUME_WINDOW_MS);
     });
   }

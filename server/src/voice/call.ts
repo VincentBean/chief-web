@@ -318,9 +318,16 @@ export class VoiceCall {
         return;
       }
       case 'hangup':
-        void this.end('hangup');
+        this.endSoon('hangup');
         return;
     }
+  }
+
+  /** {@link end} from a callback: a failure is logged, never an unhandled rejection. */
+  endSoon(reason: VoiceEndReason, closeCode = WS_CLOSE_CALL_ENDED, closeReason = 'call_ended'): void {
+    this.end(reason, closeCode, closeReason).catch((cause: unknown) => {
+      logger.error('voice call did not end cleanly', { call: this.id, error: String(cause) });
+    });
   }
 
   /**
@@ -570,7 +577,10 @@ export class VoiceCall {
     if (this.ended || this.transport === null) return;
     this.idleTimer = this.deps.clock.setTimeout(() => {
       this.idleTimer = null;
-      void this.onIdle();
+      this.onIdle().catch((cause: unknown) => {
+        logger.error('voice idle goodbye failed', { call: this.id, error: String(cause) });
+        this.endSoon('idle');
+      });
     }, this.deps.config.voiceIdleTimeoutMs);
   }
 
