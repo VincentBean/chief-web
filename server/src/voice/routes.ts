@@ -18,6 +18,7 @@ import {
   type OpenRouterSlugs,
   VoiceProviderError,
 } from './providers.js';
+import type { VoiceService } from './service.js';
 import { SttError, SttService } from './stt/index.js';
 import { synthesizeOnce, TtsError } from './tts/index.js';
 
@@ -40,9 +41,18 @@ interface Invalid {
  * made from here with the stored key (or, for the checks, a key the operator
  * has typed but not saved yet), and only the provider's answer goes back.
  */
-export function createVoiceRouter(db: Database, config: Config): Router {
+export function createVoiceRouter(db: Database, config: Config, service: VoiceService): Router {
   const router = Router();
   const stt = new SttService(db, config);
+
+  // Can a call start, on which providers, what is left on ElevenLabs (cached
+  // 60 s), and is a call running (voice US-007).
+  router.get('/voice/status', (_req, res, next) => {
+    service
+      .status()
+      .then((status) => res.status(200).json(status))
+      .catch(next);
+  });
 
   // The ElevenLabs voice picker's options, proxied so the key stays here.
   router.get('/voice/voices', (_req, res) => {

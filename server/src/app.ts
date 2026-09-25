@@ -64,7 +64,7 @@ import { createRetryRouter } from './routes/retry.js';
 import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
-import { createVoiceRouter } from './voice/routes.js';
+import { createVoice, type VoiceServiceDeps } from './voice/index.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -76,6 +76,7 @@ import {
 } from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
+import type { WebSocketGateway } from './ws/gateway.js';
 
 /** Injected collaborators that tests replace; all optional in production. */
 export interface AppDependencies {
@@ -175,6 +176,14 @@ export interface AppDependencies {
    * stubs, because the real one clones the repository.
    */
   readonly sentryFixer?: SentryFixer;
+  /**
+   * The WebSocket gateway `index.ts` attaches to the HTTP server. Features
+   * built here register their socket routes on it (voice US-007: the call
+   * socket); without one, only their REST routes exist.
+   */
+  readonly gateway?: WebSocketGateway;
+  /** The voice call's collaborators (voice US-007); tests pass fakes. */
+  readonly voice?: VoiceServiceDeps;
 }
 
 /**
@@ -213,8 +222,11 @@ export function createApp(
   // from inside a request — by which point everything below exists. Raising
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
-  // Voice (voice US-001): the provider checks and the voice picker's proxy.
-  api.use(createVoiceRouter(db, config));
+  // Voice (voice US-001): the provider checks and the voice picker's proxy;
+  // since US-007 also the call socket, on the gateway's cookie check.
+  const voice = createVoice(config, db, deps.voice);
+  api.use(voice.router);
+  deps.gateway?.register(voice.socketRoute);
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the

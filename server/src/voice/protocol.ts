@@ -1,0 +1,222 @@
+/**
+ * Wire protocol of the call socket `/api/voice/stream` (voice US-007; plan §6).
+ * The browser keeps a copy in `web/src/voice/protocol.ts` (copied, not
+ * imported).
+ *
+ * Text frames are JSON messages, defined below. Binary frames carry a 5-byte
+ * header, `u8 kind` + `u32 LE segmentId`, then the payload: kind `0x01` is one
+ * utterance as a WAV file (browser → server, segment id 0), kind `0x02` a
+ * chunk of a spoken segment's audio (server → browser).
+ */
+
+/** Close codes of plan §6; `4401` (unauthorized) is the gateway's own. */
+export const WS_CLOSE_BAD_ORIGIN = 4403;
+export const WS_CLOSE_CALL_IN_PROGRESS = 4409;
+export const WS_CLOSE_TAKEN_OVER = 4410;
+export const WS_CLOSE_NOT_CONFIGURED = 4422;
+/** The call ended normally (hang-up, idle, `end_call`). */
+export const WS_CLOSE_CALL_ENDED = 1000;
+
+export const FRAME_HEADER_BYTES = 5;
+/** Browser → server: one complete utterance, 16 kHz mono PCM16 WAV. */
+export const FRAME_KIND_UTTERANCE = 0x01;
+/** Server → browser: audio for the segment announced by `tts.segment`. */
+export const FRAME_KIND_AUDIO = 0x02;
+
+export type SttMode = 'openrouter' | 'elevenlabs-realtime' | 'browser';
+export const STT_MODES: readonly SttMode[] = ['openrouter', 'elevenlabs-realtime', 'browser'];
+
+export type CallFocus = { readonly kind: 'chief' } | { readonly kind: 'session'; readonly sessionId: string };
+export type CallPhase = 'listening' | 'thinking' | 'speaking' | 'ended';
+export type AgentKind = 'chief' | 'session';
+
+/* ------------------------------------------------------ browser → server */
+
+/** Plan §6.1. The WAV utterance travels as a binary kind `0x01` frame. */
+export type ClientMessage =
+  | {
+      readonly type: 'hello';
+      readonly sttMode: SttMode;
+      readonly sampleRateOut: number;
+      readonly clientVersion: string;
+    }
+  | { readonly type: 'transcript.final'; readonly text: string; readonly language?: string; readonly sttMs?: number }
+  | { readonly type: 'speech.start' }
+  | { readonly type: 'speech.cancel' }
+  | { readonly type: 'ptt'; readonly down: boolean }
+  | { readonly type: 'playback.progress'; readonly segmentId: number; readonly playedMs: number; readonly done: boolean }
+  | { readonly type: 'focus'; readonly target: 'chief' | { readonly sessionId: string } }
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'hangup' }
+  | { readonly type: 'metrics'; readonly turn: number; readonly firstAudioPlayedAt: string };
+
+/* ------------------------------------------------------ server → browser */
+
+export type ToolStatus = 'running' | 'ok' | 'error';
+
+export type UiAction =
+  | { readonly action: 'navigate'; readonly path: string }
+  | { readonly action: 'highlight'; readonly target: string }
+  | { readonly action: 'toast'; readonly text: string };
+
+export interface ConfirmationView {
+  readonly id: string;
+  readonly prompt: string;
+  readonly expiresAt: string;
+}
+
+/** Plan §6.2. Audio follows `tts.segment` as binary kind `0x02` frames. */
+export type ServerMessage =
+  | {
+      readonly type: 'ready';
+      readonly callId: string;
+      readonly focus: CallFocus;
+      /** The mode in effect, which may differ from the one `hello` asked for. */
+      readonly sttMode: SttMode;
+      readonly scribeToken?: string;
+      readonly earcons: readonly Readonly<Record<string, number>>[];
+      readonly sampleRate: number;
+      /** True when this socket continued a call that dropped (`?resume=`). */
+      readonly resumed: boolean;
+    }
+  | { readonly type: 'state'; readonly phase: CallPhase; readonly focus: CallFocus }
+  | { readonly type: 'user.transcript'; readonly turn: number; readonly text: string }
+  | { readonly type: 'agent.delta'; readonly turn: number; readonly agent: AgentKind; readonly text: string }
+  | { readonly type: 'agent.done'; readonly turn: number; readonly interrupted: boolean }
+  | {
+      readonly type: 'tts.segment';
+      readonly segmentId: number;
+      readonly turn: number;
+      readonly text: string;
+      readonly sampleRate: number;
+      readonly format: 'pcm16' | 'mp3';
+    }
+  | { readonly type: 'tts.end'; readonly segmentId: number }
+  | { readonly type: 'tts.stop'; readonly turn: number }
+  | {
+      readonly type: 'tool';
+      readonly turn: number;
+      readonly id: string;
+      readonly name: string;
+      readonly status: ToolStatus;
+      readonly summary: string;
+      readonly detail?: string;
+    }
+  | ({ readonly type: 'confirm' } & ConfirmationView)
+  | ({ readonly type: 'ui' } & UiAction)
+  | { readonly type: 'usage'; readonly elCreditsUsed: number; readonly orCostUsd: number; readonly elCreditsRemaining?: number }
+  | { readonly type: 'error'; readonly code: string; readonly message: string; readonly fatal: boolean };
+
+/* ------------------------------------------------------------ binary frames */
+
+export interface Frame {
+  readonly kind: number;
+  readonly segmentId: number;
+  readonly payload: Buffer;
+}
+
+export function encodeFrame(kind: number, segmentId: number, payload: Buffer): Buffer {
+  const header = Buffer.alloc(FRAME_HEADER_BYTES);
+  header.writeUInt8(kind, 0);
+  header.writeUInt32LE(segmentId, 1);
+  return Buffer.concat([header, payload]);
+}
+
+/** `null` for a frame too short to hold the header. */
+export function decodeFrame(frame: Buffer): Frame | null {
+  if (frame.length < FRAME_HEADER_BYTES) return null;
+  return {
+    kind: frame.readUInt8(0),
+    segmentId: frame.readUInt32LE(1),
+    payload: frame.subarray(FRAME_HEADER_BYTES),
+  };
+}
+
+/* ------------------------------------------------------------------ parsing */
+
+/** Longest typed or transcribed message accepted, in characters. */
+const MAX_TEXT_CHARS = 4000;
+
+/** `null` when the payload is not a message this server understands. */
+export function parseClientMessage(raw: string): ClientMessage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const m = parsed as Record<string, unknown>;
+
+  switch (m['type']) {
+    case 'hello': {
+      const sttMode = m['sttMode'];
+      return {
+        type: 'hello',
+        // An unknown mode is not a protocol error: the call falls back to OpenRouter.
+        sttMode: STT_MODES.includes(sttMode as SttMode) ? (sttMode as SttMode) : 'openrouter',
+        sampleRateOut: typeof m['sampleRateOut'] === 'number' ? m['sampleRateOut'] : 24000,
+        clientVersion: typeof m['clientVersion'] === 'string' ? m['clientVersion'] : '',
+      };
+    }
+    case 'transcript.final': {
+      const text = textOf(m['text']);
+      if (text === null) return null;
+      return {
+        type: 'transcript.final',
+        text,
+        ...(typeof m['language'] === 'string' ? { language: m['language'] } : {}),
+        ...(typeof m['sttMs'] === 'number' ? { sttMs: m['sttMs'] } : {}),
+      };
+    }
+    case 'text': {
+      const text = textOf(m['text']);
+      return text === null ? null : { type: 'text', text };
+    }
+    case 'speech.start':
+    case 'speech.cancel':
+    case 'hangup':
+      return { type: m['type'] };
+    case 'ptt':
+      return typeof m['down'] === 'boolean' ? { type: 'ptt', down: m['down'] } : null;
+    case 'playback.progress': {
+      const { segmentId, playedMs, done } = m;
+      if (!isCount(segmentId) || typeof playedMs !== 'number' || typeof done !== 'boolean') return null;
+      return { type: 'playback.progress', segmentId, playedMs, done };
+    }
+    case 'focus': {
+      const target = m['target'];
+      if (target === 'chief') return { type: 'focus', target };
+      if (typeof target === 'object' && target !== null) {
+        const sessionId = (target as Record<string, unknown>)['sessionId'];
+        if (typeof sessionId === 'string' && sessionId !== '') return { type: 'focus', target: { sessionId } };
+      }
+      return null;
+    }
+    case 'metrics': {
+      const { turn, firstAudioPlayedAt } = m;
+      if (!isCount(turn) || typeof firstAudioPlayedAt !== 'string') return null;
+      return { type: 'metrics', turn, firstAudioPlayedAt };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Parses `?focus=chief` / `?focus=session:<id>`; anything else is chief. */
+export function parseFocus(raw: string | null): CallFocus {
+  if (raw !== null && raw.startsWith('session:') && raw.length > 'session:'.length) {
+    return { kind: 'session', sessionId: raw.slice('session:'.length) };
+  }
+  return { kind: 'chief' };
+}
+
+function textOf(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text === '' || text.length > MAX_TEXT_CHARS ? null : text;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}

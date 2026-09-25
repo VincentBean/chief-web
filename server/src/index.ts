@@ -70,11 +70,12 @@ async function main(): Promise<void> {
 
   // The orchestrator is shared with the API: the same client that reconciled
   // at startup is the one that spawns a container for a new session (US-010).
-  const app = createApp(config, auth, db, { terminals, orchestrator, buildLogs });
-
-  // Terminals (US-007) and build logs (US-016) register their routes here;
-  // the gateway enforces the same session cookie on every handshake.
+  // Terminals (US-007) and build logs (US-016) register their routes here,
+  // and the voice call socket (voice US-007) inside `createApp`; the gateway
+  // enforces the same session cookie on every handshake.
   const gateway = new WebSocketGateway(auth);
+  const app = createApp(config, auth, db, { terminals, orchestrator, buildLogs, gateway });
+
   gateway.register(createTerminalSocketRoute(terminals));
   gateway.register(createBuildLogSocketRoute(buildLogs));
 
