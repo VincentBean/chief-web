@@ -35,6 +35,16 @@ const asModel = (value: string): AgentModel | null => (value === '' ? null : (va
 
 const asAdvisor = (value: string): AdvisorModel | null => (value === '' ? null : (value as AdvisorModel));
 
+/** Mirrors the server's `DEFAULT_PLANNING_QUESTIONS`, for the Restore defaults button. */
+const DEFAULT_PLANNING_QUESTIONS = ['Any open questions?', 'Re-check the entire PRD for issues, gaps and other unwanted behaviour'];
+
+/** One question per line; blank lines are dropped, the rest trimmed, order kept. */
+const toQuestions = (text: string): string[] =>
+  text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+
 // xterm.js only matters once an operator actually signs Claude in.
 const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
 
@@ -65,6 +75,9 @@ export function Settings() {
    * that scrolls away does not say which.
    */
   const [advisorError, setAdvisorError] = useState<string | null>(null);
+  const [planningQuestions, setPlanningQuestions] = useState('');
+  /** The server's refusal of the planning questions, kept under the textarea like `advisorError`. */
+  const [questionsError, setQuestionsError] = useState<string | null>(null);
   const [codeReviewDefault, setCodeReviewDefault] = useState(false);
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
@@ -122,6 +135,7 @@ export function Settings() {
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
     setAdvisorModel(loaded.advisorModel ?? '');
+    setPlanningQuestions(loaded.planningQuestions.join('\n'));
     setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
     setAuthorEmail(loaded.gitAuthorEmail);
@@ -131,10 +145,13 @@ export function Settings() {
     setSentryBaseUrl(loaded.sentryBaseUrl);
   }
 
-  const run = (kind: NonNullable<typeof busy>, action: () => Promise<string>): void => {
+  // An action resolving to `null` has already said what went wrong on the page itself.
+  const run = (kind: NonNullable<typeof busy>, action: () => Promise<string | null>): void => {
     setBusy(kind);
     action()
-      .then((message) => toast.ok(message))
+      .then((message) => {
+        if (message !== null) toast.ok(message);
+      })
       .catch((error: unknown) => toast.error(describeError(error)))
       .finally(() => setBusy(null));
   };
@@ -198,6 +215,7 @@ export function Settings() {
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
       advisorModel: asAdvisor(advisorModel),
+      planningQuestions: toQuestions(planningQuestions),
       codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
       gitAuthorEmail: authorEmail.trim() === '' ? null : authorEmail.trim(),
@@ -212,18 +230,26 @@ export function Settings() {
     if (token.trim() !== '') update.githubToken = token.trim();
     if (sentryToken.trim() !== '') update.sentryToken = sentryToken.trim();
     setAdvisorError(null);
+    setQuestionsError(null);
     run('save', async () => {
       // One rejection names a single field rather than the save as a whole, so
       // it is caught here and re-thrown: the toast still fires, and the message
-      // also stays put under the field the operator has to change.
-      applyLoaded(
-        await saveSettings(update).catch((error: unknown) => {
-          if (error instanceof ApiError && error.code === 'invalid_advisor_model') {
-            setAdvisorError(error.message);
-          }
-          throw error;
-        }),
-      );
+      // also stays put under the field the operator has to change. Refused
+      // planning questions are said under the textarea only, not as a toast.
+      let saved: SettingsData;
+      try {
+        saved = await saveSettings(update);
+      } catch (error: unknown) {
+        if (error instanceof ApiError && error.code === 'invalid_planning_questions') {
+          setQuestionsError(error.message);
+          return null;
+        }
+        if (error instanceof ApiError && error.code === 'invalid_advisor_model') {
+          setAdvisorError(error.message);
+        }
+        throw error;
+      }
+      applyLoaded(saved);
       setToken('');
       setSentryToken('');
       return 'Settings saved.';
@@ -333,6 +359,7 @@ export function Settings() {
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
     advisorModel !== (settings.advisorModel ?? '') ||
+    planningQuestions !== settings.planningQuestions.join('\n') ||
     codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
     authorEmail !== settings.gitAuthorEmail ||
@@ -571,6 +598,37 @@ export function Settings() {
                 rates, and it is an experimental Claude Code feature.
               </p>
             </div>
+          </div>
+
+          <div className="field">
+            <div className="field__head">
+              <label className="field__label" htmlFor="planning-questions">
+                Planning questions
+              </label>
+              <button
+                type="button"
+                className="button button--small button--quiet"
+                onClick={() => {
+                  setPlanningQuestions(DEFAULT_PLANNING_QUESTIONS.join('\n'));
+                  setQuestionsError(null);
+                }}
+              >
+                Restore defaults
+              </button>
+            </div>
+            <textarea
+              id="planning-questions"
+              name="planning-questions"
+              className="field__input field__textarea"
+              value={planningQuestions}
+              onChange={(event) => {
+                setPlanningQuestions(event.target.value);
+                setQuestionsError(null);
+              }}
+              rows={4}
+            />
+            {questionsError !== null && <p className="field__error">{questionsError}</p>}
+            <p className="field__hint">Shown as buttons above the planning terminal. One question per line; each is sent as a single message.</p>
           </div>
 
           <div className="field">

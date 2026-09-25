@@ -114,6 +114,14 @@ story format it parses to both prompts.
   server owns the process. Reloading the page or opening a second tab rejoins
   the same conversation; only **Close terminal** ends it.
 
+Above the terminal sits a row of **quick question** buttons, one per entry of
+**Settings → Planning questions** — by default *Any open questions?* and
+*Re-check the entire PRD for issues, gaps and other unwanted behaviour*. A click
+sends the button's text to the terminal followed by Enter, exactly as if you had
+typed it, and puts the focus back in the terminal. The buttons are disabled
+unless planning is running and the terminal is connected; an empty list hides
+the row altogether.
+
 The page also shows a live indicator for `prd.md`: whether it exists, when it
 was last written, how many stories it holds, and — when it does not parse — the
 parse errors with their line numbers. It is polled from the workspace on the

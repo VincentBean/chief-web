@@ -245,6 +245,23 @@
     gap: 0.5rem;
   }
 
+  /*
+   * One-click questions above the planning terminal. A question is a whole
+   * sentence, so its button wraps its label instead of running off the panel.
+   */
+  .quick-questions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .quick-questions > .button {
+    max-width: 100%;
+    text-align: start;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
   .field__pair > .field__input {
     flex: 1 1 12rem;
     width: auto;

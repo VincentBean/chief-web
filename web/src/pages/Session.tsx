@@ -1,4 +1,4 @@
-import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
+import { type FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 
 import {
   backToPlanning,
@@ -43,6 +43,7 @@ import {
 import { Icon } from '../Icon.tsx';
 import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
+import type { PaneStatus, TerminalPaneHandle } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Facts, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
 import { DeletionWarning } from './Sessions.tsx';
@@ -707,6 +708,19 @@ function PlanningPanel({
   // WebSocket onto a PTY nothing on screen could show or type into.
   const desktop = useMediaQuery(DESKTOP_QUERY);
 
+  const toast = useToast();
+  const pane = useRef<TerminalPaneHandle>(null);
+  const [paneStatus, setPaneStatus] = useState<PaneStatus>('connecting');
+  const canAsk = planning.running && paneStatus === 'connected';
+
+  // Focus goes back to the terminal either way, so the operator can keep
+  // typing without clicking into it first.
+  const ask = (question: string) => {
+    const sent = pane.current?.send(question) ?? false;
+    if (!sent) toast.error('Not connected to the planning terminal.');
+    pane.current?.focus();
+  };
+
   return (
     <Panel
       title="Planning"
@@ -782,7 +796,26 @@ function PlanningPanel({
       {attached !== null &&
         (desktop ? (
           <Suspense fallback={<Skeleton lines={6} />}>
-            <TerminalPane terminalId={attached} size="tall" />
+            {planning.questions.length > 0 && (
+              <div className="field">
+                <div className="quick-questions">
+                  {planning.questions.map((question, index) => (
+                    <button
+                      // Questions may repeat, so the text alone is no key.
+                      key={`${String(index)}:${question}`}
+                      type="button"
+                      className="button button--small"
+                      onClick={() => ask(question)}
+                      disabled={!canAsk}
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+                <p className="field__hint">Sends the question to Claude as if you typed it.</p>
+              </div>
+            )}
+            <TerminalPane ref={pane} terminalId={attached} size="tall" onStatus={setPaneStatus} />
           </Suspense>
         ) : (
           <Notice kind="info">

@@ -128,10 +128,43 @@ const MS_PER_MINUTE = 60_000;
 const VISIBLE_TOKEN_CHARS = 4;
 
 /**
+ * The questions the planning terminal offers when none are stored: the two an
+ * operator ends every planning session with.
+ */
+export const DEFAULT_PLANNING_QUESTIONS: readonly string[] = [
+  'Any open questions?',
+  'Re-check the entire PRD for issues, gaps and other unwanted behaviour',
+];
+
+/** Upper bounds on the planning questions, so the button row stays usable. */
+export const MAX_PLANNING_QUESTIONS = 10;
+export const MAX_PLANNING_QUESTION_CHARS = 500;
+
+/**
+ * Cleans a planning-question list as the operator entered it: every entry is
+ * trimmed and blank ones are dropped. Returns `null` when the list cannot be
+ * stored — too many entries, one too long, or one containing a control
+ * character. A newline is the one that matters: typed into the terminal it
+ * would submit the question halfway through, so it is refused, not stripped.
+ */
+export function normalizePlanningQuestions(entries: readonly unknown[]): string[] | null {
+  const questions: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || /\p{Cc}/u.test(entry)) return null;
+    const question = entry.trim();
+    if (question === '') continue;
+    if (question.length > MAX_PLANNING_QUESTION_CHARS) return null;
+    questions.push(question);
+  }
+  return questions.length > MAX_PLANNING_QUESTIONS ? null : questions;
+}
+
+/**
  * Commit identity used inside runner containers (US-006). The same defaults are
  * baked into the runner image, so a container started without these environment
  * variables still commits successfully.
  */
+
 export const DEFAULT_GIT_AUTHOR_NAME = 'chief-web';
 export const DEFAULT_GIT_AUTHOR_EMAIL = 'chief-web@localhost';
 
@@ -184,6 +217,8 @@ export interface AppSettings {
   readonly advisorModel: AdvisorModel | null;
   /** Whether new sessions are created with the code-review flag already on. */
   readonly codeReviewDefault: boolean;
+  /** Standard questions offered in the planning terminal; never absent. */
+  readonly planningQuestions: string[];
   readonly gitAuthorName: string;
   readonly gitAuthorEmail: string;
 }
@@ -211,6 +246,8 @@ export interface AppSettingsUpdate {
   /** `null` means no advisor at all; omitted leaves the stored value. */
   readonly advisorModel?: AdvisorModel | null;
   readonly codeReviewDefault?: boolean;
+  /** `null` restores the default questions; omitted leaves the stored list. */
+  readonly planningQuestions?: string[] | null;
   /** `null` restores the built-in default; omitted leaves the stored value. */
   readonly gitAuthorName?: string | null;
   readonly gitAuthorEmail?: string | null;
@@ -508,6 +545,25 @@ export function getCodeReviewDefault(db: Database): boolean {
   return getSetting(db, 'code_review_default') === '1';
 }
 
+/**
+ * The standard planning questions (US-001). A row that is not a JSON array of
+ * strings falls back to the defaults rather than throwing, so a hand-edited or
+ * corrupt value can never take the settings page or the terminal down with it.
+ */
+export function getPlanningQuestions(db: Database): string[] {
+  const stored = getSetting(db, 'planning_questions');
+  if (stored === null) return [...DEFAULT_PLANNING_QUESTIONS];
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (Array.isArray(parsed) && parsed.every((q) => typeof q === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // Unparseable: fall through to the defaults.
+  }
+  return [...DEFAULT_PLANNING_QUESTIONS];
+}
+
 /** The commit identity runner containers are started with (US-006). */
 export function getGitIdentity(db: Database): GitIdentity {
   return {
@@ -542,6 +598,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     reviewModel: getReviewModel(db),
     advisorModel: getAdvisorModel(db),
     codeReviewDefault: getCodeReviewDefault(db),
+    planningQuestions: getPlanningQuestions(db),
     gitAuthorName: identity.name,
     gitAuthorEmail: identity.email,
   };
@@ -620,6 +677,12 @@ export function updateAppSettings(
 
     if (update.codeReviewDefault !== undefined) {
       setSetting(db, 'code_review_default', update.codeReviewDefault ? '1' : '0');
+    }
+
+    // `null` clears the row, which brings the default questions back.
+    if (update.planningQuestions === null) deleteSetting(db, 'planning_questions');
+    else if (update.planningQuestions !== undefined) {
+      setSetting(db, 'planning_questions', JSON.stringify(update.planningQuestions));
     }
 
     // `null` clears the row, which makes the built-in default apply again.

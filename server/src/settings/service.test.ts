@@ -14,11 +14,13 @@ import {
 import {
   ADVISOR_MODELS,
   AGENT_MODELS,
+  DEFAULT_PLANNING_QUESTIONS,
   getAdvisorModel,
   getBuildModel,
   getCodeReviewDefault,
   getConflictFixEnabled,
   getPlanningModel,
+  getPlanningQuestions,
   getPrConflictIntervalMs,
   getReviewModel,
   getSentryBaseUrl,
@@ -95,6 +97,70 @@ describe('review model setting (US-001)', () => {
     assert.equal(getPlanningModel(db), 'opus');
     assert.equal(getBuildModel(db), 'sonnet');
     assert.equal(getReviewModel(db), null);
+  });
+});
+
+describe('planning questions setting (US-001)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'planning_questions');
+  });
+
+  it('defaults to the two questions every planning session ends with', () => {
+    assert.deepEqual(DEFAULT_PLANNING_QUESTIONS, [
+      'Any open questions?',
+      'Re-check the entire PRD for issues, gaps and other unwanted behaviour',
+    ]);
+    assert.deepEqual(getPlanningQuestions(db), DEFAULT_PLANNING_QUESTIONS);
+    assert.deepEqual(readAppSettings(db, config).planningQuestions, DEFAULT_PLANNING_QUESTIONS);
+  });
+
+  it('round-trips a stored list as a JSON array', () => {
+    const saved = updateAppSettings(db, config, { planningQuestions: ['First?', 'Second?'] });
+
+    assert.deepEqual(saved.planningQuestions, ['First?', 'Second?']);
+    assert.deepEqual(getPlanningQuestions(db), ['First?', 'Second?']);
+    assert.equal(getSetting(db, 'planning_questions'), '["First?","Second?"]');
+  });
+
+  it('stores an empty list as a deliberate choice, not the defaults', () => {
+    assert.deepEqual(updateAppSettings(db, config, { planningQuestions: [] }).planningQuestions, []);
+  });
+
+  it('clears the row on null, which restores the defaults', () => {
+    updateAppSettings(db, config, { planningQuestions: ['Only one?'] });
+
+    const cleared = updateAppSettings(db, config, { planningQuestions: null });
+
+    assert.deepEqual(cleared.planningQuestions, DEFAULT_PLANNING_QUESTIONS);
+    assert.equal(getSetting(db, 'planning_questions'), null);
+  });
+
+  it('leaves the stored list alone when an update omits it', () => {
+    updateAppSettings(db, config, { planningQuestions: ['Kept?'] });
+
+    const saved = updateAppSettings(db, config, { maxConcurrentSessions: 4 });
+
+    assert.deepEqual(saved.planningQuestions, ['Kept?']);
+  });
+
+  it('falls back to the defaults on a corrupt value instead of throwing', () => {
+    for (const corrupt of ['not json', '{"a":1}', '"text"', 'null', '[1,2]', '["ok",null]']) {
+      setSetting(db, 'planning_questions', corrupt);
+      assert.deepEqual(getPlanningQuestions(db), DEFAULT_PLANNING_QUESTIONS, corrupt);
+    }
+  });
+
+  it('hands out a copy of the defaults, so a caller cannot mutate them', () => {
+    getPlanningQuestions(db).push('Mutated?');
+
+    assert.equal(DEFAULT_PLANNING_QUESTIONS.length, 2);
   });
 });
 
