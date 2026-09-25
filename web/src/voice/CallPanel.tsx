@@ -262,6 +262,17 @@ export function CallPanel() {
           >
             <Icon name={call.voiceMuted ? 'mute' : 'unmute'} />
           </button>
+          {live && (call.phase === 'thinking' || call.phase === 'speaking') && (
+            <button
+              type="button"
+              className="button button--icon"
+              aria-label="Stop the agent"
+              title="Stop the agent (or talk over it, or hold to talk)"
+              onClick={call.stopAgent}
+            >
+              <Icon name="stop" />
+            </button>
+          )}
           <span className="call-panel__spacer" />
           {inCall ? (
             <button type="button" className="button button--danger-solid" onClick={call.hangup}>

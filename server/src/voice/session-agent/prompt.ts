@@ -1,4 +1,5 @@
 import { containerPrdDir, type PlanningMode, type PlanningPromptInput, planningPrompt } from '../../planning/prompts.js';
+import { cutOffNote } from '../cut-off.js';
 
 /**
  * What a session voice agent is told (plan Appendix A.2): the voice rules on
@@ -60,19 +61,14 @@ export function voicePlanningPrompt(mode: PlanningMode, input: VoicePlanningProm
   return body + voiceModeOverrides(mode, `${containerPrdDir(input.sessionName)}/prd.md`, firstWords);
 }
 
-/** How much of an interrupted reply the next utterance quotes back. */
-export const INTERRUPTED_QUOTE_CHARS = 200;
-
 /**
  * An utterance as the agent reads it (plan §10.2): `[voice] <text>`, or after
- * an interrupt `[voice][interrupted after: "…"] <text>` quoting the tail of
- * what the operator actually heard.
+ * an interrupt `[voice] [You were interrupted after saying: "…"] <text>`
+ * quoting the tail of what the operator actually heard (US-020).
  */
 export function voiceUtterance(text: string, interruptedAfter: string | null = null): string {
   if (interruptedAfter === null) return `[voice] ${text}`;
-  const heard = interruptedAfter.replace(/\s+/g, ' ').trim();
-  const quoted = heard.length <= INTERRUPTED_QUOTE_CHARS ? heard : `…${heard.slice(-(INTERRUPTED_QUOTE_CHARS - 1))}`;
-  return `[voice][interrupted after: "${quoted}"] ${text}`;
+  return `[voice] ${cutOffNote(interruptedAfter)} ${text}`;
 }
 
 function languageName(code: string): string {

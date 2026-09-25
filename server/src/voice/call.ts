@@ -203,7 +203,9 @@ export class VoiceCall {
   /** True once the `voice_calls` row exists (at `ready`). */
   private persisted = false;
   private segmentSeq = 0;
-  private readonly segmentTexts = new Map<number, { turn: number; text: string }>();
+  private readonly segmentTexts = new Map<number, SpokenSegment>();
+  /** What the browser reported played of each segment of the current turn, for `spokenSoFar`. */
+  private readonly heard = new Map<number, string>();
   /** The agent reply row of each turn, for `metrics`. */
   private readonly replyRows = new Map<number, number>();
   private running: Promise<void> = Promise.resolve();
@@ -417,28 +419,26 @@ export class VoiceCall {
         this.submitText(message.text, this.isoNow());
         return;
       case 'speech.start':
-        // Barge-in on speech start is US-020; for now it is only a sign of
-        // life, and background events wait until the utterance is in.
+        // Background events wait until the utterance is in.
         this.speechOpenSince = this.deps.clock.now();
         this.touch();
+        this.bargeIn('speech');
         return;
       case 'speech.cancel':
+        // A VAD misfire: a tentative barge-in stays undone. The turn it cut
+        // is over and its audio is not played again; the call just listens.
         this.speechOpenSince = null;
         this.touch();
         return;
       case 'ptt':
         this.speechOpenSince = message.down ? this.deps.clock.now() : null;
         this.touch();
+        if (message.down) this.bargeIn('ptt');
         return;
-      case 'playback.progress': {
+      case 'playback.progress':
         this.touch();
-        const segment = this.segmentTexts.get(message.segmentId);
-        if (message.done && segment !== undefined && segment.turn === this.state.turn) {
-          this.state.spokenSoFar = `${this.state.spokenSoFar} ${segment.text}`.trim();
-          this.segmentTexts.delete(message.segmentId);
-        }
+        this.notePlayed(message.segmentId, message.playedMs, message.done);
         return;
-      }
       case 'focus':
         this.switchFocus(message.target === 'chief' ? { kind: 'chief' } : { kind: 'session', sessionId: message.target.sessionId });
         return;
@@ -485,6 +485,51 @@ export class VoiceCall {
     this.deps.onEnded?.(this);
     await this.running.catch(() => undefined);
     await this.tts?.close();
+  }
+
+  /* ------------------------------------------------------------ barge-in */
+
+  /** What the operator heard of the current turn: the cut-off note quotes it. */
+  spokenSoFar(): string {
+    return this.state.spokenSoFar;
+  }
+
+  /**
+   * The operator started talking over the turn in progress (plan §13.5): it
+   * is aborted, which cuts the model stream, cancels the TTS turn and sends
+   `tts.stop` (the browser stopped playing already). A handler that is
+   * running finishes. With `voice_barge_in` off, speech during playback is
+   * ignored; push-to-talk (and the stop button) always interrupt.
+   */
+  private bargeIn(source: 'speech' | 'ptt'): void {
+    const turn = this.state.activeTurn;
+    const phase = this.state.phase;
+    if (turn === null || (phase !== 'thinking' && phase !== 'speaking')) return;
+    if (source === 'speech' && phase === 'speaking' && getVoiceSettings(this.deps.db).bargeIn === 'off') return;
+    turn.abort(new Error('barge-in'));
+  }
+
+  /**
+   * `playback.progress` → `spokenSoFar` (plan §8.4): a finished segment
+   * counts whole; a partial one by the share of its audio played, mapped
+   * proportionally onto its characters.
+   */
+  private notePlayed(segmentId: number, playedMs: number, done: boolean): void {
+    const segment = this.segmentTexts.get(segmentId);
+    if (segment === undefined) return;
+    if (done) this.segmentTexts.delete(segmentId);
+    if (segment.turn !== this.state.turn) return;
+    let text = segment.text;
+    if (!done) {
+      const share = playedShare(segment, playedMs);
+      text = segment.text.slice(0, Math.round(segment.text.length * share)).trimEnd();
+    }
+    this.heard.set(segmentId, text);
+    this.state.spokenSoFar = [...this.heard]
+      .sort(([a], [b]) => a - b)
+      .map(([, played]) => played)
+      .filter((played) => played !== '')
+      .join(' ');
   }
 
   /* --------------------------------------------------------------- turns */
@@ -597,10 +642,39 @@ export class VoiceCall {
     const tts = this.tts;
     if (tts === null) return;
     const turn = ++this.state.turn;
+    this.state.spokenSoFar = '';
+    this.heard.clear();
+    // Reports about an earlier turn's audio no longer count.
+    for (const [id, segment] of this.segmentTexts) if (segment.turn !== turn) this.segmentTexts.delete(id);
+    // Cut at once, not when the agent has wound down: an interrupted session
+    // agent may take seconds to reach its `result` (plan §10.5).
+    const cut = (): void => {
+      tts.cancelTurn(turn);
+      this.send({ type: 'tts.stop', turn });
+    };
+    if (signal.aborted) cut();
+    else signal.addEventListener('abort', cut, { once: true });
+    try {
+      await this.answer(text, turn, controller, times, clicked, mode);
+    } finally {
+      signal.removeEventListener('abort', cut);
+    }
+  }
+
+  private async answer(
+    text: string,
+    turn: number,
+    controller: AbortController,
+    times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
+    clicked: AgentInput['resolution'],
+    mode: 'user' | 'event' | 'greeting',
+  ): Promise<void> {
+    const { signal } = controller;
+    const tts = this.tts;
+    if (tts === null) return;
     const background = mode === 'event';
     // Background events are always chief's to speak; the focus stays put.
     let focus: CallFocus = background ? { kind: 'chief' } : this.state.focus;
-    this.state.spokenSoFar = '';
 
     if (mode !== 'greeting') {
       if (!background) this.send({ type: 'user.transcript', turn, text });
@@ -663,7 +737,9 @@ export class VoiceCall {
         ...(resolution === undefined ? {} : { resolution }),
         ...(invoke === undefined ? {} : { invoke }),
       })) {
-        if (signal.aborted) break;
+        // Past a barge-in only a finished tool's card still goes out.
+        const late = signal.aborted;
+        if (late && !(event.type === 'tool' && event.status !== 'running')) break;
         switch (event.type) {
           case 'delta':
             marks.tFirstToken ??= this.isoNow();
@@ -690,6 +766,7 @@ export class VoiceCall {
             this.addUsage({ orCostUsd: event.costUsd });
             break;
         }
+        if (late) break;
       }
       if (!signal.aborted) {
         flushed = [];
@@ -710,10 +787,6 @@ export class VoiceCall {
     await Promise.allSettled(speaks);
 
     const interrupted = signal.aborted;
-    if (interrupted) {
-      tts.cancelTurn(turn);
-      this.send({ type: 'tts.stop', turn });
-    }
     this.send({ type: 'agent.done', turn, interrupted });
     if (reply !== '' || tools.length > 0) {
       const row = insertVoiceTurn(this.deps.db, {
@@ -736,11 +809,8 @@ export class VoiceCall {
     this.send({ type: 'agent.delta', turn, agent: 'chief', text });
     const spoken = toSpeakable(text, getVoiceSettings(this.deps.db).pronunciations);
     await this.speak(tts, turn, spoken, true, signal, {}).catch(() => undefined);
+    // `runTurn` already sent `tts.stop` if this was cut off.
     const interrupted = signal.aborted;
-    if (interrupted) {
-      tts.cancelTurn(turn);
-      this.send({ type: 'tts.stop', turn });
-    }
     this.send({ type: 'agent.done', turn, interrupted });
     const row = insertVoiceTurn(this.deps.db, { callId: this.id, turn, speaker: 'chief', text, interrupted });
     this.replyRows.set(turn, row.id);
@@ -778,12 +848,14 @@ export class VoiceCall {
     marks: { tFirstAudioSent?: string },
   ): Promise<void> {
     const segmentId = ++this.segmentSeq;
-    this.segmentTexts.set(segmentId, { turn, text });
+    const entry: SpokenSegment = { turn, text, bytes: 0, sampleRate: 0 };
+    this.segmentTexts.set(segmentId, entry);
     let started = false;
     try {
       await tts.speak({ segmentId, turn, text, last }, signal, {
         onStart: (format) => {
           started = true;
+          entry.sampleRate = format.kind === 'pcm16' ? format.sampleRate : 0;
           this.setPhase('speaking');
           this.send({
             type: 'tts.segment',
@@ -797,6 +869,7 @@ export class VoiceCall {
         onAudio: (chunk) => {
           if (signal.aborted) return;
           marks.tFirstAudioSent ??= this.isoNow();
+          entry.bytes += chunk.length;
           this.transport?.sendAudio(segmentId, chunk);
           this.touch();
         },
@@ -1015,6 +1088,28 @@ export class VoiceCall {
   private isoNow(): string {
     return new Date(this.deps.clock.now()).toISOString();
   }
+}
+
+/** A segment sent to the browser, until its playback is reported done. */
+interface SpokenSegment {
+  readonly turn: number;
+  readonly text: string;
+  /** Audio bytes sent so far, and the PCM rate (0 for MP3), for the played share. */
+  bytes: number;
+  sampleRate: number;
+}
+
+/** Speech rate for MP3 segments, whose length the bytes do not tell: about 15 characters a second. */
+const CHARS_PER_SECOND = 15;
+
+/** The share of `segment` that `playedMs` of playback covers, 0–1. */
+function playedShare(segment: SpokenSegment, playedMs: number): number {
+  if (playedMs <= 0 || segment.text === '') return 0;
+  const lengthMs =
+    segment.sampleRate > 0 && segment.bytes > 0
+      ? (segment.bytes / 2 / segment.sampleRate) * 1000
+      : (segment.text.length / CHARS_PER_SECOND) * 1000;
+  return Math.min(1, playedMs / lengthMs);
 }
 
 function sameFocus(a: CallFocus, b: CallFocus): boolean {

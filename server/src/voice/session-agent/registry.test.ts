@@ -33,82 +33,7 @@ import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './age
 import { VOICE_PID_DIR, voicePidFile } from './process.js';
 import { voiceUtterance } from './prompt.js';
 import { NOT_PENDING_REASON, SessionAgentError, SessionAgentRegistry } from './registry.js';
-
-/* ------------------------------------------------------------ fake claude */
-
-const CLAUDE_SESSION = 'claude-conv-1';
-
-const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
-
-/** A stream-json `claude`: one scripted turn per user line, shaped like the fixtures. */
-class FakeClaude {
-  /** Every stdin line per exec id, parsed. */
-  readonly stdin = new Map<string, Record<string, unknown>[]>();
-  private message = 0;
-
-  constructor(private readonly daemon: FakeDockerDaemon) {
-    daemon.onExec = (exec) => (exec.attachStdin && !exec.tty ? this.agent(exec) : this.signal(exec));
-  }
-
-  agentExecs(): FakeExec[] {
-    return this.daemon.execs().filter((exec) => exec.attachStdin && !exec.tty);
-  }
-
-  userTexts(execId: string): string[] {
-    return (this.stdin.get(execId) ?? [])
-      .filter((entry) => entry['type'] === 'user')
-      .map((entry) => ((entry['message'] as { content: { text: string }[] }).content[0] as { text: string }).text);
-  }
-
-  private agent(exec: FakeExec): { onLine: (text: string) => void } {
-    const lines: Record<string, unknown>[] = [];
-    this.stdin.set(exec.id, lines);
-    const emit = (value: unknown): void => this.daemon.emitFramed(exec.id, line(value));
-    return {
-      onLine: (text) => {
-        const entry = JSON.parse(text) as Record<string, unknown>;
-        lines.push(entry);
-        if (entry['type'] === 'control_request') {
-          emit({ type: 'control_response', response: { subtype: 'success', request_id: entry['request_id'] } });
-          emit({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_streaming', duration_ms: 5, total_cost_usd: 0 });
-          return;
-        }
-        const said = ((entry['message'] as { content: { text: string }[] }).content[0] as { text: string }).text;
-        if (said.includes('#crash')) {
-          this.daemon.finish(exec.id, 1);
-          return;
-        }
-        const id = `msg_${String(++this.message)}`;
-        emit({ type: 'system', subtype: 'init', session_id: CLAUDE_SESSION, model: 'claude-sonnet' });
-        if (said.includes('#read')) {
-          emit({ type: 'assistant', message: { id: `${id}t`, content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/workspace/repo/server/src/auth/service.ts' } }] }, parent_tool_use_id: null });
-          emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }] }, parent_tool_use_id: null });
-        }
-        emit({ type: 'stream_event', event: { type: 'message_start', message: { id } }, parent_tool_use_id: null });
-        emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent_tool_use_id: null });
-        emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Heard you. ' } }, parent_tool_use_id: null });
-        if (said.includes('#hang')) return; // never ends the turn on its own
-        emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'What next?' } }, parent_tool_use_id: null });
-        emit({ type: 'result', subtype: 'success', is_error: false, duration_ms: 10, total_cost_usd: 0.01 });
-      },
-    };
-  }
-
-  /** `voiceSignalSpec`: the pid file names the session; the signal ends its agent. */
-  private signal(exec: FakeExec): { stdout: string } {
-    const command = exec.cmd.join(' ');
-    const kill = /kill -([A-Z]+)/.exec(command);
-    const pidFile = /\/tmp\/\.chief-voice\/[^ ;]+\.pid/.exec(command)?.[0];
-    const target = this.agentExecs().find(
-      (agent) => agent.running && agent.containerId === exec.containerId && pidFile !== undefined && agent.cmd.join(' ').includes(pidFile),
-    );
-    if (kill !== null && target !== undefined) {
-      this.daemon.finish(target.id, kill[1] === 'INT' ? 130 : 143);
-      return { stdout: 'chief-signalled\n' };
-    }
-    return { stdout: '' };
-  }
-}
+import { CLAUDE_SESSION, FakeClaude } from './__fixtures__/fake-claude.js';
 
 /* ------------------------------------------------------------------ world */
 
@@ -338,8 +263,29 @@ describe('session voice agents', () => {
     assert.ok(exec);
     const lines = claude.stdin.get(exec.id) ?? [];
     assert.equal(lines.filter((entry) => entry['type'] === 'control_request').length, 1);
-    assert.equal(claude.userTexts(exec.id).at(-1), '[voice][interrupted after: "Heard you."] shorter please');
+    assert.equal(claude.userTexts(exec.id).at(-1), '[voice] [You were interrupted after saying: "Heard you."] shorter please');
     assert.equal(voiceUtterance('x', null), '[voice] x');
+  });
+
+  it('SIGINTs an agent that ignores the interrupt after the grace period, and resumes it on the next utterance', async () => {
+    const session = newSession('deaf-to-it');
+    const call = controls();
+    const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call, interruptGraceMs: 50 });
+    await turn(agent, 'hello');
+
+    const controller = new AbortController();
+    for await (const event of agent.run({ text: '#deaf go on', turn: 2, signal: controller.signal })) {
+      if (event.type === 'delta') controller.abort(new Error('barge-in'));
+    }
+    const execs = (): FakeExec[] => claude.agentExecs().filter((entry) => entry.containerId === `c-${session.id}`);
+    const first = execs()[0] as FakeExec;
+    await waitUntil(() => !first.running);
+    assert.ok(daemon.execs().some((exec) => exec.cmd.join(' ').includes('kill -INT')));
+
+    const events = await turn(agent, 'still there?');
+    assert.equal(spoken(events), 'Heard you. What next?');
+    const resumed = execs()[1] as FakeExec;
+    assert.deepEqual(resumed.cmd.slice(resumed.cmd.indexOf('--resume'), resumed.cmd.indexOf('--resume') + 2), ['--resume', CLAUDE_SESSION]);
   });
 
   it('restarts a crashed agent once with --resume after telling the operator, then hands back to chief', async () => {
@@ -505,3 +451,11 @@ describe('session voice agents', () => {
     assert.equal(toolCardSummary('Mystery', {}), 'Using Mystery');
   });
 });
+
+async function waitUntil(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail('condition never became true');
+}

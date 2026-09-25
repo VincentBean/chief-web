@@ -24,6 +24,13 @@ export const VAD_NEGATIVE_THRESHOLD = 0.35;
 export const VAD_MIN_SPEECH_FRAMES = 8; // ≈ 250 ms
 export const VAD_PRE_SPEECH_PAD_FRAMES = 10;
 
+/** `voice_barge_in` (plan §13.5). */
+export type BargeInMode = 'on' | 'careful' | 'off';
+/** `careful` while the agent is audible: a stricter speech score… */
+export const CAREFUL_POSITIVE_THRESHOLD = 0.8;
+/** …held for this long before the speech counts as the operator talking over it. */
+export const CAREFUL_MIN_SPEECH_MS = 300;
+
 /** `voice_vad_silence_ms` → the frames of silence that end an utterance. */
 export function redemptionFrames(silenceMs: number): number {
   return Math.max(1, Math.round(silenceMs / VAD_FRAME_MS));
@@ -51,6 +58,10 @@ export function vadThresholds(silenceMs: number): {
 }
 
 export interface VadSink {
+  /**
+   * The operator started talking. While the agent is audible this is a
+   * barge-in, so it only comes once {@link BargeInMode} lets it through.
+   */
   speechStart(): void;
   speechCancel(): void;
   /** One utterance, 16 kHz mono PCM16 WAV. */
@@ -72,6 +83,10 @@ export async function startVad(opts: {
   ctx: AudioContext;
   silenceMs: number;
   sink: VadSink;
+  /** The current `voice_barge_in` setting. */
+  bargeIn: () => BargeInMode;
+  /** Whether the agent's voice is playing right now. */
+  playing: () => boolean;
 }): Promise<Vad> {
   const { MicVAD } = await import('@ricky0123/vad-web');
   const thresholds = vadThresholds(opts.silenceMs);
@@ -82,6 +97,15 @@ export async function startVad(opts: {
   let splitAt: number | null = null;
   let splitting = false;
   let vad: MicVAD | null = null;
+  /**
+   * What the speech in progress is (plan §13.5): `open` was announced and is
+   * sent; `waiting` started over the agent's voice in `careful` mode and needs
+   * {@link CAREFUL_MIN_SPEECH_MS} of confident speech first; `ignored` started
+   * over it in `off` mode. Speech that never opens is dropped as echo.
+   */
+  let gate: 'open' | 'waiting' | 'ignored' = 'open';
+  let confidentFrames = 0;
+  let threshold = thresholds.positiveSpeechThreshold;
 
   // Force-splits a long utterance: pausing with `submitUserSpeechOnPause`
   // ends the segment (→ onSpeechEnd with the audio so far), and the restart
@@ -116,20 +140,41 @@ export async function startVad(opts: {
       speechFrames = 0;
       const continuation = splitAt !== null && performance.now() - splitAt < SPLIT_CONTINUATION_MS;
       splitAt = null;
-      if (!continuation) opts.sink.speechStart();
+      if (continuation) return;
+      const mode = opts.playing() ? opts.bargeIn() : 'on';
+      gate = mode === 'on' ? 'open' : mode === 'careful' ? 'waiting' : 'ignored';
+      confidentFrames = 0;
+      if (gate === 'open') opts.sink.speechStart();
     },
-    onFrameProcessed: () => {
-      if (!speaking || splitting || vad === null) return;
+    onFrameProcessed: (probs) => {
+      if (vad === null) return;
+      // `careful` raises the bar while the agent is audible, for its own voice leaking in.
+      const wanted = opts.bargeIn() === 'careful' && opts.playing() ? CAREFUL_POSITIVE_THRESHOLD : thresholds.positiveSpeechThreshold;
+      if (wanted !== threshold) {
+        threshold = wanted;
+        vad.setOptions({ positiveSpeechThreshold: wanted });
+      }
+      if (speaking && gate === 'waiting' && probs.isSpeech >= CAREFUL_POSITIVE_THRESHOLD) {
+        confidentFrames += 1;
+        if (confidentFrames * VAD_FRAME_MS >= CAREFUL_MIN_SPEECH_MS) {
+          gate = 'open';
+          opts.sink.speechStart();
+        }
+      }
+      if (!speaking || splitting) return;
       speechFrames += 1;
       if (speechFrames >= maxFrames) void split(vad);
     },
     onVADMisfire: () => {
       speaking = false;
-      opts.sink.speechCancel();
+      if (gate === 'open') opts.sink.speechCancel();
+      gate = 'open';
     },
     onSpeechEnd: (audio) => {
       speaking = false;
-      opts.sink.utterance(encodeWav(audio));
+      const heard = gate === 'open';
+      gate = 'open';
+      if (heard) opts.sink.utterance(encodeWav(audio));
     },
   });
   await vad.start();
@@ -137,8 +182,9 @@ export async function startVad(opts: {
 
   return {
     async pause() {
-      const wasSpeaking = speaking;
+      const wasSpeaking = speaking && gate === 'open';
       speaking = false;
+      gate = 'open';
       await instance.pause();
       if (wasSpeaking) opts.sink.speechCancel();
     },

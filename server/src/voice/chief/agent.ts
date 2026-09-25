@@ -3,6 +3,7 @@ import type { Database } from '../../db/index.js';
 import { logger } from '../../lib/logger.js';
 import { getOpenRouterApiKey, getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
+import { cutOffNote } from '../cut-off.js';
 import type { CallFocus } from '../protocol.js';
 import { type ChatEvent, type ChatMessage, type ChatToolCall, type StreamChatOptions, streamChat } from './openrouter-client.js';
 import { cancelledResult, CONFIRM_TOOL, type ConfirmationGate, runConfirmation } from './confirm.js';
@@ -16,6 +17,9 @@ export const CHIEF_TEMPERATURE = 0.4;
 export const CHIEF_MAX_TOKENS = 400;
 /** The summary of the turns that fell out of the window is short. */
 const SUMMARY_MAX_TOKENS = 200;
+
+/** The signal tool handlers get: only the model stream and the audio are cut on a barge-in. */
+const NEVER_ABORTED = new AbortController().signal;
 
 /** What chief says when OpenRouter is still failing after the client's retry. */
 export const BRAIN_UNREACHABLE: Readonly<Record<string, string>> = {
@@ -37,6 +41,8 @@ export interface ChiefCallControls {
   readonly confirmations: ConfirmationGate;
   /** Moves the call's focus (`focus_session`, voice US-018). */
   setFocus?(focus: CallFocus): void;
+  /** What the operator heard of the current turn (US-020), for the cut-off note. */
+  spokenSoFar?(): string;
 }
 
 export type ChatFn = (opts: StreamChatOptions) => AsyncIterable<ChatEvent>;
@@ -67,6 +73,8 @@ export class ChiefAgent implements VoiceAgent {
   private summarizing: Promise<void> | null = null;
   /** What the summaries cost; reported with the next turn's usage. */
   private unreportedCostUsd = 0;
+  /** What the operator heard of the reply they interrupted, for the next message's cut-off note. */
+  private interruptedAfter: string | null = null;
   private readonly chat: ChatFn;
   private readonly tools: ReadonlyMap<string, ChiefTool>;
   private readonly now: () => Date;
@@ -99,12 +107,16 @@ export class ChiefAgent implements VoiceAgent {
       yield { type: 'usage', costUsd: this.unreportedCostUsd };
       this.unreportedCostUsd = 0;
     }
-    this.messages.push({ role: 'user', content: input.text });
+    const note = this.interruptedAfter;
+    this.interruptedAfter = null;
+    this.messages.push({ role: 'user', content: note === null ? input.text : `${cutOffNote(note)} ${input.text}` });
     const definitions = [...this.tools.values()].map((entry) => entry.definition);
     /** Tool calls of the last assistant message still owed a `tool` answer. */
     let owed: ChatToolCall[] = [];
     /** Text streamed in this step and not yet in the history. */
     let unsaid = '';
+    /** Whether this turn had started to answer, so an interrupt cut it off. */
+    let spoke = false;
     try {
       if (input.resolution !== undefined) {
         // The operator already answered the pending confirmation ("yes", or
@@ -120,10 +132,10 @@ export class ChiefAgent implements VoiceAgent {
         owed = [call];
         yield { type: 'tool', id: call.id, name: CONFIRM_TOOL, status: 'running', summary: '' };
         const { name, result } = await this.resolveConfirmation(confirmationId, accept, { signal, turn });
-        yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
-        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
         this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
         owed = [];
+        yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
       } else if (input.invoke !== undefined) {
         // An intent already named the tool ("switch to billing export"): it
         // runs as chief's own call, and the model speaks about its result —
@@ -137,10 +149,10 @@ export class ChiefAgent implements VoiceAgent {
         owed = [call];
         yield { type: 'tool', id: call.id, name: call.function.name, status: 'running', summary: '' };
         const result = await this.execute(call, { signal, turn });
-        yield { type: 'tool', id: call.id, name: call.function.name, status: result.ok ? 'ok' : 'error', summary: result.summary };
-        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
         this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
         owed = [];
+        yield { type: 'tool', id: call.id, name: call.function.name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
       }
       for (let hop = 0; hop < this.deps.config.voiceChiefMaxToolHops; hop++) {
         let text = '';
@@ -159,6 +171,7 @@ export class ChiefAgent implements VoiceAgent {
             if (event.type === 'delta') {
               text += event.text;
               unsaid = text;
+              spoke = true;
               yield { type: 'delta', text: event.text };
             } else if (event.type === 'tool_call') {
               calls.push({ id: event.id, type: 'function', function: { name: event.name, arguments: event.arguments } });
@@ -184,11 +197,13 @@ export class ChiefAgent implements VoiceAgent {
           if (signal.aborted) throw signal.reason;
           const name = call.function.name;
           yield { type: 'tool', id: call.id, name, status: 'running', summary: '' };
+          // A barge-in does not stop a handler that has started: its result
+          // is in the history before the card goes out, whatever comes next.
           const result = await this.execute(call, { signal, turn });
-          yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
-          for (const ui of result.ui ?? []) yield { type: 'ui', ui };
           this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
           owed = owed.filter((entry) => entry !== call);
+          yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+          for (const ui of result.ui ?? []) yield { type: 'ui', ui };
         }
       }
       logger.warn('chief ran out of tool hops', { hops: this.deps.config.voiceChiefMaxToolHops });
@@ -196,6 +211,8 @@ export class ChiefAgent implements VoiceAgent {
       // An interrupted turn must still leave a history the API accepts:
       // every tool call answered, and what was said kept.
       if (unsaid !== '') this.messages.push({ role: 'assistant', content: unsaid });
+      // Talked over (US-020): the next message says how far the operator got.
+      if (signal.aborted && spoke) this.interruptedAfter = this.deps.call.spokenSoFar?.() ?? '';
       for (const call of owed) {
         this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'interrupted' }) });
       }
@@ -247,6 +264,8 @@ export class ChiefAgent implements VoiceAgent {
   private toolContext(ctx: { signal: AbortSignal; turn: number }): ToolContext {
     return {
       ...ctx,
+      // A handler is never aborted mid-write by a barge-in (US-020).
+      signal: NEVER_ABORTED,
       focus: this.deps.call.focus,
       endCall: () => this.deps.call.hangUpAfterTurn(),
       confirmations: this.deps.call.confirmations,

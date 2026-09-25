@@ -20,7 +20,7 @@ import {
   type ServerMessage,
 } from './protocol.ts';
 import { installSpaceToTalk, PushToTalkRecorder } from './ptt.ts';
-import { startVad, type Vad } from './vad.ts';
+import { type BargeInMode, startVad, type Vad } from './vad.ts';
 
 export type TalkMode = 'hands-free' | 'push-to-talk';
 
@@ -37,6 +37,8 @@ export interface CallAudioOptions {
   pttGlobal: boolean;
   /** The call panel; Space talks while focus is inside it. */
   panel: () => HTMLElement | null;
+  /** `voice_barge_in`: how speech over the agent's voice interrupts it (plan §13.5). */
+  bargeIn: BargeInMode;
 }
 
 export class CallAudio {
@@ -48,6 +50,7 @@ export class CallAudio {
   private removeSpace: (() => void) | null = null;
   private mode: TalkMode = 'hands-free';
   private pttGlobal = false;
+  private bargeIn: BargeInMode = 'careful';
   private closed = false;
 
   constructor(private readonly sink: CallAudioSink) {
@@ -58,6 +61,7 @@ export class CallAudio {
   async start(options: CallAudioOptions): Promise<void> {
     this.mode = options.mode;
     this.pttGlobal = options.pttGlobal;
+    this.bargeIn = options.bargeIn;
     const mic = await openMic(this.captureCtx);
     if (this.closed) {
       mic.close();
@@ -94,9 +98,22 @@ export class CallAudio {
     this.mic?.setMuted(muted);
   }
 
-  /** Space or the hold-to-talk button went down. Works in both modes. */
+  /**
+   * The stop button: the agent goes quiet here at once, and the server hears
+   * the `stop` intent, which interrupts the turn without a reply.
+   */
+  stopAgent(): void {
+    this.player.stop();
+    this.sink.json({ type: 'text', text: 'stop' });
+  }
+
+  /**
+   * Space or the hold-to-talk button went down. Works in both modes, and
+   * always interrupts the agent, whatever `voice_barge_in` says.
+   */
   pttDown(): void {
     if (this.recorder === null || this.recorder.active) return;
+    this.player.stop();
     this.sink.json({ type: 'ptt', down: true });
     void this.vad?.pause();
     this.recorder.start();
@@ -153,8 +170,15 @@ export class CallAudio {
       stream: mic.stream,
       ctx: this.captureCtx,
       silenceMs,
+      bargeIn: () => this.bargeIn,
+      playing: () => this.player.playing,
       sink: {
-        speechStart: () => this.sink.json({ type: 'speech.start' }),
+        speechStart: () => {
+          // Barge-in: silent here first (instant), and `stop()` reports what
+          // was heard before the server hears about the speech (plan §13.5).
+          this.player.stop();
+          this.sink.json({ type: 'speech.start' });
+        },
         speechCancel: () => this.sink.json({ type: 'speech.cancel' }),
         utterance: (wav) => this.sendUtterance(wav),
       },

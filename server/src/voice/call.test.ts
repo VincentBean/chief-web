@@ -1,21 +1,31 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { after, describe, it } from 'node:test';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, it } from 'node:test';
 
 import { WebSocket } from 'ws';
 
 import { createAuthService } from '../auth/index.js';
-import { loadConfig } from '../config.js';
+import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createRepository,
+  createSession,
   type Database,
+  featureBranchFor,
   getVoiceCall,
+  getVoiceSessionAgent,
   IN_MEMORY,
   listVoiceTurns,
   openDatabase,
   setSetting,
 } from '../db/index.js';
+import { DockerApi } from '../docker/index.js';
+import { FakeDockerDaemon } from '../docker/fake-daemon.js';
+import { sessionRepoDir } from '../orchestrator/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import { startScriptedOpenRouter, textReply, toolReply } from './chief/__fixtures__/scripted-openrouter.js';
@@ -35,6 +45,8 @@ import {
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
 import { RESUME_WINDOW_MS } from './service.js';
+import { CLAUDE_SESSION, FakeClaude, LONG_OPENING } from './session-agent/__fixtures__/fake-claude.js';
+import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
 import type { SttResult } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
@@ -86,6 +98,7 @@ class FakeTts implements CallTts {
   readonly providerName = 'elevenlabs' as const;
   readonly format = { kind: 'pcm16', sampleRate: 24000 } as const;
   readonly spoken: string[] = [];
+  readonly cancelled: number[] = [];
   constructor(private readonly sink: TtsSink) {}
   open(): Promise<void> {
     return Promise.resolve();
@@ -99,7 +112,9 @@ class FakeTts implements CallTts {
     }
     return Promise.resolve({ spoken: true, provider: 'elevenlabs', chars: seg.text.length });
   }
-  cancelTurn(): void {}
+  cancelTurn(turn: number): void {
+    this.cancelled.push(turn);
+  }
   close(): Promise<void> {
     return Promise.resolve();
   }
@@ -178,6 +193,7 @@ interface World {
   readonly clock: FakeClock;
   readonly stt: FakeStt;
   readonly agents: ScriptedAgent[];
+  readonly ttses: FakeTts[];
   readonly voice: Voice;
   connect(query?: string): Promise<Client>;
   /** Connects, says hello and waits for `ready`. */
@@ -196,7 +212,11 @@ after(async () => {
 });
 
 /** `chief`: the real chief agent over these services instead of {@link ScriptedAgent}. */
-async function world(env: Record<string, string> = {}, opts: { chief?: (db: Database) => ChiefServices } = {}): Promise<World> {
+/** `sessionAgents`: real session voice agents over this registry (and no scripted agent). */
+async function world(
+  env: Record<string, string> = {},
+  opts: { chief?: (db: Database) => ChiefServices; sessionAgents?: (db: Database, config: Config) => SessionAgentRegistry } = {},
+): Promise<World> {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', VOICE_IDLE_TIMEOUT_MS: String(IDLE_MS), ...env });
   const db = openDatabase(IN_MEMORY);
   setSetting(db, 'voice_enabled', '1');
@@ -206,12 +226,19 @@ async function world(env: Record<string, string> = {}, opts: { chief?: (db: Data
   const clock = new FakeClock();
   const stt = new FakeStt();
   const agents: ScriptedAgent[] = [];
+  const ttses: FakeTts[] = [];
   let calls = 0;
   const chief = opts.chief?.(db);
+  const sessionAgents = opts.sessionAgents?.(db, config);
   const voice = createVoice(config, db, {
     stt,
-    tts: (sink) => new FakeTts(sink),
-    ...(chief === undefined
+    tts: (sink) => {
+      const tts = new FakeTts(sink);
+      ttses.push(tts);
+      return tts;
+    },
+    ...(sessionAgents === undefined ? {} : { sessionAgents }),
+    ...(chief === undefined && sessionAgents === undefined
       ? {
           agent: () => {
             const agent = new ScriptedAgent();
@@ -219,7 +246,9 @@ async function world(env: Record<string, string> = {}, opts: { chief?: (db: Data
             return agent;
           },
         }
-      : { chief }),
+      : chief === undefined
+        ? {}
+        : { chief }),
     clock,
     newCallId: () => `call-${++calls}`,
   });
@@ -245,6 +274,7 @@ async function world(env: Record<string, string> = {}, opts: { chief?: (db: Data
     clock,
     stt,
     agents,
+    ttses,
     voice,
     connect,
     call: async (query = '') => {
@@ -512,6 +542,130 @@ describe('voice call socket', () => {
     assert.equal(originAllowed(req('https://chief.example'), 'https://chief.example/app'), true);
     assert.equal(originAllowed(req('https://evil.example'), 'https://chief.example'), false);
     assert.equal(originAllowed(req(), 'https://chief.example'), false);
+  });
+});
+
+describe('barge-in', () => {
+  let daemon: FakeDockerDaemon;
+  let claude: FakeClaude;
+  let dataDir: string;
+
+  before(async () => {
+    daemon = await FakeDockerDaemon.start();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-barge-in-'));
+  });
+
+  after(async () => {
+    await daemon.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  /** A call focused on a pending session whose agent is the fake `claude`. */
+  const sessionCall = async (name: string): Promise<{ w: World; client: Client; callId: string; stdin: () => string[]; lines: () => Record<string, unknown>[] }> => {
+    claude = new FakeClaude(daemon);
+    let sessionId = '';
+    const w = await world({ DATA_DIR: dataDir }, {
+      sessionAgents: (db, config) => {
+        const repository = createRepository(db, { name: `repo-${name}`, sshUrl: 'git@github.com:acme/demo.git', githubSlug: 'acme/demo', defaultBaseBranch: 'main' });
+        const session = createSession(db, {
+          repositoryId: repository.id,
+          name,
+          baseBranch: 'main',
+          prTargetBranch: 'main',
+          featureBranch: featureBranchFor(name),
+          status: 'pending',
+          scheduledStartAt: null,
+        });
+        sessionId = session.id;
+        fs.mkdirSync(path.join(sessionRepoDir(config, session.id), '.git'), { recursive: true });
+        daemon.addContainer({ id: `c-${session.id}`, name: `chief-web-${name}` });
+        return new SessionAgentRegistry({
+          config,
+          db,
+          docker: new DockerApi(daemon.socketPath),
+          containers: {
+            start: () => Promise.resolve({ id: `c-${session.id}`, name: `chief-web-${name}`, running: true, state: 'running' as const }),
+            remove: () => Promise.resolve(),
+          },
+          hold: { active: () => false, until: () => null },
+        });
+      },
+    });
+    const { client, callId } = await w.call(`?focus=session:${sessionId}`);
+    const exec = (): string => claude.agentExecs().find((entry) => entry.containerId === `c-${sessionId}`)?.id ?? '';
+    // The opening turn: a fresh conversation hears the planning prompt.
+    client.send({ type: 'text', text: 'hello' });
+    await client.until('agent.done');
+    return {
+      w,
+      client,
+      callId,
+      stdin: () => claude.userTexts(exec()),
+      lines: () => claude.stdin.get(exec()) ?? [],
+    };
+  };
+
+  it('cuts a reply the operator talks over: tts.stop, interrupt on stdin, cut-off note on the next message', async () => {
+    const { w, client, callId, stdin, lines } = await sessionCall('barge-in-voice');
+    const segmentsBefore = client.messages('tts.segment').length;
+    client.send({ type: 'text', text: '#long #hang tell me more' });
+    const segment = await client.until('tts.segment', segmentsBefore + 1);
+    assert.equal(segment.turn, 2);
+    assert.equal(segment.text, LONG_OPENING);
+    await waitFor(() => client.received.some((r) => r.kind === 'audio' && r.segmentId === segment.segmentId));
+
+    // The browser stopped halfway through the sentence, reported it, then said so.
+    const lengthMs = ((segment.text.length * 2) / 2 / 24000) * 1000;
+    client.send({ type: 'playback.progress', segmentId: segment.segmentId, playedMs: lengthMs / 2, done: false });
+    client.send({ type: 'speech.start' });
+
+    assert.deepEqual(await client.until('tts.stop'), { type: 'tts.stop', turn: 2 });
+    assert.deepEqual(w.ttses[0]?.cancelled, [2]);
+    assert.deepEqual(await client.until('agent.done', 2), { type: 'agent.done', turn: 2, interrupted: true });
+    assert.equal(lines().filter((entry) => entry['type'] === 'control_request').length, 1);
+    assert.deepEqual((lines().find((entry) => entry['type'] === 'control_request') as { request: unknown }).request, { subtype: 'interrupt' });
+
+    client.send({ type: 'text', text: 'shorter please' });
+    await client.until('agent.done', 3);
+    const heard = segment.text.slice(0, Math.round(segment.text.length / 2)).trimEnd();
+    assert.equal(stdin().at(-1), `[voice] [You were interrupted after saying: "${heard}"] shorter please`);
+
+    const reply = listVoiceTurns(w.db, callId).find((t) => t.turn === 2 && t.speaker === 'session');
+    assert.equal(reply?.interrupted, true);
+    assert.equal(getVoiceSessionAgent(w.db, reply?.sessionId ?? '')?.claudeSessionId, CLAUDE_SESSION);
+  });
+
+  it('a misfire after a barge-in resumes nothing, and the aborted audio is not replayed', async () => {
+    const { client } = await sessionCall('barge-in-misfire');
+    const before = client.messages('tts.segment').length;
+    client.send({ type: 'text', text: '#long #hang go on' });
+    await client.until('tts.segment', before + 1);
+    client.send({ type: 'speech.start' });
+    await client.until('agent.done', 2);
+    client.send({ type: 'speech.cancel' });
+    await flush();
+    await waitFor(() => client.messages('state').at(-1)?.phase === 'listening');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(client.messages('tts.segment').length, before + 1);
+    assert.equal(client.messages('user.transcript').length, 2);
+    assert.equal(client.messages('agent.done').length, 2);
+  });
+
+  it('with voice_barge_in off, speech during playback is ignored and push-to-talk still interrupts', async () => {
+    const { w, client } = await sessionCall('barge-in-off');
+    setSetting(w.db, 'voice_barge_in', 'off');
+    const before = client.messages('tts.segment').length;
+    client.send({ type: 'text', text: '#long #hang keep going' });
+    await client.until('tts.segment', before + 1);
+    client.send({ type: 'speech.start' });
+    client.send({ type: 'speech.cancel' });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(client.messages('tts.stop').length, 0);
+    assert.equal(client.messages('agent.done').length, 1);
+
+    client.send({ type: 'ptt', down: true });
+    assert.deepEqual(await client.until('tts.stop'), { type: 'tts.stop', turn: 2 });
+    assert.deepEqual(await client.until('agent.done', 2), { type: 'agent.done', turn: 2, interrupted: true });
   });
 });
 

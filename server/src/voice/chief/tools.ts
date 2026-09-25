@@ -86,6 +86,7 @@ export interface ChiefServices {
 
 /** What a handler knows about the call it runs in. */
 export interface ToolContext {
+  /** Chief passes one that never aborts: a handler that has started runs to completion (US-020). */
   readonly signal: AbortSignal;
   readonly turn: number;
   readonly focus: CallFocus;

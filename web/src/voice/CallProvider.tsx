@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 
-import { fetchSettings, fetchVoiceStatus, type VoiceStatus } from '../api.ts';
+import { fetchSettings, fetchVoiceStatus, type VoiceSettings, type VoiceStatus } from '../api.ts';
 import { navigate, useLocation } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { CallAudio, type TalkMode } from './call-audio.ts';
@@ -124,6 +124,8 @@ export interface CallActions {
   start(options?: { takeover?: boolean; focus?: CallFocus }): void;
   hangup(): void;
   ptt(down: boolean): void;
+  /** The stop button: interrupts the agent's turn, with no reply (always works, whatever `voice_barge_in` says). */
+  stopAgent(): void;
   focus(target: 'chief' | { sessionId: string }): void;
   text(text: string): void;
   muteMic(muted: boolean): void;
@@ -484,10 +486,12 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
 
       void (async () => {
         let pttGlobal = false;
+        let bargeIn: VoiceSettings['bargeIn'] = 'careful';
         try {
           const settings = await fetchSettings();
           vadSilenceMs.current = settings.voice.vadSilenceMs;
           pttGlobal = settings.voice.pttGlobal;
+          bargeIn = settings.voice.bargeIn;
         } catch {
           // The defaults do.
         }
@@ -497,6 +501,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
             mode: modeRef.current,
             vadSilenceMs: vadSilenceMs.current,
             pttGlobal,
+            bargeIn,
             panel: () => panelRef.current,
           });
           if (audio.current === created) setMicOpen(true);
@@ -530,6 +535,12 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     else current.pttUp();
     setTalking(down);
   }, []);
+
+  const stopAgent = useCallback((): void => {
+    const current = audio.current;
+    if (current !== null) current.stopAgent();
+    else send({ type: 'text', text: 'stop' });
+  }, [send]);
 
   const muteMic = useCallback((muted: boolean): void => {
     audio.current?.setMicMuted(muted);
@@ -603,6 +614,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       start,
       hangup,
       ptt,
+      stopAgent,
       focus: (target) => send({ type: 'focus', target }),
       text: (text) => {
         const trimmed = text.trim();
@@ -632,6 +644,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       start,
       hangup,
       ptt,
+      stopAgent,
       send,
       muteMic,
       muteVoice,

@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { interruptRequestLine, userMessageLine } from '../process.js';
+import { voiceUtterance } from '../prompt.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MODEL = process.env['RECORD_MODEL'] ?? 'haiku';
@@ -91,7 +92,7 @@ const SCENARIOS: Record<string, Scenario> = {
       await run.waitFor(textDelta);
       run.send(interruptRequestLine(randomUUID()));
       await run.waitFor(isResult);
-      run.send(userMessageLine('[voice][interrupted after: "Once"] Never mind. Say: understood.'));
+      run.send(userMessageLine(voiceUtterance('Never mind. Say: understood.', 'Once')));
       await run.waitFor(isResult);
       run.endStdin();
     },

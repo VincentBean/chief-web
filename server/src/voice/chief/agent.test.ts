@@ -12,6 +12,7 @@ import {
   textReply,
   toolReply,
 } from './__fixtures__/scripted-openrouter.js';
+import { tool } from './tools.js';
 import { BRAIN_UNREACHABLE, CHIEF_MAX_TOKENS, CHIEF_TEMPERATURE, ChiefAgent, WINDOW_MESSAGES } from './agent.js';
 
 let fake: ScriptedOpenRouter;
@@ -263,5 +264,73 @@ describe('chief agent loop (voice US-008)', () => {
       },
       { role: 'tool', tool_call_id: 'x1', content: '{"ok":false,"error":"interrupted"}' },
     ]);
+  });
+  it('lets a tool that is already running finish through a barge-in and keeps its result (US-020)', async () => {
+    const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', OPENROUTER_API_URL: fake.baseUrl });
+    const w = chiefWorld();
+    setSetting(w.db, 'openrouter_api_key', 'sk-or-test');
+    let release = (): void => {};
+    let handlerSignal: AbortSignal | null = null;
+    const slow = tool('start_build', 'Starts a build', {}, [], async (_args, ctx) => {
+      handlerSignal = ctx.signal;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { ok: true, data: { started: true }, summary: 'Build started' };
+    });
+    const agent = new ChiefAgent({
+      db: w.db,
+      config,
+      services: w.services,
+      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined, confirmations: testGate().gate },
+      tools: new Map([['start_build', slow]]),
+      now: () => NOW,
+    });
+    fake.replies.push(toolReply([{ id: 'b1', name: 'start_build', args: '{}' }], 'Starting it. '));
+    const controller = new AbortController();
+    const events: AgentEvent[] = [];
+    // The call's loop: past the abort it only takes a finished tool's card.
+    for await (const event of agent.run({ text: 'Start the build', turn: 1, signal: controller.signal })) {
+      events.push(event);
+      if (event.type === 'tool' && event.status === 'running') {
+        controller.abort(new Error('barge-in'));
+        setImmediate(() => release());
+      } else if (controller.signal.aborted) {
+        break;
+      }
+    }
+    assert.equal((handlerSignal as AbortSignal | null)?.aborted, false);
+    assert.deepEqual(events.at(-1), { type: 'tool', id: 'b1', name: 'start_build', status: 'ok', summary: 'Build started' });
+    assert.deepEqual(agent.history.at(-1), { role: 'tool', tool_call_id: 'b1', content: '{"ok":true,"started":true}' });
+    assert.equal(fake.requests.length, 1);
+  });
+
+  it('prefixes the next message with what the operator heard before cutting chief off (US-020)', async () => {
+    const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', OPENROUTER_API_URL: fake.baseUrl });
+    const w = chiefWorld();
+    setSetting(w.db, 'openrouter_api_key', 'sk-or-test');
+    const agent = new ChiefAgent({
+      db: w.db,
+      config,
+      services: w.services,
+      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined, confirmations: testGate().gate, spokenSoFar: () => 'Two builds are running, one' },
+      now: () => NOW,
+    });
+    fake.replies.push(textReply(['Two builds are running, one for billing ', 'and one for the export.']));
+    const controller = new AbortController();
+    for await (const event of agent.run({ text: 'Status?', turn: 1, signal: controller.signal })) {
+      if (event.type === 'delta') {
+        controller.abort(new Error('barge-in'));
+        break;
+      }
+    }
+    fake.replies.push(textReply(['Okay.']));
+    await turn(agent, 'Just the export', 2);
+    const sent = messagesOf(fake.requests.at(-1));
+    assert.equal(sent.at(-1)?.content, '[You were interrupted after saying: "Two builds are running, one"] Just the export');
+    // Only once: the turn after that is plain again.
+    fake.replies.push(textReply(['Sure.']));
+    await turn(agent, 'Thanks', 3);
+    assert.equal(messagesOf(fake.requests.at(-1)).at(-1)?.content, 'Thanks');
   });
 });
