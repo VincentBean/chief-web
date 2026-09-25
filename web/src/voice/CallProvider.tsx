@@ -120,7 +120,8 @@ export interface CallActions {
   /** Opens the panel and starts a call when none runs. Call from a gesture. */
   open(): void;
   closePanel(): void;
-  start(options?: { takeover?: boolean }): void;
+  /** `focus` opens the call on a session's own agent (`?focus=session:<id>`). */
+  start(options?: { takeover?: boolean; focus?: CallFocus }): void;
   hangup(): void;
   ptt(down: boolean): void;
   focus(target: 'chief' | { sessionId: string }): void;
@@ -441,8 +442,9 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   );
 
   const start = useCallback(
-    (options: { takeover?: boolean } = {}): void => {
+    (options: { takeover?: boolean; focus?: CallFocus } = {}): void => {
       if (socket.current !== null || audio.current !== null) return;
+      const initial: CallFocus = options.focus ?? { kind: 'chief' };
       if (!window.isSecureContext) {
         setProblem({ kind: 'insecure' });
         setPanelOpen(true);
@@ -453,7 +455,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       setUsage(null);
       setStartedAt(null);
       setPhase('listening');
-      setFocus({ kind: 'chief' });
+      setFocus(initial);
       setMicMuted(false);
       setStatus('connecting');
       setPanelOpen(true);
@@ -474,7 +476,11 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
         return;
       }
       audio.current = created;
-      connect(options.takeover === true ? '?takeover=1' : '');
+      const query = new URLSearchParams();
+      if (initial.kind === 'session') query.set('focus', `session:${initial.sessionId}`);
+      if (options.takeover === true) query.set('takeover', '1');
+      const search = query.toString();
+      connect(search === '' ? '' : `?${search}`);
 
       void (async () => {
         let pttGlobal = false;

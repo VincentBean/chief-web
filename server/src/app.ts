@@ -502,6 +502,7 @@ export function createApp(
     },
     events,
     sessionAgents,
+    planning,
     ...deps.voice,
   });
   api.use(voice.router);

@@ -1,6 +1,6 @@
 import { NOT_PENDING_REASON } from '../session-agent/registry.js';
 import { guarded } from './actions.js';
-import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, sessionPath, type ToolContext, type ToolResult } from './tools.js';
+import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
 
 /**
  * `focus_session` (plan §9.2, §11): hands the call to the session's own
@@ -81,7 +81,7 @@ async function switchTo(services: ChiefServices, target: { id: string; name: str
   return {
     ok: true,
     data: { focus: target.id, name: target.name },
+    // The call's switch opens the session's page (plan §11).
     summary: `Handed the call to ${target.name}`,
-    ui: [{ action: 'navigate', path: sessionPath(target.id) }],
   };
 }

@@ -87,6 +87,9 @@ export class SessionVoiceAgent implements VoiceAgent {
       this.process = agent;
       if (signal.aborted) return;
 
+      // A greeting (the switch to this session, US-019) is only for a fresh
+      // conversation; one that is already going waits for the operator.
+      if (input.text === '' && agent.opened) return;
       agent.discardPending();
       if (agent.opened) {
         agent.write(userMessageLine(utterance));

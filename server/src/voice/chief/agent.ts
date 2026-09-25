@@ -124,6 +124,23 @@ export class ChiefAgent implements VoiceAgent {
         for (const ui of result.ui ?? []) yield { type: 'ui', ui };
         this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
         owed = [];
+      } else if (input.invoke !== undefined) {
+        // An intent already named the tool ("switch to billing export"): it
+        // runs as chief's own call, and the model speaks about its result —
+        // which is how an ambiguous or unknown name makes chief ask.
+        const call: ChatToolCall = {
+          id: `intent-${String(turn)}`,
+          type: 'function',
+          function: { name: input.invoke.tool, arguments: JSON.stringify(input.invoke.args) },
+        };
+        this.messages.push({ role: 'assistant', content: null, tool_calls: [call] });
+        owed = [call];
+        yield { type: 'tool', id: call.id, name: call.function.name, status: 'running', summary: '' };
+        const result = await this.execute(call, { signal, turn });
+        yield { type: 'tool', id: call.id, name: call.function.name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
+        this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
+        owed = [];
       }
       for (let hop = 0; hop < this.deps.config.voiceChiefMaxToolHops; hop++) {
         let text = '';

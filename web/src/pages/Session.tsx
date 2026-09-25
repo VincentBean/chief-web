@@ -45,6 +45,7 @@ import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
 import { Badge, Facts, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
+import { useCall } from '../voice/CallProvider.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
 /** How often the PRD indicator, the terminal's state and the build are re-read. */
@@ -443,6 +444,7 @@ export function Session() {
         <div className="stack">
           {status === 'pending' && (
             <PlanningPanel
+              sessionId={session.id}
               planning={planning}
               cloned={session.cloned}
               busy={busy}
@@ -683,12 +685,14 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
 /* ------------------------------------------------------------- planning */
 
 function PlanningPanel({
+  sessionId,
   planning,
   cloned,
   busy,
   onStart,
   onStop,
 }: {
+  readonly sessionId: string;
   readonly planning: Planning;
   readonly cloned: boolean;
   readonly busy: Busy;
@@ -711,6 +715,22 @@ function PlanningPanel({
   // Below `lg` the pane is not rendered at all: mounting it would open a
   // WebSocket onto a PTY nothing on screen could show or type into.
   const desktop = useMediaQuery(DESKTOP_QUERY);
+  const call = useCall();
+  const live = call.status === 'live';
+  const joining = call.status === 'connecting' || call.status === 'reconnecting';
+  const talking = (live || joining) && call.focusedOn.kind === 'session' && call.focusedOn.sessionId === sessionId;
+
+  // Voice planning (voice US-019): a call already running moves its focus
+  // here; otherwise a new one opens on this session's agent. Synchronous in
+  // the click, which the call's audio needs.
+  const talkItThrough = (): void => {
+    if (live) {
+      call.focus({ sessionId });
+      call.open();
+    } else {
+      call.start({ focus: { kind: 'session', sessionId } });
+    }
+  };
 
   return (
     <Panel
@@ -732,6 +752,18 @@ function PlanningPanel({
             >
               <Icon name="play" />
               {busy === 'start' ? 'Starting…' : resume ? 'Resume planning' : 'Start planning'}
+            </button>
+          )}
+          {!planning.running && call.enabled && (
+            <button
+              type="button"
+              className="button"
+              onClick={talkItThrough}
+              disabled={!cloned || talking || joining}
+              title={talking ? 'The call is talking to this session' : 'Plan this session by voice with its own agent'}
+            >
+              <Icon name="comment" />
+              {talking ? 'Talking it through' : 'Talk it through'}
             </button>
           )}
           {planning.terminalId !== null && (

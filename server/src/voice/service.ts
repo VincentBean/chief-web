@@ -13,6 +13,7 @@ import {
 } from '../settings/index.js';
 import {
   type CallClock,
+  type CallPlanning,
   type CallStt,
   type CallTransport,
   type CallTts,
@@ -58,6 +59,8 @@ export interface VoiceServiceDeps {
   readonly events?: VoiceEventBus;
   /** Session voice agents (US-018); without them a session focus is answered by chief. */
   readonly sessionAgents?: SessionAgentRegistry;
+  /** The planning poller a call reads after session-agent turns (US-019). */
+  readonly planning?: CallPlanning;
 }
 
 export type VoiceReadiness =
@@ -258,6 +261,7 @@ export class VoiceService {
       tts: this.deps.tts ?? ((sink) => new TtsService(db, config, sink, { now: () => this.clock.now() })),
       agent: this.deps.agent ?? ((focus, call) => this.agentFor(focus, call)),
       clock: this.clock,
+      ...(this.deps.planning === undefined ? {} : { planning: this.deps.planning }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
