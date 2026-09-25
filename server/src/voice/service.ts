@@ -20,7 +20,9 @@ import {
   type VoiceAgent,
   VoiceCall,
 } from './call.js';
+import { ChiefAgent } from './chief/agent.js';
 import { BasicChiefAgent } from './chief/basic-agent.js';
+import type { ChiefServices } from './chief/tools.js';
 import {
   type CallFocus,
   encodeFrame,
@@ -44,7 +46,9 @@ export const EL_BALANCE_TTL_MS = 60_000;
 export interface VoiceServiceDeps {
   readonly stt?: CallStt;
   readonly tts?: (sink: TtsSink) => CallTts;
-  readonly agent?: (focus: CallFocus) => VoiceAgent;
+  readonly agent?: (focus: CallFocus, call: VoiceCall) => VoiceAgent;
+  /** What chief reads; without it chief is the tool-less basic agent. */
+  readonly chief?: ChiefServices;
   readonly clock?: CallClock;
   readonly newCallId?: () => string;
 }
@@ -241,7 +245,7 @@ export class VoiceService {
       stt: this.stt,
       tts: this.deps.tts ?? ((sink) => new TtsService(db, config, sink, { now: () => this.clock.now() })),
       // Session agents are voice US-018; until then chief answers either way.
-      agent: this.deps.agent ?? (() => new BasicChiefAgent(db, config)),
+      agent: this.deps.agent ?? ((_focus, call) => this.chiefFor(call)),
       clock: this.clock,
       onEnded: (ended) => {
         if (this.active !== ended) return;
@@ -249,6 +253,12 @@ export class VoiceService {
         this.clearResumeTimer();
       },
     });
+  }
+
+  private chiefFor(call: VoiceCall): VoiceAgent {
+    const services = this.deps.chief;
+    if (services === undefined) return new BasicChiefAgent(this.db, this.config);
+    return new ChiefAgent({ db: this.db, config: this.config, services, call });
   }
 
   private async elBalance(key: string): Promise<ElevenLabsBalance | null> {

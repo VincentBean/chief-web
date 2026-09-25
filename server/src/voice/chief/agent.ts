@@ -1,0 +1,298 @@
+import type { Config } from '../../config.js';
+import type { Database } from '../../db/index.js';
+import { logger } from '../../lib/logger.js';
+import { getOpenRouterApiKey, getVoiceSettings } from '../../settings/index.js';
+import type { AgentEvent, VoiceAgent } from '../call.js';
+import type { CallFocus } from '../protocol.js';
+import { type ChatEvent, type ChatMessage, type ChatToolCall, type StreamChatOptions, streamChat } from './openrouter-client.js';
+import { chiefSystemPrompt } from './prompt.js';
+import { buildSnapshot } from './snapshot.js';
+import { type ChiefServices, type ChiefTool, createChiefTools, type ToolResult } from './tools.js';
+
+/** Messages of the conversation the model sees (plan §9.1). */
+export const WINDOW_MESSAGES = 30;
+export const CHIEF_TEMPERATURE = 0.4;
+export const CHIEF_MAX_TOKENS = 400;
+/** The summary of the turns that fell out of the window is short. */
+const SUMMARY_MAX_TOKENS = 200;
+
+/** What chief says when OpenRouter is still failing after the client's retry. */
+export const BRAIN_UNREACHABLE: Readonly<Record<string, string>> = {
+  nl: 'Ik kan mijn brein nu even niet bereiken.',
+  en: "I can't reach my brain right now.",
+};
+
+const SUMMARY_PROMPT =
+  'You summarize the earlier part of a voice call between the operator and Chief, the voice of chief-web. ' +
+  'Write one or two plain sentences with what was asked, decided and done, naming sessions and pull requests. ' +
+  'No preamble.';
+
+/** The call as chief's tools need it. */
+export interface ChiefCallControls {
+  readonly focus: CallFocus;
+  /** Hangs up once the turn in progress has been spoken. */
+  hangUpAfterTurn(): void;
+}
+
+export type ChatFn = (opts: StreamChatOptions) => AsyncIterable<ChatEvent>;
+
+export interface ChiefAgentDeps {
+  readonly db: Database;
+  readonly config: Config;
+  readonly services: ChiefServices;
+  readonly call: ChiefCallControls;
+  readonly operatorName?: string | null;
+  /** The streaming client; tests may pass another. */
+  readonly chat?: ChatFn;
+  readonly tools?: ReadonlyMap<string, ChiefTool>;
+  readonly now?: () => Date;
+}
+
+/**
+ * Chief (plan §9.1): an OpenRouter streaming loop with tools. Each model step
+ * sees the system prompt with a fresh STATE block, the summary of whatever
+ * fell out of the window, and the last {@link WINDOW_MESSAGES} messages. Text
+ * is yielded as it streams in; tool calls are run between steps, up to
+ * `VOICE_CHIEF_MAX_TOOL_HOPS` steps per utterance.
+ */
+export class ChiefAgent implements VoiceAgent {
+  readonly kind = 'chief' as const;
+  private readonly messages: ChatMessage[] = [];
+  private summary: string | null = null;
+  private summarizing: Promise<void> | null = null;
+  /** What the summaries cost; reported with the next turn's usage. */
+  private unreportedCostUsd = 0;
+  private readonly chat: ChatFn;
+  private readonly tools: ReadonlyMap<string, ChiefTool>;
+  private readonly now: () => Date;
+
+  constructor(private readonly deps: ChiefAgentDeps) {
+    this.chat = deps.chat ?? streamChat;
+    this.tools = deps.tools ?? createChiefTools(deps.services);
+    this.now = deps.now ?? (() => new Date());
+  }
+
+  /** The conversation as it stands, for tests. */
+  get history(): readonly ChatMessage[] {
+    return this.messages;
+  }
+
+  /** The line older turns were folded into, or null. */
+  get earlierSummary(): string | null {
+    return this.summary;
+  }
+
+  /** Settles once a summary in flight has landed (tests). */
+  async idle(): Promise<void> {
+    await this.summarizing;
+  }
+
+  async *run(input: { readonly text: string; readonly turn: number; readonly signal: AbortSignal }): AsyncGenerator<AgentEvent> {
+    const { signal, turn } = input;
+    const settings = getVoiceSettings(this.deps.db);
+    if (this.unreportedCostUsd > 0) {
+      yield { type: 'usage', costUsd: this.unreportedCostUsd };
+      this.unreportedCostUsd = 0;
+    }
+    this.messages.push({ role: 'user', content: input.text });
+    const definitions = [...this.tools.values()].map((entry) => entry.definition);
+    /** Tool calls of the last assistant message still owed a `tool` answer. */
+    let owed: ChatToolCall[] = [];
+    /** Text streamed in this step and not yet in the history. */
+    let unsaid = '';
+    try {
+      for (let hop = 0; hop < this.deps.config.voiceChiefMaxToolHops; hop++) {
+        let text = '';
+        const calls: ChatToolCall[] = [];
+        try {
+          for await (const event of this.chat({
+            baseUrl: this.deps.config.openrouterApiUrl,
+            apiKey: getOpenRouterApiKey(this.deps.db) ?? '',
+            model: settings.chiefModel,
+            messages: [{ role: 'system', content: this.systemPrompt(settings.language) }, ...this.summaryLine(), ...this.window()],
+            tools: definitions,
+            maxTokens: CHIEF_MAX_TOKENS,
+            temperature: CHIEF_TEMPERATURE,
+            signal,
+          })) {
+            if (event.type === 'delta') {
+              text += event.text;
+              unsaid = text;
+              yield { type: 'delta', text: event.text };
+            } else if (event.type === 'tool_call') {
+              calls.push({ id: event.id, type: 'function', function: { name: event.name, arguments: event.arguments } });
+            } else if (event.type === 'usage') {
+              yield { type: 'usage', costUsd: event.costUsd };
+            }
+          }
+        } catch (cause) {
+          if (signal.aborted) throw cause;
+          logger.warn('chief could not reach OpenRouter', { error: String(cause) });
+          const line = BRAIN_UNREACHABLE[settings.language] ?? (BRAIN_UNREACHABLE['en'] as string);
+          const spoken = text === '' ? line : ` ${line}`;
+          unsaid = text + spoken;
+          yield { type: 'delta', text: spoken };
+          return;
+        }
+
+        unsaid = '';
+        this.messages.push({ role: 'assistant', content: text === '' ? null : text, ...(calls.length === 0 ? {} : { tool_calls: calls }) });
+        if (calls.length === 0) return;
+        owed = [...calls];
+        for (const call of calls) {
+          if (signal.aborted) throw signal.reason;
+          const name = call.function.name;
+          yield { type: 'tool', id: call.id, name, status: 'running', summary: '' };
+          const result = await this.execute(call, { signal, turn });
+          yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+          for (const ui of result.ui ?? []) yield { type: 'ui', ui };
+          this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
+          owed = owed.filter((entry) => entry !== call);
+        }
+      }
+      logger.warn('chief ran out of tool hops', { hops: this.deps.config.voiceChiefMaxToolHops });
+    } finally {
+      // An interrupted turn must still leave a history the API accepts:
+      // every tool call answered, and what was said kept.
+      if (unsaid !== '') this.messages.push({ role: 'assistant', content: unsaid });
+      for (const call of owed) {
+        this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, error: 'interrupted' }) });
+      }
+      this.summarizeIfNeeded(settings.chiefModel);
+    }
+  }
+
+  private async execute(call: ChatToolCall, ctx: { signal: AbortSignal; turn: number }): Promise<ToolResult> {
+    const entry = this.tools.get(call.function.name);
+    if (entry === undefined) {
+      return { ok: false, data: { error: 'unknown_tool' }, summary: `Unknown tool ${call.function.name}` };
+    }
+    let args: unknown;
+    try {
+      args = JSON.parse(call.function.arguments === '' ? '{}' : call.function.arguments);
+    } catch {
+      return { ok: false, data: { error: 'bad_arguments', message: 'The arguments were not valid JSON.' }, summary: 'Bad arguments' };
+    }
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      return { ok: false, data: { error: 'bad_arguments', message: 'The arguments must be an object.' }, summary: 'Bad arguments' };
+    }
+    try {
+      return await entry.handler(args as Record<string, unknown>, {
+        ...ctx,
+        focus: this.deps.call.focus,
+        endCall: () => this.deps.call.hangUpAfterTurn(),
+      });
+    } catch (cause) {
+      logger.warn('chief tool failed', { tool: call.function.name, error: String(cause) });
+      return {
+        ok: false,
+        data: { error: 'failed', message: cause instanceof Error ? cause.message : String(cause) },
+        summary: `${call.function.name} failed`,
+      };
+    }
+  }
+
+  private systemPrompt(language: string): string {
+    let snapshot: string;
+    try {
+      snapshot = buildSnapshot(this.deps.services, { focus: this.deps.call.focus, now: this.now() });
+    } catch (cause) {
+      logger.warn('chief could not build the state snapshot', { error: String(cause) });
+      snapshot = 'unavailable; use the tools';
+    }
+    return chiefSystemPrompt({ operatorName: this.deps.operatorName, language, snapshot });
+  }
+
+  private summaryLine(): ChatMessage[] {
+    return this.summary === null ? [] : [{ role: 'system', content: `Earlier in this call: ${this.summary}` }];
+  }
+
+  /** The last {@link WINDOW_MESSAGES} messages, cut where a user message starts. */
+  private window(): ChatMessage[] {
+    return this.messages.slice(this.windowStart());
+  }
+
+  /**
+   * Where the window starts: the first user message inside the last
+   * {@link WINDOW_MESSAGES}, so an assistant's tool calls are never separated
+   * from their answers. One turn longer than the window is kept whole.
+   */
+  private windowStart(): number {
+    const length = this.messages.length;
+    if (length <= WINDOW_MESSAGES) return 0;
+    for (let i = length - WINDOW_MESSAGES; i < length; i++) {
+      if (this.messages[i]?.role === 'user') return i;
+    }
+    for (let i = length - 1; i >= 0; i--) {
+      if (this.messages[i]?.role === 'user') return i;
+    }
+    return 0;
+  }
+
+  /**
+   * Folds the turns that fell out of the window into one system line, by
+   * the same model, without holding up the turn. Messages are only ever
+   * appended, so the cut taken now is still right when the summary lands.
+   */
+  private summarizeIfNeeded(model: string): void {
+    const cut = this.windowStart();
+    if (cut === 0 || this.summarizing !== null) return;
+    const older = this.messages.slice(0, cut);
+    const previous = this.summary;
+    this.summarizing = this.summarize(model, previous, older)
+      .then((summary) => {
+        if (summary === '') return;
+        this.summary = summary;
+        this.messages.splice(0, cut);
+      })
+      .catch((cause: unknown) => {
+        logger.warn('chief could not summarize the call so far', { error: String(cause) });
+      })
+      .finally(() => {
+        this.summarizing = null;
+      });
+  }
+
+  private async summarize(model: string, previous: string | null, older: readonly ChatMessage[]): Promise<string> {
+    const transcript = [previous === null ? null : `Summary so far: ${previous}`, ...older.map(transcriptLine)]
+      .filter((line): line is string => line !== null)
+      .join('\n');
+    let text = '';
+    for await (const event of this.chat({
+      baseUrl: this.deps.config.openrouterApiUrl,
+      apiKey: getOpenRouterApiKey(this.deps.db) ?? '',
+      model,
+      messages: [
+        { role: 'system', content: SUMMARY_PROMPT },
+        { role: 'user', content: transcript },
+      ],
+      tools: [],
+      maxTokens: SUMMARY_MAX_TOKENS,
+      temperature: 0,
+    })) {
+      if (event.type === 'delta') text += event.text;
+      else if (event.type === 'usage') this.unreportedCostUsd += event.costUsd;
+    }
+    return text.replace(/\s+/g, ' ').trim();
+  }
+}
+
+function wrap(data: unknown): Record<string, unknown> {
+  return typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : { data };
+}
+
+function transcriptLine(message: ChatMessage): string | null {
+  switch (message.role) {
+    case 'user':
+      return `Operator: ${message.content}`;
+    case 'assistant': {
+      const tools = message.tool_calls?.map((call) => call.function.name).join(', ');
+      const said = message.content === null ? '' : `Chief: ${message.content}`;
+      return [said, tools === undefined ? '' : `(Chief used ${tools})`].filter((part) => part !== '').join(' ') || null;
+    }
+    case 'tool':
+      return `Tool result: ${message.content.length > 200 ? `${message.content.slice(0, 199)}…` : message.content}`;
+    case 'system':
+      return null;
+  }
+}

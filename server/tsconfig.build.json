@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["src/**/*.test.ts", "src/docker/fake-daemon.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/__fixtures__/**", "src/docker/fake-daemon.ts"]
 }

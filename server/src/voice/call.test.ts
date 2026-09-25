@@ -17,6 +17,9 @@ import {
   setSetting,
 } from '../db/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
+import { chiefWorld } from './chief/__fixtures__/world.js';
+import { startScriptedOpenRouter, textReply, toolReply } from './chief/__fixtures__/scripted-openrouter.js';
+import type { ChiefServices } from './chief/tools.js';
 import type { AgentEvent, CallClock, CallStt, CallTts, VoiceAgent } from './call.js';
 import { IDLE_GOODBYE } from './call.js';
 import { createVoice, type Voice } from './index.js';
@@ -192,7 +195,8 @@ after(async () => {
   }
 });
 
-async function world(env: Record<string, string> = {}): Promise<World> {
+/** `chief`: the real chief agent over these services instead of {@link ScriptedAgent}. */
+async function world(env: Record<string, string> = {}, opts: { chief?: (db: Database) => ChiefServices } = {}): Promise<World> {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', VOICE_IDLE_TIMEOUT_MS: String(IDLE_MS), ...env });
   const db = openDatabase(IN_MEMORY);
   setSetting(db, 'voice_enabled', '1');
@@ -203,14 +207,19 @@ async function world(env: Record<string, string> = {}): Promise<World> {
   const stt = new FakeStt();
   const agents: ScriptedAgent[] = [];
   let calls = 0;
+  const chief = opts.chief?.(db);
   const voice = createVoice(config, db, {
     stt,
     tts: (sink) => new FakeTts(sink),
-    agent: () => {
-      const agent = new ScriptedAgent();
-      agents.push(agent);
-      return agent;
-    },
+    ...(chief === undefined
+      ? {
+          agent: () => {
+            const agent = new ScriptedAgent();
+            agents.push(agent);
+            return agent;
+          },
+        }
+      : { chief }),
     clock,
     newCallId: () => `call-${++calls}`,
   });
@@ -340,6 +349,44 @@ describe('voice call socket', () => {
       ['user', 'chief'],
     );
     client.socket.close();
+  });
+
+  it("answers \"what's building?\" through the real chief from the snapshot, with zero tool calls (US-008)", async () => {
+    const openrouter = await startScriptedOpenRouter();
+    after(() => openrouter.close());
+    const w = await world({ OPENROUTER_API_URL: openrouter.baseUrl }, { chief: (db) => chiefWorld(db).services });
+    openrouter.replies.push(textReply(['billing-export is building story 3 of 7. ', 'Nothing else is running.'], 0.003));
+    const { client, callId } = await w.call();
+    client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+    await client.until('agent.done');
+
+    assert.equal(openrouter.requests.length, 1);
+    assert.deepEqual(client.messages('tool'), []);
+    const system = ((openrouter.requests[0]?.['messages'] ?? []) as { content: string }[])[0]?.content ?? '';
+    assert.match(system, /^- billing-export \[shop-api\] building story 3\/7/m);
+    assert.equal(
+      client.messages('agent.delta').map((d) => d.text).join(''),
+      'billing-export is building story 3 of 7. Nothing else is running.',
+    );
+    assert.ok(client.messages('tts.segment').length >= 1);
+    assert.deepEqual(
+      listVoiceTurns(w.db, callId).map((t) => [t.speaker, t.toolsJson]),
+      [
+        ['user', null],
+        ['chief', null],
+      ],
+    );
+    await waitFor(() => (getVoiceCall(w.db, callId)?.orCostUsd ?? 0) >= 0.003);
+
+    // end_call hangs up only after the goodbye in the same turn was spoken.
+    openrouter.replies.push(toolReply([{ id: 'bye', name: 'end_call', args: '{}' }], 'Tot later! '), textReply(['']));
+    client.send({ type: 'text', text: 'Dat was het.' });
+    const closed = await client.closed;
+    assert.equal(closed.code, WS_CLOSE_CALL_ENDED);
+    const types = client.types;
+    assert.ok(types.lastIndexOf('tts.end') > types.lastIndexOf('tool'));
+    assert.ok(types.lastIndexOf('agent.done') > types.lastIndexOf('tts.end'));
+    assert.equal(getVoiceCall(w.db, callId)?.endReason, 'hangup');
   });
 
   it('refuses a second call with 4409, and ?takeover=1 closes the first with 4410', async () => {

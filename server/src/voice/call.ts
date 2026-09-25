@@ -93,8 +93,8 @@ export interface VoiceCallDeps {
   readonly stt: CallStt;
   /** One text-to-speech service per call, reporting to the call's sink. */
   readonly tts: (sink: TtsSink) => CallTts;
-  /** The agent that answers while `focus` is in effect. */
-  readonly agent: (focus: CallFocus) => VoiceAgent;
+  /** The agent that answers while `focus` is in effect, on `call`. */
+  readonly agent: (focus: CallFocus, call: VoiceCall) => VoiceAgent;
   readonly clock: CallClock;
   /** Told once, when the call has ended, so the service can let go of it. */
   readonly onEnded?: (call: VoiceCall) => void;
@@ -157,6 +157,8 @@ export class VoiceCall {
   /** Bumped by every utterance; a stale one that was superseded while waiting gives up. */
   private ticket = 0;
   private idleTimer: unknown = null;
+  /** Set by chief's `end_call`: hang up once the turn's goodbye is out. */
+  private hangUpAfter = false;
   private readonly agents = new Map<string, VoiceAgent>();
   private readonly totals = { elChars: 0, sttSeconds: 0, orCostUsd: 0 };
 
@@ -189,6 +191,20 @@ export class VoiceCall {
   /** Whether a socket is carrying the call right now. */
   get attached(): boolean {
     return this.transport !== null;
+  }
+
+  /** Where the call is focused right now. */
+  get focus(): CallFocus {
+    return this.state.focus;
+  }
+
+  /**
+   * Hangs up once the turn in progress has been spoken, so a goodbye in the
+   * same reply is heard (chief's `end_call`). Without a turn it ends now.
+   */
+  hangUpAfterTurn(): void {
+    if (this.state.activeTurn === null) this.endSoon('hangup');
+    else this.hangUpAfter = true;
   }
 
   get mode(): SttMode {
@@ -403,9 +419,14 @@ export class VoiceCall {
     });
     this.running = done;
     await done;
+    // A goodbye the operator talked over does not hang up.
+    const hangUp = this.hangUpAfter && !controller.signal.aborted;
+    this.hangUpAfter = false;
     if (this.state.activeTurn === controller) {
       this.state.activeTurn = null;
-      if (!this.ended) {
+      if (hangUp && !this.ended) {
+        this.endSoon('hangup');
+      } else if (!this.ended) {
         this.setPhase('listening');
         this.armIdle();
       }
@@ -559,7 +580,7 @@ export class VoiceCall {
     const key = focus.kind === 'chief' ? 'chief' : `session:${focus.sessionId}`;
     let agent = this.agents.get(key);
     if (agent === undefined) {
-      agent = this.deps.agent(focus);
+      agent = this.deps.agent(focus, this);
       this.agents.set(key, agent);
     }
     return agent;

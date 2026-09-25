@@ -222,11 +222,6 @@ export function createApp(
   // from inside a request — by which point everything below exists. Raising
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
-  // Voice (voice US-001): the provider checks and the voice picker's proxy;
-  // since US-007 also the call socket, on the gateway's cookie check.
-  const voice = createVoice(config, db, deps.voice);
-  api.use(voice.router);
-  deps.gateway?.register(voice.socketRoute);
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the
@@ -408,9 +403,11 @@ export function createApp(
   // A review asked for while every slot is taken waits in the unified queue
   // instead of being refused (US-003); this is how the pump starts it again.
   builds.registerStart('pr-review', prReviews.starter());
+  // One instance, so voice chief's snapshot reads the list this router cached.
+  const pullRequests = deps.pullRequests ?? createPullRequestService(config, db);
   api.use(
     createPullRequestsRouter(
-      deps.pullRequests ?? createPullRequestService(config, db),
+      pullRequests,
       prFeedback,
       prReviews,
       prConflictFixes,
@@ -435,6 +432,16 @@ export function createApp(
   api.use(createLimitsRouter(hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
   api.use(createStatsRouter(db, hold, builds));
+  // Voice (voice US-001): the provider checks and the voice picker's proxy;
+  // since US-007 also the call socket, on the gateway's cookie check. Built
+  // this late because chief (US-008) reads the build pool, the build logs,
+  // the pull request list and the usage-limit hold.
+  const voice = createVoice(config, db, {
+    chief: { db, builds, buildLogs, pullRequests, hold },
+    ...deps.voice,
+  });
+  api.use(voice.router);
+  deps.gateway?.register(voice.socketRoute);
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
   // dispatching on the stage the session failed at.
   const retries = createRetryService(db, builds, delivery);

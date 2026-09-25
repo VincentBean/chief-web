@@ -82,7 +82,7 @@ export class GithubPullRequestGateway implements PullRequestGateway {
 }
 
 export class PullRequestService {
-  private cached: { at: number; value: PullRequestListView } | null = null;
+  private cache: { at: number; value: PullRequestListView } | null = null;
 
   constructor(
     private readonly config: Config,
@@ -98,7 +98,7 @@ export class PullRequestService {
    * sends; without it a reload inside the window costs GitHub nothing.
    */
   async list(options: { refresh?: boolean } = {}): Promise<PullRequestListView> {
-    const cached = this.cached;
+    const cached = this.cache;
     if (
       options.refresh !== true &&
       cached !== null &&
@@ -126,8 +126,17 @@ export class PullRequestService {
       ),
       fetchedAt: new Date(this.now()).toISOString(),
     };
-    this.cached = { at: this.now(), value };
+    this.cache = { at: this.now(), value };
     return value;
+  }
+
+  /**
+   * The list as last fetched, however old, and null before the first fetch.
+   * Never asks GitHub: this is what voice chief's state snapshot reads on
+   * every request.
+   */
+  cached(): PullRequestListView | null {
+    return this.cache?.value ?? null;
   }
 
   /** One pull request's unresolved feedback: what a run would be sent. */
