@@ -7,6 +7,7 @@ import { loadConfig } from './config.js';
 import {
   clearInterruptedPrConflictFixes,
   closeDatabase,
+  closeOpenVoiceCalls,
   type Database,
   openDatabase,
   updatePrRun,
@@ -34,6 +35,10 @@ async function main(): Promise<void> {
   // Resolves the shared password: `CHIEF_WEB_PASSWORD` if set, otherwise the
   // hash in settings — generating and logging one on first boot.
   const auth = createAuthService(config, db);
+
+  // Outside the reconcile below: it needs no Docker daemon, and must not be
+  // skipped when one cannot be reached.
+  closeVoiceCallsLeftBehind(db);
 
   // Terminals outlive the browser tabs attached to them, so the registry is
   // owned here and shared by the REST routes and the WebSocket gateway.
@@ -148,5 +153,20 @@ function clearConflictFixesLeftBehind(db: Database): void {
     logger.info('wound back pull request conflict fixes left by a previous process', {
       fixes: cleared,
     });
+  }
+}
+
+/**
+ * Closes the voice calls this process did not survive (voice US-002).
+ *
+ * A call lives in the memory of the process that took it — the socket, the
+ * providers, the agent loop — so an open row after a restart is a call nobody
+ * is on any more. It is closed as `error` so the history does not show it as
+ * still running, and so retention counts from now rather than from its start.
+ */
+function closeVoiceCallsLeftBehind(db: Database): void {
+  const closed = closeOpenVoiceCalls(db, 'error');
+  if (closed > 0) {
+    logger.info('closed voice calls left open by a previous process', { calls: closed });
   }
 }

@@ -1013,6 +1013,58 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE resolve_upstream = 1 AND resolved_in_sentry = 0;
     `,
   },
+  {
+    id: '0016_voice',
+    sql: `
+      -- Voice calls with chief. Audio is never stored: no column here holds
+      -- audio, only the transcript text, timings and usage counters. Calls
+      -- (and their turns, by cascade) are deleted by the scheduler tick once
+      -- they are older than \`voice_transcript_retention_days\`.
+      CREATE TABLE IF NOT EXISTS voice_calls (
+        id            TEXT PRIMARY KEY,
+        started_at    TEXT NOT NULL,
+        ended_at      TEXT,
+        end_reason    TEXT,                      -- hangup | idle | error | taken_over
+        stt_provider  TEXT NOT NULL,
+        tts_provider  TEXT NOT NULL,             -- last used
+        el_chars      INTEGER NOT NULL DEFAULT 0,
+        stt_seconds   REAL    NOT NULL DEFAULT 0,
+        or_cost_usd   REAL    NOT NULL DEFAULT 0,
+        claude_turns  INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS voice_turns (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id              TEXT NOT NULL REFERENCES voice_calls (id) ON DELETE CASCADE,
+        turn                 INTEGER NOT NULL,
+        speaker              TEXT NOT NULL,      -- user | chief | session | event
+        session_id           TEXT,               -- focus at the time, NULL for chief
+        text                 TEXT NOT NULL,
+        interrupted          INTEGER NOT NULL DEFAULT 0,
+        tools_json           TEXT,               -- [{name, status, summary}]
+        t_speech_end         TEXT,
+        t_transcript         TEXT,
+        t_first_token        TEXT,
+        t_first_chunk        TEXT,
+        t_first_audio_sent   TEXT,
+        t_first_audio_played TEXT,
+        created_at           TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_voice_turns_call ON voice_turns (call_id, turn);
+
+      -- The Claude Code conversation a session's voice agent resumes.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK: with
+      -- foreign keys on, dropping it cascades into this table, so carry these
+      -- rows across the rebuild (or rebuild with foreign keys off).
+      CREATE TABLE IF NOT EXISTS voice_session_agents (
+        session_id        TEXT PRIMARY KEY REFERENCES sessions (id) ON DELETE CASCADE,
+        claude_session_id TEXT NOT NULL,
+        mode              TEXT NOT NULL,         -- plan | qa
+        updated_at        TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /**

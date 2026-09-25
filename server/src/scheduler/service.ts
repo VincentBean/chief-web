@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import {
   type Database,
+  deleteVoiceCallsEndedBefore,
   getSession,
   listDueScheduledSessions,
   nowIso,
@@ -10,6 +11,9 @@ import {
 import { logger } from '../lib/logger.js';
 import { UsageLimitHold } from '../limits/index.js';
 import type { RecurringTaskFiring } from '../recurringtasks/index.js';
+import { getVoiceSettings } from '../settings/index.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Scheduled session starts (US-017).
@@ -135,6 +139,10 @@ export class SchedulerService implements SessionScheduler {
       });
     }
 
+    // Before the schedule read, whose failure ends the tick early: retention is
+    // a promise about what is kept, and it must not wait on anything else.
+    this.pruneVoiceCalls(now);
+
     let due: Session[];
     try {
       due = listDueScheduledSessions(this.db, now);
@@ -195,6 +203,24 @@ export class SchedulerService implements SessionScheduler {
       await this.tasks.fireDue(now);
     } catch (cause) {
       logger.warn('could not fire the due recurring tasks', { error: describe(cause) });
+    }
+  }
+
+  /**
+   * Voice transcript retention (voice US-002): a call goes, turns and all,
+   * once it ended `voice_transcript_retention_days` ago — or started that long
+   * ago, if it was never closed. Audio is never stored, so this is everything.
+   */
+  private pruneVoiceCalls(now: string): void {
+    try {
+      const days = getVoiceSettings(this.db).transcriptRetentionDays;
+      const cutoff = new Date(Date.parse(now) - days * DAY_MS).toISOString();
+      const deleted = deleteVoiceCallsEndedBefore(this.db, cutoff);
+      if (deleted > 0) logger.info('deleted voice calls past their retention', { deleted, days });
+    } catch (cause) {
+      logger.warn('could not delete the voice calls past their retention', {
+        error: describe(cause),
+      });
     }
   }
 
