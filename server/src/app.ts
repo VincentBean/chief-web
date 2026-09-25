@@ -454,6 +454,7 @@ export function createApp(
       prFeedback,
       prConflicts,
       github: new GithubVoiceReviews(config, db),
+      recurringTasks: recurringRuns,
     },
     ...deps.voice,
   });

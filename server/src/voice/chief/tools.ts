@@ -15,12 +15,14 @@ import type { ConflictScan } from '../../prconflicts/index.js';
 import type { PrRunView } from '../../prfeedback/index.js';
 import type { PrReviewView } from '../../prreview/index.js';
 import type { PullRequestListView } from '../../pullrequests/index.js';
+import type { RecurringTaskRunner } from '../../recurringtasks/index.js';
 import type { RetryResult } from '../../recovery/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView } from '../../sessions/index.js';
 import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
 import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
+import { recurringTaskTools } from './recurring-tasks.js';
 import type { ChatTool } from './openrouter-client.js';
 
 /**
@@ -72,6 +74,8 @@ export interface ChiefServices {
   readonly prConflicts: Pick<ConflictScan, 'fixNow' | 'conflicted'>;
   /** Where a voice change request is posted. */
   readonly github: VoiceReviewGateway;
+  /** Fires a recurring task by hand; the definitions themselves are read and written straight off `db`. */
+  readonly recurringTasks: Pick<RecurringTaskRunner, 'fireNow'>;
   readonly hold: { until(): string | null };
 }
 
@@ -184,11 +188,13 @@ export function resolveName<T extends { readonly id: string; readonly name: stri
   return { kind: 'none', candidates: nearest };
 }
 
-export function unresolved(what: 'session' | 'repository', query: string, resolution: Resolution<unknown>): ToolResult {
+const PLURALS = { session: 'sessions', repository: 'repositories', 'recurring task': 'recurring tasks' } as const;
+
+export function unresolved(what: keyof typeof PLURALS, query: string, resolution: Resolution<unknown>): ToolResult {
   const candidates = resolution.kind === 'one' ? [] : resolution.candidates;
   const summary =
     resolution.kind === 'many'
-      ? `"${query}" matches several ${what === 'session' ? 'sessions' : 'repositories'}`
+      ? `"${query}" matches several ${PLURALS[what]}`
       : `No ${what} called "${query}"`;
   return { ok: false, data: { error: resolution.kind === 'many' ? 'ambiguous' : 'not_found', candidates }, summary };
 }
@@ -467,6 +473,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
     ),
     ...sessionActionTools(services),
     ...pullRequestTools(services),
+    ...recurringTaskTools(services),
   ];
   return withConfirmTool(tools);
 }

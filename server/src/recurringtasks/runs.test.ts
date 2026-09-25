@@ -604,3 +604,55 @@ function session(overrides: Partial<Session>): Session {
     ...overrides,
   };
 }
+
+describe('firing a recurring task by hand (voice US-014)', () => {
+  it('fires one occurrence now, outside the schedule, even when the task is paused', async () => {
+    const f = await fixture();
+    const task = f.task({ paused: true, nextRunAt: null });
+    const now = new Date(Date.UTC(2026, 8, 5, 14, 7)).toISOString();
+
+    const result = await f.runner.fireNow(task.id, now);
+
+    assert.equal(result.fired, true);
+    const [session] = listSessions(f.db, {});
+    assert.equal(session?.name, 'rector-20260905-1407');
+    assert.equal(session?.recurringTaskId, task.id);
+    assert.deepEqual(f.builds.started, [session?.id]);
+    // The same history row a scheduled firing writes.
+    assert.equal(result.occurrence?.outcome, 'started');
+    assert.equal(result.occurrence?.sessionId, session?.id);
+    assert.equal(result.occurrence?.occurredAt, now);
+    // The schedule is untouched: still paused, still no next run.
+    const after = getRecurringTask(f.db, task.id);
+    assert.equal(after?.paused, true);
+    assert.equal(after?.nextRunAt, null);
+  });
+
+  it('leaves next_run_at where the schedule put it', async () => {
+    const f = await fixture();
+    const next = '2030-01-01T03:00:00.000Z';
+    const task = f.task({ nextRunAt: next });
+    const result = await f.runner.fireNow(task.id);
+    assert.equal(result.fired, true);
+    assert.equal(getRecurringTask(f.db, task.id)?.nextRunAt, next);
+  });
+
+  it('applies the same skip rules, and records the skip', async () => {
+    const f = await fixture();
+    const task = f.task({ nextRunAt: '2030-01-01T03:00:00.000Z' });
+    assert.equal((await f.runner.fireNow(task.id, new Date(Date.UTC(2026, 8, 5, 3, 0)).toISOString())).fired, true);
+
+    const result = await f.runner.fireNow(task.id, new Date(Date.UTC(2026, 8, 5, 3, 5)).toISOString());
+
+    assert.equal(result.fired, false);
+    assert.equal(result.occurrence?.outcome, 'skipped');
+    assert.match(result.occurrence?.detail ?? '', /is still building\.$/);
+    assert.equal(listSessions(f.db, {}).length, 1);
+    assert.equal(getRecurringTask(f.db, task.id)?.nextRunAt, '2030-01-01T03:00:00.000Z');
+  });
+
+  it('refuses an unknown task', async () => {
+    const f = await fixture();
+    await assert.rejects(f.runner.fireNow('nope'), { status: 404, code: 'recurring_task_not_found' });
+  });
+});

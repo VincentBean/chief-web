@@ -36,8 +36,8 @@ export const SLUG_MAX = 40;
 /** Filler words a spoken session name loses: "CSV export for invoices" → `csv-export-invoices`. */
 const SLUG_STOPWORDS: ReadonlySet<string> = new Set(['a', 'an', 'the', 'for', 'of', 'and', 'de', 'het', 'een', 'voor', 'van', 'en']);
 
-/** A spoken name as a session name: `[a-z0-9-_]`, at most {@link SLUG_MAX} characters, cut between words. */
-export function slugify(raw: string): string {
+/** A spoken name as a session name: `[a-z0-9-_]`, at most `max` characters, cut between words. */
+export function slugify(raw: string, max: number = SLUG_MAX): string {
   const words = raw
     .normalize('NFKD')
     .replace(/\p{M}/gu, '')
@@ -47,10 +47,10 @@ export function slugify(raw: string): string {
     .filter((word) => word !== '');
   const kept = words.filter((word) => !SLUG_STOPWORDS.has(word));
   let slug = (kept.length === 0 ? words : kept).join('-');
-  if (slug.length > SLUG_MAX) {
-    const cut = slug.slice(0, SLUG_MAX + 1);
+  if (slug.length > max) {
+    const cut = slug.slice(0, max + 1);
     const lastDash = cut.lastIndexOf('-');
-    slug = lastDash > 0 ? cut.slice(0, lastDash) : slug.slice(0, SLUG_MAX);
+    slug = lastDash > 0 ? cut.slice(0, lastDash) : slug.slice(0, max);
   }
   return slug.replace(/^[-_]+|[-_]+$/g, '');
 }
@@ -69,7 +69,7 @@ export function serviceFailure(cause: unknown, fallback: string): ToolResult {
 }
 
 /** `run`, with anything it throws turned into a failed result. */
-async function guarded<T>(fallback: string, run: () => T | Promise<T>): Promise<T | ToolResult> {
+export async function guarded<T>(fallback: string, run: () => T | Promise<T>): Promise<T | ToolResult> {
   try {
     return await run();
   } catch (cause) {

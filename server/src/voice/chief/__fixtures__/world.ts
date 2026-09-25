@@ -10,6 +10,7 @@ import {
   listStories,
   openDatabase,
   recordRecurringTaskOccurrence,
+  type RecurringTaskOutcome,
   type Session,
   syncStories,
   updatePrReview,
@@ -60,6 +61,8 @@ export interface ChiefWorld {
     fixNow: FixNowResult;
     /** How `pullRequests.feedback` reads every pull request. */
     feedback: Partial<PullRequestFeedback>;
+    /** What `recurringTasks.fireNow` records; `pending` never settles, like a run still cloning. */
+    firing: { outcome: RecurringTaskOutcome; detail: string | null; sessionId: string | null } | 'pending';
   };
 }
 
@@ -177,6 +180,7 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
     conflicts: new Map(),
     fixNow: { ok: true, prNumber: 0, headBranch: 'chief/x', baseBranch: 'develop' },
     feedback: {},
+    firing: { outcome: 'started', detail: null, sessionId: rector.id },
   };
   /** Records an action, or throws the failure a test put in for it. */
   const act = (method: string, arg: unknown): void => {
@@ -336,6 +340,16 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
       },
     },
     hold: { until: () => state.hold },
+    recurringTasks: {
+      // Like the real one: the history row is the record, whatever the outcome.
+      fireNow: async (taskId) => {
+        act('recurringTasks.fireNow', taskId);
+        const firing = state.firing;
+        if (firing === 'pending') return new Promise(() => undefined);
+        const occurrence = recordRecurringTaskOccurrence(db, { recurringTaskId: taskId, ...firing });
+        return Promise.resolve({ fired: firing.outcome === 'started', occurrence });
+      },
+    },
   };
 
   return {
