@@ -37,6 +37,15 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
             summary: `${session.name} is ${session.status}: ${NOT_PENDING_REASON}`,
           };
         }
+        // Checked before offering to close the terminal, so a yes is never followed by a refusal.
+        const holdUntil = services.hold.until();
+        if (holdUntil !== null) {
+          return {
+            ok: false,
+            data: { error: 'usage_limit_hold', until: holdUntil },
+            summary: `Claude is on a usage-limit hold until ${holdUntil}, so the session agent cannot start`,
+          };
+        }
         if (services.planning?.isTerminalRunning(session.id) === true) {
           const confirmation = ctx.confirmations.request(
             { tool: NAME, args: { sessionId: session.id, name: session.name }, prompt: CLOSE_TERMINAL_PROMPT },

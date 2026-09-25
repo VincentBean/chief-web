@@ -455,7 +455,7 @@ describe('session voice agents', () => {
 
     it('says voice planning is for pending sessions', async () => {
       const session = newSession('done-already', 'finished');
-      const tool = focusSessionTool({ db, sessionAgents: registry } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: session.name }, context(newGate(), []));
       assert.equal(result.ok, false);
       assert.equal((result.data as { reason: string }).reason, NOT_PENDING_REASON);
@@ -464,7 +464,7 @@ describe('session voice agents', () => {
     it('starts the agent and moves the focus', async () => {
       const session = newSession('talk-it-through');
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: 'talk it through' }, context(newGate(), focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
@@ -485,7 +485,7 @@ describe('session voice agents', () => {
       };
       const focus: CallFocus[] = [];
       const gate = newGate();
-      const tool = focusSessionTool({ db, sessionAgents: registry, planning } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, planning, hold: { until: () => null } } as unknown as ChiefServices);
       const asked = await tool.handler({ session: session.name }, context(gate, focus));
       assert.equal((asked.data as { say: string }).say, CLOSE_TERMINAL_PROMPT);
       assert.deepEqual(focus, []);
