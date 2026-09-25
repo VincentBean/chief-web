@@ -84,7 +84,10 @@ export class CallAudio {
 
   constructor(private readonly sink: CallAudioSink) {
     this.captureCtx = createCaptureContext();
-    this.player = new AudioPlayer((progress) => this.sink.json({ type: 'playback.progress', ...progress }));
+    this.player = new AudioPlayer(
+      (progress) => this.sink.json({ type: 'playback.progress', ...progress }),
+      (turn, atMs) => this.sink.json({ type: 'metrics', turn, firstAudioPlayedAt: new Date(atMs).toISOString() }),
+    );
   }
 
   async start(options: CallAudioOptions): Promise<void> {

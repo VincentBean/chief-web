@@ -52,6 +52,8 @@ export class AudioPlayer {
   private generation = 0;
   /** Set while an MP3 decode holds up the segments after it. */
   private tail: Promise<void> | null = null;
+  /** The newest turn whose first audio was scheduled, for `onFirstPlay`. */
+  private firstPlayedTurn = -1;
   /** Earcons playing (US-021); they report no progress. */
   private readonly clips = new Set<AudioBufferSourceNode>();
 
@@ -59,7 +61,11 @@ export class AudioPlayer {
    * Create this from the Call button's click handler: the context is resumed
    * here, and browsers only allow that during a user gesture.
    */
-  constructor(private readonly onProgress: (progress: PlaybackProgress) => void) {
+  constructor(
+    private readonly onProgress: (progress: PlaybackProgress) => void,
+    /** A turn's first agent audio starts at `atMs` (epoch ms, this clock), for `metrics` (US-026). */
+    private readonly onFirstPlay: (turn: number, atMs: number) => void = () => undefined,
+  ) {
     this.ctx = new AudioContext({ sampleRate: PLAYBACK_SAMPLE_RATE });
     void this.ctx.resume();
   }
@@ -231,6 +237,12 @@ export class AudioPlayer {
     source.start(startAt);
     this.cursor = startAt + buffer.duration;
     const ms = buffer.duration * 1000;
+    if (segment.turn > this.firstPlayedTurn) {
+      this.firstPlayedTurn = segment.turn;
+      // When it reaches the speakers: the scheduling lead plus the output latency.
+      const leadS = startAt - this.ctx.currentTime + (this.ctx.outputLatency || 0);
+      this.onFirstPlay(segment.turn, Date.now() + Math.max(0, leadS) * 1000);
+    }
     segment.live.set(source, { startAt, ms });
     source.onended = () => {
       if (!segment.live.delete(source)) return;

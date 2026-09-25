@@ -320,6 +320,8 @@ describe('voice call socket', () => {
     client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
     const done = await client.until('agent.done');
     assert.deepEqual(done, { type: 'agent.done', turn: 1, interrupted: false });
+    // `listening` goes out once the turn has wound down, a tick after `agent.done`.
+    await client.until('state', 4);
     assert.equal(w.stt.calls, 1);
     assert.deepEqual(w.agents[0]?.heard, ["what's building?"]);
 
@@ -370,6 +372,60 @@ describe('voice call socket', () => {
     assert.equal((await client.closed).code, WS_CLOSE_CALL_ENDED);
     assert.equal(getVoiceCall(w.db, ready.callId)?.endReason, 'hangup');
     assert.equal(w.voice.service.activeCallId, null);
+  });
+
+  it('times every stage of a normal turn, in order, and stores the browser\'s first-audio-played', async () => {
+    const w = await world();
+    // Each reading of the call's clock is 5 ms after the last, so the stages are ordered in time.
+    const tick = w.clock.now.bind(w.clock);
+    let skew = 0;
+    w.clock.now = () => tick() + (skew += 5);
+    const { client, callId } = await w.call();
+
+    client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+    await client.until('agent.done');
+    const reply = listVoiceTurns(w.db, callId).find((t) => t.speaker === 'chief');
+    assert.ok(reply?.tFirstAudioSent);
+    // The browser heard it 40 ms after it went out.
+    const played = new Date(Date.parse(reply.tFirstAudioSent) + 40).toISOString();
+    client.send({ type: 'metrics', turn: 1, firstAudioPlayedAt: played });
+    // A second report for the same turn does not move it.
+    client.send({ type: 'metrics', turn: 1, firstAudioPlayedAt: new Date(Date.parse(played) + 999).toISOString() });
+    client.send({ type: 'metrics', turn: 7, firstAudioPlayedAt: played });
+    const last = await client.until('latency', 3);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(client.messages('latency').length, 3);
+    assert.equal(last.turn, 1);
+
+    const [user, chief] = listVoiceTurns(w.db, callId);
+    assert.equal(user?.speaker, 'user');
+    assert.equal(chief?.speaker, 'chief');
+    const stages = [
+      user?.tSpeechEnd,
+      user?.tTranscript,
+      chief?.tFirstToken,
+      chief?.tFirstChunk,
+      chief?.tFirstAudioSent,
+      chief?.tFirstAudioPlayed,
+    ];
+    for (const stage of stages) assert.equal(typeof stage, 'string');
+    const ms = stages.map((stage) => Date.parse(stage as string));
+    for (let i = 1; i < ms.length; i++) assert.ok((ms[i] as number) > (ms[i - 1] as number), `stage ${i} is not after stage ${i - 1}: ${stages.join(', ')}`);
+    assert.equal(chief?.tFirstAudioPlayed, played);
+
+    // The overlay's copy says the same.
+    assert.deepEqual(last.times, {
+      speechEnd: user?.tSpeechEnd,
+      transcript: user?.tTranscript,
+      firstToken: chief?.tFirstToken,
+      firstChunk: chief?.tFirstChunk,
+      firstAudioSent: chief?.tFirstAudioSent,
+      firstAudioPlayed: played,
+    });
+    // The first `latency` went out with the transcript, before the agent answered.
+    const first = client.messages('latency')[0];
+    assert.deepEqual(first?.times, { ...last.times, firstToken: null, firstChunk: null, firstAudioSent: null, firstAudioPlayed: null });
+    assert.ok(client.types.indexOf('latency') < client.types.indexOf('agent.delta'));
   });
 
   it('takes a typed message through the same pipeline without STT', async () => {

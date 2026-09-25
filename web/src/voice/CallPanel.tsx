@@ -7,6 +7,7 @@ import { Segmented } from '../ui.tsx';
 import { type CallStatus, type CallUsage, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
 import type { CallFocus, CallPhase, ConfirmationOutcome, ToolStatus } from './protocol.ts';
 import { bindHoldToTalkButton } from './ptt.ts';
+import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
 
 /**
  * The call panel (voice US-010): docked bottom-right at `lg`, a bottom sheet
@@ -165,6 +166,16 @@ export function CallPanel() {
             {status}
           </span>
         </div>
+        <button
+          type="button"
+          className="button button--icon button--quiet"
+          aria-pressed={call.debug}
+          aria-label={call.debug ? 'Hide latency' : 'Show latency'}
+          title={call.debug ? 'Hide the latency overlay' : 'Show where the time of each turn goes'}
+          onClick={() => call.setDebug(!call.debug)}
+        >
+          <Icon name="pulse" />
+        </button>
         <Link
           className="button button--icon button--quiet"
           href="/calls"
@@ -214,6 +225,8 @@ export function CallPanel() {
         </div>
       )}
 
+      {call.debug && <LatencyOverlay times={lastTimedTurn(call.latency)} />}
+
       <ol className="call-transcript" ref={body} aria-label="Transcript">
         {call.transcript.length === 0 && (
           <li className="call-transcript__empty">
@@ -221,7 +234,12 @@ export function CallPanel() {
           </li>
         )}
         {call.transcript.map((entry) => (
-          <TranscriptLine key={entry.key} entry={entry} onResolve={call.resolve} />
+          <TranscriptLine
+            key={entry.key}
+            entry={entry}
+            onResolve={call.resolve}
+            {...(call.debug && entry.kind === 'user' ? { stt: sttMs(call.latency[entry.turn]) } : {})}
+          />
         ))}
         {call.caption !== '' && (
           <li className="call-transcript__caption" aria-live="off">
@@ -325,15 +343,26 @@ export function CallPanel() {
 export function TranscriptLine({
   entry,
   onResolve,
+  stt,
 }: {
   readonly entry: TranscriptEntry;
   readonly onResolve: (id: string, confirm: boolean) => void;
+  /** Debug (US-026): the line's speech-to-text latency; undefined shows nothing. */
+  readonly stt?: number | null;
 }) {
   switch (entry.kind) {
     case 'user':
       return (
         <li className="call-line call-line--user">
-          <span className="call-line__who">You</span>
+          <span className="call-line__who">
+            You
+            {stt !== undefined && (
+              <span className="call-line__latency mono" title="Speech end → transcript">
+                {' · STT '}
+                {formatMs(stt)}
+              </span>
+            )}
+          </span>
           <span className="call-line__text">{entry.text}</span>
         </li>
       );
@@ -396,6 +425,31 @@ export function TranscriptLine({
         </li>
       );
   }
+}
+
+/** The debug overlay (US-026): where the last turn's time went, stage by stage. */
+function LatencyOverlay({ times }: { readonly times: ReturnType<typeof lastTimedTurn> }) {
+  if (times === null) {
+    return <div className="call-debug call-debug--empty">Latency shows here after your next turn.</div>;
+  }
+  const total = totalMs(times);
+  return (
+    <dl className="call-debug mono" aria-label="Latency of the last turn">
+      {latencyStages(times).map((stage) => (
+        <div key={stage.label} className="call-debug__stage" title={stage.title}>
+          <dt>{stage.label}</dt>
+          <dd>{formatMs(stage.ms)}</dd>
+        </div>
+      ))}
+      <div
+        className={`call-debug__stage call-debug__total${total !== null && total > LATENCY_TARGET_MS ? ' call-debug__total--slow' : ''}`}
+        title={`Speech end → first audio played (target ${formatMs(LATENCY_TARGET_MS)})`}
+      >
+        <dt>Total</dt>
+        <dd>{formatMs(total)}</dd>
+      </div>
+    </dl>
+  );
 }
 
 /** "38.2k", "121k", "950". */

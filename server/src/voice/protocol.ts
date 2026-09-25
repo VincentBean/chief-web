@@ -94,6 +94,20 @@ export interface EarconRef {
   readonly sampleRate: number;
 }
 
+/**
+ * Where the time of one turn went (US-026), ISO timestamps or null when that
+ * stage did not happen: the server's clock, except `firstAudioPlayed`, which
+ * is the browser's (the `metrics` message).
+ */
+export interface TurnTimes {
+  readonly speechEnd: string | null;
+  readonly transcript: string | null;
+  readonly firstToken: string | null;
+  readonly firstChunk: string | null;
+  readonly firstAudioSent: string | null;
+  readonly firstAudioPlayed: string | null;
+}
+
 /** Plan §6.2. Audio follows `tts.segment` as binary kind `0x02` frames. */
 export type ServerMessage =
   | {
@@ -120,6 +134,8 @@ export type ServerMessage =
   | { readonly type: 'user.transcript'; readonly turn: number; readonly text: string }
   | { readonly type: 'agent.delta'; readonly turn: number; readonly agent: AgentKind; readonly text: string }
   | { readonly type: 'agent.done'; readonly turn: number; readonly interrupted: boolean }
+  /** A turn's timestamps so far (US-026), sent again whenever one more is known. */
+  | { readonly type: 'latency'; readonly turn: number; readonly times: TurnTimes }
   | {
       readonly type: 'tts.segment';
       readonly segmentId: number;

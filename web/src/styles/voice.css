@@ -233,6 +233,48 @@
     word-break: break-word;
   }
 
+  .call-line__latency {
+    font-weight: 400;
+  }
+
+  /* Latency overlay (US-026): the last turn's stages, between header and transcript. */
+  .call-debug {
+    background: var(--color-surface-sunken);
+    border-bottom: 1px solid var(--color-line-subtle);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: var(--text-xs);
+    gap: 0.25rem 0.75rem;
+    margin: 0;
+    padding: 0.375rem 0.75rem;
+  }
+
+  .call-debug--empty {
+    color: var(--color-fg-subtle);
+  }
+
+  .call-debug__stage {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .call-debug__stage dt {
+    color: var(--color-fg-subtle);
+  }
+
+  .call-debug__stage dd {
+    margin: 0;
+  }
+
+  .call-debug__total {
+    font-weight: 600;
+    margin-left: auto;
+  }
+
+  .call-debug__total--slow dd {
+    color: var(--color-status-wait);
+  }
+
   .call-line__cut {
     color: var(--color-fg-subtle);
     font-style: italic;

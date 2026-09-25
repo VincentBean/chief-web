@@ -272,6 +272,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |
 | [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
+| [Voice calls](docs/voice.md) | talking to chief, and tuning the latency of a turn |
 | [Claude authentication](docs/claude-auth.md) | the one-time login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
 | [Troubleshooting](docs/troubleshooting.md) | SSH and login failures, recovering a failed session |

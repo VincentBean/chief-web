@@ -23,6 +23,7 @@ import {
   type ServerMessage,
   type SttMode,
   type ToolStatus,
+  type TurnTimes,
   WS_CLOSE_BAD_ORIGIN,
   WS_CLOSE_CALL_ENDED,
   WS_CLOSE_CALL_IN_PROGRESS,
@@ -47,6 +48,7 @@ const CLIENT_VERSION = 'web-1';
 const RESUME_WINDOW_MS = 30_000;
 const RESUME_DELAY_MS = 1000;
 const MODE_KEY = 'chief.voice.mode';
+const DEBUG_KEY = 'chief.voice.debug';
 /** Used until Settings has been read; the server's own default. */
 const DEFAULT_VAD_SILENCE_MS = 700;
 
@@ -114,6 +116,10 @@ export interface CallState {
   /** Live caption of what the operator is saying (Scribe partials or Web Speech), '' when none (US-022). */
   readonly caption: string;
   readonly usage: CallUsage | null;
+  /** The latency overlay is on (US-026); remembered in this browser. */
+  readonly debug: boolean;
+  /** Each recent turn's timing, by turn number, from the server's `latency` messages. */
+  readonly latency: Readonly<Record<number, TurnTimes>>;
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
   readonly panelOpen: boolean;
@@ -142,6 +148,7 @@ export interface CallActions {
   setMode(mode: TalkMode): void;
   /** Answers a confirmation pill; the server runs or drops exactly that one. */
   resolve(id: string, confirm: boolean): void;
+  setDebug(debug: boolean): void;
 }
 
 export type CallContext = CallState & CallActions;
@@ -161,6 +168,23 @@ function storeMode(mode: TalkMode): void {
     window.localStorage.setItem(MODE_KEY, mode);
   } catch {
     // Private mode or a full quota: the mode just is not remembered.
+  }
+}
+
+function readDebug(): boolean {
+  try {
+    return window.localStorage.getItem(DEBUG_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function storeDebug(debug: boolean): void {
+  try {
+    if (debug) window.localStorage.setItem(DEBUG_KEY, '1');
+    else window.localStorage.removeItem(DEBUG_KEY);
+  } catch {
+    // Not remembered; the toggle still works for this page.
   }
 }
 
@@ -297,6 +321,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [talking, setTalking] = useState(false);
   const [caption, setCaption] = useState('');
   const [usage, setUsage] = useState<CallUsage | null>(null);
+  const [debug, setDebugState] = useState(readDebug);
+  const [latency, setLatency] = useState<Readonly<Record<number, TurnTimes>>>({});
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -381,6 +407,9 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
             elCreditsRemaining: message.elCreditsRemaining ?? null,
             elCreditsLimit: message.elCreditsLimit ?? null,
           });
+          return;
+        case 'latency':
+          setLatency((current) => ({ ...current, [message.turn]: message.times }));
           return;
         case 'ui':
           if (message.action === 'navigate') navigate(message.path);
@@ -490,6 +519,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       setProblem(null);
       setTranscript([]);
       setUsage(null);
+      setLatency({});
       setCaption('');
       sttMode.current = 'openrouter';
       setStartedAt(null);
@@ -640,6 +670,11 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     return () => window.removeEventListener('pagehide', onUnload);
   }, []);
 
+  const setDebug = useCallback((next: boolean): void => {
+    setDebugState(next);
+    storeDebug(next);
+  }, []);
+
   const value = useMemo<CallContext>(
     () => ({
       availability,
@@ -656,6 +691,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       talking,
       caption,
       usage,
+      debug,
+      latency,
       problem,
       panelOpen,
       panelRef,
@@ -674,6 +711,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      setDebug,
     }),
     [
       availability,
@@ -689,6 +727,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       talking,
       caption,
       usage,
+      debug,
+      latency,
       problem,
       panelOpen,
       open,
@@ -701,6 +741,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      setDebug,
     ],
   );
 

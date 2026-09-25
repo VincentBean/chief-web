@@ -26,6 +26,7 @@ import {
   FRAME_KIND_UTTERANCE,
   parseClientMessage,
   type ServerMessage,
+  type TurnTimes,
   type SttMode,
   type ToolStatus,
   type UiAction,
@@ -259,6 +260,17 @@ const GOODBYE_MAX_MS = 15_000;
  * the focused agent and TTS. Exactly one turn is active at a time; a new
  * utterance while one runs interrupts it first (barge-in).
  */
+/** How many recent turns keep their timing for `latency` (US-026). */
+const TIMED_TURNS_KEPT = 8;
+const NO_TIMES: TurnTimes = {
+  speechEnd: null,
+  transcript: null,
+  firstToken: null,
+  firstChunk: null,
+  firstAudioSent: null,
+  firstAudioPlayed: null,
+};
+
 export class VoiceCall {
   readonly state: VoiceCallState;
   /** The one pending server-enforced confirmation (US-011), kept in `state`. */
@@ -274,6 +286,8 @@ export class VoiceCall {
   private readonly heard = new Map<number, string>();
   /** The agent reply row of each turn, for `metrics`. */
   private readonly replyRows = new Map<number, number>();
+  /** What is known of the recent turns' timing (US-026), for `latency` and the reply row. */
+  private readonly turnTimes = new Map<number, TurnTimes>();
   private running: Promise<void> = Promise.resolve();
   /** Bumped by every utterance; a stale one that was superseded while waiting gives up. */
   private ticket = 0;
@@ -552,6 +566,10 @@ export class VoiceCall {
         this.submitResolution(message.id, message.accept);
         return;
       case 'metrics': {
+        // Only the first report counts; a turn the call no longer tracks is ignored.
+        if (this.turnTimes.get(message.turn)?.firstAudioPlayed !== null) return;
+        this.noteTimes(message.turn, { firstAudioPlayed: message.firstAudioPlayedAt });
+        // The audio usually plays before the reply row exists; that insert picks it up then.
         const row = this.replyRows.get(message.turn);
         if (row !== undefined) updateVoiceTurn(this.deps.db, row, { tFirstAudioPlayed: message.firstAudioPlayedAt });
         return;
@@ -894,6 +912,7 @@ export class VoiceCall {
         ...(times.tTranscript === undefined ? {} : { tTranscript: times.tTranscript }),
       });
     }
+    this.noteTimes(turn, { speechEnd: times.tSpeechEnd ?? null, transcript: times.tTranscript ?? null });
 
     // The operator spoke first: the session agent answers that, not a greeting.
     if (mode === 'user') this.greetPending = null;
@@ -1022,7 +1041,7 @@ export class VoiceCall {
         text: reply,
         interrupted,
         toolsJson: tools.length > 0 ? JSON.stringify(tools) : null,
-        ...marks,
+        ...this.replyTimes(turn, marks),
       });
       this.replyRows.set(turn, row.id);
     }
@@ -1034,11 +1053,19 @@ export class VoiceCall {
   private async sayLine(tts: CallTts, turn: number, text: string, signal: AbortSignal): Promise<void> {
     this.send({ type: 'agent.delta', turn, agent: 'chief', text });
     const spoken = toSpeakable(text, getVoiceSettings(this.deps.db).pronunciations);
-    await this.speak(tts, turn, spoken, true, signal, {}).catch(() => undefined);
+    const marks: { tFirstAudioSent?: string } = {};
+    await this.speak(tts, turn, spoken, true, signal, marks).catch(() => undefined);
     // `runTurn` already sent `tts.stop` if this was cut off.
     const interrupted = signal.aborted;
     this.send({ type: 'agent.done', turn, interrupted });
-    const row = insertVoiceTurn(this.deps.db, { callId: this.id, turn, speaker: 'chief', text, interrupted });
+    const row = insertVoiceTurn(this.deps.db, {
+      callId: this.id,
+      turn,
+      speaker: 'chief',
+      text,
+      interrupted,
+      ...this.replyTimes(turn, marks),
+    });
     this.replyRows.set(turn, row.id);
     this.noteReply(turn, 'chief', text);
   }
@@ -1055,6 +1082,7 @@ export class VoiceCall {
     }
     const text = last.text !== '' ? last.text : last.segments.map((segment) => segment.text).join(' ');
     this.send({ type: 'agent.delta', turn, agent: last.agent, text });
+    const marks: { tFirstAudioSent?: string } = {};
     for (const segment of last.segments) {
       if (signal.aborted || this.state.muted) break;
       const segmentId = ++this.segmentSeq;
@@ -1062,12 +1090,22 @@ export class VoiceCall {
       this.segmentTexts.set(segmentId, { turn, text: segment.text, bytes, sampleRate: segment.sampleRate });
       this.audioStarted();
       this.send({ type: 'tts.segment', segmentId, turn, text: segment.text, sampleRate: segment.sampleRate, format: segment.format });
-      for (const chunk of segment.chunks) this.transport?.sendAudio(segmentId, chunk);
+      for (const chunk of segment.chunks) {
+        marks.tFirstAudioSent ??= this.isoNow();
+        this.transport?.sendAudio(segmentId, chunk);
+      }
       this.send({ type: 'tts.end', segmentId });
     }
     const interrupted = signal.aborted;
     this.send({ type: 'agent.done', turn, interrupted });
-    const row = insertVoiceTurn(this.deps.db, { callId: this.id, turn, speaker: last.agent, text, interrupted });
+    const row = insertVoiceTurn(this.deps.db, {
+      callId: this.id,
+      turn,
+      speaker: last.agent,
+      text,
+      interrupted,
+      ...this.replyTimes(turn, marks),
+    });
     this.replyRows.set(turn, row.id);
   }
 
@@ -1491,6 +1529,35 @@ export class VoiceCall {
 
   private send(message: ServerMessage): void {
     this.transport?.send(message);
+  }
+
+  /**
+   * Merges what is now known of `turn`'s timing and sends it as `latency`
+   * (US-026). Only the last few turns are kept.
+   */
+  private noteTimes(turn: number, patch: Partial<TurnTimes>): void {
+    const known = this.turnTimes.get(turn) ?? NO_TIMES;
+    const times: TurnTimes = { ...known };
+    for (const [key, value] of Object.entries(patch) as [keyof TurnTimes, string | null | undefined][]) {
+      if (value !== undefined && value !== null) (times as Record<keyof TurnTimes, string | null>)[key] = value;
+    }
+    this.turnTimes.set(turn, times);
+    for (const old of this.turnTimes.keys()) if (old <= turn - TIMED_TURNS_KEPT) this.turnTimes.delete(old);
+    this.send({ type: 'latency', turn, times });
+  }
+
+  /** The reply row's timing columns: the turn's marks plus a `metrics` report that came first. */
+  private replyTimes(
+    turn: number,
+    marks: { readonly tFirstToken?: string; readonly tFirstChunk?: string; readonly tFirstAudioSent?: string },
+  ): { tFirstToken?: string; tFirstChunk?: string; tFirstAudioSent?: string; tFirstAudioPlayed?: string } {
+    this.noteTimes(turn, {
+      firstToken: marks.tFirstToken ?? null,
+      firstChunk: marks.tFirstChunk ?? null,
+      firstAudioSent: marks.tFirstAudioSent ?? null,
+    });
+    const played = this.turnTimes.get(turn)?.firstAudioPlayed ?? null;
+    return { ...marks, ...(played === null ? {} : { tFirstAudioPlayed: played }) };
   }
 
   private isoNow(): string {
