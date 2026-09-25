@@ -4,8 +4,12 @@ import type { AddressInfo } from 'node:net';
 /**
  * A fake OpenRouter for chief's tests (voice US-008): every chat request gets
  * the next scripted reply, streamed as SSE in small pieces, and is recorded
- * with its parsed body so a test can see what chief sent.
+ * with its parsed body so a test can see what chief sent. `POST /audio/speech`
+ * is the backup voice (voice US-027): {@link SPEECH_BYTES_PER_CHAR} bytes of
+ * PCM per character of `input`, recorded in `speech` and never taking a reply.
  */
+
+export const SPEECH_BYTES_PER_CHAR = 2;
 
 export interface ScriptedReply {
   readonly status: number;
@@ -17,6 +21,8 @@ export interface ScriptedOpenRouter {
   /** Replies still to be given, in order; a request with none left gets a 500. */
   readonly replies: ScriptedReply[];
   readonly requests: Record<string, unknown>[];
+  /** Every `/audio/speech` body, in order. */
+  readonly speech: Record<string, unknown>[];
   close(): Promise<void>;
 }
 
@@ -65,11 +71,19 @@ export function errorReply(status: number): ScriptedReply {
 export async function startScriptedOpenRouter(): Promise<ScriptedOpenRouter> {
   const replies: ScriptedReply[] = [];
   const requests: Record<string, unknown>[] = [];
+  const speech: Record<string, unknown>[] = [];
   const server = http.createServer((req, res) => {
     const body: Buffer[] = [];
     req.on('data', (data: Buffer) => body.push(data));
     req.on('end', () => {
-      requests.push(JSON.parse(Buffer.concat(body).toString('utf8')) as Record<string, unknown>);
+      const parsed = JSON.parse(Buffer.concat(body).toString('utf8')) as Record<string, unknown>;
+      if ((req.url ?? '').endsWith('/audio/speech')) {
+        speech.push(parsed);
+        res.writeHead(200, { 'content-type': 'audio/pcm' });
+        res.end(Buffer.alloc(String(parsed['input']).length * SPEECH_BYTES_PER_CHAR, 1));
+        return;
+      }
+      requests.push(parsed);
       const reply = replies.shift() ?? errorReply(500);
       if (reply.status !== 200) {
         res.writeHead(reply.status, { 'content-type': 'application/json' });
@@ -93,6 +107,7 @@ export async function startScriptedOpenRouter(): Promise<ScriptedOpenRouter> {
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     replies,
     requests,
+    speech,
     close: async () => {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import type { Duplex } from 'node:stream';
 import { after, before, describe, it } from 'node:test';
 
 import { WebSocket } from 'ws';
@@ -16,9 +17,11 @@ import {
   createSession,
   type Database,
   featureBranchFor,
+  getRecurringTaskByName,
   getVoiceCall,
   getVoiceSessionAgent,
   IN_MEMORY,
+  listSessions,
   listVoiceTurns,
   openDatabase,
   setSetting,
@@ -27,11 +30,18 @@ import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
-import { chiefWorld } from './chief/__fixtures__/world.js';
-import { startScriptedOpenRouter, textReply, toolReply } from './chief/__fixtures__/scripted-openrouter.js';
+import { type ChiefWorld, chiefWorld } from './chief/__fixtures__/world.js';
+import {
+  type ScriptedOpenRouter,
+  SPEECH_BYTES_PER_CHAR,
+  startScriptedOpenRouter,
+  textReply,
+  toolReply,
+} from './chief/__fixtures__/scripted-openrouter.js';
 import type { ChiefServices } from './chief/tools.js';
 import type { AgentEvent, CallClock, CallEarcons, CallStt, CallTts, VoiceAgent } from './call.js';
-import { IDLE_GOODBYE } from './call.js';
+import { EVENT_QUIET_MS, IDLE_GOODBYE } from './call.js';
+import { VoiceEventBus } from './events.js';
 import { createVoice, type Voice } from './index.js';
 import {
   decodeFrame,
@@ -49,7 +59,7 @@ import { CLAUDE_SESSION, FakeClaude, LONG_OPENING } from './session-agent/__fixt
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
 import type { SttResult } from './stt/index.js';
-import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
+import { type SpeakCallbacks, type SpeakResult, SWITCHED_TOAST, type TtsSink } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
 
 const IDLE_MS = 120_000;
@@ -85,15 +95,18 @@ class FakeClock implements CallClock {
   }
 }
 
+/** Hears the next canned line per utterance, and "what's building?" once they run out. */
 class FakeStt implements CallStt {
   calls = 0;
+  readonly canned: string[] = [];
   transcribe(): Promise<SttResult> {
     this.calls += 1;
-    return Promise.resolve({ kind: 'text', text: "what's building?", durationMs: 900, costUsd: 0.001, seconds: 0.9 });
+    const text = this.canned.shift() ?? "what's building?";
+    return Promise.resolve({ kind: 'text', text, durationMs: 900, costUsd: 0.001, seconds: 0.9 });
   }
 }
 
-/** Two bytes of "audio" per character, in one chunk. */
+/** {@link SPEECH_BYTES_PER_CHAR} bytes of "audio" per character, in one chunk. */
 class FakeTts implements CallTts {
   readonly providerName = 'elevenlabs' as const;
   readonly format = { kind: 'pcm16', sampleRate: 24000 } as const;
@@ -107,7 +120,7 @@ class FakeTts implements CallTts {
     if (seg.text !== '') {
       this.spoken.push(seg.text);
       callbacks.onStart?.(this.format, 'elevenlabs');
-      callbacks.onAudio(Buffer.alloc(seg.text.length * 2, 1));
+      callbacks.onAudio(Buffer.alloc(seg.text.length * SPEECH_BYTES_PER_CHAR, 1));
       this.sink.chars({ provider: 'elevenlabs', segmentId: seg.segmentId, turn: seg.turn, chars: seg.text.length });
     }
     return Promise.resolve({ spoken: true, provider: 'elevenlabs', chars: seg.text.length });
@@ -213,12 +226,15 @@ after(async () => {
 
 /** `chief`: the real chief agent over these services instead of {@link ScriptedAgent}. */
 /** `sessionAgents`: real session voice agents over this registry (and no scripted agent). */
+/** `providerTts`: the real `TtsService` against `ELEVENLABS_API_URL`/`OPENROUTER_API_URL` instead of {@link FakeTts}. */
 async function world(
   env: Record<string, string> = {},
   opts: {
     chief?: (db: Database) => ChiefServices;
     sessionAgents?: (db: Database, config: Config) => SessionAgentRegistry;
     earcons?: CallEarcons;
+    events?: VoiceEventBus;
+    providerTts?: boolean;
   } = {},
 ): Promise<World> {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', VOICE_IDLE_TIMEOUT_MS: String(IDLE_MS), ...env });
@@ -236,13 +252,22 @@ async function world(
   const sessionAgents = opts.sessionAgents?.(db, config);
   const voice = createVoice(config, db, {
     stt,
-    tts: (sink) => {
-      const tts = new FakeTts(sink);
-      ttses.push(tts);
-      return tts;
-    },
+    ...(opts.providerTts === true
+      ? {
+          // Without these the service would render earcons and read usage from the providers.
+          earcons: opts.earcons ?? { load: () => Promise.resolve([]) },
+          usage: { subscription: () => Promise.resolve(null), generationCost: () => Promise.resolve(null) },
+        }
+      : {
+          tts: (sink: TtsSink) => {
+            const tts = new FakeTts(sink);
+            ttses.push(tts);
+            return tts;
+          },
+          ...(opts.earcons === undefined ? {} : { earcons: opts.earcons }),
+        }),
     ...(sessionAgents === undefined ? {} : { sessionAgents }),
-    ...(opts.earcons === undefined ? {} : { earcons: opts.earcons }),
+    ...(opts.events === undefined ? {} : { events: opts.events }),
     ...(chief === undefined && sessionAgents === undefined
       ? {
           agent: () => {
@@ -744,6 +769,287 @@ describe('barge-in', () => {
     client.send({ type: 'ptt', down: true });
     assert.deepEqual(await client.until('tts.stop'), { type: 'tts.stop', turn: 2 });
     assert.deepEqual(await client.until('agent.done', 2), { type: 'agent.done', turn: 2, interrupted: true });
+  });
+});
+
+describe('a scripted call end to end (US-027)', () => {
+  let daemon: FakeDockerDaemon;
+  let openrouter: ScriptedOpenRouter;
+  let dataDir: string;
+
+  before(async () => {
+    daemon = await FakeDockerDaemon.start();
+    new FakeClaude(daemon);
+    openrouter = await startScriptedOpenRouter();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-e2e-call-'));
+  });
+
+  after(async () => {
+    await openrouter.close();
+    await daemon.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  /**
+   * A call on the real chief over the seeded install, scripted through
+   * {@link openrouter}, with the pending `onboarding-copy` session's agent
+   * running as the fake `claude` on the fake daemon. `say` goes through STT as
+   * an utterance and waits for `turns` turns to finish.
+   */
+  const scriptedCall = async (opts: { env?: Record<string, string>; providerTts?: boolean; before?: (db: Database) => void } = {}) => {
+    openrouter.replies.length = 0;
+    openrouter.requests.length = 0;
+    openrouter.speech.length = 0;
+    const events = new VoiceEventBus();
+    let seeded: ChiefWorld | null = null;
+    let registry: SessionAgentRegistry | null = null;
+    const agents = (): SessionAgentRegistry => registry ?? assert.fail('no session agent registry');
+    const w = await world(
+      { DATA_DIR: dataDir, OPENROUTER_API_URL: openrouter.baseUrl, ...opts.env },
+      {
+        events,
+        ...(opts.providerTts === true ? { providerTts: true } : {}),
+        chief: (db) => {
+          seeded = chiefWorld(db);
+          // Like app.ts: chief reaches the registry built after it.
+          return { ...seeded.services, sessionAgents: { acquire: (id) => agents().acquire(id), isAlive: (id) => agents().isAlive(id) } };
+        },
+        sessionAgents: (db, config) => {
+          const id = (seeded ?? assert.fail('chief was not seeded')).ids['onboarding'] ?? '';
+          fs.mkdirSync(path.join(sessionRepoDir(config, id), '.git'), { recursive: true });
+          daemon.addContainer({ id: `c-${id}`, name: `chief-web-onboarding-copy-${id}` });
+          registry = new SessionAgentRegistry({
+            config,
+            db,
+            docker: new DockerApi(daemon.socketPath),
+            containers: {
+              start: () => Promise.resolve({ id: `c-${id}`, name: `chief-web-onboarding-copy-${id}`, running: true, state: 'running' as const }),
+              remove: () => Promise.resolve(),
+            },
+            hold: { active: () => false, until: () => null },
+          });
+          return registry;
+        },
+      },
+    );
+    const chief: ChiefWorld = seeded ?? assert.fail('chief was not seeded');
+    opts.before?.(w.db);
+    const { client, callId } = await w.call();
+    const say = async (text: string, turns = 1): Promise<void> => {
+      const done = client.messages('agent.done').length;
+      w.stt.canned.push(text);
+      client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+      await client.until('agent.done', done + turns);
+      await waitFor(() => client.messages('state').at(-1)?.phase === 'listening');
+    };
+    const hangUp = async (): Promise<void> => {
+      client.send({ type: 'hangup' });
+      assert.equal((await client.closed).code, WS_CLOSE_CALL_ENDED);
+    };
+    return { w, chief, events, client, callId, say, hangUp };
+  };
+
+  /** The deltas of one turn, joined. */
+  const said = (client: Client, turn: number): string =>
+    client.messages('agent.delta').filter((d) => d.turn === turn).map((d) => d.text).join('');
+
+  /** Every segment of the turn was voiced, at {@link SPEECH_BYTES_PER_CHAR} bytes a character; returns what was spoken. */
+  const spoken = (client: Client, turn: number): string => {
+    const segments = client.messages('tts.segment').filter((s) => s.turn === turn);
+    assert.ok(segments.length > 0, `turn ${String(turn)} spoke nothing`);
+    for (const segment of segments) {
+      const bytes = client.received.reduce((n, r) => n + (r.kind === 'audio' && r.segmentId === segment.segmentId ? r.bytes : 0), 0);
+      assert.equal(bytes, segment.text.length * SPEECH_BYTES_PER_CHAR, `segment "${segment.text}"`);
+    }
+    return segments.map((s) => s.text).join(' ');
+  };
+
+  /** The `[name, status, summary]` of every finished tool card of a turn. */
+  const toolCards = (client: Client, turn: number): string[][] =>
+    client.messages('tool').filter((m) => m.turn === turn && m.status !== 'running').map((m) => [m.name, m.status, m.summary ?? '']);
+
+  /** The last message chief's model was sent. */
+  const lastModelInput = (): string => {
+    const messages = (openrouter.requests.at(-1)?.['messages'] ?? []) as { content: string | null }[];
+    return messages.at(-1)?.content ?? '';
+  };
+
+  it('"what\'s building" → a spoken answer from the snapshot, with no tool call', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['billing-export is building story 3 of 7. ', 'Nothing else is running.']));
+    await s.say("what's building");
+
+    assert.deepEqual(s.client.messages('user.transcript'), [{ type: 'user.transcript', turn: 1, text: "what's building" }]);
+    assert.equal(openrouter.requests.length, 1);
+    assert.deepEqual(s.client.messages('tool'), []);
+    assert.equal(said(s.client, 1), 'billing-export is building story 3 of 7. Nothing else is running.');
+    assert.match(spoken(s.client, 1), /story 3 of 7\. Nothing else is running\.$/);
+    assert.deepEqual(
+      listVoiceTurns(s.w.db, s.callId).map((t) => [t.speaker, t.toolsJson]),
+      [
+        ['user', null],
+        ['chief', null],
+      ],
+    );
+    await s.hangUp();
+  });
+
+  it('"create a session …" → confirm → "yes" → created, opened, and the setup event spoken after a quiet moment', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(
+      toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
+      textReply(['Shall I create csv-export in shop-api?']),
+    );
+    await s.say('create a session for the CSV export on shop-api');
+    const pill = s.client.messages('confirm').at(-1);
+    assert.equal(pill?.prompt, 'Create session csv-export in shop-api, from develop with a pull request into main?');
+    assert.deepEqual(toolCards(s.client, 1).map(([name]) => name), ['create_session']);
+    assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
+    spoken(s.client, 1);
+
+    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
+    await s.say('yes');
+    assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
+    const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
+    assert.ok(session);
+    assert.deepEqual(toolCards(s.client, 2), [['create_session', 'ok', 'Created session: csv-export']]);
+    assert.ok(s.client.messages('ui').some((m) => m.action === 'navigate' && m.path === `/sessions/${session.id}`));
+    assert.equal(s.client.messages('confirm.resolved').at(-1)?.outcome, 'confirmed');
+    assert.equal(spoken(s.client, 2), 'Done. csv-export is being set up.');
+
+    // The clone finishes: toasted at once, spoken only once the call has been quiet.
+    const done = s.client.messages('agent.done').length;
+    s.events.publish({ kind: 'session.setup', sessionId: session.id, name: 'csv-export', ok: true, message: null });
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text.includes('csv-export is cloned')));
+    await flush();
+    assert.equal(s.client.messages('agent.done').length, done);
+    openrouter.replies.push(textReply(['csv-export is cloned and ready to plan.']));
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    assert.match(lastModelInput(), /^\[event\] csv-export is cloned and ready to plan\./);
+    assert.equal(spoken(s.client, 3), 'csv-export is cloned and ready to plan.');
+    await s.hangUp();
+  });
+
+  it('"pause the nightly rector task" → confirm → "ja" → paused and read back', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(
+      toolReply([{ id: 'p1', name: 'pause_recurring_task', args: '{"task":"nightly rector"}' }]),
+      textReply(['Zal ik nightly-rector pauzeren?']),
+    );
+    await s.say('pause the nightly rector task');
+    assert.equal(s.client.messages('confirm').at(-1)?.prompt, 'Pause the recurring task nightly-rector?');
+    const task = (): boolean | undefined => getRecurringTaskByName(s.w.db, s.chief.ids['shop'] ?? '', 'nightly-rector')?.paused;
+    assert.equal(task(), false);
+
+    const requests = openrouter.requests.length;
+    openrouter.replies.push(textReply(['nightly-rector is gepauzeerd; ', 'hij draait vannacht niet.']));
+    await s.say('ja');
+    assert.equal(task(), true);
+    assert.deepEqual(toolCards(s.client, 2), [['pause_recurring_task', 'ok', 'Paused: nightly-rector']]);
+    // One model round trip: chief reads the outcome back.
+    assert.equal(openrouter.requests.length, requests + 1);
+    assert.deepEqual(JSON.parse(lastModelInput()), { ok: true, name: 'nightly-rector', paused: true, nextRun: null });
+    assert.equal(spoken(s.client, 2), 'nightly-rector is gepauzeerd; hij draait vannacht niet.');
+    await s.hangUp();
+  });
+
+  it('"change PR 213: …" → confirm → "yes" → the request is posted and a feedback run started', async () => {
+    const s = await scriptedCall();
+    const list = s.chief.state.pullRequests;
+    const [shop] = list?.repositories ?? [];
+    const template = shop?.pullRequests[0];
+    assert.ok(list && shop && template);
+    const csv = { ...template, number: 213, title: 'CSV import', url: 'https://github.com/acme/shop-api/pull/213', headRef: 'csv-import', sessionId: null };
+    s.chief.state.pullRequests = { ...list, repositories: [{ ...shop, pullRequests: [...shop.pullRequests, csv] }] };
+    openrouter.replies.push(
+      toolReply([{ id: 'r1', name: 'request_pr_change', args: '{"repository":"shop-api","number":213,"instruction":"use league csv instead of fgetcsv"}' }]),
+      textReply(['Shall I ask for that on 213?']),
+    );
+    await s.say('change PR 213: use league csv instead of fgetcsv');
+    const prompt = s.client.messages('confirm').at(-1)?.prompt ?? '';
+    assert.match(prompt, /213, "CSV import", ask for: "use league csv instead of fgetcsv"\?$/);
+    assert.equal(s.chief.state.calls.length, 0);
+
+    openrouter.replies.push(textReply(['Posted, and a run is picking it up.']));
+    await s.say('yes');
+    assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['pullRequests.feedback', 'github.postReview', 'prFeedback.start']);
+    const posted = s.chief.state.calls[1]?.arg as { prNumber: number; body: string };
+    assert.equal(posted.prNumber, 213);
+    assert.match(posted.body, /use league csv instead of fgetcsv/);
+    assert.deepEqual(s.chief.state.calls[2]?.arg, { repositoryId: s.chief.ids['shop'], prNumber: 213 });
+    assert.deepEqual(toolCards(s.client, 2).map(([name, status]) => [name, status]), [['request_pr_change', 'ok']]);
+    spoken(s.client, 2);
+    await s.hangUp();
+  });
+
+  it('focus a session → its agent boots → the reply streams → "back to chief"', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    // Chief's turn, then the session agent's opening.
+    await s.say("let's plan the onboarding copy", 2);
+    assert.deepEqual(toolCards(s.client, 1), [['focus_session', 'ok', 'Handed the call to onboarding-copy']]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.ok(s.client.messages('ui').some((m) => m.action === 'navigate' && m.path === `/sessions/${sessionId}`));
+    const opening = s.client.messages('agent.delta').filter((d) => d.agent === 'session');
+    assert.ok(opening.length >= 2, 'the reply streams in pieces');
+    assert.equal(opening.map((d) => d.text).join(''), 'Heard you. What next?');
+    const openingTurn = opening[0]?.turn ?? 0;
+    assert.equal(spoken(s.client, openingTurn), 'Heard you. What next?');
+
+    await s.say('add a download button');
+    const reply = s.client.messages('agent.delta').filter((d) => d.agent === 'session' && d.turn > openingTurn);
+    assert.equal(reply.map((d) => d.text).join(''), 'Heard you. What next?');
+    assert.equal(getVoiceSessionAgent(s.w.db, sessionId)?.claudeSessionId, CLAUDE_SESSION);
+
+    const requests = openrouter.requests.length;
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
+    assert.equal(openrouter.requests.length, requests, 'the handback is a fixed line, not a model call');
+    await s.hangUp();
+  });
+
+  it('ElevenLabs answering 402 → the call speaks through OpenRouter and toasts', async () => {
+    const elevenlabs = createServer((req, res) => {
+      if ((req.url ?? '').startsWith('/v1/user/subscription')) {
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ character_count: 10_000, character_limit: 10_000, next_character_count_reset_unix: 1_790_000_000 }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    elevenlabs.on('upgrade', (_req: IncomingMessage, socket: Duplex) => {
+      const body = JSON.stringify({ detail: { type: 'payment_required', code: 'insufficient_credits', message: 'Out of credits' } });
+      socket.end(`HTTP/1.1 402 Payment Required\r\ncontent-type: application/json\r\ncontent-length: ${String(Buffer.byteLength(body))}\r\nconnection: close\r\n\r\n${body}`);
+    });
+    elevenlabs.listen(0, '127.0.0.1');
+    await new Promise((resolve) => elevenlabs.once('listening', resolve));
+    try {
+      const s = await scriptedCall({
+        env: { ELEVENLABS_API_URL: `http://127.0.0.1:${String((elevenlabs.address() as AddressInfo).port)}` },
+        providerTts: true,
+        before: (db) => {
+          setSetting(db, 'elevenlabs_api_key', 'sk_el_test');
+          setSetting(db, 'voice_voice_id', 'voice123');
+        },
+      });
+      openrouter.replies.push(textReply(['billing-export is building story 3 of 7. ', 'Nothing else is running.']));
+      await s.say("what's building");
+
+      assert.ok(s.client.messages('ui').some((m) => m.action === 'toast' && m.text === SWITCHED_TOAST));
+      assert.equal(spoken(s.client, 1), openrouter.speech.map((body) => String(body['input'])).join(' '));
+      assert.ok(openrouter.speech.length > 0);
+      assert.equal(getVoiceCall(s.w.db, s.callId)?.ttsProvider, 'openrouter');
+      await s.hangUp();
+    } finally {
+      elevenlabs.closeAllConnections();
+      await new Promise((resolve) => elevenlabs.close(resolve));
+    }
   });
 });
 
