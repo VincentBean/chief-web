@@ -36,6 +36,7 @@ export {
   type ConflictScan,
   type ConflictScanGateway,
   createPrConflictScan,
+  type FixNowResult,
   GithubConflictScan,
   isCandidate,
   PrConflictService,

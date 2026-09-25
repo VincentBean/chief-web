@@ -34,9 +34,11 @@ import type { SessionExecutor } from '../sessions/index.js';
 import { CONTAINER_OUTCOME_PATH } from './prompts.js';
 import {
   type BuildSlots,
+  forkRefusalMessage,
   type PrFeedbackGateway,
   PrFeedbackService,
   type PrRunContainers,
+  VOICE_REQUEST_PREFIX,
 } from './service.js';
 
 const TOKEN = 'ghp_token';
@@ -126,6 +128,13 @@ class StubGithub implements PrFeedbackGateway {
     if (this.resolveError !== null) return Promise.reject(this.resolveError);
     this.resolves.push(threadId);
     return Promise.resolve({ isResolved: true });
+  }
+
+  comments: { number: number; body: string }[] = [];
+
+  comment(_token: string, _slug: string, number: number, body: string): Promise<{ id: number; url: string }> {
+    this.comments.push({ number, body });
+    return Promise.resolve({ id: 2, url: 'https://github.com/comment/2' });
   }
 }
 
@@ -794,5 +803,63 @@ describe('answering pull request feedback', () => {
     // A second pass that lands on the same commit has nothing new to say.
     await runOnce(service);
     assert.equal(github.replies.length, 2, 'the same sentence must not be posted twice');
+  });
+
+  it('answers a voice request exactly once, and never hands it over again', async () => {
+    const service = serviceWith();
+    // What `request_pr_change` posts: a COMMENT review under the token's user.
+    const request = {
+      id: 'PRR_voice',
+      authorLogin: 'VincentBean',
+      authorType: 'User',
+      state: 'COMMENTED',
+      body: `${VOICE_REQUEST_PREFIX}rename the export button to Download`,
+      url: `https://github.com/${SLUG}/pull/61#pullrequestreview-9`,
+      submittedAt: '2026-09-25T10:00:00Z',
+    };
+    github.result = feedbackFixture({ threads: [], reviews: [request] });
+    runner.behaviour = () => {
+      const run = findPrRun(db, repository.id, 61);
+      reportFrom(run?.id ?? '', { addressed: [{ key: 'R1', summary: 'Renamed the button.' }], skipped: [] });
+      runner.head = `sha-after-${String(runner.invocations.length)}`;
+    };
+
+    const runId = await runOnce(service);
+    // Picked up as a review item…
+    assert.match(runner.invocations[0]?.prompt ?? '', /R1/);
+    assert.match(runner.invocations[0]?.prompt ?? '', /rename the export button to Download/);
+    // …and answered with one comment on the pull request, quoting it.
+    assert.equal(github.comments.length, 1);
+    assert.equal(github.comments[0]?.number, 61);
+    assert.match(github.comments[0]?.body ?? '', /^> rename the export button to Download/);
+    assert.match(github.comments[0]?.body ?? '', /addressed this in `sha-aft`/);
+    assert.deepEqual(github.replies, []);
+    assert.equal(service.status(runId).threads[0]?.replied, true);
+
+    // A re-run with only that request left has nothing to do: it is answered.
+    await assert.rejects(service.start(repository.id, 61), { code: 'no_unresolved_feedback' });
+
+    // A re-run for other feedback neither hands it to the agent again nor
+    // answers it a second time.
+    github.result = feedbackFixture({ reviews: [request] });
+    runner.behaviour = () => {
+      const run = findPrRun(db, repository.id, 61);
+      reportFrom(run?.id ?? '', { addressed: [{ key: 'T1', summary: 'done' }], skipped: [{ key: 'T2', reason: 'fine' }] });
+      runner.head = 'sha-third';
+    };
+    await runOnce(service);
+    assert.equal(runner.invocations.length, 2);
+    assert.doesNotMatch(runner.invocations[1]?.prompt ?? '', /rename the export button/);
+    assert.equal(github.comments.length, 1, 'a voice request is answered exactly once');
+    assert.equal(github.replies.length, 2);
+  });
+
+  it('refuses a pull request from a fork with the shared reason', async () => {
+    const service = serviceWith();
+    github.result = feedbackFixture({ fromFork: true, headRef: 'patch-1' });
+    await assert.rejects(service.start(repository.id, 61), {
+      code: 'pull_request_from_fork',
+      message: forkRefusalMessage('patch-1', 61, repository.name),
+    });
   });
 });

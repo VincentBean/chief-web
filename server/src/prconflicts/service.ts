@@ -22,6 +22,8 @@ import {
   type RepositoryPullRequests,
 } from '../lib/github-review.js';
 import { logger } from '../lib/logger.js';
+import { forkRefusalMessage } from '../prfeedback/index.js';
+import { ConflictFixError } from './fix.js';
 import { getConflictFixEnabled, getGithubToken, getPrConflictIntervalMs } from '../settings/index.js';
 
 /**
@@ -144,7 +146,19 @@ export interface ConflictScan {
   stop(): void;
   /** One pass over every connected repository. Returns conflicts acted on. */
   tick(): Promise<number>;
+  /** Scans one pull request and, when it conflicts, starts its fix (voice US-013). */
+  fixNow(repositoryId: string, prNumber: number): Promise<FixNowResult>;
+  /**
+   * Whether the last look at a pull request found it conflicted: true or false
+   * when a scan (or a fix row) says so, null when nothing is known.
+   */
+  conflicted(repositoryId: string, prNumber: number): boolean | null;
 }
+
+/** What asking for one pull request's fix came to; `reason` is a sentence to say. */
+export type FixNowResult =
+  | { readonly ok: true; readonly prNumber: number; readonly headBranch: string; readonly baseBranch: string }
+  | { readonly ok: false; readonly code: string; readonly reason: string };
 
 export class PrConflictService implements ConflictScan {
   private timer: NodeJS.Timeout | null = null;
@@ -152,6 +166,8 @@ export class PrConflictService implements ConflictScan {
   private ticking: Promise<number> | null = null;
   /** Whether the "no token" complaint has already been made, to log it once. */
   private warnedAboutToken = false;
+  /** The last mergeability verdict per pull request: `repositoryId#number` → conflicted. */
+  private readonly verdicts = new Map<string, boolean>();
 
   constructor(
     private readonly config: Config,
@@ -384,6 +400,7 @@ export class PrConflictService implements ConflictScan {
       return false;
     }
 
+    this.verdicts.set(verdictKey(repository.id, pull.number), mergeability.mergeable !== 'clean');
     if (mergeability.mergeable === 'clean') {
       this.clearStaleFailure(repository, pull);
       return false;
@@ -460,6 +477,84 @@ export class PrConflictService implements ConflictScan {
     return true;
   }
 
+  conflicted(repositoryId: string, prNumber: number): boolean | null {
+    const fix = findPrConflictFix(this.db, repositoryId, prNumber);
+    if (fix !== null && (fix.status === 'running' || fix.status === 'failed')) return true;
+    return this.verdicts.get(verdictKey(repositoryId, prNumber)) ?? null;
+  }
+
+  /**
+   * One pull request, scanned and fixed on request (voice US-013).
+   *
+   * The same rules as a tick, minus the two that exist because nobody asked:
+   * the enabled switch and the yield to the build queue. A standing failure is
+   * no reason either — the operator is asking for another go. Every refusal is
+   * a result with a sentence, never an exception.
+   */
+  async fixNow(repositoryId: string, prNumber: number): Promise<FixNowResult> {
+    const refuse = (code: string, reason: string): FixNowResult => ({ ok: false, code, reason });
+    const number = `#${String(prNumber)}`;
+    const repository = listRepositories(this.db).find((entry) => entry.id === repositoryId);
+    if (repository === undefined) return refuse('repository_not_found', 'No such repository.');
+    if (!isValidGithubSlug(repository.githubSlug)) {
+      return refuse('invalid_github_slug', `"${repository.githubSlug}" is not a GitHub owner/repo slug.`);
+    }
+    if (this.starter === null) return refuse('no_fixer', 'The conflict fixer is not available on this server.');
+    const token = getGithubToken(this.db);
+    if (token === null) {
+      return refuse('github_token_missing', 'No GitHub token is configured, so pull requests cannot be read.');
+    }
+    const active = this.activeRunOn(repositoryId, prNumber);
+    if (active === 'conflict-fix') return refuse('fix_already_active', `A conflict fix is already running on ${number}.`);
+    if (active !== null) {
+      return refuse('run_already_active', `chief-web is already working on ${number} (a ${active} run), so it is left alone.`);
+    }
+
+    try {
+      const [answer] = await this.github.list(token, [repository.githubSlug]);
+      if (answer === undefined || answer.error !== null) {
+        return refuse(answer?.error ?? 'github_error', answer?.message ?? 'GitHub gave no answer.');
+      }
+      const pull = answer.pullRequests.find((entry) => entry.number === prNumber);
+      if (pull === undefined) return refuse('pull_request_not_open', `${number} is not an open pull request in ${repository.name}.`);
+      if (pull.fromFork) return refuse('pull_request_from_fork', forkRefusalMessage(pull.headRef, prNumber, repository.name));
+      if (!pull.headRef.startsWith(CHIEF_BRANCH_PREFIX)) {
+        return refuse(
+          'not_a_chief_branch',
+          `${number} is on "${pull.headRef}", and the conflict fixer only touches chief-web's own ${CHIEF_BRANCH_PREFIX} branches.`,
+        );
+      }
+
+      const mergeability = await this.github.mergeability(token, repository.githubSlug, prNumber);
+      if (mergeability.mergeable === 'unknown') {
+        return refuse('mergeability_unknown', `GitHub has not worked out yet whether ${number} conflicts. Ask again in a minute.`);
+      }
+      this.verdicts.set(verdictKey(repositoryId, prNumber), mergeability.mergeable !== 'clean');
+      if (mergeability.mergeable === 'clean') {
+        this.clearStaleFailure(repository, pull);
+        return refuse('no_conflicts', `${number} has no merge conflicts.`);
+      }
+
+      await this.starter.start({
+        repositoryId,
+        repositoryName: repository.name,
+        slug: repository.githubSlug,
+        prNumber,
+        prUrl: pull.url,
+        prTitle: pull.title,
+        prBody: mergeability.body,
+        headBranch: pull.headRef,
+        baseBranch: mergeability.baseRef,
+        headSha: mergeability.headSha,
+        baseSha: mergeability.baseSha,
+      });
+      return { ok: true, prNumber, headBranch: pull.headRef, baseBranch: mergeability.baseRef };
+    } catch (cause) {
+      const code = cause instanceof GithubApiError || cause instanceof ConflictFixError ? cause.code : 'failed';
+      return refuse(code, describe(cause));
+    }
+  }
+
   /**
    * The chief-web run already on this pull request, named for the log, or null
    * when there is none.
@@ -518,6 +613,10 @@ export function createPrConflictScan(
   github: ConflictScanGateway = new GithubConflictScan(config),
 ): PrConflictService {
   return new PrConflictService(config, db, github, starter);
+}
+
+function verdictKey(repositoryId: string, prNumber: number): string {
+  return `${repositoryId}#${String(prNumber)}`;
 }
 
 function describe(cause: unknown): string {
