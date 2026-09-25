@@ -108,8 +108,9 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, r
         '--font-mono',
         "ui-monospace, SFMono-Regular, Menlo, 'Cascadia Mono', monospace",
       ),
-      // Matches --text-code, so terminal text lines up with the log beside it.
-      fontSize: 13,
+      // Matches --text-terminal: larger than --text-code so a long conversation
+      // reads comfortably. Keep the two in sync.
+      fontSize: 15,
       // The browser keeps its own scrollback on top of the server's replay.
       scrollback: 5000,
       rightClickSelectsWord: true,

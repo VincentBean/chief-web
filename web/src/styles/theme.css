@@ -144,8 +144,9 @@
   --text-*: initial;
   --text-xs: 0.75rem;
   --text-xs--line-height: 1rem;
-  --text-code: 0.8125rem; /* 13px, the size xterm is configured with */
+  --text-code: 0.8125rem; /* 13px */
   --text-code--line-height: 1.25rem;
+  --text-terminal: 0.9375rem; /* 15px, the size xterm is configured with */
   --text-sm: 0.875rem;
   --text-sm--line-height: 1.375rem;
   --text-base: 0.9375rem;
