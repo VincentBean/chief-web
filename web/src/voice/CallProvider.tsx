@@ -325,9 +325,10 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
 
   const onMessage = useCallback(
     (message: ServerMessage): void => {
-      const isAudio = message.type === 'tts.segment' || message.type === 'tts.end' || message.type === 'tts.stop';
-      // Mute voice is text only: speech never reaches the player (US-021 does it properly).
-      if (!isAudio || !voiceMutedRef.current || message.type === 'tts.stop') audio.current?.handleMessage(message);
+      // Mute voice is text only: the server stops speaking too (US-021); what
+      // was already on its way never starts playing here.
+      const sound = message.type === 'tts.segment' || message.type === 'earcon';
+      if (!sound || !voiceMutedRef.current) audio.current?.handleMessage(message);
 
       switch (message.type) {
         case 'ready':
@@ -339,6 +340,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           return;
         case 'state':
           setFocus(message.focus);
+          voiceMutedRef.current = message.muted;
+          setVoiceMuted(message.muted);
           if (message.phase === 'ended') finish('ended');
           else setPhase(message.phase);
           return;
@@ -386,7 +389,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       ws.onmessage = (event: MessageEvent) => {
         if (socket.current !== ws) return;
         if (event.data instanceof ArrayBuffer) {
-          if (!voiceMutedRef.current) audio.current?.handleBinary(event.data);
+          // Muted, the player has no segment for speech audio; earcon audio is still kept.
+          audio.current?.handleBinary(event.data);
           return;
         }
         try {
@@ -551,7 +555,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     voiceMutedRef.current = muted;
     setVoiceMuted(muted);
     if (muted) audio.current?.player.stop();
-  }, []);
+    send({ type: 'voice.mute', muted });
+  }, [send]);
 
   const setMode = useCallback((next: TalkMode): void => {
     modeRef.current = next;

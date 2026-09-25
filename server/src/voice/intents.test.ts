@@ -9,9 +9,13 @@ import {
   matchCallIntent,
   matchConfirmIntent,
   MAX_INTENT_WORDS,
+  MUTE,
+  normalizeUtterance,
+  REPEAT,
   STOP_TALKING,
   TO_CHIEF,
   TO_SESSION_PREFIXES,
+  UNMUTE,
 } from './intents.js';
 
 describe('focus and control intents (voice US-019)', () => {
@@ -89,5 +93,31 @@ describe('focus and control intents (voice US-019)', () => {
     for (const phrase of [...TO_CHIEF, ...STOP_TALKING, ...HANGUP]) assert.equal(matchConfirmIntent(phrase), null, phrase);
     assert.equal(matchCallIntent('yes'), null);
     assert.equal(matchCallIntent('go'), null);
+  });
+});
+
+describe('repeat and mute intents (voice US-021)', () => {
+  it('matches the repeat, mute and unmute phrases in both languages', () => {
+    for (const phrase of REPEAT) assert.deepEqual(matchCallIntent(phrase), { kind: 'repeat' }, phrase);
+    for (const phrase of MUTE) assert.deepEqual(matchCallIntent(phrase), { kind: 'mute' }, phrase);
+    for (const phrase of UNMUTE) assert.deepEqual(matchCallIntent(phrase), { kind: 'unmute' }, phrase);
+    assert.deepEqual(matchCallIntent('Say that again?'), { kind: 'repeat' });
+    assert.deepEqual(matchCallIntent('Wat zei je?'), { kind: 'repeat' });
+    assert.deepEqual(matchCallIntent('Stil.'), { kind: 'mute' });
+    assert.deepEqual(matchCallIntent('Unmute!'), { kind: 'unmute' });
+    // Longer sentences are for the agent.
+    assert.equal(matchCallIntent('can you repeat the part about the migration'), null);
+  });
+
+  it('never lists one phrase under two intents (the later list would silently win)', () => {
+    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE };
+    const seen = new Map<string, string>();
+    for (const [list, phrases] of Object.entries(lists)) {
+      for (const phrase of phrases) {
+        const key = normalizeUtterance(phrase);
+        assert.equal(seen.get(key), undefined, `"${phrase}" is in ${seen.get(key) ?? ''} and ${list}`);
+        seen.set(key, list);
+      }
+    }
   });
 });

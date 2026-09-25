@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
@@ -13,6 +14,7 @@ import {
 } from '../settings/index.js';
 import {
   type CallClock,
+  type CallEarcons,
   type CallPlanning,
   type CallStt,
   type CallTransport,
@@ -24,6 +26,7 @@ import {
 import { ChiefAgent } from './chief/agent.js';
 import { BasicChiefAgent } from './chief/basic-agent.js';
 import type { ChiefServices } from './chief/tools.js';
+import { EarconCache, earconVoice, providerRenderer } from './earcons.js';
 import type { VoiceEventBus } from './events.js';
 import { SessionVoiceAgent } from './session-agent/agent.js';
 import type { SessionAgentRegistry } from './session-agent/registry.js';
@@ -61,6 +64,12 @@ export interface VoiceServiceDeps {
   readonly sessionAgents?: SessionAgentRegistry;
   /** The planning poller a call reads after session-agent turns (US-019). */
   readonly planning?: CallPlanning;
+  /**
+   * Earcons (US-021). Without it, production renders them into
+   * `<DATA_DIR>/voice-cache` with the real providers; a test that fakes
+   * `tts` gets none unless it passes some.
+   */
+  readonly earcons?: CallEarcons;
 }
 
 export type VoiceReadiness =
@@ -135,6 +144,7 @@ export class VoiceService {
   private balance: { at: number; key: string; value: ElevenLabsBalance | null } | null = null;
   private readonly clock: CallClock;
   private readonly stt: CallStt;
+  private readonly earcons: CallEarcons | null;
 
   constructor(
     private readonly config: Config,
@@ -143,6 +153,7 @@ export class VoiceService {
   ) {
     this.clock = deps.clock ?? systemClock;
     this.stt = deps.stt ?? new SttService(db, config);
+    this.earcons = deps.earcons ?? (deps.tts === undefined ? providerEarcons(db, config) : null);
     deps.events?.subscribe((event) => {
       this.active?.postEvent(event);
     });
@@ -262,6 +273,7 @@ export class VoiceService {
       agent: this.deps.agent ?? ((focus, call) => this.agentFor(focus, call)),
       clock: this.clock,
       ...(this.deps.planning === undefined ? {} : { planning: this.deps.planning }),
+      ...(this.earcons === null ? {} : { earcons: this.earcons }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
@@ -308,6 +320,17 @@ export class VoiceService {
     if (this.resumeTimer !== null) this.clock.clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
   }
+}
+
+/** The earcons of whichever voice a call opens on, cached under `<DATA_DIR>/voice-cache`. */
+function providerEarcons(db: Database, config: Config): CallEarcons {
+  const cache = new EarconCache(path.join(config.dataDir, 'voice-cache'), providerRenderer(db, config));
+  return {
+    load: async (provider, signal) => {
+      const voice = earconVoice(db, provider);
+      return voice === null ? [] : cache.load(voice, signal);
+    },
+  };
 }
 
 function socketTransport(socket: WebSocket): CallTransport {

@@ -52,6 +52,8 @@ export class AudioPlayer {
   private generation = 0;
   /** Set while an MP3 decode holds up the segments after it. */
   private tail: Promise<void> | null = null;
+  /** Earcons playing (US-021); they report no progress. */
+  private readonly clips = new Set<AudioBufferSourceNode>();
 
   /**
    * Create this from the Call button's click handler: the context is resumed
@@ -64,8 +66,26 @@ export class AudioPlayer {
 
   /** True while any audio is scheduled or playing. */
   get playing(): boolean {
+    if (this.clips.size > 0) return true;
     for (const segment of this.segments.values()) if (segment.live.size > 0) return true;
     return false;
+  }
+
+  /**
+   * Plays a cached earcon now, or right after what is queued; agent audio
+   * that arrives meanwhile follows it. `stop()` silences it like speech.
+   */
+  playClip(buffer: AudioBuffer): void {
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.ctx.destination);
+    const startAt = Math.max(this.cursor, this.ctx.currentTime + JITTER_BUFFER_S);
+    source.start(startAt);
+    this.cursor = startAt + buffer.duration;
+    this.clips.add(source);
+    source.onended = () => {
+      this.clips.delete(source);
+    };
   }
 
   /** `tts.segment`. */
@@ -147,6 +167,15 @@ export class AudioPlayer {
       }
     }
     this.segments.clear();
+    for (const clip of this.clips) {
+      clip.onended = null;
+      try {
+        clip.stop();
+      } catch {
+        // Already stopped.
+      }
+    }
+    this.clips.clear();
     this.stoppedThroughTurn = Math.max(this.stoppedThroughTurn, lastTurn);
     this.cursor = 0;
   }
@@ -224,6 +253,18 @@ export class AudioPlayer {
     if (done) this.segments.delete(segment.segmentId);
     this.onProgress({ segmentId: segment.segmentId, playedMs: Math.round(segment.playedMs), done });
   }
+}
+
+/** Mono PCM16 LE bytes as an `AudioBuffer` of `ctx` (earcons, US-021). */
+export function pcm16Buffer(ctx: BaseAudioContext, bytes: Uint8Array, sampleRate: number): AudioBuffer | null {
+  const count = Math.floor(bytes.byteLength / 2);
+  if (count === 0 || sampleRate <= 0) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, count * 2);
+  const samples = new Float32Array(count) as Float32Array<ArrayBuffer>;
+  for (let i = 0; i < count; i++) samples[i] = view.getInt16(i * 2, true) / 0x8000;
+  const buffer = ctx.createBuffer(1, count, sampleRate);
+  buffer.copyToChannel(samples, 0);
+  return buffer;
 }
 
 function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {

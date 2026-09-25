@@ -50,6 +50,8 @@ export type ClientMessage =
   | { readonly type: 'playback.progress'; readonly segmentId: number; readonly playedMs: number; readonly done: boolean }
   | { readonly type: 'focus'; readonly target: 'chief' | { readonly sessionId: string } }
   | { readonly type: 'text'; readonly text: string }
+  /** The panel's mute-voice button (US-021): text only until unmuted, like the `mute` intent. */
+  | { readonly type: 'voice.mute'; readonly muted: boolean }
   | { readonly type: 'hangup' }
   /** The pill's Confirm / Cancel button (voice US-011). */
   | { readonly type: 'confirm.resolve'; readonly id: string; readonly accept: boolean }
@@ -73,6 +75,13 @@ export interface ConfirmationView {
   readonly expiresAt: string;
 }
 
+/** An earcon of `ready`: its audio arrives under `segmentId`, PCM16 at `sampleRate`. */
+export interface EarconRef {
+  readonly name: string;
+  readonly segmentId: number;
+  readonly sampleRate: number;
+}
+
 /** Plan §6.2. Audio follows `tts.segment` as binary kind `0x02` frames. */
 export type ServerMessage =
   | {
@@ -82,12 +91,20 @@ export type ServerMessage =
       /** The mode in effect, which may differ from the one `hello` asked for. */
       readonly sttMode: SttMode;
       readonly scribeToken?: string;
-      readonly earcons: readonly Readonly<Record<string, number>>[];
+      /**
+       * The pre-rendered acknowledgements (US-021), in the call's language: each
+       * one's audio follows as binary kind `0x02` frames under its segment id,
+       * then a `tts.end`. Keep them; `earcon` plays one by name.
+       */
+      readonly earcons: readonly EarconRef[];
       readonly sampleRate: number;
       /** True when this socket continued a call that dropped (`?resume=`). */
       readonly resumed: boolean;
     }
-  | { readonly type: 'state'; readonly phase: CallPhase; readonly focus: CallFocus }
+  /** `muted`: the voice is off (the `mute` intent or `voice.mute`); replies are text only. */
+  | { readonly type: 'state'; readonly phase: CallPhase; readonly focus: CallFocus; readonly muted: boolean }
+  /** Plays a cached earcon now (US-021): no agent audio 700 ms after the operator stopped, a booting session agent, a missed utterance. */
+  | { readonly type: 'earcon'; readonly name: string }
   | { readonly type: 'user.transcript'; readonly turn: number; readonly text: string }
   | { readonly type: 'agent.delta'; readonly turn: number; readonly agent: AgentKind; readonly text: string }
   | { readonly type: 'agent.done'; readonly turn: number; readonly interrupted: boolean }

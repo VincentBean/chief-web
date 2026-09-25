@@ -76,6 +76,7 @@ async function switchTo(services: ChiefServices, target: { id: string; name: str
   if (agents === undefined || ctx.setFocus === undefined) {
     return { ok: false, data: { error: 'unavailable' }, summary: 'Session agents are not available here' };
   }
+  if (agents.isAlive?.(target.id) === false) ctx.earcon?.('one_sec');
   await agents.acquire(target.id);
   ctx.setFocus({ kind: 'session', sessionId: target.id });
   return {

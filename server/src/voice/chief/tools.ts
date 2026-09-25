@@ -18,6 +18,7 @@ import type { PullRequestListView } from '../../pullrequests/index.js';
 import type { RecurringTaskRunner } from '../../recurringtasks/index.js';
 import type { RetryResult } from '../../recovery/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView } from '../../sessions/index.js';
+import type { EarconName } from '../earcons.js';
 import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
@@ -81,7 +82,7 @@ export interface ChiefServices {
   /** The planning terminal, which `focus_session` offers to close (voice US-018). */
   readonly planning?: { isTerminalRunning(sessionId: string): boolean; stop(sessionId: string): Promise<unknown> };
   /** The session voice agents `focus_session` starts; without them it refuses. */
-  readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown> };
+  readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown>; isAlive?(sessionId: string): boolean };
 }
 
 /** What a handler knows about the call it runs in. */
@@ -96,6 +97,8 @@ export interface ToolContext {
   readonly confirmations: Pick<ConfirmationGate, 'request' | 'take'>;
   /** Moves the call's focus (`focus_session`); absent outside a call. */
   readonly setFocus?: (focus: CallFocus) => void;
+  /** Plays a cached earcon (US-021): "one sec" while `focus_session` boots an agent. */
+  readonly earcon?: (name: EarconName) => void;
 }
 
 export interface ToolResult {

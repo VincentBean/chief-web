@@ -30,7 +30,7 @@ import { WebSocketGateway } from '../ws/gateway.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import { startScriptedOpenRouter, textReply, toolReply } from './chief/__fixtures__/scripted-openrouter.js';
 import type { ChiefServices } from './chief/tools.js';
-import type { AgentEvent, CallClock, CallStt, CallTts, VoiceAgent } from './call.js';
+import type { AgentEvent, CallClock, CallEarcons, CallStt, CallTts, VoiceAgent } from './call.js';
 import { IDLE_GOODBYE } from './call.js';
 import { createVoice, type Voice } from './index.js';
 import {
@@ -215,7 +215,11 @@ after(async () => {
 /** `sessionAgents`: real session voice agents over this registry (and no scripted agent). */
 async function world(
   env: Record<string, string> = {},
-  opts: { chief?: (db: Database) => ChiefServices; sessionAgents?: (db: Database, config: Config) => SessionAgentRegistry } = {},
+  opts: {
+    chief?: (db: Database) => ChiefServices;
+    sessionAgents?: (db: Database, config: Config) => SessionAgentRegistry;
+    earcons?: CallEarcons;
+  } = {},
 ): Promise<World> {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', VOICE_IDLE_TIMEOUT_MS: String(IDLE_MS), ...env });
   const db = openDatabase(IN_MEMORY);
@@ -238,6 +242,7 @@ async function world(
       return tts;
     },
     ...(sessionAgents === undefined ? {} : { sessionAgents }),
+    ...(opts.earcons === undefined ? {} : { earcons: opts.earcons }),
     ...(chief === undefined && sessionAgents === undefined
       ? {
           agent: () => {
@@ -561,7 +566,7 @@ describe('barge-in', () => {
   });
 
   /** A call focused on a pending session whose agent is the fake `claude`. */
-  const sessionCall = async (name: string): Promise<{ w: World; client: Client; callId: string; stdin: () => string[]; lines: () => Record<string, unknown>[] }> => {
+  const sessionCall = async (name: string, earcons?: CallEarcons): Promise<{ w: World; client: Client; callId: string; stdin: () => string[]; lines: () => Record<string, unknown>[] }> => {
     claude = new FakeClaude(daemon);
     let sessionId = '';
     const w = await world({ DATA_DIR: dataDir }, {
@@ -590,6 +595,7 @@ describe('barge-in', () => {
           hold: { active: () => false, until: () => null },
         });
       },
+      ...(earcons === undefined ? {} : { earcons }),
     });
     const { client, callId } = await w.call(`?focus=session:${sessionId}`);
     const exec = (): string => claude.agentExecs().find((entry) => entry.containerId === `c-${sessionId}`)?.id ?? '';
@@ -604,6 +610,22 @@ describe('barge-in', () => {
       lines: () => claude.stdin.get(exec()) ?? [],
     };
   };
+
+  it('plays "one sec" while the session agent boots, and not once it runs (US-021)', async () => {
+    const earcons: CallEarcons = {
+      load: () => Promise.resolve([{ name: 'one_sec', language: 'nl', sampleRate: 24000, pcm: Buffer.alloc(480) }]),
+    };
+    const { client } = await sessionCall('earcon-boot', earcons);
+    const ready = client.messages('ready')[0];
+    assert.equal(ready?.earcons[0]?.name, 'one_sec');
+    assert.deepEqual(client.messages('earcon'), [{ type: 'earcon', name: 'one_sec' }]);
+    const types = client.types;
+    assert.ok(types.indexOf('earcon') < types.indexOf('agent.delta'));
+
+    client.send({ type: 'text', text: 'and then?' });
+    await client.until('agent.done', 2);
+    assert.equal(client.messages('earcon').length, 1);
+  });
 
   it('cuts a reply the operator talks over: tts.stop, interrupt on stdin, cut-off note on the next message', async () => {
     const { w, client, callId, stdin, lines } = await sessionCall('barge-in-voice');

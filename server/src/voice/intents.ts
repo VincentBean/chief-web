@@ -6,7 +6,7 @@
  * words, so a normal sentence that happens to contain "yes" is never taken.
  *
  * The answer to a pending confirmation (voice US-011), and the focus and
- * control intents (voice US-019).
+ * control intents (voice US-019), repeat and mute (voice US-021).
  */
 
 export const MAX_INTENT_WORDS = 8;
@@ -91,7 +91,10 @@ export type CallIntent =
   | { readonly kind: 'to_chief' }
   | { readonly kind: 'to_session'; readonly name: string }
   | { readonly kind: 'stop_talking' }
-  | { readonly kind: 'hangup' };
+  | { readonly kind: 'hangup' }
+  | { readonly kind: 'repeat' }
+  | { readonly kind: 'mute' }
+  | { readonly kind: 'unmute' };
 
 export const TO_CHIEF: readonly string[] = [
   'chief',
@@ -149,6 +152,51 @@ export const HANGUP: readonly string[] = [
   'tot ziens',
 ];
 
+/** Replays the last reply from the call's cache (US-021). */
+export const REPEAT: readonly string[] = [
+  'say that again',
+  'say it again',
+  'repeat',
+  'repeat that',
+  'repeat that please',
+  'come again',
+  'what did you say',
+  'sorry what did you say',
+  'pardon',
+  'wat zei je',
+  'wat zei je nou',
+  'wat zeg je',
+  'zeg dat nog eens',
+  'zeg het nog eens',
+  'nog een keer',
+  'herhaal',
+  'herhaal dat',
+  'kun je dat herhalen',
+];
+
+/** Text only from here on (US-021). "quiet" is `stop_talking`: it silences one reply, not the call. */
+export const MUTE: readonly string[] = [
+  'mute',
+  'mute yourself',
+  'mute your voice',
+  'text only',
+  'stil',
+  'wees stil',
+  'stem uit',
+  'geluid uit',
+  'alleen tekst',
+];
+
+export const UNMUTE: readonly string[] = [
+  'unmute',
+  'unmute yourself',
+  'voice on',
+  'talk to me again',
+  'stem aan',
+  'geluid aan',
+  'praat maar weer',
+];
+
 /** What comes before a session name in "switch to csv export", "ga naar billing export". */
 export const TO_SESSION_PREFIXES: readonly string[] = [
   'switch to',
@@ -167,6 +215,9 @@ const CONTROL = new Map<string, CallIntent>([
   ...TO_CHIEF.map((phrase) => [normalizeUtterance(phrase), { kind: 'to_chief' }] as const),
   ...STOP_TALKING.map((phrase) => [normalizeUtterance(phrase), { kind: 'stop_talking' }] as const),
   ...HANGUP.map((phrase) => [normalizeUtterance(phrase), { kind: 'hangup' }] as const),
+  ...REPEAT.map((phrase) => [normalizeUtterance(phrase), { kind: 'repeat' }] as const),
+  ...MUTE.map((phrase) => [normalizeUtterance(phrase), { kind: 'mute' }] as const),
+  ...UNMUTE.map((phrase) => [normalizeUtterance(phrase), { kind: 'unmute' }] as const),
 ]);
 
 /** Longest first, so "switch over to x" is not read as "switch" + "over to x". */
@@ -175,7 +226,8 @@ const PREFIXES = TO_SESSION_PREFIXES.map(normalizeUtterance).sort((a, b) => b.le
 /**
  * "Back to chief" → `to_chief`, "Switch to billing export." → `to_session`
  * with the name as spoken (`billing export`; the shared resolver maps it onto
- * a session), "wacht" → `stop_talking`, "ophangen" → `hangup`. Anything else,
+ * a session), "wacht" → `stop_talking`, "ophangen" → `hangup`, "wat zei je" →
+ * `repeat`, "stil" → `mute`, "unmute" → `unmute`. Anything else,
  * or anything longer than {@link MAX_INTENT_WORDS} words, is null.
  */
 export function matchCallIntent(text: string): CallIntent | null {

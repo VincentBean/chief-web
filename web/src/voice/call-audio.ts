@@ -10,7 +10,7 @@
  * user gesture. `start()` (which asks for the microphone) may be awaited after.
  */
 import { createCaptureContext, openMic, type Mic } from './mic.ts';
-import { AudioPlayer } from './player.ts';
+import { AudioPlayer, pcm16Buffer } from './player.ts';
 import {
   decodeFrame,
   encodeFrame,
@@ -52,6 +52,10 @@ export class CallAudio {
   private pttGlobal = false;
   private bargeIn: BargeInMode = 'careful';
   private closed = false;
+  /** Earcon audio still arriving after `ready`, by segment id (US-021). */
+  private readonly incoming = new Map<number, { name: string; sampleRate: number; chunks: Uint8Array[] }>();
+  /** Decoded earcons, by name; `earcon` plays one. */
+  private readonly earcons = new Map<string, AudioBuffer>();
 
   constructor(private readonly sink: CallAudioSink) {
     this.captureCtx = createCaptureContext();
@@ -131,11 +135,23 @@ export class CallAudio {
   /** Feed every server JSON message; the audio ones are handled here. */
   handleMessage(message: ServerMessage): void {
     switch (message.type) {
+      case 'ready':
+        // Earcons come once per socket; a resumed one sends them again.
+        this.incoming.clear();
+        for (const earcon of message.earcons) {
+          this.incoming.set(earcon.segmentId, { name: earcon.name, sampleRate: earcon.sampleRate, chunks: [] });
+        }
+        break;
+      case 'earcon': {
+        const buffer = this.earcons.get(message.name);
+        if (buffer !== undefined) this.player.playClip(buffer);
+        break;
+      }
       case 'tts.segment':
         this.player.beginSegment(message);
         break;
       case 'tts.end':
-        this.player.endSegment(message.segmentId);
+        if (!this.finishEarcon(message.segmentId)) this.player.endSegment(message.segmentId);
         break;
       case 'tts.stop':
         this.player.stop(message.turn);
@@ -148,7 +164,26 @@ export class CallAudio {
   /** Feed every binary frame from the socket. */
   handleBinary(frame: ArrayBuffer): void {
     const decoded = decodeFrame(frame);
-    if (decoded?.kind === FRAME_KIND_AUDIO) this.player.pushAudio(decoded.segmentId, decoded.payload);
+    if (decoded?.kind !== FRAME_KIND_AUDIO) return;
+    const earcon = this.incoming.get(decoded.segmentId);
+    if (earcon !== undefined) earcon.chunks.push(new Uint8Array(decoded.payload));
+    else this.player.pushAudio(decoded.segmentId, decoded.payload);
+  }
+
+  /** An earcon's audio is complete: it becomes an `AudioBuffer` kept for the call. */
+  private finishEarcon(segmentId: number): boolean {
+    const earcon = this.incoming.get(segmentId);
+    if (earcon === undefined) return false;
+    this.incoming.delete(segmentId);
+    const bytes = new Uint8Array(earcon.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+    let offset = 0;
+    for (const chunk of earcon.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const buffer = pcm16Buffer(this.player.ctx, bytes, earcon.sampleRate);
+    if (buffer !== null) this.earcons.set(earcon.name, buffer);
+    return true;
   }
 
   async close(): Promise<void> {

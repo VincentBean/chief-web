@@ -4,6 +4,7 @@ import { logger } from '../../lib/logger.js';
 import { getOpenRouterApiKey, getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
 import { cutOffNote } from '../cut-off.js';
+import type { EarconName } from '../earcons.js';
 import type { CallFocus } from '../protocol.js';
 import { type ChatEvent, type ChatMessage, type ChatToolCall, type StreamChatOptions, streamChat } from './openrouter-client.js';
 import { cancelledResult, CONFIRM_TOOL, type ConfirmationGate, runConfirmation } from './confirm.js';
@@ -41,6 +42,8 @@ export interface ChiefCallControls {
   readonly confirmations: ConfirmationGate;
   /** Moves the call's focus (`focus_session`, voice US-018). */
   setFocus?(focus: CallFocus): void;
+  /** Plays a cached earcon (US-021). */
+  earcon?(name: EarconName): void;
   /** What the operator heard of the current turn (US-020), for the cut-off note. */
   spokenSoFar?(): string;
 }
@@ -270,6 +273,7 @@ export class ChiefAgent implements VoiceAgent {
       endCall: () => this.deps.call.hangUpAfterTurn(),
       confirmations: this.deps.call.confirmations,
       setFocus: (focus) => this.deps.call.setFocus?.(focus),
+      earcon: (name) => this.deps.call.earcon?.(name),
     };
   }
 

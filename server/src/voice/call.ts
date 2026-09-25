@@ -13,6 +13,7 @@ import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
 import { getVoiceSettings } from '../settings/index.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
+import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
 import { describeEvent, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
 import { matchCallIntent, matchConfirmIntent } from './intents.js';
 import {
@@ -59,7 +60,9 @@ export type AgentEvent =
       readonly detail?: string;
     }
   | { readonly type: 'ui'; readonly ui: UiAction }
-  | { readonly type: 'usage'; readonly costUsd: number };
+  | { readonly type: 'usage'; readonly costUsd: number }
+  /** Plays a cached earcon now, e.g. "one sec" while a session agent boots (US-021). */
+  | { readonly type: 'earcon'; readonly name: EarconName };
 
 /** One utterance for the focused agent. */
 export interface AgentInput {
@@ -103,6 +106,11 @@ export interface CallTts {
   close(): Promise<void>;
 }
 
+/** The earcon cache (US-021) as a call sees it: every clip of the voice `provider` speaks with. */
+export interface CallEarcons {
+  load(provider: TtsProviderName, signal: AbortSignal): Promise<readonly EarconClip[]>;
+}
+
 /** The socket as the call sees it; the service adapts a `ws` socket to this. */
 export interface CallTransport {
   send(message: ServerMessage): void;
@@ -127,6 +135,8 @@ export interface VoiceCallDeps {
    * PRD state chief names on the way back.
    */
   readonly planning?: CallPlanning;
+  /** Pre-rendered acknowledgements (US-021); without them the call has none. */
+  readonly earcons?: CallEarcons;
 }
 
 /** The slice of `PlanningService` a call reads. */
@@ -139,6 +149,10 @@ export type { VoiceEvent } from './events.js';
 
 /** How long both sides must have been quiet before chief speaks a background event (plan §12). */
 export const EVENT_QUIET_MS = 2_000;
+/** An acknowledgement plays when no agent audio has started this long after the operator's turn ended (plan §3.1). */
+export const ACK_AFTER_MS = 700;
+/** How long call start waits for earcons that still have to be rendered; they finish in the background for the next call. */
+export const EARCON_WAIT_MS = 5_000;
 
 /** Plan §5. */
 export interface VoiceCallState {
@@ -154,6 +168,8 @@ export interface VoiceCallState {
   pendingConfirmation: Confirmation | null;
   ttsProvider: TtsProviderName;
   queue: VoiceEvent[];
+  /** The voice is off (US-021): replies stream as text only, and no earcons play. */
+  muted: boolean;
 }
 
 /** What the idle timeout says before hanging up, in the call's language. */
@@ -184,6 +200,21 @@ export function backWithMe(language: string, session: { readonly sessionName: st
   else state = `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} that parses cleanly.`;
   return `${back} ${state}`;
 }
+
+/** What the `mute` intent answers, as text: it is never spoken. */
+export const MUTED_LINE: Readonly<Record<string, string>> = {
+  nl: 'Stem uit. Ik antwoord in tekst tot je unmute zegt.',
+  en: "Voice off. I'll answer in text until you say unmute.",
+};
+export const UNMUTED_LINE: Readonly<Record<string, string>> = {
+  nl: 'Mijn stem staat weer aan.',
+  en: 'Voice back on.',
+};
+/** The `repeat` intent before anything was spoken. */
+export const NOTHING_TO_REPEAT: Readonly<Record<string, string>> = {
+  nl: 'Ik heb nog niets gezegd.',
+  en: "I haven't said anything yet.",
+};
 
 /** The goodbye is not allowed to keep a dead call open. */
 const GOODBYE_MAX_MS = 15_000;
@@ -223,6 +254,13 @@ export class VoiceCall {
   /** Set between the operator starting to speak and the utterance (or a misfire). */
   private speechOpenSince: number | null = null;
   private drainTimer: unknown = null;
+  /** The call's earcons, in its language, once loaded; the browser got their audio after `ready`. */
+  private readonly earcons = new Map<EarconName, { readonly segmentId: number; readonly sampleRate: number; readonly pcm: Buffer }>();
+  /** The 700 ms acknowledgement timer of the utterance waiting for its first audio. */
+  private ack: { timer: unknown } | null = null;
+  private acks = 0;
+  /** The audio of the last turn that spoke, for the `repeat` intent. */
+  private recording: Recording | null = null;
 
   constructor(
     id: string,
@@ -239,6 +277,7 @@ export class VoiceCall {
       pendingConfirmation: null,
       ttsProvider: 'openrouter',
       queue: [],
+      muted: false,
     };
     this.confirmations = new ConfirmationGate({
       holder: this.state,
@@ -344,6 +383,8 @@ export class VoiceCall {
     this.tts = this.deps.tts(this.sink());
     await this.tts.open(this.id);
     if (this.ended) return;
+    await this.loadEarcons(this.tts.providerName);
+    if (this.ended) return;
     this.state.ttsProvider = this.tts.providerName;
     createVoiceCall(this.deps.db, {
       id: this.id,
@@ -415,6 +456,9 @@ export class VoiceCall {
       case 'text':
         this.submitText(message.text, null);
         return;
+      case 'voice.mute':
+        this.setMuted(message.muted);
+        return;
       case 'transcript.final':
         this.submitText(message.text, this.isoNow());
         return;
@@ -471,6 +515,7 @@ export class VoiceCall {
     if (this.ended) return;
     this.clearIdle();
     this.clearDrain();
+    this.clearAck();
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
     this.state.activeTurn?.abort(new Error('call ended'));
@@ -538,25 +583,33 @@ export class VoiceCall {
     const speechEnd = this.isoNow();
     this.speechOpenSince = null;
     this.touch();
+    const ack = this.armAck();
     void this.enqueue(async (controller) => {
-      const tts = this.tts;
-      if (tts === null) return;
-      let result: SttResult;
       try {
-        result = await this.deps.stt.transcribe(wav, controller.signal);
-      } catch (cause) {
-        if (controller.signal.aborted) return;
-        logger.warn('voice transcription failed', { error: String(cause) });
-        this.send({ type: 'error', code: 'stt_failed', message: 'I could not transcribe that.', fatal: false });
-        return;
+        const tts = this.tts;
+        if (tts === null) return;
+        let result: SttResult;
+        try {
+          result = await this.deps.stt.transcribe(wav, controller.signal);
+        } catch (cause) {
+          if (controller.signal.aborted) return;
+          logger.warn('voice transcription failed', { error: String(cause) });
+          // Plan §7.1: say so, and keep listening.
+          this.clearAck(ack);
+          this.earcon('sorry');
+          this.send({ type: 'error', code: 'stt_failed', message: 'I could not transcribe that.', fatal: false });
+          return;
+        }
+        if (result.kind === 'rejected') {
+          this.send({ type: 'error', code: `audio_${result.reason}`, message: result.message, fatal: false });
+          return;
+        }
+        this.addUsage({ sttSeconds: result.seconds, orCostUsd: result.costUsd });
+        if (result.kind === 'dropped') return;
+        await this.runTurn(result.text, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() });
+      } finally {
+        this.clearAck(ack);
       }
-      if (result.kind === 'rejected') {
-        this.send({ type: 'error', code: `audio_${result.reason}`, message: result.message, fatal: false });
-        return;
-      }
-      this.addUsage({ sttSeconds: result.seconds, orCostUsd: result.costUsd });
-      if (result.kind === 'dropped') return;
-      await this.runTurn(result.text, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() });
     });
   }
 
@@ -580,7 +633,8 @@ export class VoiceCall {
   private submitText(text: string, tTranscript: string | null): void {
     this.speechOpenSince = null;
     this.touch();
-    void this.enqueue((controller) => this.runTurn(text, controller, { tTranscript }));
+    const ack = this.armAck();
+    void this.enqueue((controller) => this.runTurn(text, controller, { tTranscript }).finally(() => this.clearAck(ack)));
   }
 
   /**
@@ -708,6 +762,17 @@ export class VoiceCall {
         this.setFocus({ kind: 'chief' });
         await this.sayLine(tts, turn, backWithMe(getVoiceSettings(this.deps.db).language, this.readPlanning(focus.sessionId)), signal);
         return;
+      case 'repeat':
+        await this.replay(tts, turn, signal);
+        return;
+      case 'mute':
+        this.setMuted(true);
+        await this.sayLine(tts, turn, this.inLanguage(MUTED_LINE), signal);
+        return;
+      case 'unmute':
+        this.setMuted(false);
+        await this.sayLine(tts, turn, this.inLanguage(UNMUTED_LINE), signal);
+        return;
       case 'to_session':
         // Chief resolves the name with `focus_session` and asks when it is ambiguous.
         focus = { kind: 'chief' };
@@ -765,6 +830,9 @@ export class VoiceCall {
           case 'usage':
             this.addUsage({ orCostUsd: event.costUsd });
             break;
+          case 'earcon':
+            this.earcon(event.name);
+            break;
         }
         if (late) break;
       }
@@ -801,6 +869,7 @@ export class VoiceCall {
       });
       this.replyRows.set(turn, row.id);
     }
+    this.noteReply(turn, agent.kind, reply);
     if (sessionId !== null && agent.kind === 'session') this.pollPrd(sessionId);
   }
 
@@ -814,6 +883,42 @@ export class VoiceCall {
     this.send({ type: 'agent.done', turn, interrupted });
     const row = insertVoiceTurn(this.deps.db, { callId: this.id, turn, speaker: 'chief', text, interrupted });
     this.replyRows.set(turn, row.id);
+    this.noteReply(turn, 'chief', text);
+  }
+
+  /**
+   * The `repeat` intent: the last turn that spoke goes out again from the
+   * call's own copy of its audio, with no provider call. Muted, it is text only.
+   */
+  private async replay(tts: CallTts, turn: number, signal: AbortSignal): Promise<void> {
+    const last = this.recording;
+    if (last === null) {
+      await this.sayLine(tts, turn, this.inLanguage(NOTHING_TO_REPEAT), signal);
+      return;
+    }
+    const text = last.text !== '' ? last.text : last.segments.map((segment) => segment.text).join(' ');
+    this.send({ type: 'agent.delta', turn, agent: last.agent, text });
+    for (const segment of last.segments) {
+      if (signal.aborted || this.state.muted) break;
+      const segmentId = ++this.segmentSeq;
+      const bytes = segment.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      this.segmentTexts.set(segmentId, { turn, text: segment.text, bytes, sampleRate: segment.sampleRate });
+      this.audioStarted();
+      this.send({ type: 'tts.segment', segmentId, turn, text: segment.text, sampleRate: segment.sampleRate, format: segment.format });
+      for (const chunk of segment.chunks) this.transport?.sendAudio(segmentId, chunk);
+      this.send({ type: 'tts.end', segmentId });
+    }
+    const interrupted = signal.aborted;
+    this.send({ type: 'agent.done', turn, interrupted });
+    const row = insertVoiceTurn(this.deps.db, { callId: this.id, turn, speaker: last.agent, text, interrupted });
+    this.replyRows.set(turn, row.id);
+  }
+
+  /** The recording of `turn`, if it spoke, learns whose reply it was and its text. */
+  private noteReply(turn: number, agent: AgentKind, text: string): void {
+    if (this.recording?.turn !== turn) return;
+    this.recording.agent = agent;
+    this.recording.text = text;
   }
 
   private inLanguage(lines: Readonly<Record<string, string>>): string {
@@ -847,16 +952,21 @@ export class VoiceCall {
     signal: AbortSignal,
     marks: { tFirstAudioSent?: string },
   ): Promise<void> {
+    // Muted: the text went out as deltas; nothing is sent to a provider.
+    if (this.state.muted) return;
     const segmentId = ++this.segmentSeq;
     const entry: SpokenSegment = { turn, text, bytes: 0, sampleRate: 0 };
     this.segmentTexts.set(segmentId, entry);
     let started = false;
+    let recorded: RecordedSegment | null = null;
     try {
       await tts.speak({ segmentId, turn, text, last }, signal, {
         onStart: (format) => {
+          if (signal.aborted) return;
           started = true;
           entry.sampleRate = format.kind === 'pcm16' ? format.sampleRate : 0;
-          this.setPhase('speaking');
+          recorded = this.record(turn, text, format);
+          this.audioStarted();
           this.send({
             type: 'tts.segment',
             segmentId,
@@ -867,9 +977,10 @@ export class VoiceCall {
           });
         },
         onAudio: (chunk) => {
-          if (signal.aborted) return;
+          if (signal.aborted || this.state.muted) return;
           marks.tFirstAudioSent ??= this.isoNow();
           entry.bytes += chunk.length;
+          (recorded as RecordedSegment | null)?.chunks.push(chunk);
           this.transport?.sendAudio(segmentId, chunk);
           this.touch();
         },
@@ -899,6 +1010,111 @@ export class VoiceCall {
       this.agents.set(key, agent);
     }
     return agent;
+  }
+
+  /* ------------------------------------------------------------- earcons */
+
+  /**
+   * Plays a cached earcon (plan §3.1), unless the voice is muted or the
+   * call has none. The acknowledgement waiting for this utterance is done.
+   * Chief's `focus_session` plays "one sec" through this while it boots.
+   */
+  earcon(name: EarconName): void {
+    this.clearAck();
+    if (this.state.muted || !this.earcons.has(name)) return;
+    this.send({ type: 'earcon', name });
+  }
+
+  /**
+   * Mute voice (US-021): replies stream as text only until unmuted; audio
+   * already on its way is dropped and the browser stops playing.
+   */
+  setMuted(muted: boolean): void {
+    if (this.state.muted === muted) {
+      this.sendState();
+      return;
+    }
+    this.state.muted = muted;
+    if (muted) {
+      this.clearAck();
+      if (this.state.activeTurn !== null) this.send({ type: 'tts.stop', turn: this.state.turn });
+    }
+    this.sendState();
+  }
+
+  private async loadEarcons(provider: TtsProviderName): Promise<void> {
+    const source = this.deps.earcons;
+    if (source === undefined) return;
+    let timer: unknown = null;
+    let clips: readonly EarconClip[] | null = null;
+    try {
+      clips = await Promise.race([
+        // Never aborted: a render that outlasts the wait still fills the cache.
+        source.load(provider, new AbortController().signal),
+        new Promise<null>((resolve) => {
+          timer = this.deps.clock.setTimeout(() => resolve(null), EARCON_WAIT_MS);
+        }),
+      ]);
+    } catch (cause) {
+      logger.warn('voice earcons could not be loaded', { call: this.id, error: String(cause) });
+    } finally {
+      this.deps.clock.clearTimeout(timer);
+    }
+    if (clips === null) return;
+    const language = earconLanguage(getVoiceSettings(this.deps.db).language);
+    for (const clip of clips) {
+      if (clip.language !== language) continue;
+      this.earcons.set(clip.name, { segmentId: ++this.segmentSeq, sampleRate: clip.sampleRate, pcm: clip.pcm });
+    }
+  }
+
+  /** After `ready`: every earcon's audio under the segment id `ready` gave it. */
+  private sendEarconAudio(): void {
+    for (const { segmentId, pcm } of this.earcons.values()) {
+      this.transport?.sendAudio(segmentId, pcm);
+      this.send({ type: 'tts.end', segmentId });
+    }
+  }
+
+  /** Arms the 700 ms acknowledgement for an utterance that just came in. */
+  private armAck(): { timer: unknown } {
+    this.clearAck();
+    const ack: { timer: unknown } = { timer: null };
+    ack.timer = this.deps.clock.setTimeout(() => {
+      if (this.ack !== ack) return;
+      this.ack = null;
+      const name = ACK_EARCONS[this.acks++ % ACK_EARCONS.length] as EarconName;
+      this.earcon(name);
+    }, ACK_AFTER_MS);
+    this.ack = ack;
+    return ack;
+  }
+
+  /** Stops the acknowledgement: `only` when it is still that utterance's. */
+  private clearAck(only?: { timer: unknown }): void {
+    const ack = this.ack;
+    if (ack === null || (only !== undefined && ack !== only)) return;
+    this.deps.clock.clearTimeout(ack.timer);
+    this.ack = null;
+  }
+
+  /** The turn's first audio is going out: no acknowledgement needed. */
+  private audioStarted(): void {
+    this.clearAck();
+    this.setPhase('speaking');
+  }
+
+  /** The segment's audio, kept as the turn's recording for `repeat`; a turn that speaks replaces the last one. */
+  private record(turn: number, text: string, format: TtsFormat): RecordedSegment {
+    if (this.recording?.turn !== turn) this.recording = { turn, agent: 'chief', text: '', segments: [] };
+    const segment: RecordedSegment = {
+      text,
+      format: format.kind,
+      sampleRate: format.kind === 'pcm16' ? format.sampleRate : 0,
+      chunks: [],
+    };
+    this.recording.segments.push(segment);
+    return segment;
   }
 
   /* -------------------------------------------------------------- events */
@@ -1063,11 +1279,12 @@ export class VoiceCall {
       callId: this.id,
       focus: this.state.focus,
       sttMode: this.sttMode,
-      earcons: [],
+      earcons: [...this.earcons].map(([name, { segmentId, sampleRate }]) => ({ name, segmentId, sampleRate })),
       sampleRate: this.tts?.format.kind === 'pcm16' ? this.tts.format.sampleRate : 0,
       resumed,
     });
     this.sendState();
+    this.sendEarconAudio();
   }
 
   private setPhase(phase: CallPhase): void {
@@ -1078,7 +1295,7 @@ export class VoiceCall {
   }
 
   private sendState(): void {
-    this.send({ type: 'state', phase: this.state.phase, focus: this.state.focus });
+    this.send({ type: 'state', phase: this.state.phase, focus: this.state.focus, muted: this.state.muted });
   }
 
   private send(message: ServerMessage): void {
@@ -1097,6 +1314,22 @@ interface SpokenSegment {
   /** Audio bytes sent so far, and the PCM rate (0 for MP3), for the played share. */
   bytes: number;
   sampleRate: number;
+}
+
+/** One segment of the last spoken turn, as it went to the browser. */
+interface RecordedSegment {
+  readonly text: string;
+  readonly format: TtsFormat['kind'];
+  readonly sampleRate: number;
+  readonly chunks: Buffer[];
+}
+
+interface Recording {
+  readonly turn: number;
+  agent: AgentKind;
+  /** The reply as the transcript showed it. */
+  text: string;
+  readonly segments: RecordedSegment[];
 }
 
 /** Speech rate for MP3 segments, whose length the bytes do not tell: about 15 characters a second. */

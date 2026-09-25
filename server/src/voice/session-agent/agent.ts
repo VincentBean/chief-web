@@ -75,6 +75,11 @@ export class SessionVoiceAgent implements VoiceAgent {
 
       let agent: SessionAgentProcess;
       try {
+        // A boot takes seconds (plan §11 step 4): "one sec" covers it.
+        if (!this.deps.registry.isAlive(this.deps.sessionId)) {
+          this.deps.registry.check(this.deps.sessionId);
+          yield { type: 'earcon', name: 'one_sec' };
+        }
         agent = await this.deps.registry.acquire(this.deps.sessionId);
       } catch (cause) {
         if (signal.aborted) return;
