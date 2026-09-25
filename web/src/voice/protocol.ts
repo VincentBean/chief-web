@@ -145,7 +145,18 @@ export type ServerMessage =
   | ({ readonly type: 'confirm' } & ConfirmationView)
   | { readonly type: 'confirm.resolved'; readonly id: string; readonly outcome: ConfirmationOutcome }
   | ({ readonly type: 'ui' } & UiAction)
-  | { readonly type: 'usage'; readonly elCreditsUsed: number; readonly orCostUsd: number; readonly elCreditsRemaining?: number }
+  /**
+   * The meter (US-023): this call's ElevenLabs credits and OpenRouter
+   * dollars; the balance and monthly limit once ElevenLabs was asked, the
+   * remaining credits estimated locally between its 5-minute refreshes.
+   */
+  | {
+      readonly type: 'usage';
+      readonly elCreditsUsed: number;
+      readonly orCostUsd: number;
+      readonly elCreditsRemaining?: number;
+      readonly elCreditsLimit?: number;
+    }
   | { readonly type: 'error'; readonly code: string; readonly message: string; readonly fatal: boolean };
 
 /* ------------------------------------------------------------ binary frames */

@@ -193,6 +193,8 @@ export interface AppSettings {
   readonly elevenlabsApiKey: GithubTokenView;
   /** Everything else Settings → Voice edits (voice US-001). */
   readonly voice: VoiceSettings;
+  /** Read-only: Scribe's measured credits per minute, null before a Scribe call (US-023). */
+  readonly voiceScribeCreditsPerMin: number | null;
 }
 
 export interface AppSettingsUpdate {
@@ -945,6 +947,20 @@ export function setVoiceElExhaustedUntil(db: Database, until: string | null): vo
   else setSetting(db, 'voice_el_exhausted_until', until);
 }
 
+/**
+ * What Scribe realtime costs in ElevenLabs credits per minute on the
+ * operator's plan, measured from the balance after the last Scribe call
+ * (US-023), or `null` before one. Internal: the settings form cannot write it.
+ */
+export function getVoiceScribeCreditsPerMin(db: Database): number | null {
+  const stored = Number(getSetting(db, 'voice_scribe_credits_per_min') ?? Number.NaN);
+  return Number.isFinite(stored) && stored > 0 ? stored : null;
+}
+
+export function setVoiceScribeCreditsPerMin(db: Database, rate: number): void {
+  setSetting(db, 'voice_scribe_credits_per_min', String(rate));
+}
+
 export function readAppSettings(db: Database, config: Config): AppSettings {
   const token = getGithubToken(db);
   const identity = getGitIdentity(db);
@@ -976,6 +992,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     openrouterApiKey: masked(getOpenRouterApiKey(db)),
     elevenlabsApiKey: masked(getElevenLabsApiKey(db)),
     voice: getVoiceSettings(db),
+    voiceScribeCreditsPerMin: getVoiceScribeCreditsPerMin(db),
   };
 }
 

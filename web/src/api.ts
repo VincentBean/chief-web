@@ -107,6 +107,8 @@ export interface Settings {
   openrouterApiKey: { configured: boolean; last4: string | null };
   elevenlabsApiKey: { configured: boolean; last4: string | null };
   voice: VoiceSettings;
+  /** Scribe's credits per minute, measured after a Scribe call (voice US-023); null before one. */
+  voiceScribeCreditsPerMin: number | null;
 }
 
 /** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
@@ -967,6 +969,8 @@ export interface Stats {
    * no earlier sample to measure against. Memory is in bytes.
    */
   host: { cpu: number | null; cores: number; memory: { used: number; total: number } };
+  /** Voice calls this calendar month (UTC); ElevenLabs credits include Scribe once its rate was measured. */
+  voice: { enabled: boolean; calls: number; minutes: number; elCredits: number; orCostUsd: number };
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];

@@ -49,7 +49,7 @@ export class OpenRouterTts implements TtsProvider {
     // Nothing per call: requests share the module's keep-alive agents.
   }
 
-  async speak(seg: TtsSegment, signal: AbortSignal, onAudio: (chunk: Buffer) => void): Promise<{ chars: number }> {
+  async speak(seg: TtsSegment, signal: AbortSignal, onAudio: (chunk: Buffer) => void): Promise<{ chars: number; generationId?: string }> {
     const text = seg.text.trim();
     if (text === '') return { chars: 0 };
     const own = new AbortController();
@@ -57,18 +57,24 @@ export class OpenRouterTts implements TtsProvider {
     this.turns.set(seg.turn, turn);
     turn.add(own);
     const both = AbortSignal.any([signal, own.signal]);
+    // Billed once the request is answered, even when the audio is cancelled after.
+    let generationId: string | null = null;
+    const result = (): { chars: number; generationId?: string } =>
+      generationId === null ? { chars: text.length } : { chars: text.length, generationId };
     try {
       await this.acquire(both);
       try {
-        await this.request(text, both, onAudio);
+        await this.request(text, both, onAudio, (id) => {
+          generationId = id;
+        });
       } finally {
         this.release();
       }
-      return { chars: text.length };
+      return result();
     } catch (cause) {
       if (signal.aborted) throw signal.reason;
       // Cancelled by cancelTurn: the audio is not wanted, which is no failure.
-      if (own.signal.aborted) return { chars: text.length };
+      if (own.signal.aborted) return result();
       throw cause;
     } finally {
       turn.delete(own);
@@ -117,7 +123,12 @@ export class OpenRouterTts implements TtsProvider {
     this.waiting.shift()?.();
   }
 
-  private request(text: string, signal: AbortSignal, onAudio: (chunk: Buffer) => void): Promise<void> {
+  private request(
+    text: string,
+    signal: AbortSignal,
+    onAudio: (chunk: Buffer) => void,
+    onGeneration: (id: string) => void,
+  ): Promise<void> {
     const target = new URL(`${this.opts.baseUrl}/audio/speech`);
     const isHttp = target.protocol === 'http:';
     const body = JSON.stringify({ model: this.opts.model, input: text, voice: this.opts.voice, response_format: 'pcm' });
@@ -149,6 +160,8 @@ export class OpenRouterTts implements TtsProvider {
             res.on('error', reject);
             return;
           }
+          const generation = res.headers['x-generation-id'];
+          if (typeof generation === 'string' && generation !== '') onGeneration(generation);
           res.on('data', (chunk: Buffer) => {
             if (!signal.aborted) onAudio(chunk);
           });

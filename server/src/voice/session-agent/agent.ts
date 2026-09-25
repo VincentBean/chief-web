@@ -111,6 +111,8 @@ export class SessionVoiceAgent implements VoiceAgent {
           if (event === null) break;
           if (event.type === 'turnEnd') {
             ended = true;
+            // One Claude turn on the subscription, for the call's usage (US-023).
+            yield { type: 'usage', claudeTurns: 1 };
             break;
           }
           const out = toAgentEvent(event, tools);

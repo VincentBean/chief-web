@@ -157,6 +157,38 @@ export function updateVoiceCall(
   return changeCount(result) === 0 ? null : getVoiceCall(db, id);
 }
 
+/** What the calls that started in a window added up to (US-023). */
+export interface VoiceUsageSum {
+  readonly calls: number;
+  /** Call time; a call still open counts up to `now`. */
+  readonly minutes: number;
+  readonly elChars: number;
+  readonly scribeSeconds: number;
+  readonly orCostUsd: number;
+}
+
+/** Sums the calls started at or after `since` (ISO); pruned calls are gone from it. */
+export function sumVoiceUsageSince(db: Database, since: string, now: string = nowIso()): VoiceUsageSum {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS calls,
+              COALESCE(SUM(MAX(0, julianday(COALESCE(ended_at, ?)) - julianday(started_at))), 0) * 1440 AS minutes,
+              COALESCE(SUM(el_chars), 0) AS el_chars,
+              COALESCE(SUM(scribe_seconds), 0) AS scribe_seconds,
+              COALESCE(SUM(or_cost_usd), 0) AS or_cost_usd
+         FROM voice_calls
+        WHERE started_at >= ?`,
+    )
+    .get(now, since) as Row;
+  return {
+    calls: integer(row, 'calls'),
+    minutes: real(row, 'minutes'),
+    elChars: integer(row, 'el_chars'),
+    scribeSeconds: real(row, 'scribe_seconds'),
+    orCostUsd: real(row, 'or_cost_usd'),
+  };
+}
+
 /** Deletes the call and, by cascade, its turns. */
 export function deleteVoiceCall(db: Database, id: string): boolean {
   return changeCount(db.prepare('DELETE FROM voice_calls WHERE id = ?').run(id)) > 0;

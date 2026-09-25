@@ -11,7 +11,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
-import { getVoiceSettings } from '../settings/index.js';
+import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
@@ -32,9 +32,19 @@ import {
   WS_CLOSE_CALL_ENDED,
 } from './protocol.js';
 import { SentenceChunker, toSpeakable } from './speakable.js';
+import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
 import type { TtsFormat, TtsProviderName, TtsSegment } from './tts/types.js';
+import {
+  CallUsage,
+  type UsageDelta,
+  GENERATION_LOOKUP_DELAY_MS,
+  GENERATION_RETRY_MS,
+  SCRIBE_CALIBRATION_MIN_SECONDS,
+  scribeCreditsPerMinute,
+  SUBSCRIPTION_REFRESH_MS,
+} from './usage.js';
 
 /** Timers the call runs on; tests pass a fake one to drive the idle timeout. */
 export interface CallClock {
@@ -61,7 +71,8 @@ export type AgentEvent =
       readonly detail?: string;
     }
   | { readonly type: 'ui'; readonly ui: UiAction }
-  | { readonly type: 'usage'; readonly costUsd: number }
+  /** Chief's OpenRouter dollars, or a Claude Code turn of a session agent (US-023). */
+  | { readonly type: 'usage'; readonly costUsd?: number; readonly claudeTurns?: number }
   /** Plays a cached earcon now, e.g. "one sec" while a session agent boots (US-021). */
   | { readonly type: 'earcon'; readonly name: EarconName };
 
@@ -151,6 +162,16 @@ export interface VoiceCallDeps {
   readonly planning?: CallPlanning;
   /** Pre-rendered acknowledgements (US-021); without them the call has none. */
   readonly earcons?: CallEarcons;
+  /** The providers' own usage numbers (US-023); without them the meter is local only. */
+  readonly usage?: CallUsageSources;
+}
+
+/** Where a call reads what the providers say it spent (US-023). */
+export interface CallUsageSources {
+  /** `GET /v1/user/subscription`, or null without an ElevenLabs key. */
+  subscription(): Promise<ElevenLabsSubscription | null>;
+  /** One OpenRouter generation's USD, or null while its stats are not there yet. */
+  generationCost(id: string): Promise<number | null>;
 }
 
 /** The slice of `PlanningService` a call reads. */
@@ -262,7 +283,11 @@ export class VoiceCall {
   /** A session focus whose agent still has to be started and heard (plan §11 step 4–5). */
   private greetPending: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
-  private readonly totals = { elChars: 0, sttSeconds: 0, scribeSeconds: 0, orCostUsd: 0 };
+  /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
+  readonly usage = new CallUsage();
+  private subscriptionTimer: unknown = null;
+  /** The after-call cost lookup, once `end` started it. */
+  private settling: Promise<void> | null = null;
   /** Chief's early start on a stable partial (US-022), until the commit adopts or drops it. */
   private speculation: { readonly text: string; readonly controller: AbortController; readonly step: SpeculativeStep } | null = null;
   /** The last sign of speech in either direction, for the event gate. */
@@ -412,6 +437,8 @@ export class VoiceCall {
     this.lastActivityAt = this.deps.clock.now();
     this.sendReady(false);
     this.armIdle();
+    this.sendUsage();
+    void this.refreshSubscription();
   }
 
   /** The `hello` of a socket continuing this call after a drop (`?resume=`). */
@@ -419,6 +446,7 @@ export class VoiceCall {
     this.sendReady(true);
     this.armIdle();
     this.markActivity();
+    this.sendUsage();
   }
 
   /**
@@ -549,6 +577,8 @@ export class VoiceCall {
     if (this.ended) return;
     this.clearIdle();
     this.clearDrain();
+    if (this.subscriptionTimer !== null) this.deps.clock.clearTimeout(this.subscriptionTimer);
+    this.subscriptionTimer = null;
     this.clearAck();
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
@@ -563,8 +593,95 @@ export class VoiceCall {
       updateVoiceCall(this.deps.db, this.id, { endedAt: this.isoNow(), endReason: reason });
     }
     this.deps.onEnded?.(this);
+    if (this.persisted) this.settling = this.settle();
     await this.running.catch(() => undefined);
     await this.tts?.close();
+  }
+
+  /** Resolves once the after-call cost lookup has written its totals (tests). */
+  settled(): Promise<void> {
+    return this.settling ?? Promise.resolve();
+  }
+
+  /* --------------------------------------------------------------- usage */
+
+  /**
+   * The authoritative ElevenLabs balance: at call start and every
+   * {@link SUBSCRIPTION_REFRESH_MS} after, until the call ends. A failed read
+   * keeps the local estimate going from the last good one.
+   */
+  private async refreshSubscription(): Promise<void> {
+    this.subscriptionTimer = null;
+    const subscription = await this.readSubscription();
+    if (this.ended) return;
+    if (subscription !== null) {
+      this.usage.noteSubscription(subscription);
+      this.sendUsage();
+    }
+    this.subscriptionTimer = this.deps.clock.setTimeout(() => void this.refreshSubscription(), SUBSCRIPTION_REFRESH_MS);
+  }
+
+  private async readSubscription(): Promise<ElevenLabsSubscription | null> {
+    try {
+      return (await this.deps.usage?.subscription()) ?? null;
+    } catch (cause) {
+      logger.warn('could not read the ElevenLabs balance', { call: this.id, error: String(cause) });
+      return null;
+    }
+  }
+
+  /**
+   * After the call: the backup voice's dollars from OpenRouter's generation
+   * stats (they lag the request, so wait, and look a missing one up once
+   * more), and for a Scribe call, Scribe's price per minute from how far the
+   * balance moved beyond the voice's own characters.
+   */
+  private async settle(): Promise<void> {
+    const sources = this.deps.usage;
+    if (sources === undefined) return;
+    const pending = [...this.usage.generationIds];
+    const scribe = this.usage.snapshot().scribeSeconds >= SCRIBE_CALIBRATION_MIN_SECONDS;
+    if (pending.length === 0 && !scribe) return;
+    try {
+      await this.sleep(GENERATION_LOOKUP_DELAY_MS);
+      let missing = await this.lookUpGenerations(sources, pending);
+      if (missing.length > 0) {
+        await this.sleep(GENERATION_RETRY_MS);
+        missing = await this.lookUpGenerations(sources, missing);
+        if (missing.length > 0) logger.warn('OpenRouter had no cost for some speech requests', { call: this.id, missing: missing.length });
+      }
+      updateVoiceCall(this.deps.db, this.id, this.usage.toCallUpdate());
+      const start = this.usage.firstSubscription;
+      if (scribe && start !== null) {
+        const end = await this.readSubscription();
+        const { elChars, scribeSeconds } = this.usage.snapshot();
+        const rate = end === null ? null : scribeCreditsPerMinute(start, end, elChars, scribeSeconds);
+        if (rate !== null) setVoiceScribeCreditsPerMin(this.deps.db, rate);
+      }
+    } catch (cause) {
+      logger.warn('could not settle the call usage', { call: this.id, error: String(cause) });
+    }
+  }
+
+  /** Adds what OpenRouter knows; returns the ids it did not know yet. */
+  private async lookUpGenerations(sources: CallUsageSources, ids: readonly string[]): Promise<string[]> {
+    const costs = await Promise.all(ids.map((id) => sources.generationCost(id).catch(() => null)));
+    const missing: string[] = [];
+    costs.forEach((cost, index) => {
+      if (cost === null) missing.push(ids[index] as string);
+      else this.usage.add({ ttsCostUsd: cost });
+    });
+    return missing;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.deps.clock.setTimeout(resolve, ms);
+    });
+  }
+
+  private sendUsage(): void {
+    this.send({ type: 'usage', ...this.usage.report() });
   }
 
   /* ------------------------------------------------------------ barge-in */
@@ -639,7 +756,7 @@ export class VoiceCall {
           this.send({ type: 'error', code: `audio_${result.reason}`, message: result.message, fatal: false });
           return;
         }
-        this.addUsage({ sttSeconds: result.seconds, orCostUsd: result.costUsd });
+        this.addUsage({ sttSeconds: result.seconds, sttCostUsd: result.costUsd });
         if (result.kind === 'dropped') return;
         await this.runTurn(result.text, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() });
       } finally {
@@ -868,7 +985,7 @@ export class VoiceCall {
             this.send({ type: 'ui', ...event.ui });
             break;
           case 'usage':
-            this.addUsage({ orCostUsd: event.costUsd });
+            this.addUsage({ chatCostUsd: event.costUsd ?? 0, claudeTurns: event.claudeTurns ?? 0 });
             break;
           case 'earcon':
             this.earcon(event.name);
@@ -1330,8 +1447,9 @@ export class VoiceCall {
     return {
       toast: (text) => this.send({ type: 'ui', action: 'toast', text }),
       error: (error) => this.send({ type: 'error', ...error }),
-      chars: ({ provider, chars }) => {
+      chars: ({ provider, chars, generationId }) => {
         if (provider === 'elevenlabs') this.addUsage({ elChars: chars });
+        else if (generationId !== undefined) this.usage.addGeneration(generationId);
       },
       providerChanged: (provider) => {
         this.state.ttsProvider = provider;
@@ -1340,13 +1458,10 @@ export class VoiceCall {
     };
   }
 
-  private addUsage(add: { elChars?: number; sttSeconds?: number; scribeSeconds?: number; orCostUsd?: number }): void {
-    this.totals.elChars += add.elChars ?? 0;
-    this.totals.sttSeconds += add.sttSeconds ?? 0;
-    this.totals.scribeSeconds += add.scribeSeconds ?? 0;
-    this.totals.orCostUsd += add.orCostUsd ?? 0;
-    if (this.persisted) updateVoiceCall(this.deps.db, this.id, { ...this.totals });
-    this.send({ type: 'usage', elCreditsUsed: this.totals.elChars, orCostUsd: this.totals.orCostUsd });
+  private addUsage(add: UsageDelta): void {
+    this.usage.add(add);
+    if (this.persisted) updateVoiceCall(this.deps.db, this.id, this.usage.toCallUpdate());
+    this.sendUsage();
   }
 
   private sendReady(resumed: boolean): void {

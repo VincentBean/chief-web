@@ -477,6 +477,17 @@ function Activity({ stats }: { readonly stats: Stats | null }) {
         }
         tone={successRate !== null && successRate < 50 ? 'danger' : undefined}
       />
+      {(stats.voice.enabled || stats.voice.calls > 0) && (
+        <Figure
+          label="voice this month"
+          value={`${String(Math.round(stats.voice.minutes))} min`}
+          hint={
+            <span className="figure__note">
+              {Math.round(stats.voice.elCredits).toLocaleString()} ElevenLabs credits · ${stats.voice.orCostUsd.toFixed(2)} OpenRouter
+            </span>
+          }
+        />
+      )}
     </div>
   );
 }

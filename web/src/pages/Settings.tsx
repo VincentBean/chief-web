@@ -1228,6 +1228,12 @@ function VoicePanel({
               </option>
             ))}
           </select>
+          {settings.voiceScribeCreditsPerMin !== null && (
+            <p className="field__hint">
+              Scribe cost ≈ {Math.round(settings.voiceScribeCreditsPerMin).toLocaleString()} credits/min on your plan
+              (measured from your ElevenLabs balance after the last Scribe call).
+            </p>
+          )}
         </div>
         <div className="field">
           <label className="field__label" htmlFor="voice-live-captions">

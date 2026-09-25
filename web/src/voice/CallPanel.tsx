@@ -3,7 +3,7 @@ import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { isEnded, useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
 import { Segmented } from '../ui.tsx';
-import { type CallStatus, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
+import { type CallStatus, type CallUsage, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
 import type { CallFocus, CallPhase, ConfirmationOutcome, ToolStatus } from './protocol.ts';
 import { bindHoldToTalkButton } from './ptt.ts';
 
@@ -299,11 +299,8 @@ export function CallPanel() {
               { value: 'push-to-talk', label: 'Push to talk' },
             ]}
           />
-          {/* The usage meter proper is US-023. */}
-          <span className="call-usage" title="Cost of this call so far">
-            {call.usage === null
-              ? 'Usage —'
-              : `$${call.usage.orCostUsd.toFixed(3)} · ${String(call.usage.elCreditsUsed)} chars`}
+          <span className="call-usage" title={call.usage === null ? undefined : usageTitle(call.usage)}>
+            {call.usage === null ? 'Usage —' : usageLine(call.usage)}
           </span>
         </div>
       </footer>
@@ -378,4 +375,27 @@ function TranscriptLine({
         </li>
       );
   }
+}
+
+/** "38.2k", "121k", "950". */
+function credits(n: number): string {
+  if (n < 1000) return String(Math.round(n));
+  const k = n / 1000;
+  return `${k < 100 ? k.toFixed(1).replace(/\.0$/, '') : String(Math.round(k))}k`;
+}
+
+/** The meter (US-023): "EL 38.2k / 121k this month · OR $0.14 this call". */
+function usageLine(usage: CallUsage): string {
+  const or = `OR $${usage.orCostUsd.toFixed(2)} this call`;
+  if (usage.elCreditsRemaining === null || usage.elCreditsLimit === null) return or;
+  const used = usage.elCreditsLimit - usage.elCreditsRemaining;
+  return `EL ${credits(used)} / ${credits(usage.elCreditsLimit)} this month · ${or}`;
+}
+
+function usageTitle(usage: CallUsage): string {
+  const lines = [`This call: ${String(usage.elCreditsUsed)} ElevenLabs credits, $${usage.orCostUsd.toFixed(4)} on OpenRouter`];
+  if (usage.elCreditsRemaining !== null) {
+    lines.push(`${usage.elCreditsRemaining.toLocaleString()} ElevenLabs credits left (read every 5 minutes, estimated in between)`);
+  }
+  return lines.join('\n');
 }

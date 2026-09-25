@@ -32,9 +32,10 @@ export interface TtsProvider {
    * rejecting with `signal.reason`. Resolves when the segment's audio is
    * complete, not when its text is accepted, so segments of one turn may be
    * spoken concurrently and still finish in order. `chars` is what was sent
-   * to the provider (what it bills).
+   * to the provider (what it bills); `generationId` is OpenRouter's
+   * `X-Generation-Id`, whose cost is looked up after the call (US-023).
    */
-  speak(seg: TtsSegment, signal: AbortSignal, onAudio: (chunk: Buffer) => void): Promise<{ chars: number }>;
+  speak(seg: TtsSegment, signal: AbortSignal, onAudio: (chunk: Buffer) => void): Promise<{ chars: number; generationId?: string }>;
   /** Cancels all in-flight audio for a turn (barge-in). Never reconnects. */
   cancelTurn(turn: number): void;
   close(): Promise<void>;

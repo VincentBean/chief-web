@@ -86,7 +86,9 @@ export type TranscriptEntry =
 export interface CallUsage {
   readonly elCreditsUsed: number;
   readonly orCostUsd: number;
+  /** The balance, estimated locally between the server's 5-minute reads; null without ElevenLabs. */
   readonly elCreditsRemaining: number | null;
+  readonly elCreditsLimit: number | null;
 }
 
 export interface CallState {
@@ -373,6 +375,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
             elCreditsUsed: message.elCreditsUsed,
             orCostUsd: message.orCostUsd,
             elCreditsRemaining: message.elCreditsRemaining ?? null,
+            elCreditsLimit: message.elCreditsLimit ?? null,
           });
           return;
         case 'ui':

@@ -135,6 +135,21 @@ export async function fetchOpenRouterKey(baseUrl: string, apiKey: string): Promi
   };
 }
 
+/**
+ * What one generation cost in USD (`GET /generation?id=`, the id from a
+ * response's `X-Generation-Id`), or null while OpenRouter has no stats for
+ * it yet (a 404 for the first seconds after the request).
+ */
+export async function fetchOpenRouterGenerationCost(baseUrl: string, apiKey: string, id: string): Promise<number | null> {
+  try {
+    const body = record(await call('openrouter', `${baseUrl}/generation?id=${encodeURIComponent(id)}`, bearer(apiKey)));
+    return num(record(body['data'])['total_cost']);
+  } catch (cause) {
+    if (cause instanceof VoiceProviderError && cause.status === 404) return null;
+    throw cause;
+  }
+}
+
 /** One catalog entry, reduced to what validating a setting needs. */
 export interface OpenRouterModel {
   readonly id: string;

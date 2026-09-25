@@ -32,7 +32,7 @@ export interface TtsSink {
   /** An `error` message; text-to-speech failures are never fatal to a call. */
   error(error: { code: string; message: string; fatal: false }): void;
   /** Characters sent to a provider for one segment, for `voice_calls` and the usage meter. */
-  chars(usage: { provider: TtsProviderName; segmentId: number; turn: number; chars: number }): void;
+  chars(usage: { provider: TtsProviderName; segmentId: number; turn: number; chars: number; generationId?: string }): void;
   /** The call now speaks through another provider (`voice_calls.tts_provider`). */
   providerChanged?(provider: TtsProviderName): void;
 }
@@ -185,8 +185,11 @@ export class TtsService {
       const provider = this.provider ?? this.backup();
       using(provider);
       try {
-        const { chars } = await provider.speak(seg, signal, onAudio);
-        if (chars > 0) this.sink.chars({ provider: provider.name, segmentId: seg.segmentId, turn: seg.turn, chars });
+        const { chars, generationId } = await provider.speak(seg, signal, onAudio);
+        if (chars > 0) {
+          const usage = { provider: provider.name, segmentId: seg.segmentId, turn: seg.turn, chars };
+          this.sink.chars(generationId === undefined ? usage : { ...usage, generationId });
+        }
         return { spoken: true, provider: provider.name, chars };
       } catch (cause) {
         if (signal.aborted) throw signal.reason;

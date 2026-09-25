@@ -19,6 +19,7 @@ import {
   type CallStt,
   type CallTransport,
   type CallTts,
+  type CallUsageSources,
   systemClock,
   type VoiceAgent,
   VoiceCall,
@@ -40,7 +41,7 @@ import {
   WS_CLOSE_CALL_IN_PROGRESS,
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
-import { fetchElevenLabsSubscription } from './providers.js';
+import { fetchElevenLabsSubscription, fetchOpenRouterGenerationCost } from './providers.js';
 import { SttService } from './stt/index.js';
 import { TtsService, type TtsSink } from './tts/index.js';
 
@@ -70,6 +71,11 @@ export interface VoiceServiceDeps {
    * `tts` gets none unless it passes some.
    */
   readonly earcons?: CallEarcons;
+  /**
+   * The providers' usage numbers (US-023). Without it, production asks
+   * ElevenLabs and OpenRouter; a test that fakes `tts` gets none.
+   */
+  readonly usage?: CallUsageSources;
 }
 
 export type VoiceReadiness =
@@ -145,6 +151,7 @@ export class VoiceService {
   private readonly clock: CallClock;
   private readonly stt: CallStt;
   private readonly earcons: CallEarcons | null;
+  private readonly usageSources: CallUsageSources | null;
 
   constructor(
     private readonly config: Config,
@@ -154,6 +161,7 @@ export class VoiceService {
     this.clock = deps.clock ?? systemClock;
     this.stt = deps.stt ?? new SttService(db, config);
     this.earcons = deps.earcons ?? (deps.tts === undefined ? providerEarcons(db, config) : null);
+    this.usageSources = deps.usage ?? (deps.tts === undefined ? providerUsage(db, config) : null);
     deps.events?.subscribe((event) => {
       this.active?.postEvent(event);
     });
@@ -274,6 +282,7 @@ export class VoiceService {
       clock: this.clock,
       ...(this.deps.planning === undefined ? {} : { planning: this.deps.planning }),
       ...(this.earcons === null ? {} : { earcons: this.earcons }),
+      ...(this.usageSources === null ? {} : { usage: this.usageSources }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
@@ -320,6 +329,20 @@ export class VoiceService {
     if (this.resumeTimer !== null) this.clock.clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
   }
+}
+
+/** The balance and generation costs, read with whatever keys are saved at the time. */
+function providerUsage(db: Database, config: Config): CallUsageSources {
+  return {
+    subscription: async () => {
+      const key = getElevenLabsApiKey(db);
+      return key === null ? null : fetchElevenLabsSubscription(config.elevenlabsApiUrl, key);
+    },
+    generationCost: async (id) => {
+      const key = getOpenRouterApiKey(db);
+      return key === null ? null : fetchOpenRouterGenerationCost(config.openrouterApiUrl, key, id);
+    },
+  };
 }
 
 /** The earcons of whichever voice a call opens on, cached under `<DATA_DIR>/voice-cache`. */

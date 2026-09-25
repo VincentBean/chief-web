@@ -75,6 +75,7 @@ describe('voice settings (voice US-001)', () => {
       transcriptRetentionDays: 30,
       pttGlobal: false,
       liveCaptions: 'off',
+      speculativeChief: false,
     });
   });
 

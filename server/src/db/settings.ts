@@ -127,6 +127,8 @@ export const SETTING_KEYS = [
    * part of the settings view and never accepted by `PUT /api/settings`.
    */
   'voice_el_exhausted_until',
+  /** Scribe's measured credits per minute (US-023). Internal like the one above. */
+  'voice_scribe_credits_per_min',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];

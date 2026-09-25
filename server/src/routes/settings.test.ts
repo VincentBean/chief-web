@@ -821,5 +821,6 @@ function voiceDefaults(db: Database): Record<string, unknown> {
     openrouterApiKey: { configured: false, last4: null },
     elevenlabsApiKey: { configured: false, last4: null },
     voice: getVoiceSettings(db),
+    voiceScribeCreditsPerMin: null,
   };
 }
