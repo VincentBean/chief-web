@@ -10,9 +10,9 @@ import { type VoiceService, voiceReadiness } from './service.js';
 export const VOICE_WS_PATH = '/api/voice/stream';
 
 /**
- * The call socket (voice US-007; plan §6). Registered on the shared
+ * The call socket (voice US-007; docs/voice-plan.md §6). Registered on the shared
  * `WebSocketGateway`, so the session cookie is checked before `handle` runs.
- * A voice socket is more sensitive than a log stream (plan §17), so it also
+ * A voice socket is more sensitive than a log stream (docs/voice-plan.md §17), so it also
  * requires the browser's `Origin` to be `PUBLIC_URL` when that is set.
  */
 export function createVoiceSocketRoute(service: VoiceService, config: Config, db: Database): WebSocketRoute {

@@ -1,6 +1,6 @@
 /**
- * What speech-to-text models "hear" in silence or a cough (voice US-004; plan
- * §7.1). Whisper-family models were trained on subtitles, so a near-empty clip
+ * What speech-to-text models "hear" in silence or a cough (voice US-004;
+ * docs/voice-plan.md §7.1). Whisper-family models were trained on subtitles, so a near-empty clip
  * comes back as a sign-off. Only trusted as a hallucination on a short clip: a
  * real "thank you" at the end of a long sentence is kept.
  */

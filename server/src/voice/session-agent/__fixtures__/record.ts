@@ -22,7 +22,7 @@ import { voiceUtterance } from '../prompt.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MODEL = process.env['RECORD_MODEL'] ?? 'haiku';
 
-/** Flags of plan §10.1, minus the prompt. */
+/** Flags of docs/voice-plan.md §10.1, minus the prompt. */
 const STREAM_FLAGS = [
   '--dangerously-skip-permissions',
   '-p',

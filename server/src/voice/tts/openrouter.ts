@@ -6,7 +6,7 @@ import { OPENROUTER_REFERER, OPENROUTER_TITLE } from '../stt/openrouter.js';
 import { TtsError, type TtsFormat, type TtsProvider, type TtsSegment } from './types.js';
 
 /**
- * OpenRouter text-to-speech, the fallback voice (voice US-006; plan §8.4): one
+ * OpenRouter text-to-speech, the fallback voice (voice US-006; docs/voice-plan.md §8.4): one
  * `POST /audio/speech` per segment with `response_format: 'pcm'`, the body
  * streamed to the call as it arrives. At most two segments are in flight, so
  * segment n+1 synthesizes while n plays without flooding the provider.
@@ -14,7 +14,7 @@ import { TtsError, type TtsFormat, type TtsProvider, type TtsSegment } from './t
  * `node:http` with keep-alive agents for the same reason as stt/openrouter.ts.
  */
 
-/** Plan §8.4: segment n+1 synthesizes while n plays, and no more. */
+/** docs/voice-plan.md §8.4: segment n+1 synthesizes while n plays, and no more. */
 export const MAX_IN_FLIGHT = 2;
 
 const agents = {

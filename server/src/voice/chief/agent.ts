@@ -13,7 +13,7 @@ import { ChatPrefetch, sameUtterance } from './speculation.js';
 import { buildSnapshot } from './snapshot.js';
 import { type ChiefServices, type ChiefTool, createChiefTools, type ToolContext, type ToolResult } from './tools.js';
 
-/** Messages of the conversation the model sees (plan §9.1). */
+/** Messages of the conversation the model sees (docs/voice-plan.md §9.1). */
 export const WINDOW_MESSAGES = 30;
 export const CHIEF_TEMPERATURE = 0.4;
 export const CHIEF_MAX_TOKENS = 400;
@@ -64,7 +64,7 @@ export interface ChiefAgentDeps {
 }
 
 /**
- * Chief (plan §9.1): an OpenRouter streaming loop with tools. Each model step
+ * Chief (docs/voice-plan.md §9.1): an OpenRouter streaming loop with tools. Each model step
  * sees the system prompt with a fresh STATE block, the summary of whatever
  * fell out of the window, and the last {@link WINDOW_MESSAGES} messages. Text
  * is yielded as it streams in; tool calls are run between steps, up to

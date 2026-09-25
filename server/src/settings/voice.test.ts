@@ -46,7 +46,7 @@ describe('voice settings (voice US-001)', () => {
     deleteSetting(db, 'voice_el_exhausted_until');
   });
 
-  it('reads every default of plan §14.1 when nothing is stored', () => {
+  it('reads every default of docs/voice-plan.md §14.1 when nothing is stored', () => {
     assert.deepEqual(getVoiceSettings(db), {
       enabled: false,
       sttProvider: 'openrouter',

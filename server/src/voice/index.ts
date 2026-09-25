@@ -29,7 +29,7 @@ export interface Voice {
   readonly service: VoiceService;
 }
 
-/** The voice feature (plan §4): its routes, its call socket and the service owning the call. */
+/** The voice feature (docs/voice-plan.md §4): its routes, its call socket and the service owning the call. */
 export function createVoice(config: Config, db: Database, deps: VoiceServiceDeps = {}): Voice {
   const service = new VoiceService(config, db, deps);
   return {

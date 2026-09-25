@@ -118,7 +118,7 @@ export const VOICE_BARGE_IN_MODES = ['on', 'careful', 'off'] as const;
 export const VOICE_EVENT_VERBOSITIES = ['important', 'all', 'none'] as const;
 export const VOICE_LIVE_CAPTIONS = ['off', 'browser'] as const;
 
-/** Mirrors the server's `VoiceSettings` (plan §14.1). */
+/** Mirrors the server's `VoiceSettings` (docs/voice-plan.md §14.1). */
 export interface VoiceSettings {
   enabled: boolean;
   sttProvider: (typeof VOICE_STT_PROVIDERS)[number];

@@ -135,7 +135,7 @@ export interface Config {
    */
   readonly publicUrl: string;
   /**
-   * Voice calls (voice US-001, plan §14.2). The provider keys and preferences
+   * Voice calls (voice US-001, docs/voice-plan.md §14.2). The provider keys and preferences
    * live in Settings → Voice; these are the operational limits around a call.
    */
   /** A call nobody has spoken in for this long is ended. */
@@ -241,7 +241,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
-  // Voice limits (plan §14.2). The bounds keep a typo from producing a call
+  // Voice limits (docs/voice-plan.md §14.2). The bounds keep a typo from producing a call
   // that ends before anyone speaks, or one that never gives up on a provider.
   const bounded = (name: string, fallback: number, min: number, max: number): number => {
     const value = int(name, fallback);
@@ -297,7 +297,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     voiceKeepAgentsMs: bounded('VOICE_KEEP_AGENTS_MS', 900_000, 0, 86_400_000),
     voiceMaxSessionAgents: bounded('VOICE_MAX_SESSION_AGENTS', 3, 1, 20),
     voiceSttTimeoutMs: bounded('VOICE_STT_TIMEOUT_MS', 8_000, 1_000, 60_000),
-    // Upstream speech-to-text providers time out around 60 s (plan §7.1).
+    // Upstream speech-to-text providers time out around 60 s (docs/voice-plan.md §7.1).
     voiceMaxUtteranceMs: bounded('VOICE_MAX_UTTERANCE_MS', 60_000, 1_000, 60_000),
     voiceChiefMaxToolHops: bounded('VOICE_CHIEF_MAX_TOOL_HOPS', 6, 1, 50),
     voiceScribeIdleCloseMs: bounded('VOICE_SCRIBE_IDLE_CLOSE_MS', 20_000, 1_000, 600_000),

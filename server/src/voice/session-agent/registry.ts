@@ -16,7 +16,7 @@ import { QA_DISALLOWED_TOOLS, type SessionAgentDocker, SessionAgentProcess } fro
 import { voicePlanningPrompt, voiceQaPrompt, voiceRulesPrompt } from './prompt.js';
 
 /**
- * The session voice agents that are alive (plan §10.4): at most one per
+ * The session voice agents that are alive (docs/voice-plan.md §10.4): at most one per
  * session and `VOICE_MAX_SESSION_AGENTS` in all, the least recently used
  * stopped (TERM through its pid file) to make room. They outlive a call by
  * `VOICE_KEEP_AGENTS_MS`, so calling back a minute later finds the same

@@ -18,7 +18,7 @@ import type { CallFocus } from '../protocol.js';
 import { type ChiefServices, orderActiveFirst, prNumberOf } from './tools.js';
 
 /**
- * The STATE block of chief's system prompt (plan §9.3), rebuilt for every
+ * The STATE block of chief's system prompt (docs/voice-plan.md §9.3), rebuilt for every
  * request. Everything here is SQLite plus the pull request list the service
  * already has cached: nothing on the hot path asks GitHub or Docker. With it
  * in the prompt, "what's building?" and "anything need me?" need no tool.

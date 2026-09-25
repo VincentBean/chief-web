@@ -16,9 +16,9 @@ export { classify, ELEVENLABS_SAMPLE_RATE, ElevenLabsTts, KEEP_ALIVE_MS, parseEl
 export { MAX_IN_FLIGHT, OpenRouterTts } from './openrouter.js';
 export { TtsError, type TtsErrorKind, type TtsFormat, type TtsProvider, type TtsProviderName, type TtsSegment } from './types.js';
 
-/** The toast of plan §8.6. */
+/** The toast of docs/voice-plan.md §8.6. */
 export const SWITCHED_TOAST = 'Switched to backup voice';
-/** Plan §8.6: this many ElevenLabs socket failures ... */
+/** docs/voice-plan.md §8.6: this many ElevenLabs socket failures ... */
 export const SOCKET_FAILURES_TO_SWITCH = 2;
 /** ... within this window switch the call to OpenRouter. */
 export const SOCKET_FAILURE_WINDOW_MS = 30_000;
@@ -57,7 +57,7 @@ export interface TtsServiceDeps {
 }
 
 /**
- * Text-to-speech for one call with the fallback policy of plan §8.6. The call
+ * Text-to-speech for one call with the fallback policy of docs/voice-plan.md §8.6. The call
  * starts on ElevenLabs unless it has no key or voice, or credits ran out
  * earlier (`voice_el_exhausted_until` still in the future). ElevenLabs 401,
  * 402 or a quota error, or two socket failures within 30 s, switch the call
@@ -163,7 +163,7 @@ export class TtsService {
     }
   }
 
-  /** Plan §8.1: the turn was interrupted; its audio stops. */
+  /** docs/voice-plan.md §8.1: the turn was interrupted; its audio stops. */
   cancelTurn(turn: number): void {
     this.elevenlabs?.cancelTurn(turn);
     this.openrouter?.cancelTurn(turn);

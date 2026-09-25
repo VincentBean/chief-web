@@ -1,5 +1,5 @@
 /**
- * Speculative chief (voice US-022; plan §3 item 4). In Scribe mode a partial
+ * Speculative chief (voice US-022; docs/voice-plan.md §3 item 4). In Scribe mode a partial
  * transcript unchanged for 300 ms is usually what the operator ends up
  * saying, so chief's first model step starts on it before the commit.
  *

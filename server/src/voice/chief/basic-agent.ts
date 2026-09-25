@@ -4,7 +4,7 @@ import { getOpenRouterApiKey, getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, VoiceAgent } from '../call.js';
 import { type ChatMessage, streamChat } from './openrouter-client.js';
 
-/** Messages kept in the model's window (plan §9.1). */
+/** Messages kept in the model's window (docs/voice-plan.md §9.1). */
 const WINDOW = 30;
 
 const SYSTEM_PROMPT =

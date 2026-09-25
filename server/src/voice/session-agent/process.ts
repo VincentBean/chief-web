@@ -1,12 +1,12 @@
 /**
- * What chief-web writes to a session agent's stdin (plan §10.2, §10.5).
+ * What chief-web writes to a session agent's stdin (docs/voice-plan.md §10.2, §10.5).
  *
  * The session agent is `claude -p --input-format stream-json`: every line on
  * its stdin is one JSON message. These builders are the only place the shapes
  * are spelled out, and `__fixtures__/record.ts` writes exactly their output to
  * the real CLI, so the recordings next to it prove the CLI accepts them.
  *
- * The recordings confirm plan §10's framing on Claude Code 2.1.280: one
+ * The recordings confirm docs/voice-plan.md §10's framing on Claude Code 2.1.280: one
  * process reads user messages from stdin turn after turn, and the interrupt
  * stops the current turn without ending the process. So one long-lived process
  * per session is the design; the fallback of one `-p` process per turn with
@@ -64,20 +64,20 @@ export interface SessionAgentCommandOptions {
   readonly model: string | null;
   /** The Claude session to continue, from `voice_session_agents`. */
   readonly resumeId: string | null;
-  /** Appendix A.2 part 1, the voice rules. */
+  /** docs/voice-plan.md Appendix A.2 part 1, the voice rules. */
   readonly systemPrompt: string;
   /** Tools the CLI must refuse: {@link QA_DISALLOWED_TOOLS} in Q&A mode (voice US-025). */
   readonly disallowedTools?: readonly string[];
 }
 
 /**
- * The edit tools a Q&A agent may not use (plan §10.4, FR-25): the build loop
+ * The edit tools a Q&A agent may not use (docs/voice-plan.md §10.4, FR-25): the build loop
  * owns the tree of a session that is not pending. Passed as
  * `--disallowedTools`, checked against `claude --help` of 2.1.280.
  */
 export const QA_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
-/** `claude` with the flags of plan §10.1. */
+/** `claude` with the flags of docs/voice-plan.md §10.1. */
 export function sessionAgentCommand(options: SessionAgentCommandOptions): string[] {
   return [
     'claude',

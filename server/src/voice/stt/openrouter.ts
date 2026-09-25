@@ -4,8 +4,8 @@ import https from 'node:https';
 import { errorText } from '../providers.js';
 
 /**
- * OpenRouter speech-to-text, one request per utterance (voice US-004; plan
- * §7.1): the WAV goes up base64-encoded in a JSON body, the transcript and
+ * OpenRouter speech-to-text, one request per utterance (voice US-004;
+ * docs/voice-plan.md §7.1): the WAV goes up base64-encoded in a JSON body, the transcript and
  * what it cost come back.
  *
  * Not `fetch`: Node's global fetch takes no agent, and `undici` is not a
@@ -14,7 +14,7 @@ import { errorText } from '../providers.js';
  * of a short clip.
  */
 
-/** Plan §7.1: OpenRouter's app attribution headers. */
+/** docs/voice-plan.md §7.1: OpenRouter's app attribution headers. */
 export const OPENROUTER_REFERER = 'https://github.com/vincentBean/chief-web';
 export const OPENROUTER_TITLE = 'chief-web voice';
 

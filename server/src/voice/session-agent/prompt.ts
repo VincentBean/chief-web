@@ -2,12 +2,12 @@ import { containerPrdDir, type PlanningMode, type PlanningPromptInput, planningP
 import { cutOffNote } from '../cut-off.js';
 
 /**
- * What a session voice agent is told (plan Appendix A.2): the voice rules on
+ * What a session voice agent is told (docs/voice-plan.md Appendix A.2): the voice rules on
  * the command line (`--append-system-prompt`), and chief's own planning prompt
  * with a block of voice overrides as its first stdin message.
  */
 
-/** Appendix A.2 part 1, with the call's language filled in. */
+/** docs/voice-plan.md Appendix A.2 part 1, with the call's language filled in. */
 export function voiceRulesPrompt(language: string): string {
   return `You are on a live voice call. Everything you write is converted to speech.
 - Reply in at most three short spoken sentences, then stop and let the operator talk.
@@ -22,7 +22,7 @@ export function voiceRulesPrompt(language: string): string {
 - Speak ${languageName(language)} unless the operator switches language.`;
 }
 
-/** Appendix A.2 part 2: the block appended to chief's planning prompt. */
+/** docs/voice-plan.md Appendix A.2 part 2: the block appended to chief's planning prompt. */
 export function voiceModeOverrides(mode: PlanningMode, prdPath: string, context: string | null): string {
   const said = context === null || context.trim() === '' ? '' : ` (they said: "${context.trim()}")`;
   const ask = mode === 'edit' ? 'what they want to change in the PRD' : 'what they want to build';
@@ -69,7 +69,7 @@ export interface VoiceQaPromptInput {
 }
 
 /**
- * The first stdin message for a session that is not pending (Appendix A.3,
+ * The first stdin message for a session that is not pending (docs/voice-plan.md Appendix A.3,
  * voice US-025): questions only, the tree belongs to the build loop. The
  * command line backs the last sentence up with `--disallowedTools`.
  */
@@ -85,7 +85,7 @@ ${start}`;
 }
 
 /**
- * An utterance as the agent reads it (plan §10.2): `[voice] <text>`, or after
+ * An utterance as the agent reads it (docs/voice-plan.md §10.2): `[voice] <text>`, or after
  * an interrupt `[voice] [You were interrupted after saying: "…"] <text>`
  * quoting the tail of what the operator actually heard (US-020).
  */

@@ -1,5 +1,5 @@
 /**
- * Microphone capture for a call (voice US-009; plan §13.3): one
+ * Microphone capture for a call (voice US-009; docs/voice-plan.md §13.3): one
  * `getUserMedia` stream (mono, echo cancellation, noise suppression, auto
  * gain) feeding a 16 kHz `AudioContext` with the `pcm16` worklet from
  * `web/public/voice/pcm-worklet.js`. The VAD (`vad.ts`) listens to the same

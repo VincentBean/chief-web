@@ -1,6 +1,6 @@
 /**
- * Single-use tokens for ElevenLabs Scribe v2 Realtime (voice US-022; plan
- * §7.2). The browser streams its microphone straight to ElevenLabs, so it
+ * Single-use tokens for ElevenLabs Scribe v2 Realtime (voice US-022;
+ * docs/voice-plan.md §7.2). The browser streams its microphone straight to ElevenLabs, so it
  * needs a credential; it gets a token that works for one realtime session
  * and expires after 15 minutes, never the API key.
  *
@@ -54,7 +54,7 @@ export async function mintScribeToken(baseUrl: string, apiKey: string, now: Date
 }
 
 /**
- * A sliding-window cap on mints (plan §14.3: 10 per hour). Every mint counts,
+ * A sliding-window cap on mints (docs/voice-plan.md §14.3: 10 per hour). Every mint counts,
  * not only failures: a token is a credential to spend credits with, and a
  * browser stuck in a reconnect loop should hit the wall, not the bill.
  */

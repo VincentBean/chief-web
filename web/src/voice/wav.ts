@@ -1,6 +1,6 @@
 /**
  * Browser audio → the 16 kHz mono PCM16 WAV the server's speech-to-text takes
- * (voice US-004; plan §7.1). The call's VAD (US-009) hands 16 kHz Float32
+ * (voice US-004; docs/voice-plan.md §7.1). The call's VAD (US-009) hands 16 kHz Float32
  * frames straight to {@link encodeWav}, push-to-talk its PCM16 batches to
  * {@link encodeWavPcm16}; the Settings microphone test records
  * at the device rate and goes through {@link recordWav}.

@@ -28,11 +28,11 @@ import { synthesizeOnce, TtsError } from './tts/index.js';
 const MAX_TEST_TTS_CHARS = 500;
 const TEST_TTS_TIMEOUT_MS = 20_000;
 
-/** Plan §14.3: single-use Scribe tokens, at most this many per hour. */
+/** docs/voice-plan.md §14.3: single-use Scribe tokens, at most this many per hour. */
 export const SCRIBE_TOKENS_PER_HOUR = 10;
 /** ElevenLabs takes at most 50 key terms. */
 const MAX_KEYTERMS = 50;
-/** Always biased towards, before the repository names (plan §7.2). */
+/** Always biased towards, before the repository names (docs/voice-plan.md §7.2). */
 const BASE_KEYTERMS = ['chief', 'PRD'];
 
 /** A rejected request body: an error code plus something to show the operator. */
@@ -42,7 +42,7 @@ interface Invalid {
 }
 
 /**
- * The voice feature's REST routes (voice US-001; plan §14.3). Mounted behind
+ * The voice feature's REST routes (voice US-001; docs/voice-plan.md §14.3). Mounted behind
  * `requireApiAuth` like every other API router. This story adds the three the
  * Settings page needs; later stories add theirs here.
  *
@@ -64,7 +64,7 @@ export function createVoiceRouter(
   router.use(createVoiceHistoryRouter(db, () => service.activeCallId, now));
 
   // A single-use token for the browser's Scribe realtime socket (voice
-  // US-022; plan §7.2), with everything else it needs to open one. Minted per
+  // US-022; docs/voice-plan.md §7.2), with everything else it needs to open one. Minted per
   // socket: an idle close or a reconnect asks again.
   router.post('/voice/scribe-token', (_req, res) => {
     const key = getElevenLabsApiKey(db);

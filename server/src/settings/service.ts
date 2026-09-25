@@ -535,7 +535,7 @@ export function getGitIdentity(db: Database): GitIdentity {
 
 /*
  * ---------------------------------------------------------------------------
- * Voice calls (voice US-001, plan §14.1)
+ * Voice calls (voice US-001, docs/voice-plan.md §14.1)
  * ---------------------------------------------------------------------------
  */
 
@@ -545,7 +545,7 @@ export function getGitIdentity(db: Database): GitIdentity {
  * (`qwen/qwen3-asr-0.6b`, `nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b`
  * and this one); Whisper Large V3 Turbo is the one of the three whose listing
  * guarantees Dutch (99+ languages), and its habit of hallucinating on silence
- * is already handled by the short-utterance filter of plan §7.1.
+ * is already handled by the short-utterance filter of docs/voice-plan.md §7.1.
  */
 export const DEFAULT_VOICE_OR_STT_MODEL = 'openai/whisper-large-v3-turbo';
 
@@ -559,7 +559,7 @@ export const DEFAULT_VOICE_OR_STT_MODEL = 'openai/whisper-large-v3-turbo';
 export const DEFAULT_VOICE_CHIEF_MODEL = 'inclusionai/ling-3.0-flash';
 
 /**
- * Default OpenRouter text-to-speech model, the fallback voice of plan §8.4.
+ * Default OpenRouter text-to-speech model, the fallback voice of docs/voice-plan.md §8.4.
  * The cheapest paid entry of OpenRouter's speech collection on 2026-09-25 that
  * speaks Dutch: the free Deepgram Flux and the cheaper Kokoro, Orpheus and CSM
  * voices are English (or at least not Dutch) only, and the `:free` Fish Audio
@@ -574,11 +574,11 @@ export const DEFAULT_VOICE_OR_TTS_MODEL = 'google/gemini-3.8-flash-lite-tts';
  */
 export const DEFAULT_VOICE_OR_TTS_VOICE = 'Kore';
 
-/** Where speech-to-text comes from (plan §7). */
+/** Where speech-to-text comes from (docs/voice-plan.md §7). */
 export const VOICE_STT_PROVIDERS = ['openrouter', 'elevenlabs-realtime', 'browser'] as const;
 
 /**
- * ElevenLabs models the multi-context WebSocket of plan §8.3 can stream. The
+ * ElevenLabs models the multi-context WebSocket of docs/voice-plan.md §8.3 can stream. The
  * English-only v2 Flash and Turbo are left out because the default language is
  * Dutch; `eleven_v3` is left out because it has no WebSocket endpoint.
  */
@@ -747,7 +747,7 @@ export function isValidElevenLabsVoiceId(value: string): boolean {
 }
 
 /**
- * A term → spoken-form map (plan §8.2): a plain object of strings, with
+ * A term → spoken-form map (docs/voice-plan.md §8.2): a plain object of strings, with
  * non-empty terms. An empty spoken form is allowed — it says "skip this".
  */
 export function parseVoicePronunciations(raw: unknown): Record<string, string> | undefined {
@@ -934,7 +934,7 @@ function writeVoiceSettings(db: Database, update: VoiceSettingsUpdate): void {
 
 /**
  * Until when calls start on the OpenRouter fallback voice because ElevenLabs
- * ran out of credits (plan §8.6), or `null`. A time in the past means no hold,
+ * ran out of credits (docs/voice-plan.md §8.6), or `null`. A time in the past means no hold,
  * so nothing has to sweep the row.
  */
 export function getVoiceElExhaustedUntil(db: Database): string | null {

@@ -1,5 +1,5 @@
 /**
- * Intents (plan §11): short utterances the call handles itself, before the
+ * Intents (docs/voice-plan.md §11): short utterances the call handles itself, before the
  * focused agent sees them. Matching is on the whole utterance against exact
  * phrase lists (English and Dutch), after lowercasing and stripping
  * punctuation, and only for utterances of at most {@link MAX_INTENT_WORDS}

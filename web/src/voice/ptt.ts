@@ -1,5 +1,5 @@
 /**
- * Push-to-talk (voice US-009; plan §13.2–13.3): while Space or the
+ * Push-to-talk (voice US-009; docs/voice-plan.md §13.2–13.3): while Space or the
  * hold-to-talk button is down, the capture worklet's PCM16 batches are
  * collected; on release they go to the server as one WAV. No VAD involved.
  */

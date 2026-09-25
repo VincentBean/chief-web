@@ -1,4 +1,4 @@
-// The call's capture worklet (voice US-009; plan §13.3). Loaded by
+// The call's capture worklet (voice US-009; docs/voice-plan.md §13.3). Loaded by
 // `web/src/voice/mic.ts` into the 16 kHz capture context: it turns the
 // microphone into ~100 ms batches of 16 kHz mono PCM16 (1600 samples) and
 // posts each batch's ArrayBuffer to the main thread. Push-to-talk collects

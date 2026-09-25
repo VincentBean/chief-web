@@ -2,7 +2,7 @@ import type { ConfirmationOutcome, ConfirmationView, ServerMessage } from '../pr
 import type { ChiefTool, ToolContext, ToolResult } from './tools.js';
 
 /**
- * Server-enforced confirmation (voice US-011; plan §9.4). A confirmable tool
+ * Server-enforced confirmation (voice US-011; docs/voice-plan.md §9.4). A confirmable tool
  * never acts on its first call: it builds the prompt and the arguments that
  * will run from what the model asked for, parks them as the one pending
  * {@link Confirmation} and shows the operator a Confirm / Cancel pill. Only a
@@ -21,7 +21,7 @@ export interface Confirmation extends ConfirmationView {
   readonly createdAtTurn: number;
 }
 
-/** Where the call keeps its one pending confirmation (plan §5). */
+/** Where the call keeps its one pending confirmation (docs/voice-plan.md §5). */
 export interface ConfirmationHolder {
   pendingConfirmation: Confirmation | null;
 }
@@ -187,7 +187,7 @@ export function cancelledResult(confirmation: Confirmation): ToolResult {
   };
 }
 
-/** The `confirm` tool (plan Appendix B) over the registry it runs confirmations from. */
+/** The `confirm` tool (docs/voice-plan.md Appendix B) over the registry it runs confirmations from. */
 export function confirmTool(tools: () => ReadonlyMap<string, ChiefTool>): ChiefTool {
   return {
     definition: {

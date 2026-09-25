@@ -1,5 +1,5 @@
 /**
- * ElevenLabs Scribe v2 Realtime, browser-direct (voice US-022; plan §7.2).
+ * ElevenLabs Scribe v2 Realtime, browser-direct (voice US-022; docs/voice-plan.md §7.2).
  * The microphone's 100 ms PCM16 batches go straight to ElevenLabs over a
  * socket opened with a single-use token from `POST /api/voice/scribe-token`;
  * partials become captions (and the barge-in signal), commits become
@@ -38,7 +38,7 @@ export async function mintScribeSession(): Promise<ScribeSession> {
   return (await res.json()) as ScribeSession;
 }
 
-/** Plan §7.2: VAD commits after 0.8 s of silence. */
+/** docs/voice-plan.md §7.2: VAD commits after 0.8 s of silence. */
 export const SCRIBE_VAD_SILENCE_SECS = 0.8;
 export const SCRIBE_MODEL = 'scribe_v2_realtime';
 /** Kept locally before a (re)open, so the first syllable is not lost. */

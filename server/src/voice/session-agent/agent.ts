@@ -11,10 +11,10 @@ import { interruptRequestLine, type SessionAgentProcess, userMessageLine } from 
 import { voiceUtterance } from './prompt.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
-/** How long an interrupted turn may take to end before the process is sent SIGINT (plan §10.5). */
+/** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
 export const INTERRUPT_GRACE_MS = 5_000;
 
-/** Said before the one restart of a call (plan §10.4). */
+/** Said before the one restart of a call (docs/voice-plan.md §10.4). */
 export const RESTARTING: Readonly<Record<string, string>> = {
   nl: 'De sessie-agent is gestopt, ik start hem opnieuw.',
   en: "The session agent stopped, I'm restarting it.",
@@ -75,7 +75,7 @@ export class SessionVoiceAgent implements VoiceAgent {
 
       let agent: SessionAgentProcess;
       try {
-        // A boot takes seconds (plan §11 step 4): "one sec" covers it.
+        // A boot takes seconds (docs/voice-plan.md §11 step 4): "one sec" covers it.
         if (!this.deps.registry.isAlive(this.deps.sessionId)) {
           this.deps.registry.check(this.deps.sessionId);
           yield { type: 'earcon', name: 'one_sec' };
@@ -127,7 +127,7 @@ export class SessionVoiceAgent implements VoiceAgent {
   }
 
   /**
-   * Barge-in (plan §10.5): the interrupt request, then the rest of the turn is
+   * Barge-in (docs/voice-plan.md §10.5): the interrupt request, then the rest of the turn is
    * read and dropped until its `result`. A turn that does not end within the
    * grace period gets SIGINT; the next utterance starts a new process with
    * `--resume`.

@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { loadConfig } from './config.js';
 
 describe('voice config (voice US-001)', () => {
-  it('uses the plan §14.2 defaults', () => {
+  it('uses the docs/voice-plan.md §14.2 defaults', () => {
     const config = loadConfig({});
 
     assert.equal(config.voiceIdleTimeoutMs, 600_000);

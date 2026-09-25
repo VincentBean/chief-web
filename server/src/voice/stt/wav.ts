@@ -1,5 +1,5 @@
 /**
- * The WAV an utterance arrives in (voice US-004; plan §7.1): 16 kHz mono PCM16,
+ * The WAV an utterance arrives in (voice US-004; docs/voice-plan.md §7.1): 16 kHz mono PCM16,
  * as `web/src/voice/wav.ts` writes it. Checked before anything is sent to a
  * provider, so a VAD misfire or a runaway recording costs nothing.
  */

@@ -1,5 +1,5 @@
 /**
- * Chief's system prompt (plan Appendix A.1). `{{snapshot}}` is the STATE
+ * Chief's system prompt (docs/voice-plan.md Appendix A.1). `{{snapshot}}` is the STATE
  * block, rebuilt for every request (`snapshot.ts`).
  */
 export const CHIEF_PROMPT_TEMPLATE = `You are Chief, the voice of chief-web: a self-hosted app that plans features as PRDs and builds them

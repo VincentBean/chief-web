@@ -2,7 +2,7 @@ import { guarded } from './actions.js';
 import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
 
 /**
- * `focus_session` (plan §9.2, §11): hands the call to the session's own
+ * `focus_session` (docs/voice-plan.md §9.2, §11): hands the call to the session's own
  * Claude Code: it plans a `pending` session and answers questions about any
  * other (the registry's Q&A mode, voice US-025). Everything the registry
  * refuses on (no clone, the usage-limit hold, a container that does not
@@ -74,7 +74,7 @@ async function switchTo(services: ChiefServices, target: { id: string; name: str
   return {
     ok: true,
     data: { focus: target.id, name: target.name },
-    // The call's switch opens the session's page (plan §11).
+    // The call's switch opens the session's page (docs/voice-plan.md §11).
     summary: `Handed the call to ${target.name}`,
   };
 }

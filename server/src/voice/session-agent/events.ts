@@ -1,9 +1,9 @@
 /**
  * Turning a session agent's `claude --output-format stream-json` into
- * `SessionAgentEvent`s (plan §10.3).
+ * `SessionAgentEvent`s (docs/voice-plan.md §10.3).
  *
  * Checked against the recordings in `__fixtures__/` (Claude Code 2.1.280, see
- * the README there). The plan's §10 assumptions hold: `-p --input-format
+ * the README there). The docs/voice-plan.md §10 assumptions hold: `-p --input-format
  * stream-json` keeps reading stdin across turns on one process, the user
  * message and `control_request` interrupt shapes are accepted as written
  * (`process.ts`), and partial text arrives in the `stream_event` envelope. So

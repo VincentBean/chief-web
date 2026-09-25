@@ -1,5 +1,5 @@
 /**
- * Wire protocol of the call socket `/api/voice/stream` (voice US-007; plan §6).
+ * Wire protocol of the call socket `/api/voice/stream` (voice US-007; docs/voice-plan.md §6).
  * The browser keeps a copy in `web/src/voice/protocol.ts` (copied, not
  * imported).
  *
@@ -9,7 +9,7 @@
  * chunk of a spoken segment's audio (server → browser).
  */
 
-/** Close codes of plan §6; `4401` (unauthorized) is the gateway's own. */
+/** Close codes of docs/voice-plan.md §6; `4401` (unauthorized) is the gateway's own. */
 export const WS_CLOSE_BAD_ORIGIN = 4403;
 export const WS_CLOSE_CALL_IN_PROGRESS = 4409;
 export const WS_CLOSE_TAKEN_OVER = 4410;
@@ -32,7 +32,7 @@ export type AgentKind = 'chief' | 'session';
 
 /* ------------------------------------------------------ browser → server */
 
-/** Plan §6.1. The WAV utterance travels as a binary kind `0x01` frame. */
+/** docs/voice-plan.md §6.1. The WAV utterance travels as a binary kind `0x01` frame. */
 export type ClientMessage =
   | {
       readonly type: 'hello';
@@ -108,7 +108,7 @@ export interface TurnTimes {
   readonly firstAudioPlayed: string | null;
 }
 
-/** Plan §6.2. Audio follows `tts.segment` as binary kind `0x02` frames. */
+/** docs/voice-plan.md §6.2. Audio follows `tts.segment` as binary kind `0x02` frames. */
 export type ServerMessage =
   | {
       readonly type: 'ready';

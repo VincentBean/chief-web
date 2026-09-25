@@ -123,7 +123,7 @@ export const SETTING_KEYS = [
   'voice_speculative_chief',
   /**
    * ISO timestamp until which calls start on the OpenRouter fallback voice,
-   * because ElevenLabs said its credits ran out (plan §8.6). Internal: never
+   * because ElevenLabs said its credits ran out (docs/voice-plan.md §8.6). Internal: never
    * part of the settings view and never accepted by `PUT /api/settings`.
    */
   'voice_el_exhausted_until',

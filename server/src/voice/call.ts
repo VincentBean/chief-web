@@ -183,14 +183,14 @@ export interface CallPlanning {
 export type { Confirmation } from './chief/confirm.js';
 export type { VoiceEvent } from './events.js';
 
-/** How long both sides must have been quiet before chief speaks a background event (plan §12). */
+/** How long both sides must have been quiet before chief speaks a background event (docs/voice-plan.md §12). */
 export const EVENT_QUIET_MS = 2_000;
-/** An acknowledgement plays when no agent audio has started this long after the operator's turn ended (plan §3.1). */
+/** An acknowledgement plays when no agent audio has started this long after the operator's turn ended (docs/voice-plan.md §3.1). */
 export const ACK_AFTER_MS = 700;
 /** How long call start waits for earcons that still have to be rendered; they finish in the background for the next call. */
 export const EARCON_WAIT_MS = 5_000;
 
-/** Plan §5. */
+/** docs/voice-plan.md §5. */
 export interface VoiceCallState {
   readonly id: string;
   focus: CallFocus;
@@ -221,7 +221,7 @@ export const HANGUP_GOODBYE: Readonly<Record<string, string>> = {
 
 /**
  * The one line chief says when the operator comes back from a session agent
- * (plan §11): "Back with me. csv-export-invoices has a draft PRD."
+ * (docs/voice-plan.md §11): "Back with me. csv-export-invoices has a draft PRD."
  */
 export function backWithMe(language: string, session: { readonly sessionName: string; readonly prd: PrdStatus } | null): string {
   const nl = language === 'nl';
@@ -256,7 +256,7 @@ export const NOTHING_TO_REPEAT: Readonly<Record<string, string>> = {
 const GOODBYE_MAX_MS = 15_000;
 
 /**
- * One call (voice US-007; plan §5): the state machine between the socket, STT,
+ * One call (voice US-007; docs/voice-plan.md §5): the state machine between the socket, STT,
  * the focused agent and TTS. Exactly one turn is active at a time; a new
  * utterance while one runs interrupts it first (barge-in).
  */
@@ -294,7 +294,7 @@ export class VoiceCall {
   private idleTimer: unknown = null;
   /** Set by chief's `end_call`: hang up once the turn's goodbye is out. */
   private hangUpAfter = false;
-  /** A session focus whose agent still has to be started and heard (plan §11 step 4–5). */
+  /** A session focus whose agent still has to be started and heard (docs/voice-plan.md §11 step 4–5). */
   private greetPending: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
@@ -361,7 +361,7 @@ export class VoiceCall {
   }
 
   /**
-   * Moves the call's focus (plan §11): a pending confirmation does not
+   * Moves the call's focus (docs/voice-plan.md §11): a pending confirmation does not
    * survive it; the switch is kept in `voice_turns`, the panel hears `state`
    * and a session focus opens the session's page. The session's agent is
    * started and speaks its opening once the turn in progress is over.
@@ -710,7 +710,7 @@ export class VoiceCall {
   }
 
   /**
-   * The operator started talking over the turn in progress (plan §13.5): it
+   * The operator started talking over the turn in progress (docs/voice-plan.md §13.5): it
    * is aborted, which cuts the model stream, cancels the TTS turn and sends
    `tts.stop` (the browser stopped playing already). A handler that is
    * running finishes. With `voice_barge_in` off, speech during playback is
@@ -725,7 +725,7 @@ export class VoiceCall {
   }
 
   /**
-   * `playback.progress` → `spokenSoFar` (plan §8.4): a finished segment
+   * `playback.progress` → `spokenSoFar` (docs/voice-plan.md §8.4): a finished segment
    * counts whole; a partial one by the share of its audio played, mapped
    * proportionally onto its characters.
    */
@@ -764,7 +764,7 @@ export class VoiceCall {
         } catch (cause) {
           if (controller.signal.aborted) return;
           logger.warn('voice transcription failed', { error: String(cause) });
-          // Plan §7.1: say so, and keep listening.
+          // docs/voice-plan.md §7.1: say so, and keep listening.
           this.clearAck(ack);
           this.earcon('sorry');
           this.send({ type: 'error', code: 'stt_failed', message: 'I could not transcribe that.', fatal: false });
@@ -871,7 +871,7 @@ export class VoiceCall {
     // Reports about an earlier turn's audio no longer count.
     for (const [id, segment] of this.segmentTexts) if (segment.turn !== turn) this.segmentTexts.delete(id);
     // Cut at once, not when the agent has wound down: an interrupted session
-    // agent may take seconds to reach its `result` (plan §10.5).
+    // agent may take seconds to reach its `result` (docs/voice-plan.md §10.5).
     const cut = (): void => {
       tts.cancelTurn(turn);
       this.send({ type: 'tts.stop', turn });
@@ -1131,7 +1131,7 @@ export class VoiceCall {
   }
 
   /**
-   * Polls the planning poller after a session agent's turn (plan §10.6): a
+   * Polls the planning poller after a session agent's turn (docs/voice-plan.md §10.6): a
    * `prd.md` that has just become valid comes back through `postEvent`.
    */
   private pollPrd(sessionId: string): void {
@@ -1187,7 +1187,7 @@ export class VoiceCall {
 
   /**
    * A bare "yes"/"no" while chief has a confirmation pending answers it
-   * directly (plan §9.4), with no model deciding what it meant.
+   * directly (docs/voice-plan.md §9.4), with no model deciding what it meant.
    */
   private spokenResolution(text: string, focus: CallFocus): AgentInput['resolution'] {
     if (focus.kind !== 'chief') return undefined;
@@ -1245,7 +1245,7 @@ export class VoiceCall {
   /* ------------------------------------------------------------- earcons */
 
   /**
-   * Plays a cached earcon (plan §3.1), unless the voice is muted or the
+   * Plays a cached earcon (docs/voice-plan.md §3.1), unless the voice is muted or the
    * call has none. The acknowledgement waiting for this utterance is done.
    * Chief's `focus_session` plays "one sec" through this while it boots.
    */
@@ -1350,7 +1350,7 @@ export class VoiceCall {
   /* -------------------------------------------------------------- events */
 
   /**
-   * A background event (voice US-015; plan §12). It is toasted at once,
+   * A background event (voice US-015; docs/voice-plan.md §12). It is toasted at once,
    * whatever happens next. Chief speaks it only if `voice_event_verbosity`
    * allows the kind and, while a session agent has the focus, only if it is
    * about that session; then it waits in `state.queue` for a quiet moment.
@@ -1360,7 +1360,7 @@ export class VoiceCall {
     const settings = getVoiceSettings(this.deps.db);
     const text = describeEvent(event, settings.timezone);
     this.send({ type: 'ui', action: 'toast', text });
-    // A PRD the voice conversation just made valid (plan §10.6): the page
+    // A PRD the voice conversation just made valid (docs/voice-plan.md §10.6): the page
     // points at it, and chief says so even below `all` verbosity.
     const planned = event.kind === 'prd.valid' && this.agents.has(`session:${event.sessionId}`);
     if (planned) this.send({ type: 'ui', action: 'highlight', target: 'prd' });

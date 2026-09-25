@@ -9,7 +9,7 @@ import { synthesizeOnce } from './tts/index.js';
 import type { TtsFormat, TtsProviderName } from './tts/types.js';
 
 /**
- * Earcons (voice US-021; plan §3.1): short acknowledgements pre-rendered once
+ * Earcons (voice US-021; docs/voice-plan.md §3.1): short acknowledgements pre-rendered once
  * per voice, so the call can fill a pause without a provider round trip.
  * They live in `<DATA_DIR>/voice-cache/<voice-id>/<name>.<lang>.pcm` (raw
  * PCM16 LE mono) next to a `manifest.json` saying which provider, model and

@@ -164,7 +164,7 @@ describe('session voice agents', () => {
     await registry.stopAll();
   });
 
-  it('boots claude as uid 1000 in the clone with the §10.1 flags under the pid-file wrapper', async () => {
+  it('boots claude as uid 1000 in the clone with the docs/voice-plan.md §10.1 flags under the pid-file wrapper', async () => {
     const session = newSession('boot-it');
     const agent = await registry.acquire(session.id);
     const exec = daemon.exec(agent.execId);

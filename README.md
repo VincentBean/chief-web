@@ -71,6 +71,11 @@ background, instead of babysitting one terminal per feature.
 - **Shows you a dashboard.** What is running, what needs you, what is queued,
   and how much got built in the last two weeks.
   [Overview](docs/interface.md#overview)
+- **Takes your calls.** Open a call from any page and talk to chief: ask what
+  is building, create a session, start a build or review a pull request, with
+  every change confirmed out loud first. Chief hands the call to a session's
+  own agent to plan a feature by conversation, and it writes the PRD.
+  [Voice calls](docs/voice.md)
 
 If Claude runs into its usage limit mid-build, the session waits for the limit
 to lift and carries on instead of failing.
@@ -272,7 +277,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |
 | [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
-| [Voice calls](docs/voice.md) | talking to chief, and tuning the latency of a turn |
+| [Voice calls](docs/voice.md) | setting up a call with chief, what it can do by voice, providers and costs, privacy and latency |
 | [Claude authentication](docs/claude-auth.md) | the one-time login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
 | [Troubleshooting](docs/troubleshooting.md) | SSH and login failures, recovering a failed session |

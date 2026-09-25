@@ -1,5 +1,5 @@
 /**
- * Hands-free turn taking (voice US-009; plan §13.3): Silero v5 through
+ * Hands-free turn taking (voice US-009; docs/voice-plan.md §13.3): Silero v5 through
  * `@ricky0123/vad-web`'s `MicVAD`, listening to the call's own microphone
  * stream and capture context. Each finished utterance goes to the server as
  * one WAV (binary kind `0x01`); speech start and misfires become
@@ -18,13 +18,13 @@ export const VAD_FRAME_MS = (512 / WAV_SAMPLE_RATE) * 1000;
 /** Upstream speech-to-text times out around 60 s; the server rejects > 60 s. */
 export const MAX_UTTERANCE_MS = 55_000;
 
-/** Plan §13.3 thresholds, expressed in Silero frames. */
+/** docs/voice-plan.md §13.3 thresholds, expressed in Silero frames. */
 export const VAD_POSITIVE_THRESHOLD = 0.6;
 export const VAD_NEGATIVE_THRESHOLD = 0.35;
 export const VAD_MIN_SPEECH_FRAMES = 8; // ≈ 250 ms
 export const VAD_PRE_SPEECH_PAD_FRAMES = 10;
 
-/** `voice_barge_in` (plan §13.5). */
+/** `voice_barge_in` (docs/voice-plan.md §13.5). */
 export type BargeInMode = 'on' | 'careful' | 'off';
 /** `careful` while the agent is audible: a stricter speech score… */
 export const CAREFUL_POSITIVE_THRESHOLD = 0.8;
@@ -98,7 +98,7 @@ export async function startVad(opts: {
   let splitting = false;
   let vad: MicVAD | null = null;
   /**
-   * What the speech in progress is (plan §13.5): `open` was announced and is
+   * What the speech in progress is (docs/voice-plan.md §13.5): `open` was announced and is
    * sent; `waiting` started over the agent's voice in `careful` mode and needs
    * {@link CAREFUL_MIN_SPEECH_MS} of confident speech first; `ignored` started
    * over it in `off` mode. Speech that never opens is dropped as echo.

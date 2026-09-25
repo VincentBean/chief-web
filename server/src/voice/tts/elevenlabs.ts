@@ -4,7 +4,7 @@ import { TtsError, type TtsErrorKind, type TtsFormat, type TtsProvider, type Tts
 
 /**
  * ElevenLabs text-to-speech over the multi-context WebSocket (voice US-006;
- * plan §8.3). One socket per call, opened at call start so the handshake is not
+ * docs/voice-plan.md §8.3). One socket per call, opened at call start so the handshake is not
  * paid on the first reply, and one context per turn (`t<turn>`), so a barge-in
  * closes that context and the audio stops without reconnecting.
  *
@@ -16,7 +16,7 @@ import { TtsError, type TtsErrorKind, type TtsFormat, type TtsProvider, type Tts
  */
 
 export const ELEVENLABS_SAMPLE_RATE = 24000;
-/** Plan §8.3: a keep-alive after this long without sending anything. */
+/** docs/voice-plan.md §8.3: a keep-alive after this long without sending anything. */
 export const KEEP_ALIVE_MS = 15_000;
 /** The API's maximum, in seconds. */
 const INACTIVITY_TIMEOUT_S = 180;
@@ -321,7 +321,7 @@ export class ElevenLabsTts implements TtsProvider {
     this.armKeepAlive(ws);
   }
 
-  /** Plan §8.3: after 15 s of sending nothing, an empty text resets the clock. */
+  /** docs/voice-plan.md §8.3: after 15 s of sending nothing, an empty text resets the clock. */
   private armKeepAlive(ws: WebSocket): void {
     this.stopKeepAlive();
     this.keepAlive = setTimeout(() => {

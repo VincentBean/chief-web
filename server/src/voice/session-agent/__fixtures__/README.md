@@ -1,7 +1,7 @@
 # Session agent stream-json fixtures
 
 Real recordings of Claude Code in the mode a session voice agent runs in
-(plan §10.1). `events.test.ts` runs every one through the parser, and checks
+(docs/voice-plan.md §10.1). `events.test.ts` runs every one through the parser, and checks
 that the stdin builders in `../process.ts` reproduce what was sent.
 
 | Fixture | What it shows |

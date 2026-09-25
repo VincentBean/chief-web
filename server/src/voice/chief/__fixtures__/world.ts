@@ -29,7 +29,7 @@ import { ConfirmationGate } from '../confirm.js';
 import type { ChiefServices } from '../tools.js';
 
 /**
- * A seeded install for chief's tests (voice US-008): the state of plan §9.3's
+ * A seeded install for chief's tests (voice US-008): the state of docs/voice-plan.md §9.3's
  * example, over an in-memory database, with in-memory stand-ins for the
  * services that would otherwise need Docker or GitHub.
  */

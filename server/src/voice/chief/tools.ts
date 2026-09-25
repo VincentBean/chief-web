@@ -28,7 +28,7 @@ import { recurringTaskTools } from './recurring-tasks.js';
 import type { ChatTool } from './openrouter-client.js';
 
 /**
- * Chief's tools (plan §9.2): each one a JSON-schema `definition` the model
+ * Chief's tools (docs/voice-plan.md §9.2): each one a JSON-schema `definition` the model
  * sees and a `handler` over the services chief-web already has. A result's
  * `data` goes back to the model as compact JSON (ids, names, statuses; never
  * full logs), its `summary` is the one-liner on the tool card, and `ui` is

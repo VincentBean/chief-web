@@ -8,7 +8,7 @@ export type VoiceEventVerbosity = (typeof VOICE_EVENT_VERBOSITIES)[number];
 
 /**
  * What happened in the background while a call may be running (voice US-015;
- * plan §12). Each source emits the facts; {@link describeEvent} is the one
+ * docs/voice-plan.md §12). Each source emits the facts; {@link describeEvent} is the one
  * place that turns them into the sentence the panel toasts and chief reads.
  */
 export type VoiceBusEvent =
@@ -60,7 +60,7 @@ export interface VoiceEventSink {
 }
 
 /**
- * The bus between the services and the call (plan §12): a small
+ * The bus between the services and the call (docs/voice-plan.md §12): a small
  * `EventEmitter` on one channel. Publishing never throws into the service
  * that reported, whatever a listener does.
  */
@@ -153,7 +153,7 @@ export function describeEvent(event: VoiceBusEvent, timeZone?: string): string {
   }
 }
 
-/** A background event waiting in the call for a quiet moment (plan §5 `queue`). */
+/** A background event waiting in the call for a quiet moment (docs/voice-plan.md §5 `queue`). */
 export interface VoiceEvent {
   readonly kind: VoiceEventKind;
   readonly text: string;

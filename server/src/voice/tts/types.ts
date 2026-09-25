@@ -1,5 +1,5 @@
 /**
- * The text-to-speech provider contract (voice US-006; plan §8.1). A call holds
+ * The text-to-speech provider contract (voice US-006; docs/voice-plan.md §8.1). A call holds
  * one provider at a time; `TtsService` (tts/index.ts) picks it and falls back.
  */
 

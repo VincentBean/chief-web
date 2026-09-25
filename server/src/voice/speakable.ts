@@ -1,5 +1,5 @@
 /**
- * Agent replies turned into text worth reading aloud (voice US-003, plan §8.2).
+ * Agent replies turned into text worth reading aloud (voice US-003, docs/voice-plan.md §8.2).
  *
  * The transcript on screen keeps the original markdown; only the copy that goes
  * to the TTS engine passes through here. {@link SentenceChunker} cuts a stream

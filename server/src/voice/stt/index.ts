@@ -43,12 +43,12 @@ export interface TranscribeOptions {
 }
 
 /**
- * Server-side speech-to-text for a call (voice US-004; plan §4). Settings are
+ * Server-side speech-to-text for a call (voice US-004; docs/voice-plan.md §4). Settings are
  * read on every utterance, so a changed model or language applies to the next
  * sentence without restarting anything.
  *
  * Only `openrouter` transcribes on the server. `elevenlabs-realtime` and
- * `browser` run in the browser (plan §7.2, §7.3) and deliver a finished
+ * `browser` run in the browser (docs/voice-plan.md §7.2, §7.3) and deliver a finished
  * transcript, so audio reaching the server under them is refused as
  * `unconfigured` rather than being billed to a provider nobody chose.
  */

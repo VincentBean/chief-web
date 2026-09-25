@@ -1,5 +1,5 @@
 /**
- * Plays the agent's voice (voice US-009; plan §8.5, §13.4). Each `tts.segment`
+ * Plays the agent's voice (voice US-009; docs/voice-plan.md §8.5, §13.4). Each `tts.segment`
  * is followed by binary kind `0x02` chunks and a `tts.end`. PCM16 chunks are
  * scheduled back to back on a 24 kHz context behind an 80 ms jitter buffer;
  * MP3 segments are accumulated and decoded on `tts.end`. Progress goes back

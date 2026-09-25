@@ -1,7 +1,7 @@
 import type { UpdateVoiceCallInput } from '../db/index.js';
 import type { ElevenLabsSubscription } from './providers.js';
 
-/** How often a call re-reads `GET /v1/user/subscription` (plan §13). */
+/** How often a call re-reads `GET /v1/user/subscription` (docs/voice-plan.md §13). */
 export const SUBSCRIPTION_REFRESH_MS = 5 * 60_000;
 /** OpenRouter's generation stats can lag the response; the lookup waits this long first. */
 export const GENERATION_LOOKUP_DELAY_MS = 3_000;
@@ -44,7 +44,7 @@ export interface UsageReport {
 }
 
 /**
- * The usage of one call (voice US-023; plan §13): ElevenLabs characters,
+ * The usage of one call (voice US-023; docs/voice-plan.md §13): ElevenLabs characters,
  * Scribe seconds, STT seconds and dollars, chief's chat dollars, the backup
  * voice's dollars (looked up after the call from its generation ids) and
  * Claude turns. Clock-free and I/O-free: the call feeds it and persists

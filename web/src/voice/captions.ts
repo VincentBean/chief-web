@@ -1,5 +1,5 @@
 /**
- * The browser's Web Speech API (voice US-022; plan §7.1 captions, §7.3). Two
+ * The browser's Web Speech API (voice US-022; docs/voice-plan.md §7.1 captions, §7.3). Two
  * uses: rough live captions next to OpenRouter STT (`voice_live_captions =
  * browser`; the OpenRouter transcript still counts), and the dev-only
  * `browser` STT provider, whose final results are the transcript. Chrome and

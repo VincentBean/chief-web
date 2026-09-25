@@ -7,7 +7,7 @@ import { chiefSystemPrompt, DEFAULT_OPERATOR_NAME, languageName } from './prompt
 import { buildSnapshot, formatLocal, SNAPSHOT_MAX_SESSIONS } from './snapshot.js';
 
 describe('chief state snapshot (voice US-008)', () => {
-  it('writes the STATE block of plan §9.3 from the seeded database', () => {
+  it('writes the STATE block of docs/voice-plan.md §9.3 from the seeded database', () => {
     const w = chiefWorld();
     const snapshot = buildSnapshot(w.services, { focus: { kind: 'chief' }, now: NOW });
     assert.equal(

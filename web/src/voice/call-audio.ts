@@ -1,5 +1,5 @@
 /**
- * The audio side of a call (voice US-009; plan §13.3–13.4): microphone,
+ * The audio side of a call (voice US-009; docs/voice-plan.md §13.3–13.4): microphone,
  * hands-free VAD or push-to-talk, and playback, wired to the call socket's
  * protocol. The React side (US-010's `CallProvider`) owns the socket and
  * hands this its messages; this sends `speech.*`, `ptt`, `playback.progress`
@@ -54,7 +54,7 @@ export interface CallAudioOptions {
   pttGlobal: boolean;
   /** The call panel; Space talks while focus is inside it. */
   panel: () => HTMLElement | null;
-  /** `voice_barge_in`: how speech over the agent's voice interrupts it (plan §13.5). */
+  /** `voice_barge_in`: how speech over the agent's voice interrupts it (docs/voice-plan.md §13.5). */
   bargeIn: BargeInMode;
 }
 
@@ -342,7 +342,7 @@ export class CallAudio {
             return;
           }
           // Barge-in: silent here first (instant), and `stop()` reports what
-          // was heard before the server hears about the speech (plan §13.5).
+          // was heard before the server hears about the speech (docs/voice-plan.md §13.5).
           this.player.stop();
           this.sink.json({ type: 'speech.start' });
         },
