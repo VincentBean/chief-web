@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[voice] Tell me a long story of about 400 words about a lighthouse keeper."}]}}
+{"type":"control_request","request_id":"1de5764b-8280-491b-94e3-c7d63a751090","request":{"subtype":"interrupt"}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[voice][interrupted after: \"Once\"] Never mind. Say: understood."}]}}

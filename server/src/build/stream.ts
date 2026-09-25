@@ -42,25 +42,46 @@ const MAX_TOOL_RESULT_LINES = 3;
  */
 const ADVISOR_NAME_PREFIX = 'advisor';
 
-export class AgentOutputFormatter {
+/**
+ * Splits a byte stream of JSON lines into whole lines. Shared by the build log
+ * formatter and the session agent's event parser (`voice/session-agent/events.ts`).
+ */
+export class LineBuffer {
   /** The tail of the last chunk, up to the first newline of the next one. */
   private partial = '';
 
-  /** Renders every complete line in `chunk`; `''` when it completed none. */
-  push(chunk: string): string {
-    const text = this.partial + chunk;
-    const lines = text.split('\n');
+  /** Every line `chunk` completed, without its newline. */
+  push(chunk: string): string[] {
+    const lines = (this.partial + chunk).split('\n');
     // The last element is whatever came after the final newline — possibly a
     // half-received JSON object, which must not be parsed yet.
     this.partial = lines.pop() ?? '';
-    return lines.map((line) => renderLine(line)).join('');
+    return lines;
+  }
+
+  /** The unterminated last line when the stream ends; `null` when there is none. */
+  flush(): string | null {
+    const rest = this.partial;
+    this.partial = '';
+    return rest === '' ? null : rest;
+  }
+}
+
+export class AgentOutputFormatter {
+  private readonly lines = new LineBuffer();
+
+  /** Renders every complete line in `chunk`; `''` when it completed none. */
+  push(chunk: string): string {
+    return this.lines
+      .push(chunk)
+      .map((line) => renderLine(line))
+      .join('');
   }
 
   /** Renders the last line when the stream ends without a newline. */
   flush(): string {
-    const rest = this.partial;
-    this.partial = '';
-    return rest === '' ? '' : renderLine(rest);
+    const rest = this.lines.flush();
+    return rest === null ? '' : renderLine(rest);
   }
 }
 

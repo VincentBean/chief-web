@@ -75,6 +75,7 @@ export {
 } from './socket.js';
 export {
   AgentOutputFormatter,
+  LineBuffer,
   MAX_TOOL_INPUT_CHARS,
   MAX_TOOL_RESULT_CHARS,
   renderLine,
