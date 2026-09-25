@@ -49,6 +49,8 @@ export interface FakeExec {
   readonly cmd: readonly string[];
   readonly env: readonly string[];
   readonly workingDir: string | null;
+  /** `User` of the exec, when one was asked for. */
+  readonly user: string | null;
   /** Terminal id when this exec is a wrapped terminal shell; else `null`. */
   readonly terminalId: string | null;
   /** False for a collected `runExec`, whose output is framed rather than raw. */
@@ -390,6 +392,7 @@ export class FakeDockerDaemon {
           Cmd?: string[];
           Env?: string[];
           WorkingDir?: string;
+          User?: string;
           Tty?: boolean;
           AttachStdin?: boolean;
         };
@@ -401,6 +404,7 @@ export class FakeDockerDaemon {
           cmd,
           env: spec.Env ?? [],
           workingDir: spec.WorkingDir ?? null,
+          user: spec.User ?? null,
           terminalId: cmd.join(' ').includes('echo $$') ? pidFileOwner(cmd) : null,
           tty: spec.Tty !== false,
           attachStdin: spec.AttachStdin !== false,

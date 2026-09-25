@@ -22,6 +22,7 @@ import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
 import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
+import { focusSessionTool } from './focus.js';
 import { recurringTaskTools } from './recurring-tasks.js';
 import type { ChatTool } from './openrouter-client.js';
 
@@ -77,6 +78,10 @@ export interface ChiefServices {
   /** Fires a recurring task by hand; the definitions themselves are read and written straight off `db`. */
   readonly recurringTasks: Pick<RecurringTaskRunner, 'fireNow'>;
   readonly hold: { until(): string | null };
+  /** The planning terminal, which `focus_session` offers to close (voice US-018). */
+  readonly planning?: { isTerminalRunning(sessionId: string): boolean; stop(sessionId: string): Promise<unknown> };
+  /** The session voice agents `focus_session` starts; without them it refuses. */
+  readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown> };
 }
 
 /** What a handler knows about the call it runs in. */
@@ -88,6 +93,8 @@ export interface ToolContext {
   endCall(): void;
   /** The call's one pending confirmation. */
   readonly confirmations: Pick<ConfirmationGate, 'request' | 'take'>;
+  /** Moves the call's focus (`focus_session`); absent outside a call. */
+  readonly setFocus?: (focus: CallFocus) => void;
 }
 
 export interface ToolResult {
@@ -471,6 +478,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
         return { ok: true, data: { ending: true }, summary: 'Ending the call' };
       },
     ),
+    focusSessionTool(services),
     ...sessionActionTools(services),
     ...pullRequestTools(services),
     ...recurringTaskTools(services),

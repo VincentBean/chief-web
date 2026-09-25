@@ -94,7 +94,7 @@ describe('chief agent loop (voice US-008)', () => {
       ((request['tools'] ?? []) as { function: { name: string } }[]).map((tool) => tool.function.name).sort(),
       [
         'address_pr_feedback', 'back_to_planning', 'build_status', 'confirm', 'create_recurring_task', 'create_session', 'end_call',
-        'fix_pr_conflicts', 'get_recurring_task', 'get_session', 'list_pull_requests', 'list_recurring_tasks', 'list_repositories',
+        'fix_pr_conflicts', 'focus_session', 'get_recurring_task', 'get_session', 'list_pull_requests', 'list_recurring_tasks', 'list_repositories',
         'list_sessions', 'mark_ready', 'overview', 'pause_recurring_task', 'request_pr_change', 'resume_recurring_task', 'retry',
         'review_pull_request', 'run_recurring_task_now', 'schedule_start', 'show', 'start_build', 'stop_build', 'stop_pr_run',
         'update_recurring_task',

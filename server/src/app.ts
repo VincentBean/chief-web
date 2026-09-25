@@ -65,6 +65,7 @@ import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index.js';
+import { SessionAgentRegistry } from './voice/session-agent/registry.js';
 import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
@@ -268,7 +269,18 @@ export function createApp(
   // every instance reads the same one; sharing this one also means a hold that
   // begins is reported on the bus once, whoever armed it.
   const hold = new UsageLimitHold(db, events);
-  const planning = deps.planning ?? createPlanningService(config, db, terminals, orchestrator, events);
+  // Session voice agents (voice US-018) and the planning terminal lock each
+  // other out; the thunk lets the registry ask the service built after it.
+  const sessionAgents: SessionAgentRegistry = new SessionAgentRegistry({
+    config,
+    db,
+    docker,
+    containers: orchestrator,
+    hold,
+    planning: (): PlanningService => planning,
+  });
+  const planning: PlanningService =
+    deps.planning ?? createPlanningService(config, db, terminals, orchestrator, events, sessionAgents);
   // Assigned further down: the review chains into this solver (US-011), and the
   // solver needs the build loop's slot cap, which in turn needs the delivery.
   // The thunk below is what breaks that circle — nothing reads it until a
@@ -485,8 +497,11 @@ export function createApp(
       prConflicts,
       github: new GithubVoiceReviews(config, db),
       recurringTasks: recurringRuns,
+      planning,
+      sessionAgents,
     },
     events,
+    sessionAgents,
     ...deps.voice,
   });
   api.use(voice.router);

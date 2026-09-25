@@ -76,6 +76,11 @@ export interface PlanningView {
   readonly prd: PrdStatus;
 }
 
+/** The slice of the session voice agent registry planning asks. */
+export interface VoiceAgentLock {
+  isAlive(sessionId: string): boolean;
+}
+
 export interface StartPlanningInput {
   /** Free text describing the feature; fills chief's `{{CONTEXT}}` slot. */
   readonly context?: string | undefined;
@@ -99,7 +104,14 @@ export class PlanningService {
     private readonly containers: SessionContainers,
     /** Voice background events (voice US-015); `null` where nothing listens. */
     private readonly events: VoiceEventSink | null = null,
+    /** The session voice agents (voice US-018): a live one keeps the terminal shut. */
+    private readonly voiceAgents: VoiceAgentLock | null = null,
   ) {}
+
+  /** Whether the session's planning `claude` is running right now (the voice call's side of the lock). */
+  isTerminalRunning(sessionId: string): boolean {
+    return this.liveTerminal(sessionId)?.view.status === 'running';
+  }
 
   /**
    * Cheap enough to poll: a `stat` plus a parse of a small markdown file.
@@ -180,6 +192,13 @@ export class PlanningService {
         409,
         'session_not_cloned',
         `"${session.name}" has no clone yet, so there is nothing to plan against. Run setup first.`,
+      );
+    }
+    if (this.voiceAgents?.isAlive(session.id) === true) {
+      throw new PlanningError(
+        409,
+        'session_in_voice_call',
+        `"${session.name}" is being planned by voice. Hang up or leave the session agent first.`,
       );
     }
     if ((input.context ?? '').length > MAX_CONTEXT_LENGTH) {
@@ -299,8 +318,9 @@ export function createPlanningService(
   terminals: PlanningTerminals,
   containers: SessionContainers,
   events: VoiceEventSink | null = null,
+  voiceAgents: VoiceAgentLock | null = null,
 ): PlanningService {
-  return new PlanningService(config, db, terminals, containers, events);
+  return new PlanningService(config, db, terminals, containers, events, voiceAgents);
 }
 
 function describe(cause: unknown): string {

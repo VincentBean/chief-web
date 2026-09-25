@@ -98,6 +98,7 @@ describe('chief read-only tools (voice US-008)', () => {
       'create_session',
       'end_call',
       'fix_pr_conflicts',
+      'focus_session',
       'get_recurring_task',
       'get_session',
       'list_pull_requests',

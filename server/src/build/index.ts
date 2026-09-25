@@ -6,7 +6,9 @@ export {
   agentPidGlob,
   agentSignalSpec,
   headShaSpec,
+  pidFileSignalSpec,
   wrapAgentCommand,
+  wrapWithPidFile,
 } from './agent.js';
 export {
   type BuildLogEvent,

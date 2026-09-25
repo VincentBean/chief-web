@@ -35,6 +35,8 @@ export interface ChiefCallControls {
   hangUpAfterTurn(): void;
   /** The call's one pending confirmation (US-011). */
   readonly confirmations: ConfirmationGate;
+  /** Moves the call's focus (`focus_session`, voice US-018). */
+  setFocus?(focus: CallFocus): void;
 }
 
 export type ChatFn = (opts: StreamChatOptions) => AsyncIterable<ChatEvent>;
@@ -231,6 +233,7 @@ export class ChiefAgent implements VoiceAgent {
       focus: this.deps.call.focus,
       endCall: () => this.deps.call.hangUpAfterTurn(),
       confirmations: this.deps.call.confirmations,
+      setFocus: (focus) => this.deps.call.setFocus?.(focus),
     };
   }
 

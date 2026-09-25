@@ -24,6 +24,8 @@ import { ChiefAgent } from './chief/agent.js';
 import { BasicChiefAgent } from './chief/basic-agent.js';
 import type { ChiefServices } from './chief/tools.js';
 import type { VoiceEventBus } from './events.js';
+import { SessionVoiceAgent } from './session-agent/agent.js';
+import type { SessionAgentRegistry } from './session-agent/registry.js';
 import {
   type CallFocus,
   encodeFrame,
@@ -54,6 +56,8 @@ export interface VoiceServiceDeps {
   readonly newCallId?: () => string;
   /** Background events (US-015) for the active call; without it chief hears none. */
   readonly events?: VoiceEventBus;
+  /** Session voice agents (US-018); without them a session focus is answered by chief. */
+  readonly sessionAgents?: SessionAgentRegistry;
 }
 
 export type VoiceReadiness =
@@ -237,27 +241,40 @@ export class VoiceService {
     };
   }
 
-  /** Ends the call, at shutdown. */
+  /** Ends the call, at shutdown, and the session agents with it. */
   async closeAll(): Promise<void> {
     this.clearResumeTimer();
     await this.active?.end('error');
+    await this.deps.sessionAgents?.stopAll();
   }
 
   private newCall(focus: CallFocus): VoiceCall {
     const { db, config } = this;
+    this.deps.sessionAgents?.callStarted();
     return new VoiceCall(this.deps.newCallId?.() ?? randomUUID(), focus, {
       db,
       config,
       stt: this.stt,
       tts: this.deps.tts ?? ((sink) => new TtsService(db, config, sink, { now: () => this.clock.now() })),
-      // Session agents are voice US-018; until then chief answers either way.
-      agent: this.deps.agent ?? ((_focus, call) => this.chiefFor(call)),
+      agent: this.deps.agent ?? ((focus, call) => this.agentFor(focus, call)),
       clock: this.clock,
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
+        this.deps.sessionAgents?.callEnded();
         this.clearResumeTimer();
       },
+    });
+  }
+
+  private agentFor(focus: CallFocus, call: VoiceCall): VoiceAgent {
+    const registry = this.deps.sessionAgents;
+    if (focus.kind === 'chief' || registry === undefined) return this.chiefFor(call);
+    return new SessionVoiceAgent({
+      db: this.db,
+      sessionId: focus.sessionId,
+      registry,
+      call: { setFocus: (next) => call.setFocus(next), spokenSoFar: () => call.state.spokenSoFar },
     });
   }
 
