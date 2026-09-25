@@ -8,6 +8,7 @@ import { Login } from './pages/Login.tsx';
 import { Overview } from './pages/Overview.tsx';
 import { Sessions } from './pages/Sessions.tsx';
 import {
+  callIdFromPath,
   editedRecurringTaskIdFromPath,
   recurringTaskIdFromPath,
   sessionIdFromPath,
@@ -29,6 +30,7 @@ const PullRequests = lazy(() => import('./pages/PullRequests.tsx').then((m) => (
 const Repositories = lazy(() => import('./pages/Repositories.tsx').then((m) => ({ default: m.Repositories })));
 const Sentry = lazy(() => import('./pages/Sentry.tsx').then((m) => ({ default: m.Sentry })));
 const NewSession = lazy(() => import('./pages/NewSession.tsx').then((m) => ({ default: m.NewSession })));
+const Calls = lazy(() => import('./pages/Calls.tsx').then((m) => ({ default: m.Calls })));
 const RecurringTasks = lazy(() => import('./pages/RecurringTasks.tsx').then((m) => ({ default: m.RecurringTasks })));
 const RecurringTask = lazy(() => import('./pages/RecurringTask.tsx').then((m) => ({ default: m.RecurringTask })));
 const RecurringTaskForm = lazy(() =>
@@ -42,6 +44,7 @@ const RecurringTaskForm = lazy(() =>
  */
 const PAGES: Record<string, ComponentType> = {
   '/': Overview,
+  '/calls': Calls,
   '/pull-requests': PullRequests,
   '/recurring-tasks': RecurringTasks,
   '/recurring-tasks/new': RecurringTaskForm,
@@ -59,6 +62,7 @@ function resolve(pathname: string): ComponentType {
   const page = PAGES[trimmed];
   if (page !== undefined) return page;
   if (sessionIdFromPath(trimmed) !== null) return Session;
+  if (callIdFromPath(trimmed) !== null) return Calls;
   if (editedRecurringTaskIdFromPath(trimmed) !== null) return RecurringTaskForm;
   if (recurringTaskIdFromPath(trimmed) !== null) return RecurringTask;
   // An unknown URL lands on the overview rather than on a blank screen.

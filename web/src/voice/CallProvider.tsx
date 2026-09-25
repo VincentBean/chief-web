@@ -62,6 +62,8 @@ export type TranscriptEntry =
       readonly key: string;
       readonly turn: number;
       readonly agent: AgentKind;
+      /** The name to show instead of "Chief"/"Session" (the call history's session names). */
+      readonly who?: string;
       readonly text: string;
       readonly interrupted: boolean;
     }
@@ -81,7 +83,9 @@ export type TranscriptEntry =
       readonly expiresAt: string;
       readonly resolution: ConfirmationOutcome | null;
     }
-  | { readonly kind: 'notice'; readonly key: string; readonly text: string };
+  | { readonly kind: 'notice'; readonly key: string; readonly text: string }
+  /** A background event or focus change, as the call history stores them (US-024). */
+  | { readonly kind: 'event'; readonly key: string; readonly text: string };
 
 export interface CallUsage {
   readonly elCreditsUsed: number;

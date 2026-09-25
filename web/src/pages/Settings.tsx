@@ -30,6 +30,7 @@ import {
 } from '../api.ts';
 import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
+import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
 import { playPcm16 } from '../voice/pcm.ts';
@@ -1358,6 +1359,12 @@ function VoicePanel({
             Keep transcripts for (days)
           </label>
           <input id="voice-retention" name="voice-retention" type="number" min={1} max={365} step={1} value={form.transcriptRetentionDays} onChange={(event) => set('transcriptRetentionDays', event.target.value)} className="field__input field__input--narrow" />
+          <p className="field__hint">
+            Audio is never stored: only the transcript text, timings and usage are kept, and calls older than this are deleted.{' '}
+            <Link className="link" href="/calls">
+              Call history
+            </Link>
+          </p>
         </div>
       </div>
 

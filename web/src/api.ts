@@ -229,6 +229,59 @@ export async function fetchVoiceStatus(signal?: AbortSignal): Promise<VoiceStatu
   return api<VoiceStatus>('/api/voice/status', signal ? { signal } : {});
 }
 
+/** A past call in the history (voice US-024; `GET /api/voice/calls`). */
+export interface VoiceCallSummary {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number;
+  endReason: 'hangup' | 'idle' | 'error' | 'taken_over' | null;
+  /** The call running right now; the server refuses to delete it. */
+  active: boolean;
+  providers: { stt: string; tts: string };
+  cost: { elChars: number; sttSeconds: number; scribeSeconds: number; orCostUsd: number; claudeTurns: number };
+}
+
+/** One stored transcript row (`GET /api/voice/calls/:id`). */
+export interface VoiceTurn {
+  id: number;
+  turn: number;
+  speaker: 'user' | 'chief' | 'session' | 'event';
+  sessionId: string | null;
+  sessionName: string | null;
+  text: string;
+  interrupted: boolean;
+  tools: { name: string; status: string; summary: string }[];
+  latency: {
+    speechEnd: string | null;
+    transcript: string | null;
+    firstToken: string | null;
+    firstChunk: string | null;
+    firstAudioSent: string | null;
+    firstAudioPlayed: string | null;
+  };
+  createdAt: string;
+}
+
+export async function fetchVoiceCalls(limit = 100, signal?: AbortSignal): Promise<VoiceCallSummary[]> {
+  const { calls } = await api<{ calls: VoiceCallSummary[] }>(
+    `/api/voice/calls?limit=${String(limit)}`,
+    signal ? { signal } : {},
+  );
+  return calls;
+}
+
+export async function fetchVoiceCall(
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ call: VoiceCallSummary; turns: VoiceTurn[] }> {
+  return api(`/api/voice/calls/${encodeURIComponent(id)}`, signal ? { signal } : {});
+}
+
+export async function deleteVoiceCall(id: string): Promise<void> {
+  await api<void>(`/api/voice/calls/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 /** The ElevenLabs voice list, fetched by the server with the stored key. */
 export async function fetchVoiceVoices(signal?: AbortSignal): Promise<ElevenLabsVoice[]> {
   const { voices } = await api<{ voices: ElevenLabsVoice[] }>('/api/voice/voices', signal ? { signal } : {});

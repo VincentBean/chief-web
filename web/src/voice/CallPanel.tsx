@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useRef, useState } from 'react';
 
 import { isEnded, useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
+import { Link } from '../router.tsx';
 import { Segmented } from '../ui.tsx';
 import { type CallStatus, type CallUsage, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
 import type { CallFocus, CallPhase, ConfirmationOutcome, ToolStatus } from './protocol.ts';
@@ -163,6 +164,14 @@ export function CallPanel() {
             {status}
           </span>
         </div>
+        <Link
+          className="button button--icon button--quiet"
+          href="/calls"
+          aria-label="Call history"
+          title="Call history and transcripts"
+        >
+          <Icon name="history" />
+        </Link>
         <span className="call-panel__timer mono" aria-label="Call duration">
           {call.startedAt === null ? '0:00' : clock(now - call.startedAt)}
         </span>
@@ -308,7 +317,11 @@ export function CallPanel() {
   );
 }
 
-function TranscriptLine({
+/**
+ * One transcript row. The call history (US-024) renders stored turns through
+ * this too, so a past call reads the way it did live.
+ */
+export function TranscriptLine({
   entry,
   onResolve,
 }: {
@@ -326,7 +339,7 @@ function TranscriptLine({
     case 'agent':
       return (
         <li className="call-line call-line--agent">
-          <span className="call-line__who">{entry.agent === 'chief' ? 'Chief' : 'Session'}</span>
+          <span className="call-line__who">{entry.who ?? (entry.agent === 'chief' ? 'Chief' : 'Session')}</span>
           <span className="call-line__text">
             {entry.text}
             {entry.interrupted && <span className="call-line__cut"> (interrupted)</span>}
@@ -371,6 +384,13 @@ function TranscriptLine({
       return (
         <li className="call-notice">
           <Icon name="alert" />
+          <span>{entry.text}</span>
+        </li>
+      );
+    case 'event':
+      return (
+        <li className="call-event">
+          <Icon name="broadcast" />
           <span>{entry.text}</span>
         </li>
       );

@@ -126,12 +126,12 @@ export function getVoiceCall(db: Database, id: string): VoiceCall | null {
   return row ? mapVoiceCall(row) : null;
 }
 
-/** Newest first, the order the call history shows them in. */
-export function listVoiceCalls(db: Database): VoiceCall[] {
-  return db
-    .prepare('SELECT * FROM voice_calls ORDER BY started_at DESC, id ASC')
-    .all()
-    .map(mapVoiceCall);
+/** Newest first, the order the call history shows them in; all of them without a limit. */
+export function listVoiceCalls(db: Database, limit?: number): VoiceCall[] {
+  const sql = 'SELECT * FROM voice_calls ORDER BY started_at DESC, id ASC';
+  return (limit === undefined ? db.prepare(sql).all() : db.prepare(`${sql} LIMIT ?`).all(limit)).map(
+    mapVoiceCall,
+  );
 }
 
 export function updateVoiceCall(
@@ -352,6 +352,25 @@ export function listVoiceTurns(db: Database, callId: string): VoiceTurn[] {
     .prepare('SELECT * FROM voice_turns WHERE call_id = ? ORDER BY turn ASC, id ASC')
     .all(callId)
     .map(mapVoiceTurn);
+}
+
+/** A transcript row with the name of the session in focus (US-024); `null` once that session is gone. */
+export interface VoiceTurnWithSession extends VoiceTurn {
+  readonly sessionName: string | null;
+}
+
+/** {@link listVoiceTurns}, joined with the sessions table for the call history. */
+export function listVoiceTurnsWithSessions(db: Database, callId: string): VoiceTurnWithSession[] {
+  return db
+    .prepare(
+      `SELECT t.*, s.name AS session_name
+         FROM voice_turns t
+         LEFT JOIN sessions s ON s.id = t.session_id
+        WHERE t.call_id = ?
+        ORDER BY t.turn ASC, t.id ASC`,
+    )
+    .all(callId)
+    .map((row) => ({ ...mapVoiceTurn(row), sessionName: nullableText(row, 'session_name') }));
 }
 
 export function updateVoiceTurn(

@@ -193,6 +193,13 @@
     }
   }
 
+  /* A child of the entry above it: the call history under Call (voice US-024). */
+  .nav__item--sub {
+    font-size: var(--text-xs);
+    padding-block: 0.3125rem;
+    padding-left: 2.125rem;
+  }
+
   .nav__item .icon {
     color: var(--color-fg-subtle);
     transition: color var(--motion-fast) var(--ease-standard);

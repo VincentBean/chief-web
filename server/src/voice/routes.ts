@@ -18,6 +18,7 @@ import {
   type OpenRouterSlugs,
   VoiceProviderError,
 } from './providers.js';
+import { createVoiceHistoryRouter } from './history.js';
 import type { VoiceService } from './service.js';
 import { MintLimit, mintScribeToken } from './stt/elevenlabs-token.js';
 import { SttError, SttService } from './stt/index.js';
@@ -58,6 +59,9 @@ export function createVoiceRouter(
   const router = Router();
   const stt = new SttService(db, config);
   const scribeMints = new MintLimit(SCRIBE_TOKENS_PER_HOUR, 60 * 60_000);
+
+  // Call history and transcripts (voice US-024).
+  router.use(createVoiceHistoryRouter(db, () => service.activeCallId, now));
 
   // A single-use token for the browser's Scribe realtime socket (voice
   // US-022; plan §7.2), with everything else it needs to open one. Minted per

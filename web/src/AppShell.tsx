@@ -39,6 +39,9 @@ const NAV: readonly NavItem[] = [
   { href: '/settings', label: 'Settings', icon: 'gear', key: ',', match: ['/settings'] },
 ];
 
+/** Past calls and their transcripts, listed under the Call entry. */
+const CALLS_ITEM: NavItem = { href: '/calls', label: 'History', icon: 'history', key: '', match: ['/calls'] };
+
 /** Bytes as gigabytes, one decimal below 10 GB and whole numbers above it. */
 function gigabytes(bytes: number): string {
   const value = bytes / 1024 ** 3;
@@ -130,6 +133,15 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
                 </span>
               )}
             </button>
+            {/* Call history (voice US-024), nested under the call it belongs to. */}
+            <Link
+              className={`nav__item nav__item--sub${isCurrent(CALLS_ITEM, pathname) ? ' nav__item--current' : ''}`}
+              href={CALLS_ITEM.href}
+              aria-current={isCurrent(CALLS_ITEM, pathname) ? 'page' : undefined}
+            >
+              <Icon name="history" />
+              <span className="nav__label">{CALLS_ITEM.label}</span>
+            </Link>
           </li>
         )}
       </ul>
