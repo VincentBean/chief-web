@@ -1,6 +1,21 @@
 import { type Response, Router } from 'express';
 
-import { MAX_CONTEXT_LENGTH, PlanningError, type PlanningService } from '../planning/index.js';
+import type { Database } from '../db/index.js';
+import {
+  MAX_CONTEXT_LENGTH,
+  PlanningError,
+  type PlanningService,
+  type PlanningView,
+} from '../planning/index.js';
+import { getPlanningQuestions } from '../settings/index.js';
+
+/**
+ * What every planning endpoint answers: the service's view plus the standard
+ * questions from Settings, read per request so a change shows on the next poll.
+ */
+export interface PlanningPayload extends PlanningView {
+  readonly questions: string[];
+}
 
 /** A rejected request body: an error code plus something to show the operator. */
 interface Invalid {
@@ -16,12 +31,16 @@ interface Invalid {
  * and parses — without touching Docker. `POST` starts the conversation (or
  * resumes it with chief's edit prompt once a PRD exists) and `DELETE` ends it.
  */
-export function createPlanningRouter(planning: PlanningService): Router {
+export function createPlanningRouter(planning: PlanningService, db: Database): Router {
   const router = Router();
+  const payload = (view: PlanningView): PlanningPayload => ({
+    ...view,
+    questions: getPlanningQuestions(db),
+  });
 
   router.get('/sessions/:id/planning', (req, res) => {
     try {
-      res.status(200).json(planning.status(req.params.id));
+      res.status(200).json(payload(planning.status(req.params.id)));
     } catch (cause: unknown) {
       respondWithFailure(res, cause);
     }
@@ -36,14 +55,14 @@ export function createPlanningRouter(planning: PlanningService): Router {
 
     planning
       .start(req.params.id, parsed)
-      .then((view) => res.status(201).json(view))
+      .then((view) => res.status(201).json(payload(view)))
       .catch((cause: unknown) => respondWithFailure(res, cause));
   });
 
   router.delete('/sessions/:id/planning', (req, res) => {
     planning
       .stop(req.params.id)
-      .then((view) => res.status(200).json(view))
+      .then((view) => res.status(200).json(payload(view)))
       .catch((cause: unknown) => respondWithFailure(res, cause));
   });
 

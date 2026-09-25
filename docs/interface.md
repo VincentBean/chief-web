@@ -207,6 +207,16 @@ the `settings` table so it can be changed without a restart:
   rates, uncached, so it is billed **in addition to** the build model. The
   feature is experimental. See [The advisor](build-loop.md#the-advisor) and
   [Claude Code's advisor docs](https://code.claude.com/docs/en/advisor).
+- **Planning questions** — the [quick question buttons](sessions.md#planning)
+  above the planning terminal, edited one question per line. The defaults are
+  *Any open questions?* and *Re-check the entire PRD for issues, gaps and other
+  unwanted behaviour*. Each line is trimmed and blank lines are dropped. Saving
+  an empty list keeps it empty and hides the buttons; it does not bring the
+  defaults back. **Restore defaults** refills the editor with the two defaults,
+  which take effect once you save. At most 10 questions, each at most 500
+  characters and a single line; a list over a limit is refused with an error
+  under the editor. The session page re-reads the list each time it polls, so a
+  change reaches an open planning page without restarting the terminal.
 - **Run code review on new sessions** — the starting value of the **Code
   review** checkbox on the new-session form, and what a session created through
   `POST /api/sessions` without a `codeReview` field gets. It is only a default:

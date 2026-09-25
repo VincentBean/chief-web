@@ -14,13 +14,17 @@ import {
   createRepository,
   createSession,
   type Database,
+  deleteSetting,
   featureBranchFor,
   IN_MEMORY,
   openDatabase,
   type Session,
+  setSetting,
 } from '../db/index.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
 import { PlanningService, type PlanningTerminals, type PlanningView } from '../planning/index.js';
+import { type PlanningPayload } from './planning.js';
+import { DEFAULT_PLANNING_QUESTIONS } from '../settings/index.js';
 import type { CreateTerminalInput, TerminalView } from '../terminal/index.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -148,6 +152,7 @@ describe('planning api', () => {
   beforeEach(async () => {
     created.length = 0;
     views.clear();
+    deleteSetting(db, 'planning_questions');
     await call('DELETE', `/api/sessions/${session.id}/planning`);
   });
 
@@ -215,5 +220,31 @@ describe('planning api', () => {
     assert.equal(response.status, 200);
     assert.equal(body.terminalId, null);
     assert.equal(views.size, 0);
+  });
+
+  it('returns the default questions when none are stored', async () => {
+    const body = (await (
+      await call('GET', `/api/sessions/${session.id}/planning`)
+    ).json()) as PlanningPayload;
+
+    assert.deepEqual(body.questions, [...DEFAULT_PLANNING_QUESTIONS]);
+  });
+
+  it('returns the stored questions on every planning response', async () => {
+    setSetting(db, 'planning_questions', JSON.stringify(['Anything else?']));
+
+    const polled = (await (
+      await call('GET', `/api/sessions/${session.id}/planning`)
+    ).json()) as PlanningPayload;
+    const started = (await (
+      await call('POST', `/api/sessions/${session.id}/planning`)
+    ).json()) as PlanningPayload;
+    const stopped = (await (
+      await call('DELETE', `/api/sessions/${session.id}/planning`)
+    ).json()) as PlanningPayload;
+
+    assert.deepEqual(polled.questions, ['Anything else?']);
+    assert.deepEqual(started.questions, ['Anything else?']);
+    assert.deepEqual(stopped.questions, ['Anything else?']);
   });
 });

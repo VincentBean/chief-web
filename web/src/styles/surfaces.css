@@ -674,17 +674,14 @@
   }
 
   /*
-   * The planning terminal is the page's main content: a long Claude Code
-   * conversation the operator reads and types into for as long as the PRD
-   * takes. It takes the viewport minus roughly what the header above it
-   * occupies.
+   * Both tall terminals share this height: the planning terminal, where the
+   * operator reads and types into a long Claude Code conversation for as
+   * long as the PRD takes, and the /terminal page's container shell. Each
+   * is its page's main content, so it takes the viewport minus roughly what
+   * the header above it occupies.
    */
   .terminal--tall .terminal__screen {
-    height: max(28rem, calc(100vh - 20rem));
-  }
-
-  .panel--terminal .terminal--tall .terminal__screen {
-    height: max(24rem, calc(100vh - 16rem));
+    height: max(28rem, calc(100vh - 16rem));
   }
 
   /* ------------------------------------------------------------------- log */

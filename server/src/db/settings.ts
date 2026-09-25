@@ -129,6 +129,12 @@ export const SETTING_KEYS = [
   'voice_el_exhausted_until',
   /** Scribe's measured credits per minute (US-023). Internal like the one above. */
   'voice_scribe_credits_per_min',
+  /**
+   * The standard questions offered in the planning terminal, as a JSON-encoded
+   * array of strings. An absent row, or one that does not decode to such an
+   * array, means `DEFAULT_PLANNING_QUESTIONS`.
+   */
+  'planning_questions',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
