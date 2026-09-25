@@ -16,6 +16,8 @@ import {
   updateSession,
 } from '../../../db/index.js';
 import type { PullRequestListView } from '../../../pullrequests/index.js';
+import type { ServerMessage } from '../../protocol.js';
+import { ConfirmationGate } from '../confirm.js';
 import type { ChiefServices } from '../tools.js';
 
 /**
@@ -233,3 +235,16 @@ function buildView(db: Database, sessionId: string, pool: BuildPoolView): BuildV
   };
 }
 
+
+/** A confirmation gate outside a call: `sent` collects what it tells the browser. */
+export function testGate(now: () => number = () => NOW.getTime()): { gate: ConfirmationGate; sent: ServerMessage[] } {
+  const sent: ServerMessage[] = [];
+  let seq = 0;
+  const gate = new ConfirmationGate({
+    holder: { pendingConfirmation: null },
+    now,
+    send: (message) => sent.push(message),
+    newId: () => `c${String(++seq)}`,
+  });
+  return { gate, sent };
+}

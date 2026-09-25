@@ -51,6 +51,8 @@ export type ClientMessage =
   | { readonly type: 'focus'; readonly target: 'chief' | { readonly sessionId: string } }
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'hangup' }
+  /** The pill's Confirm / Cancel button (voice US-011). */
+  | { readonly type: 'confirm.resolve'; readonly id: string; readonly accept: boolean }
   | { readonly type: 'metrics'; readonly turn: number; readonly firstAudioPlayedAt: string };
 
 /* ------------------------------------------------------ server → browser */
@@ -61,6 +63,9 @@ export type UiAction =
   | { readonly action: 'navigate'; readonly path: string }
   | { readonly action: 'highlight'; readonly target: string }
   | { readonly action: 'toast'; readonly text: string };
+
+/** How a confirmation stopped being pending. */
+export type ConfirmationOutcome = 'confirmed' | 'cancelled' | 'expired';
 
 export interface ConfirmationView {
   readonly id: string;
@@ -106,6 +111,7 @@ export type ServerMessage =
       readonly detail?: string;
     }
   | ({ readonly type: 'confirm' } & ConfirmationView)
+  | { readonly type: 'confirm.resolved'; readonly id: string; readonly outcome: ConfirmationOutcome }
   | ({ readonly type: 'ui' } & UiAction)
   | { readonly type: 'usage'; readonly elCreditsUsed: number; readonly orCostUsd: number; readonly elCreditsRemaining?: number }
   | { readonly type: 'error'; readonly code: string; readonly message: string; readonly fatal: boolean };

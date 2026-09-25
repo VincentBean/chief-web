@@ -2,12 +2,13 @@ import type { Config } from '../../config.js';
 import type { Database } from '../../db/index.js';
 import { logger } from '../../lib/logger.js';
 import { getOpenRouterApiKey, getVoiceSettings } from '../../settings/index.js';
-import type { AgentEvent, VoiceAgent } from '../call.js';
+import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
 import type { CallFocus } from '../protocol.js';
 import { type ChatEvent, type ChatMessage, type ChatToolCall, type StreamChatOptions, streamChat } from './openrouter-client.js';
+import { cancelledResult, CONFIRM_TOOL, type ConfirmationGate, runConfirmation } from './confirm.js';
 import { chiefSystemPrompt } from './prompt.js';
 import { buildSnapshot } from './snapshot.js';
-import { type ChiefServices, type ChiefTool, createChiefTools, type ToolResult } from './tools.js';
+import { type ChiefServices, type ChiefTool, createChiefTools, type ToolContext, type ToolResult } from './tools.js';
 
 /** Messages of the conversation the model sees (plan §9.1). */
 export const WINDOW_MESSAGES = 30;
@@ -32,6 +33,8 @@ export interface ChiefCallControls {
   readonly focus: CallFocus;
   /** Hangs up once the turn in progress has been spoken. */
   hangUpAfterTurn(): void;
+  /** The call's one pending confirmation (US-011). */
+  readonly confirmations: ConfirmationGate;
 }
 
 export type ChatFn = (opts: StreamChatOptions) => AsyncIterable<ChatEvent>;
@@ -87,7 +90,7 @@ export class ChiefAgent implements VoiceAgent {
     await this.summarizing;
   }
 
-  async *run(input: { readonly text: string; readonly turn: number; readonly signal: AbortSignal }): AsyncGenerator<AgentEvent> {
+  async *run(input: AgentInput): AsyncGenerator<AgentEvent> {
     const { signal, turn } = input;
     const settings = getVoiceSettings(this.deps.db);
     if (this.unreportedCostUsd > 0) {
@@ -101,6 +104,25 @@ export class ChiefAgent implements VoiceAgent {
     /** Text streamed in this step and not yet in the history. */
     let unsaid = '';
     try {
+      if (input.resolution !== undefined) {
+        // The operator already answered the pending confirmation ("yes", or
+        // the pill's button): no model decides, it only hears the outcome as
+        // the result of a `confirm` call and speaks one line about it.
+        const { confirmationId, accept } = input.resolution;
+        const call: ChatToolCall = {
+          id: `confirm-${String(turn)}`,
+          type: 'function',
+          function: { name: CONFIRM_TOOL, arguments: JSON.stringify({ confirmation_id: confirmationId }) },
+        };
+        this.messages.push({ role: 'assistant', content: null, tool_calls: [call] });
+        owed = [call];
+        yield { type: 'tool', id: call.id, name: CONFIRM_TOOL, status: 'running', summary: '' };
+        const { name, result } = await this.resolveConfirmation(confirmationId, accept, { signal, turn });
+        yield { type: 'tool', id: call.id, name, status: result.ok ? 'ok' : 'error', summary: result.summary };
+        for (const ui of result.ui ?? []) yield { type: 'ui', ui };
+        this.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, ...wrap(result.data) }) });
+        owed = [];
+      }
       for (let hop = 0; hop < this.deps.config.voiceChiefMaxToolHops; hop++) {
         let text = '';
         const calls: ChatToolCall[] = [];
@@ -176,20 +198,40 @@ export class ChiefAgent implements VoiceAgent {
     if (typeof args !== 'object' || args === null || Array.isArray(args)) {
       return { ok: false, data: { error: 'bad_arguments', message: 'The arguments must be an object.' }, summary: 'Bad arguments' };
     }
-    try {
-      return await entry.handler(args as Record<string, unknown>, {
-        ...ctx,
-        focus: this.deps.call.focus,
-        endCall: () => this.deps.call.hangUpAfterTurn(),
+    return guarded(call.function.name, () => entry.handler(args as Record<string, unknown>, this.toolContext(ctx)));
+  }
+
+  /** Runs or cancels confirmation `id` on the operator's word; `name` is the tool it was for. */
+  private async resolveConfirmation(
+    id: string,
+    accept: boolean,
+    ctx: { signal: AbortSignal; turn: number },
+  ): Promise<{ name: string; result: ToolResult }> {
+    const gate = this.deps.call.confirmations;
+    if (accept) {
+      let name = CONFIRM_TOOL;
+      const result = await guarded(CONFIRM_TOOL, async () => {
+        const ran = await runConfirmation(this.tools, id, this.toolContext(ctx));
+        name = ran.tool ?? CONFIRM_TOOL;
+        return ran.result;
       });
-    } catch (cause) {
-      logger.warn('chief tool failed', { tool: call.function.name, error: String(cause) });
-      return {
-        ok: false,
-        data: { error: 'failed', message: cause instanceof Error ? cause.message : String(cause) },
-        summary: `${call.function.name} failed`,
-      };
+      return { name, result };
     }
+    const pending = gate.pending;
+    if (pending === null || pending.id !== id) {
+      return { name: CONFIRM_TOOL, result: { ok: false, data: { reason: 'await_user', why: 'unknown' }, summary: 'No such confirmation pending' } };
+    }
+    gate.cancel();
+    return { name: pending.tool, result: cancelledResult(pending) };
+  }
+
+  private toolContext(ctx: { signal: AbortSignal; turn: number }): ToolContext {
+    return {
+      ...ctx,
+      focus: this.deps.call.focus,
+      endCall: () => this.deps.call.hangUpAfterTurn(),
+      confirmations: this.deps.call.confirmations,
+    };
   }
 
   private systemPrompt(language: string): string {
@@ -274,6 +316,20 @@ export class ChiefAgent implements VoiceAgent {
       else if (event.type === 'usage') this.unreportedCostUsd += event.costUsd;
     }
     return text.replace(/\s+/g, ' ').trim();
+  }
+}
+
+/** A handler's result, or a failed one: nothing throws out of a tool. */
+async function guarded(name: string, run: () => Promise<ToolResult> | ToolResult): Promise<ToolResult> {
+  try {
+    return await run();
+  } catch (cause) {
+    logger.warn('chief tool failed', { tool: name, error: String(cause) });
+    return {
+      ok: false,
+      data: { error: 'failed', message: cause instanceof Error ? cause.message : String(cause) },
+      summary: `${name} failed`,
+    };
   }
 }
 

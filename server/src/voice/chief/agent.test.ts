@@ -4,7 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { loadConfig } from '../../config.js';
 import { setSetting } from '../../db/index.js';
 import type { AgentEvent } from '../call.js';
-import { chiefWorld, NOW } from './__fixtures__/world.js';
+import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
 import {
   errorReply,
   type ScriptedOpenRouter,
@@ -38,7 +38,7 @@ function setup(env: Record<string, string> = {}): { agent: ChiefAgent; w: Return
     db: w.db,
     config,
     services: w.services,
-    call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => (hangUps += 1) },
+    call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => (hangUps += 1), confirmations: testGate().gate },
     operatorName: 'Vincent',
     now: () => NOW,
   });
@@ -92,7 +92,7 @@ describe('chief agent loop (voice US-008)', () => {
     assert.deepEqual(messagesOf(request).slice(1), [{ role: 'user', content: "What's building?" }]);
     assert.deepEqual(
       ((request['tools'] ?? []) as { function: { name: string } }[]).map((tool) => tool.function.name).sort(),
-      ['build_status', 'end_call', 'get_session', 'list_repositories', 'list_sessions', 'overview', 'show'],
+      ['build_status', 'confirm', 'end_call', 'get_session', 'list_repositories', 'list_sessions', 'overview', 'show'],
     );
     assert.deepEqual(agent.history.at(-1), {
       role: 'assistant',

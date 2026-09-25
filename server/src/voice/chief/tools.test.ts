@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { chiefWorld } from './__fixtures__/world.js';
+import { chiefWorld, testGate } from './__fixtures__/world.js';
 import {
   BUILD_LOG_SUMMARY_CHARS,
   createChiefTools,
@@ -70,6 +70,7 @@ describe('chief read-only tools (voice US-008)', () => {
     turn: 1,
     focus: { kind: 'chief' },
     endCall: onEnd,
+    confirmations: testGate().gate,
   });
 
   async function call(name: string, args: Record<string, unknown> = {}, context = ctx()): Promise<{ result: ToolResult; w: ReturnType<typeof chiefWorld> }> {
@@ -79,11 +80,12 @@ describe('chief read-only tools (voice US-008)', () => {
     return { result: await tool.handler(args, context), w };
   }
 
-  it('registers the read-only tools with OpenAI-shaped definitions', () => {
+  it('registers the read-only tools and confirm with OpenAI-shaped definitions', () => {
     const w = chiefWorld();
     const tools = createChiefTools(w.services);
     assert.deepEqual([...tools.keys()].sort(), [
       'build_status',
+      'confirm',
       'end_call',
       'get_session',
       'list_repositories',

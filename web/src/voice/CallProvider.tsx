@@ -19,6 +19,7 @@ import {
   type CallFocus,
   type CallPhase,
   type ClientMessage,
+  type ConfirmationOutcome,
   type ServerMessage,
   type ToolStatus,
   WS_CLOSE_BAD_ORIGIN,
@@ -77,7 +78,7 @@ export type TranscriptEntry =
       readonly id: string;
       readonly prompt: string;
       readonly expiresAt: string;
-      readonly resolution: 'confirmed' | 'cancelled' | null;
+      readonly resolution: ConfirmationOutcome | null;
     }
   | { readonly kind: 'notice'; readonly key: string; readonly text: string };
 
@@ -127,7 +128,7 @@ export interface CallActions {
   muteMic(muted: boolean): void;
   muteVoice(muted: boolean): void;
   setMode(mode: TalkMode): void;
-  /** Resolves a confirmation pill (sent as a spoken yes/no until US-011). */
+  /** Answers a confirmation pill; the server runs or drops exactly that one. */
   resolve(id: string, confirm: boolean): void;
 }
 
@@ -241,6 +242,14 @@ function applyToTranscript(entries: readonly TranscriptEntry[], message: ServerM
         },
       ];
     }
+    case 'confirm.resolved':
+      // A spoken yes/no, a focus switch, expiry or the end of the call; the
+      // server's word also overrides a click it found stale.
+      return entries.map((entry) =>
+        entry.kind === 'confirm' && entry.id === message.id
+          ? { ...entry, resolution: message.outcome }
+          : entry,
+      );
     case 'error':
       return [...entries, { kind: 'notice', key: `e${String(entries.length)}`, text: message.message }];
     default:
@@ -538,8 +547,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
 
   const resolve = useCallback(
     (id: string, confirm: boolean): void => {
-      // US-011's intents treat a bare "yes"/"no" as the answer to the pending one.
-      send({ type: 'text', text: confirm ? 'yes' : 'no' });
+      send({ type: 'confirm.resolve', id, accept: confirm });
       setTranscript((entries) =>
         entries.map((entry) =>
           entry.kind === 'confirm' && entry.id === id

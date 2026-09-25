@@ -4,7 +4,7 @@ import { isEnded, useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
 import { Segmented } from '../ui.tsx';
 import { type CallStatus, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
-import type { CallFocus, CallPhase, ToolStatus } from './protocol.ts';
+import type { CallFocus, CallPhase, ConfirmationOutcome, ToolStatus } from './protocol.ts';
 import { bindHoldToTalkButton } from './ptt.ts';
 
 /**
@@ -57,6 +57,7 @@ function toolIcon(name: string): IconName {
 }
 
 const TOOL_STATUS_LABEL: Record<ToolStatus, string> = { running: 'running', ok: 'done', error: 'failed' };
+const CONFIRM_OUTCOME_LABEL: Record<ConfirmationOutcome, string> = { confirmed: 'Confirmed', cancelled: 'Cancelled', expired: 'Expired' };
 
 function focusValue(focus: CallFocus): string {
   return focus.kind === 'chief' ? 'chief' : `session:${focus.sessionId}`;
@@ -349,7 +350,7 @@ function TranscriptLine({
               </button>
             </span>
           ) : (
-            <span className="call-confirm__done">{entry.resolution === 'confirmed' ? 'Confirmed' : 'Cancelled'}</span>
+            <span className="call-confirm__done">{CONFIRM_OUTCOME_LABEL[entry.resolution]}</span>
           )}
         </li>
       );

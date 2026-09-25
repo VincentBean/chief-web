@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { Config } from '../config.js';
 import {
   createVoiceCall,
@@ -9,12 +11,13 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { getVoiceSettings } from '../settings/index.js';
+import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
+import { matchConfirmIntent } from './intents.js';
 import {
   type AgentKind,
   type CallFocus,
   type CallPhase,
   type ClientMessage,
-  type ConfirmationView,
   decodeFrame,
   FRAME_KIND_UTTERANCE,
   parseClientMessage,
@@ -56,13 +59,26 @@ export type AgentEvent =
   | { readonly type: 'ui'; readonly ui: UiAction }
   | { readonly type: 'usage'; readonly costUsd: number };
 
+/** One utterance for the focused agent. */
+export interface AgentInput {
+  readonly text: string;
+  readonly turn: number;
+  readonly signal: AbortSignal;
+  /**
+   * Set when the utterance (a bare "yes"/"no") or the pill's button already
+   * answered the pending confirmation (US-011): the agent runs or cancels it
+   * without asking its model, then speaks about the outcome.
+   */
+  readonly resolution?: { readonly confirmationId: string; readonly accept: boolean };
+}
+
 /**
  * The focused agent: chief (US-008) or a session agent (US-018). It must stop
  * promptly when `signal` aborts; throwing `signal.reason` is fine.
  */
 export interface VoiceAgent {
   readonly kind: AgentKind;
-  run(input: { readonly text: string; readonly turn: number; readonly signal: AbortSignal }): AsyncIterable<AgentEvent>;
+  run(input: AgentInput): AsyncIterable<AgentEvent>;
 }
 
 /** The slice of `SttService` a call uses. */
@@ -100,12 +116,7 @@ export interface VoiceCallDeps {
   readonly onEnded?: (call: VoiceCall) => void;
 }
 
-/** A pending server-enforced confirmation (US-011). */
-export interface Confirmation extends ConfirmationView {
-  readonly tool: string;
-  readonly args: unknown;
-  readonly createdAtTurn: number;
-}
+export type { Confirmation } from './chief/confirm.js';
 
 /** A background event waiting for a quiet moment (US-015). */
 export interface VoiceEvent {
@@ -144,6 +155,8 @@ const GOODBYE_MAX_MS = 15_000;
  */
 export class VoiceCall {
   readonly state: VoiceCallState;
+  /** The one pending server-enforced confirmation (US-011), kept in `state`. */
+  readonly confirmations: ConfirmationGate;
   private transport: CallTransport | null = null;
   private tts: CallTts | null = null;
   private sttMode: SttMode = 'openrouter';
@@ -178,6 +191,12 @@ export class VoiceCall {
       ttsProvider: 'openrouter',
       queue: [],
     };
+    this.confirmations = new ConfirmationGate({
+      holder: this.state,
+      now: () => this.deps.clock.now(),
+      send: (message) => this.send(message),
+      newId: () => randomUUID(),
+    });
   }
 
   get id(): string {
@@ -196,6 +215,13 @@ export class VoiceCall {
   /** Where the call is focused right now. */
   get focus(): CallFocus {
     return this.state.focus;
+  }
+
+  /** Moves the call's focus; a pending confirmation does not survive the switch. */
+  setFocus(focus: CallFocus): void {
+    this.confirmations.cancel();
+    this.state.focus = focus;
+    this.sendState();
   }
 
   /**
@@ -325,8 +351,10 @@ export class VoiceCall {
       }
       case 'focus':
         // The full handoff (agent start, navigation) is US-019.
-        this.state.focus = message.target === 'chief' ? { kind: 'chief' } : { kind: 'session', sessionId: message.target.sessionId };
-        this.sendState();
+        this.setFocus(message.target === 'chief' ? { kind: 'chief' } : { kind: 'session', sessionId: message.target.sessionId });
+        return;
+      case 'confirm.resolve':
+        this.submitResolution(message.id, message.accept);
         return;
       case 'metrics': {
         const row = this.replyRows.get(message.turn);
@@ -353,6 +381,8 @@ export class VoiceCall {
   async end(reason: VoiceEndReason, closeCode = WS_CLOSE_CALL_ENDED, closeReason = 'call_ended'): Promise<void> {
     if (this.ended) return;
     this.clearIdle();
+    // A hang-up or takeover takes the pending confirmation with it.
+    this.confirmations.cancel();
     this.state.activeTurn?.abort(new Error('call ended'));
     this.state.phase = 'ended';
     this.sendState();
@@ -391,6 +421,22 @@ export class VoiceCall {
       this.addUsage({ sttSeconds: result.seconds, orCostUsd: result.costUsd });
       if (result.kind === 'dropped') return;
       await this.runTurn(result.text, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() });
+    });
+  }
+
+  /**
+   * The pill's Confirm / Cancel: a turn like a spoken "yes"/"no", but bound
+   * to the id the operator clicked, so a pill that was replaced meanwhile
+   * cannot answer the new one.
+   */
+  private submitResolution(id: string, accept: boolean): void {
+    this.touch();
+    void this.enqueue(async (controller) => {
+      if (this.state.focus.kind !== 'chief' || this.confirmations.pending?.id !== id) {
+        this.send({ type: 'error', code: 'confirmation_gone', message: 'That confirmation is no longer pending.', fatal: false });
+        return;
+      }
+      await this.runTurn(accept ? 'Confirm' : 'Cancel', controller, {}, { confirmationId: id, accept });
     });
   }
 
@@ -437,6 +483,7 @@ export class VoiceCall {
     text: string,
     controller: AbortController,
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
+    clicked?: AgentInput['resolution'],
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
@@ -457,6 +504,7 @@ export class VoiceCall {
       ...(times.tTranscript === undefined ? {} : { tTranscript: times.tTranscript }),
     });
 
+    const resolution = clicked ?? this.spokenResolution(text, focus);
     const agent = this.agentFor(focus);
     const marks: { tFirstToken?: string; tFirstChunk?: string; tFirstAudioSent?: string } = {};
     const speaks: Promise<void>[] = [];
@@ -470,7 +518,7 @@ export class VoiceCall {
     let reply = '';
     const tools: { name: string; status: ToolStatus; summary: string }[] = [];
     try {
-      for await (const event of agent.run({ text, turn, signal })) {
+      for await (const event of agent.run({ text, turn, signal, ...(resolution === undefined ? {} : { resolution }) })) {
         if (signal.aborted) break;
         switch (event.type) {
           case 'delta':
@@ -574,6 +622,18 @@ export class VoiceCall {
     } finally {
       if (started && !signal.aborted) this.send({ type: 'tts.end', segmentId });
     }
+  }
+
+  /**
+   * A bare "yes"/"no" while chief has a confirmation pending answers it
+   * directly (plan §9.4), with no model deciding what it meant.
+   */
+  private spokenResolution(text: string, focus: CallFocus): AgentInput['resolution'] {
+    if (focus.kind !== 'chief') return undefined;
+    const pending = this.confirmations.pending;
+    if (pending === null) return undefined;
+    const intent = matchConfirmIntent(text);
+    return intent === null ? undefined : { confirmationId: pending.id, accept: intent === 'yes' };
   }
 
   private agentFor(focus: CallFocus): VoiceAgent {

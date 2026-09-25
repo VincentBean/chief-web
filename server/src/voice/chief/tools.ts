@@ -12,6 +12,7 @@ import {
 } from '../../db/index.js';
 import type { PullRequestListView } from '../../pullrequests/index.js';
 import type { CallFocus, UiAction } from '../protocol.js';
+import { type ConfirmationGate, confirmTool } from './confirm.js';
 import type { ChatTool } from './openrouter-client.js';
 
 /**
@@ -21,8 +22,9 @@ import type { ChatTool } from './openrouter-client.js';
  * full logs), its `summary` is the one-liner on the tool card, and `ui` is
  * what the operator's browser is told to do.
  *
- * Only the read-only tools live here so far; the ones that act (create a
- * session, start a build) come with server-enforced confirmation.
+ * Tools that act (create a session, start a build) are built with
+ * `confirmable` from `confirm.ts`: their first call only asks, and the
+ * `confirm` tool runs them in a later turn.
  */
 
 /** The slices of chief-web's services the tools and the snapshot read. */
@@ -45,6 +47,8 @@ export interface ToolContext {
   readonly focus: CallFocus;
   /** Hangs up once the turn in progress (the goodbye) has been spoken. */
   endCall(): void;
+  /** The call's one pending confirmation. */
+  readonly confirmations: Pick<ConfirmationGate, 'request' | 'take'>;
 }
 
 export interface ToolResult {
@@ -57,6 +61,8 @@ export interface ToolResult {
 export interface ChiefTool {
   readonly definition: ChatTool;
   handler(args: Readonly<Record<string, unknown>>, ctx: ToolContext): Promise<ToolResult> | ToolResult;
+  /** A confirmable tool's action, run by `confirm` with the stored arguments. */
+  readonly execute?: (args: Readonly<Record<string, unknown>>, ctx: ToolContext) => Promise<ToolResult> | ToolResult;
 }
 
 /** How many rendered log lines `build_status` looks at, and how much of them it keeps. */
@@ -237,7 +243,7 @@ function tool(
 
 const SESSION_PARAM = { type: 'string', description: 'Session id or spoken name' };
 
-/** The read-only tools over `services`, keyed by name. */
+/** Chief's tools over `services`, keyed by name, `confirm` included. */
 export function createChiefTools(services: ChiefServices): ReadonlyMap<string, ChiefTool> {
   const { db } = services;
   const tools: ChiefTool[] = [
@@ -425,7 +431,15 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       },
     ),
   ];
-  return new Map(tools.map((entry) => [entry.definition.function.name, entry]));
+  return withConfirmTool(tools);
+}
+
+/** `tools` keyed by name, plus the `confirm` tool that runs their confirmations. */
+export function withConfirmTool(tools: readonly ChiefTool[]): ReadonlyMap<string, ChiefTool> {
+  const map = new Map(tools.map((entry) => [entry.definition.function.name, entry]));
+  const confirm = confirmTool(() => map);
+  map.set(confirm.definition.function.name, confirm);
+  return map;
 }
 
 /** Busy work first, then what waits on the operator, then what is over. */
