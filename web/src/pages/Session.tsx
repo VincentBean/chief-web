@@ -46,7 +46,7 @@ import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import type { PaneStatus, TerminalPaneHandle } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, Facts, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
+import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
 import { useCall } from '../voice/CallProvider.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
@@ -410,6 +410,7 @@ export function Session() {
         title={
           <>
             {session.name} <StatusBadge session={session} />
+            <FeedbackBadge session={session} />
             {build.queued && <Badge tone="wait">queued #{build.queuePosition ?? 1}</Badge>}
           </>
         }
@@ -456,6 +457,7 @@ export function Session() {
 
       <div className="grid grid--main-aside">
         <div className="stack">
+          {session.feedback !== null && <FeedbackPanel feedback={session.feedback} />}
           {status === 'pending' && (
             <PlanningPanel
               sessionId={session.id}
@@ -757,6 +759,18 @@ function VoiceSessionButton({ sessionId, label }: { readonly sessionId: string; 
       <Icon name="comment" />
       {talking ? (planning ? 'Talking it through' : 'Talking about it') : label}
     </button>
+  );
+}
+
+/**
+ * What the session was started from: shown verbatim, above planning, because
+ * planning (and the PRD's `## Feedback` section) works from exactly this text.
+ */
+function FeedbackPanel({ feedback }: { readonly feedback: string }) {
+  return (
+    <Panel title="Feedback" icon="comment">
+      <p className="feedback-text">{feedback}</p>
+    </Panel>
   );
 }
 

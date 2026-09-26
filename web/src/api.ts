@@ -623,7 +623,15 @@ export interface SessionInput {
   scheduledStartAt?: string | null;
   /** Omit to fall back to the global "code review by default" setting. */
   codeReview?: boolean;
+  /**
+   * What a user reported; planning then opens on it. At most
+   * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
+   */
+  feedback?: string;
 }
+
+/** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */
+export const MAX_FEEDBACK_LENGTH = 4000;
 
 /** The clone's outcome; `ok: false` is an answer, not a failed request. */
 export interface SessionSetup {
