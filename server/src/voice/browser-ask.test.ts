@@ -65,7 +65,10 @@ class FakeMcpSide {
   readonly answers: { containerId: string; exec: FakeExec; content: string }[] = [];
   failWrites = false;
 
-  constructor(daemon: FakeDockerDaemon) {
+  constructor(
+    daemon: FakeDockerDaemon,
+    private readonly now: () => number,
+  ) {
     const previous = daemon.onExec;
     daemon.onExec = (exec) => {
       const command = exec.cmd.join(' ');
@@ -89,9 +92,9 @@ class FakeMcpSide {
     };
   }
 
-  request(containerId: string, id = REQUEST_ID, hint = 'the checkout page'): void {
+  request(containerId: string, id = REQUEST_ID, hint = 'the checkout page', createdAt = new Date(this.now()).toISOString()): void {
     const list = this.requests.get(containerId) ?? [];
-    list.push({ id, hint, createdAt: new Date().toISOString() });
+    list.push({ id, hint, createdAt });
     this.requests.set(containerId, list);
   }
 
@@ -144,9 +147,9 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
 
   beforeEach(() => {
     daemon.onExec = null;
-    mcp = new FakeMcpSide(daemon);
-    new FakeBrowser(daemon);
     clock = new FakeClock();
+    mcp = new FakeMcpSide(daemon, () => clock.now());
+    new FakeBrowser(daemon);
     sent = [];
   });
 
@@ -267,6 +270,16 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
     clock.advance(1);
     await until(() => mcp.answersFor(containerId).length === 1);
     assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true }]);
+    assert.deepEqual(resolved(), [{ type: 'browser.resolved', id: REQUEST_ID, outcome: 'expired' }]);
+  });
+
+  it('expires with the tool: a request written a while ago gets a shorter card', async () => {
+    const { sessionId, containerId } = newSession();
+    mcp.request(containerId, REQUEST_ID, 'the checkout page', new Date(clock.now() - 20_000).toISOString());
+    await relay().ask(sessionId);
+    assert.equal(asks()[0]?.expiresAt, new Date(clock.now() + BROWSER_ASK_TTL_MS - 20_000).toISOString());
+    clock.advance(BROWSER_ASK_TTL_MS - 20_000);
+    await until(() => mcp.answersFor(containerId).length === 1);
     assert.deepEqual(resolved(), [{ type: 'browser.resolved', id: REQUEST_ID, outcome: 'expired' }]);
   });
 

@@ -252,11 +252,16 @@ export class BrowserAsks {
       );
       return;
     }
+    // The tool's own five minutes started when it wrote the request, before the
+    // browser booted: the card never outlives them.
+    const now = this.call.clock.now();
+    const created = Date.parse(request.createdAt);
+    const expiresAt = Number.isNaN(created) ? now + BROWSER_ASK_TTL_MS : Math.min(now + BROWSER_ASK_TTL_MS, created + BROWSER_ASK_TTL_MS);
     const ask: Ask = { id: request.id, sessionId, containerId, timer: null };
     ask.timer = this.call.clock.setTimeout(() => {
       ask.timer = null;
       void this.resolveCancelled(ask, 'expired');
-    }, BROWSER_ASK_TTL_MS);
+    }, Math.max(0, expiresAt - now));
     this.asks.set(ask.id, ask);
     this.call.send({
       type: 'browser.ask',
@@ -264,18 +269,18 @@ export class BrowserAsks {
       sessionId,
       hint: request.hint,
       savedLogins: this.deps.savedLogins?.list(sessionId) ?? [],
-      expiresAt: new Date(this.call.clock.now() + BROWSER_ASK_TTL_MS).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
     });
   }
 
   /** The newest request file this call has not handled yet, looked for until the tool call is over. */
-  private async discover(containerId: string, discovery: Discovery): Promise<{ id: string; hint: string } | null> {
+  private async discover(containerId: string, discovery: Discovery): Promise<{ id: string; hint: string; createdAt: string } | null> {
     const deadline = Date.now() + (this.deps.discoveryMs ?? REQUEST_DISCOVERY_MS);
     for (;;) {
       if (discovery.stopped || this.closed) return null;
       const found = await this.listRequests(containerId);
       const fresh = found.filter((request) => !this.seen.has(request.id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      if (fresh[0] !== undefined) return { id: fresh[0].id, hint: fresh[0].hint };
+      if (fresh[0] !== undefined) return fresh[0];
       if (Date.now() >= deadline) return null;
       await new Promise((resolve) => setTimeout(resolve, this.deps.pollMs ?? REQUEST_POLL_MS));
     }

@@ -104,11 +104,11 @@ function describe(answer) {
   }
   const credentials = answer.credentials !== undefined && answer.credentials !== null;
   return (
-    `The operator opened ${answer.url} in the shared browser. ` +
+    `The operator chose ${answer.url}. ` +
     (credentials
       ? 'They supplied a username and password for it (not shown to you). '
       : 'They did not supply a login. ') +
-    'Use the browser tools to look at the page; the operator sees it too.'
+    'Open it with browser_navigate; the operator watches the same browser.'
   );
 }
 
