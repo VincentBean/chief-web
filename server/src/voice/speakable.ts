@@ -335,3 +335,55 @@ function pronouncer(pronunciations: Pronunciations): (text: string) => string {
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+/** A planning session as {@link waitingSummary} names it (US-009). */
+export interface WaitingSession {
+  readonly sessionName: string;
+  readonly repositoryName: string;
+  readonly state: 'briefing' | 'drafting' | 'waiting' | 'done' | 'failed';
+  readonly openQuestions: number;
+}
+
+/**
+ * One sentence on the other planning sessions (US-009): "Billing export on
+ * shop-api is waiting with 4 open questions, and search on webshop is done."
+ * Sessions still briefing or drafting are named only when none is waiting,
+ * done or failed; `''` when there is nothing to say. Names are left as they
+ * are, so the pronunciation map still matches them when the line is spoken.
+ */
+export function waitingSummary(language: string, sessions: readonly WaitingSession[]): string {
+  const nl = language === 'nl';
+  const on = (session: WaitingSession): string => `${session.sessionName} ${nl ? 'op' : 'on'} ${session.repositoryName}`;
+  const settled = sessions.filter((session) => session.state === 'waiting' || session.state === 'done' || session.state === 'failed');
+  if (settled.length > 0) {
+    const clauses = settled.map((session) => {
+      const count = session.openQuestions;
+      switch (session.state) {
+        case 'waiting':
+          if (count <= 0) return nl ? `${on(session)} wacht op je` : `${on(session)} is waiting`;
+          return nl
+            ? `${on(session)} wacht met ${String(count)} ${count === 1 ? 'open vraag' : 'open vragen'}`
+            : `${on(session)} is waiting with ${String(count)} open ${count === 1 ? 'question' : 'questions'}`;
+        case 'failed':
+          return nl ? `${on(session)} is vastgelopen` : `${on(session)} has failed`;
+        default:
+          return nl ? `${on(session)} is klaar` : `${on(session)} is done`;
+      }
+    });
+    return `${joinList(clauses, nl, true)}.`;
+  }
+  const drafting = sessions.filter((session) => session.state === 'briefing' || session.state === 'drafting');
+  if (drafting.length === 0) return '';
+  const names = joinList(drafting.map(on), nl, false);
+  if (nl) return `${names} ${drafting.length === 1 ? 'is' : 'zijn'} nog aan het schrijven.`;
+  return `${names} ${drafting.length === 1 ? 'is' : 'are'} still drafting.`;
+}
+
+/** "a and b", "a, b and c"; whole clauses take a comma before the English "and" too. */
+function joinList(parts: readonly string[], nl: boolean, clauses: boolean): string {
+  const and = nl ? 'en' : 'and';
+  if (parts.length <= 1) return parts.join('');
+  const head = parts.slice(0, -1).join(', ');
+  const last = parts[parts.length - 1] as string;
+  return !nl && clauses ? `${head}, ${and} ${last}` : `${head} ${and} ${last}`;
+}

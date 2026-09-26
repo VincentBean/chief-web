@@ -294,6 +294,9 @@ export class VoiceService {
       agent: this.deps.agent ?? ((focus, call) => this.agentFor(focus, call)),
       clock: this.clock,
       ...(this.deps.planning === undefined ? {} : { planning: this.deps.planning }),
+      ...(this.deps.sessionAgents === undefined
+        ? {}
+        : { planningStates: new PlanningStates({ db, config, registry: this.deps.sessionAgents }) }),
       ...(this.earcons === null ? {} : { earcons: this.earcons }),
       ...(this.usageSources === null ? {} : { usage: this.usageSources }),
       onSessionFocused: (sessionId) => this.deps.sessionAgents?.focused(sessionId),

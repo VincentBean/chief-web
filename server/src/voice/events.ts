@@ -192,11 +192,14 @@ export function draftedLine(language: string, event: Extract<VoiceBusEvent, { ki
 
 /** A background event waiting in the call for a quiet moment (docs/voice-plan.md §5 `queue`). */
 export interface VoiceEvent {
-  readonly kind: VoiceEventKind;
+  /** A bus event, or `planning.waiting`: the call's own reminder of the other planning sessions (US-009). */
+  readonly kind: VoiceEventKind | 'planning.waiting';
   readonly text: string;
   readonly sessionId: string | null;
-  /** A line the call speaks itself instead of handing the event to chief (`planning.drafted`). */
+  /** A line the call speaks itself instead of handing the event to chief (`planning.drafted`, `planning.waiting`). */
   readonly line?: string;
+  /** The one waiting session the line offers to switch to; the call parks the confirmation once it is said. */
+  readonly offer?: { readonly sessionId: string; readonly name: string };
 }
 
 /**

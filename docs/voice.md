@@ -296,6 +296,13 @@ focus, only events about that session are spoken — except a finished draft,
 which is announced whoever has the focus. A PRD that became valid is not
 announced separately when its finished draft is.
 
+Chief also keeps track of your other planning sessions. "Back to chief" names
+them ("Back with me. csv-export has a draft PRD with 2 open questions.
+billing-export on shop-api is waiting with 4 open questions."), and when the
+session you are talking to finishes its PRD, chief names the others at the next
+quiet moment. If exactly one is waiting it asks "Shall I switch you over?"; say
+yes (or press Confirm) to go there.
+
 ## Privacy
 
 - **Audio is never stored.** chief-web holds your speech in memory only long

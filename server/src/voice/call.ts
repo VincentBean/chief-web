@@ -33,8 +33,9 @@ import {
   type UiAction,
   WS_CLOSE_CALL_ENDED,
 } from './protocol.js';
+import type { PlanningState, PlanningStateName } from './session-agent/planning-state.js';
 import { voiceAgentMode } from './session-agent/registry.js';
-import { SentenceChunker, toSpeakable } from './speakable.js';
+import { SentenceChunker, toSpeakable, type WaitingSession, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
@@ -171,6 +172,11 @@ export interface VoiceCallDeps {
    * PRD state chief names on the way back.
    */
   readonly planning?: CallPlanning;
+  /**
+   * Where the planning sessions stand (US-009), for the other sessions chief
+   * names on the way back and when the focused one is done.
+   */
+  readonly planningStates?: CallPlanningStates;
   /** Pre-rendered acknowledgements (US-021); without them the call has none. */
   readonly earcons?: CallEarcons;
   /** The providers' own usage numbers (US-023); without them the meter is local only. */
@@ -189,6 +195,18 @@ export interface CallUsageSources {
 export interface CallPlanning {
   status(sessionId: string): { readonly sessionName: string; readonly prd: PrdStatus };
 }
+
+/** The slice of `PlanningStates` a call reads. */
+export interface CallPlanningStates {
+  planningState(sessionId: string): PlanningState | null;
+  listPlanningSessions(): readonly PlanningState[];
+}
+
+/**
+ * The confirmation the call parks itself after naming the one waiting session
+ * (US-009): a "yes" moves the focus there, with no model deciding anything.
+ */
+export const SWITCH_OVER_TOOL = 'switch_over';
 
 export type { Confirmation } from './chief/confirm.js';
 export type { VoiceEvent } from './events.js';
@@ -231,20 +249,51 @@ export const HANGUP_GOODBYE: Readonly<Record<string, string>> = {
 
 /**
  * The one line chief says when the operator comes back from a session agent
- * (docs/voice-plan.md §11): "Back with me. csv-export-invoices has a draft PRD."
+ * (docs/voice-plan.md §11): "Back with me. csv-export-invoices has a draft PRD
+ * with 2 open questions.", followed by the other planning sessions (US-009).
  */
-export function backWithMe(language: string, session: { readonly sessionName: string; readonly prd: PrdStatus } | null): string {
+export function backWithMe(
+  language: string,
+  session: { readonly sessionName: string; readonly prd: PrdStatus } | null,
+  others: readonly WaitingSession[] = [],
+): string {
   const nl = language === 'nl';
   const back = nl ? 'Je bent weer bij mij.' : 'Back with me.';
-  if (session === null) return back;
+  const summary = waitingSummary(language, others);
+  if (session === null) return summary === '' ? back : `${back} ${summary}`;
   const { sessionName: name, prd } = session;
   const stories = prd.storyCount;
+  const questions = prd.exists ? prd.openQuestions : 0;
+  const withQuestions =
+    questions <= 0
+      ? ''
+      : nl
+        ? ` met ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}`
+        : ` with ${String(questions)} open ${questions === 1 ? 'question' : 'questions'}`;
   let state: string;
   if (!prd.exists) state = nl ? `${name} heeft nog geen PRD.` : `${name} has no PRD yet.`;
-  else if (!prd.parses || stories === 0) state = nl ? `${name} heeft een concept-PRD.` : `${name} has a draft PRD.`;
-  else if (nl) state = `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en is in orde.`;
+  else if (!prd.parses || stories === 0) state = nl ? `${name} heeft een concept-PRD${withQuestions}.` : `${name} has a draft PRD${withQuestions}.`;
+  else if (questions > 0) {
+    state = nl
+      ? `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}.`
+      : `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} and ${String(questions)} open ${questions === 1 ? 'question' : 'questions'}.`;
+  } else if (nl) state = `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en is in orde.`;
   else state = `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} that parses cleanly.`;
-  return `${back} ${state}`;
+  return summary === '' ? `${back} ${state}` : `${back} ${state} ${summary}`;
+}
+
+/** What chief adds to the waiting summary when exactly one session waits (US-009). */
+export function switchOverQuestion(language: string): string {
+  return language === 'nl' ? 'Zal ik je doorverbinden?' : 'Shall I switch you over?';
+}
+
+function asWaiting(state: PlanningState): WaitingSession {
+  return {
+    sessionName: state.sessionName,
+    repositoryName: state.repositoryName,
+    state: state.state,
+    openQuestions: state.openQuestions.length,
+  };
 }
 
 /**
@@ -256,6 +305,12 @@ export function carryingOn(language: string, sessionName: string): string {
     ? `Oké, ${sessionName} gaat ermee aan de slag. Je bent weer bij mij.`
     : `Okay, ${sessionName} is working on it. Back with me.`;
 }
+
+/** A "no" to switching over to the waiting session (US-009). */
+export const SWITCH_OVER_DECLINED: Readonly<Record<string, string>> = {
+  nl: 'Oké, we blijven hier.',
+  en: 'Okay, staying here.',
+};
 
 /** What the `mute` intent answers, as text: it is never spoken. */
 export const MUTED_LINE: Readonly<Record<string, string>> = {
@@ -830,7 +885,8 @@ export class VoiceCall {
   private submitResolution(id: string, accept: boolean): void {
     this.touch();
     void this.enqueue(async (controller) => {
-      if (this.state.focus.kind !== 'chief' || this.confirmations.pending?.id !== id) {
+      const pending = this.confirmations.pending;
+      if ((this.state.focus.kind !== 'chief' && pending?.tool !== SWITCH_OVER_TOOL) || pending?.id !== id) {
         this.send({ type: 'error', code: 'confirmation_gone', message: 'That confirmation is no longer pending.', fatal: false });
         return;
       }
@@ -963,6 +1019,10 @@ export class VoiceCall {
     // The operator spoke first: the session agent answers that, not a greeting.
     if (mode === 'user') this.greetPending = null;
     const resolution = mode === 'user' ? (clicked ?? this.spokenResolution(text, focus)) : undefined;
+    if (resolution !== undefined && this.confirmations.pending?.tool === SWITCH_OVER_TOOL) {
+      await this.switchOver(resolution, turn, tts, signal);
+      return;
+    }
     let invoke: AgentInput['invoke'];
     const intent = mode === 'user' && resolution === undefined ? matchCallIntent(text) : null;
     switch (intent?.kind) {
@@ -977,7 +1037,16 @@ export class VoiceCall {
       case 'to_chief':
         if (focus.kind === 'chief') break;
         this.setFocus({ kind: 'chief' });
-        await this.sayLine(tts, turn, backWithMe(getVoiceSettings(this.deps.db).language, this.readPlanning(focus.sessionId)), signal);
+        await this.sayLine(
+          tts,
+          turn,
+          backWithMe(
+            getVoiceSettings(this.deps.db).language,
+            this.readPlanning(focus.sessionId),
+            this.otherPlanningSessions(focus.sessionId).map(asWaiting),
+          ),
+          signal,
+        );
         return;
       case 'carry_on': {
         // Only a planning session is sent off; anywhere else it is just words for the agent.
@@ -1012,6 +1081,7 @@ export class VoiceCall {
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     const agent = this.agentFor(focus);
     if (mode === 'user' && sessionId !== null && agent.kind === 'session') this.briefed.add(sessionId);
+    const stateBefore = sessionId !== null && agent.kind === 'session' ? this.planningStateOf(sessionId) : null;
     const prefetched =
       mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
         ? this.adoptSpeculation(text, signal)
@@ -1104,7 +1174,10 @@ export class VoiceCall {
       this.replyRows.set(turn, row.id);
     }
     this.noteReply(turn, agent.kind, reply);
-    if (sessionId !== null && agent.kind === 'session') this.pollPrd(sessionId);
+    if (sessionId !== null && agent.kind === 'session') {
+      this.pollPrd(sessionId);
+      if (!interrupted && stateBefore !== 'done' && this.planningStateOf(sessionId) === 'done') this.remindOfOthers(sessionId);
+    }
   }
 
   /** A fixed line the call says itself, as chief: an intent's answer, not a model's. */
@@ -1185,6 +1258,62 @@ export class VoiceCall {
     return session !== null && voiceAgentMode(session) === 'plan';
   }
 
+  private planningStateOf(sessionId: string): PlanningStateName | null {
+    try {
+      return this.deps.planningStates?.planningState(sessionId)?.state ?? null;
+    } catch (cause) {
+      logger.warn('voice call could not read the planning state', { session: sessionId, error: String(cause) });
+      return null;
+    }
+  }
+
+  /** Every planning session but `sessionId`, most recently updated first; empty on a failure. */
+  private otherPlanningSessions(sessionId: string): PlanningState[] {
+    try {
+      return (this.deps.planningStates?.listPlanningSessions() ?? []).filter((state) => state.sessionId !== sessionId);
+    } catch (cause) {
+      logger.warn('voice call could not list the planning sessions', { error: String(cause) });
+      return [];
+    }
+  }
+
+  /**
+   * The focused planning session has just become `done` (US-009): the other
+   * planning sessions are named at the next quiet moment, with an offer to
+   * switch when exactly one of them waits for the operator.
+   */
+  private remindOfOthers(sessionId: string): void {
+    const settings = getVoiceSettings(this.deps.db);
+    if (settings.eventVerbosity === 'none') return;
+    const others = this.otherPlanningSessions(sessionId);
+    const summary = waitingSummary(settings.language, others.map(asWaiting));
+    if (summary === '') return;
+    const waiting = others.filter((state) => state.state === 'waiting');
+    const offer = waiting.length === 1 ? (waiting[0] as PlanningState) : null;
+    this.state.queue.push({
+      kind: 'planning.waiting',
+      text: summary,
+      sessionId,
+      line: offer === null ? summary : `${summary} ${switchOverQuestion(settings.language)}`,
+      ...(offer === null ? {} : { offer: { sessionId: offer.sessionId, name: offer.sessionName } }),
+    });
+    this.scheduleDrain();
+  }
+
+  /** A "yes" or "no" to {@link SWITCH_OVER_TOOL}: the call answers it itself. */
+  private async switchOver(resolution: NonNullable<AgentInput['resolution']>, turn: number, tts: CallTts, signal: AbortSignal): Promise<void> {
+    if (!resolution.accept) {
+      this.confirmations.cancel();
+      await this.sayLine(tts, turn, this.inLanguage(SWITCH_OVER_DECLINED), signal);
+      return;
+    }
+    const taken = this.confirmations.take(resolution.confirmationId, turn);
+    this.send({ type: 'agent.done', turn, interrupted: false });
+    if (taken.kind !== 'ok') return;
+    const target = taken.confirmation.args['sessionId'];
+    if (typeof target === 'string') this.setFocus({ kind: 'session', sessionId: target });
+  }
+
   private readPlanning(sessionId: string): { sessionName: string; prd: PrdStatus } | null {
     try {
       return this.deps.planning?.status(sessionId) ?? null;
@@ -1254,9 +1383,10 @@ export class VoiceCall {
    * directly (docs/voice-plan.md §9.4), with no model deciding what it meant.
    */
   private spokenResolution(text: string, focus: CallFocus): AgentInput['resolution'] {
-    if (focus.kind !== 'chief') return undefined;
     const pending = this.confirmations.pending;
     if (pending === null) return undefined;
+    // The call's own offer to switch over is also made while a session has the focus.
+    if (focus.kind !== 'chief' && pending.tool !== SWITCH_OVER_TOOL) return undefined;
     const intent = matchConfirmIntent(text);
     return intent === null ? undefined : { confirmationId: pending.id, accept: intent === 'yes' };
   }
@@ -1502,6 +1632,12 @@ export class VoiceCall {
       if (lines.length > 0) {
         const line = lines.map((event) => event.line).join(' ');
         await this.runTurn(asEvents(lines), controller, {}, undefined, 'event', line);
+        // Stamped with the turn that asked, so only the operator's next words can answer it.
+        const offer = lines.findLast((event) => event.offer !== undefined)?.offer;
+        if (offer !== undefined && !controller.signal.aborted) {
+          const prompt = getVoiceSettings(this.deps.db).language === 'nl' ? `Doorverbinden met ${offer.name}?` : `Switch over to ${offer.name}?`;
+          this.confirmations.request({ tool: SWITCH_OVER_TOOL, args: { sessionId: offer.sessionId, name: offer.name }, prompt }, this.state.turn);
+        }
       }
       if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, undefined, 'event');
     });
