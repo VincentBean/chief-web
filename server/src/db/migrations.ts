@@ -1104,6 +1104,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_repository_logins_repository ON repository_logins (repository_id);
     `,
   },
+  {
+    id: '0020_repository_open_pull_request_default',
+    sql: `
+      -- Whether a new session of this repository opens a pull request by
+      -- default (pull-request US-001). 1 for every existing repository, so
+      -- nothing changes until an operator turns it off.
+      ALTER TABLE repositories ADD COLUMN open_pull_request_default INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
 ];
 
 /**

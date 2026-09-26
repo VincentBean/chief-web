@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
-import { changeCount, type Database, nowIso, nullableText, type Row, text } from './sqlite.js';
+import {
+  changeCount,
+  type Database,
+  integer,
+  nowIso,
+  nullableText,
+  type Row,
+  text,
+} from './sqlite.js';
 
 /** Whether chief-web generated the deploy key or the operator pasted one. */
 export const REPOSITORY_KEY_SOURCES = ['generated', 'imported'] as const;
@@ -37,6 +45,11 @@ export interface Repository {
    * exactly as it is.
    */
   readonly reviewContext: string | null;
+  /**
+   * Whether a new session of this repository opens a pull request after its
+   * build unless the operator unticks it (pull-request US-001).
+   */
+  readonly openPullRequestDefault: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -52,6 +65,7 @@ export interface CreateRepositoryInput {
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
   readonly reviewContext?: string | null;
+  readonly openPullRequestDefault?: boolean;
 }
 
 export interface UpdateRepositoryInput {
@@ -65,6 +79,7 @@ export interface UpdateRepositoryInput {
   readonly sentryOrg?: string | null;
   readonly sentryProject?: string | null;
   readonly reviewContext?: string | null;
+  readonly openPullRequestDefault?: boolean;
 }
 
 const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
@@ -78,6 +93,7 @@ const COLUMNS: Record<keyof UpdateRepositoryInput, string> = {
   sentryOrg: 'sentry_org',
   sentryProject: 'sentry_project',
   reviewContext: 'review_context',
+  openPullRequestDefault: 'open_pull_request_default',
 };
 
 function keySourceOf(row: Row): RepositoryKeySource | null {
@@ -102,6 +118,7 @@ export function mapRepository(row: Row): Repository {
     sentryOrg: nullableText(row, 'sentry_org'),
     sentryProject: nullableText(row, 'sentry_project'),
     reviewContext: nullableText(row, 'review_context'),
+    openPullRequestDefault: integer(row, 'open_pull_request_default') !== 0,
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -121,6 +138,7 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     sentryOrg: input.sentryOrg ?? null,
     sentryProject: input.sentryProject ?? null,
     reviewContext: input.reviewContext ?? null,
+    openPullRequestDefault: input.openPullRequestDefault ?? true,
     createdAt: now,
     updatedAt: now,
   };
@@ -129,8 +147,8 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     `INSERT INTO repositories
        (id, name, ssh_url, github_slug, default_base_branch,
         public_key, key_fingerprint, key_source, sentry_org, sentry_project,
-        review_context, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        review_context, open_pull_request_default, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     repository.id,
     repository.name,
@@ -143,6 +161,7 @@ export function createRepository(db: Database, input: CreateRepositoryInput): Re
     repository.sentryOrg,
     repository.sentryProject,
     repository.reviewContext,
+    repository.openPullRequestDefault ? 1 : 0,
     repository.createdAt,
     repository.updatedAt,
   );
@@ -193,13 +212,14 @@ export function updateRepository(
   patch: UpdateRepositoryInput,
 ): Repository | null {
   const assignments: string[] = [];
-  const params: Record<string, string | null> = { ':id': id, ':updated_at': nowIso() };
+  const params: Record<string, string | number | null> = { ':id': id, ':updated_at': nowIso() };
 
   for (const [field, column] of Object.entries(COLUMNS)) {
     const value = patch[field as keyof UpdateRepositoryInput];
     if (value === undefined) continue;
     assignments.push(`${column} = :${column}`);
-    params[`:${column}`] = value;
+    // SQLite has no boolean; a flag is stored as 0/1.
+    params[`:${column}`] = typeof value === 'boolean' ? (value ? 1 : 0) : value;
   }
 
   if (assignments.length > 0) {

@@ -62,6 +62,9 @@ const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 /** The migration under test in 'adds `review_context`'. */
 const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
 
+/** The migration under test in 'adds `open_pull_request_default` as true'. */
+const OPEN_PULL_REQUEST_DEFAULT_MIGRATION = '0020_repository_open_pull_request_default';
+
 /** The migration under test in 'adds `feedback` to existing sessions'. */
 const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 
@@ -478,6 +481,61 @@ describe('migrations', () => {
       'Watch the N+1 queries.',
     );
     assert.equal(updateRepository(db, repository.id, { reviewContext: null })?.reviewContext, null);
+
+    closeDatabase(db);
+  });
+});
+
+describe('open pull request default migration', () => {
+  it('adds `open_pull_request_default` to existing repositories as true', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex(
+      (migration) => migration.id === OPEN_PULL_REQUEST_DEFAULT_MIGRATION,
+    );
+    assert.ok(index > 0, `${OPEN_PULL_REQUEST_DEFAULT_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+
+    assert.ok(runMigrations(db).includes(OPEN_PULL_REQUEST_DEFAULT_MIGRATION));
+    assert.equal(getRepository(db, repository.id)?.openPullRequestDefault, true);
+
+    closeDatabase(db);
+  });
+
+  it('round-trips the flag through create and a partial update', () => {
+    const db = freshDb();
+
+    assert.equal(seedRepository(db).openPullRequestDefault, true);
+
+    const off = createRepository(db, {
+      name: 'no-pr',
+      sshUrl: 'git@github.com:owner/no-pr.git',
+      githubSlug: 'owner/no-pr',
+      openPullRequestDefault: false,
+    });
+    assert.equal(off.openPullRequestDefault, false);
+    assert.equal(getRepository(db, off.id)?.openPullRequestDefault, false);
+
+    // An update that does not mention the flag keeps it.
+    assert.equal(updateRepository(db, off.id, { name: 'renamed' })?.openPullRequestDefault, false);
+    assert.equal(
+      updateRepository(db, off.id, { openPullRequestDefault: true })?.openPullRequestDefault,
+      true,
+    );
+    assert.equal(
+      updateRepository(db, off.id, { openPullRequestDefault: false })?.openPullRequestDefault,
+      false,
+    );
 
     closeDatabase(db);
   });
