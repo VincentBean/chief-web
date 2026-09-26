@@ -29,6 +29,7 @@ import {
 import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
+import { prdPathFor } from '../prd/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
 import { type ChiefWorld, chiefWorld } from './chief/__fixtures__/world.js';
 import {
@@ -55,6 +56,7 @@ import {
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
 import { RESUME_WINDOW_MS } from './service.js';
+import { detachPrompt } from './session-agent/prompt.js';
 import { CLAUDE_SESSION, FakeClaude, LONG_OPENING } from './session-agent/__fixtures__/fake-claude.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
@@ -774,12 +776,13 @@ describe('barge-in', () => {
 
 describe('a scripted call end to end (US-027)', () => {
   let daemon: FakeDockerDaemon;
+  let claude: FakeClaude;
   let openrouter: ScriptedOpenRouter;
   let dataDir: string;
 
   before(async () => {
     daemon = await FakeDockerDaemon.start();
-    new FakeClaude(daemon);
+    claude = new FakeClaude(daemon);
     openrouter = await startScriptedOpenRouter();
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-e2e-call-'));
   });
@@ -846,7 +849,7 @@ describe('a scripted call end to end (US-027)', () => {
       client.send({ type: 'hangup' });
       assert.equal((await client.closed).code, WS_CLOSE_CALL_ENDED);
     };
-    return { w, chief, events, client, callId, say, hangUp };
+    return { w, chief, events, client, callId, say, hangUp, agents };
   };
 
   /** The deltas of one turn, joined. */
@@ -1011,6 +1014,60 @@ describe('a scripted call end to end (US-027)', () => {
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
     assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
     assert.equal(openrouter.requests.length, requests, 'the handback is a fixed line, not a model call');
+    await s.hangUp();
+  });
+
+  /** Every user message the session's fake `claude` processes were sent, across restarts. */
+  const sessionStdin = (sessionId: string): string[] =>
+    claude
+      .agentExecs()
+      .filter((exec) => exec.containerId === `c-${sessionId}`)
+      .flatMap((exec) => claude.userTexts(exec.id));
+
+  it('brief a session → "back to chief" → it drafts alone while chief answers (US-005)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    assert.equal(s.agents().detachedState(sessionId).running, false);
+
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
+    const detach = detachPrompt(prdPathFor('onboarding-copy'));
+    await waitFor(() => sessionStdin(sessionId).slice(before).includes(detach));
+    assert.deepEqual(sessionStdin(sessionId).slice(before).slice(-1), [detach]);
+    await s.agents().detachedTurnEnded(sessionId);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, 'ok');
+    assert.ok(listVoiceTurns(s.w.db, s.callId).some((t) => t.speaker === 'agent' && t.text.startsWith('[detached]')));
+
+    // Chief goes on as usual.
+    openrouter.replies.push(textReply(['Nothing else is running.']));
+    await s.say("what's building");
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Nothing else is running.');
+    await s.hangUp();
+  });
+
+  it('a session left before the operator said anything to it is not detached (US-005)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    await flush();
+    assert.equal(s.agents().detachedState(sessionId).running, false);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, null);
+    assert.equal(sessionStdin(sessionId).slice(before).length, 1, 'only the opening was sent');
     await s.hangUp();
   });
 

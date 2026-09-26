@@ -4,8 +4,9 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import type { Config } from '../config.js';
-import type { Database } from '../db/index.js';
+import { type Database, getSession } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { prdPathFor } from '../prd/index.js';
 import {
   getElevenLabsApiKey,
   getOpenRouterApiKey,
@@ -30,6 +31,8 @@ import type { ChiefServices } from './chief/tools.js';
 import { EarconCache, earconVoice, providerRenderer } from './earcons.js';
 import type { VoiceEventBus } from './events.js';
 import { SessionVoiceAgent } from './session-agent/agent.js';
+import { PlanningStates } from './session-agent/planning-state.js';
+import { detachPrompt } from './session-agent/prompt.js';
 import type { SessionAgentRegistry } from './session-agent/registry.js';
 import {
   type CallFocus,
@@ -294,6 +297,7 @@ export class VoiceService {
       ...(this.earcons === null ? {} : { earcons: this.earcons }),
       ...(this.usageSources === null ? {} : { usage: this.usageSources }),
       onSessionFocused: (sessionId) => this.deps.sessionAgents?.focused(sessionId),
+      onSessionLeft: (sessionId) => this.detach(sessionId),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
@@ -304,6 +308,27 @@ export class VoiceService {
     this.deps.sessionAgents?.callStarted({ id: call.id, turn: () => call.state.turn });
     if (focus.kind === 'session') this.deps.sessionAgents?.focused(focus.sessionId);
     return call;
+  }
+
+  /**
+   * The call left a session it had briefed (US-005): a planning session goes
+   * on alone with the detach prompt, unless its PRD is already complete or it
+   * is drafting still. Fire and forget; the detached turn records itself.
+   */
+  private detach(sessionId: string): void {
+    const registry = this.deps.sessionAgents;
+    if (registry === undefined) return;
+    try {
+      const state = new PlanningStates({ db: this.db, config: this.config, registry }).planningState(sessionId);
+      if (state === null || state.state === 'done' || state.state === 'drafting') return;
+      const session = getSession(this.db, sessionId);
+      if (session === null) return;
+      registry.runDetached(sessionId, detachPrompt(prdPathFor(session.name))).catch((cause: unknown) => {
+        logger.warn('detached session agent turn failed', { session: sessionId, error: String(cause) });
+      });
+    } catch (cause) {
+      logger.warn('could not detach the session agent', { session: sessionId, error: String(cause) });
+    }
   }
 
   private agentFor(focus: CallFocus, call: VoiceCall): VoiceAgent {

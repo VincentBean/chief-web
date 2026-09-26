@@ -158,6 +158,12 @@ export interface VoiceCallDeps {
   /** Told whenever the call's focus moves to a session (not when it opens on one). */
   readonly onSessionFocused?: (sessionId: string) => void;
   /**
+   * Told when the focus has left a session the operator spoke to in this
+   * call, once the turn that was running has wound down (US-005); the service
+   * sends a planning session's agent off to draft alone. Never awaited.
+   */
+  readonly onSessionLeft?: (sessionId: string) => void;
+  /**
    * The planning poller (US-019): read after every session-agent turn, so a
    * `prd.md` that just became valid publishes `prd.valid`, and for the
    * PRD state chief names on the way back.
@@ -299,6 +305,8 @@ export class VoiceCall {
   /** A session focus whose agent still has to be started and heard (docs/voice-plan.md §11 step 4–5). */
   private greetPending: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
+  /** Sessions whose agent answered the operator in this call: only those have something to draft from. */
+  private readonly briefed = new Set<string>();
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
   private subscriptionTimer: unknown = null;
@@ -380,6 +388,7 @@ export class VoiceCall {
       return;
     }
     this.state.focus = focus;
+    if (current.kind === 'session') this.leave(current.sessionId);
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     if (this.persisted) {
       const name = sessionId === null ? 'chief' : (this.readPlanning(sessionId)?.sessionName ?? sessionId);
@@ -403,6 +412,21 @@ export class VoiceCall {
     // focus is in effect at once, and its agent speaks once that turn is out.
     this.state.activeTurn?.abort(new Error('focus switched'));
     this.setFocus(focus);
+  }
+
+  /**
+   * The focus left `sessionId` (US-005), whichever way: the detach waits for
+   * the turn that was running, since an interrupted session agent reads its
+   * process up to the `result` first, but the new focus does not wait for it.
+   */
+  private leave(sessionId: string): void {
+    const onLeft = this.deps.onSessionLeft;
+    if (onLeft === undefined || !this.briefed.has(sessionId)) return;
+    void this.running.then(() => {
+      // Back on it already: the operator talks to it instead.
+      if (sameFocus(this.state.focus, { kind: 'session', sessionId })) return;
+      onLeft(sessionId);
+    });
   }
 
   /**
@@ -957,6 +981,7 @@ export class VoiceCall {
     }
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     const agent = this.agentFor(focus);
+    if (mode === 'user' && sessionId !== null && agent.kind === 'session') this.briefed.add(sessionId);
     const prefetched =
       mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
         ? this.adoptSpeculation(text, signal)
