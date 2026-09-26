@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+
+import { WebSocketServer } from 'ws';
 
 /** `runner/chief-mcp.js`, the `chief` MCP server of the session agent (voice feedback US-007). */
 const SCRIPT = fileURLToPath(new URL('../../../../runner/chief-mcp.js', import.meta.url));
@@ -42,6 +46,92 @@ class McpClient {
   }
 }
 
+interface CdpCommand {
+  readonly id: number;
+  readonly method: string;
+  readonly params: Record<string, unknown>;
+}
+
+/**
+ * Chromium's DevTools endpoint as the script sees it: `/json/list` with one
+ * page, and that page's socket. Commands are recorded; `login` is what the
+ * login function "finds" in the page, and `navigates` whether a submit
+ * navigates.
+ */
+class FakeCdp {
+  readonly commands: CdpCommand[] = [];
+  /** Checked when `Page.navigate` arrives. */
+  onNavigate: () => void = () => undefined;
+  login: { found: boolean; submitted?: boolean } = { found: true, submitted: true };
+  navigates = true;
+  navigateError: string | null = null;
+  private readonly server = http.createServer((request, response) => {
+    if (request.url !== '/json/list') {
+      response.writeHead(404).end();
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify([{ id: 'page-1', type: 'page', url: 'about:blank', webSocketDebuggerUrl: `ws://127.0.0.1:${String(this.port)}/devtools/page/page-1` }]));
+  });
+  private readonly sockets = new WebSocketServer({ server: this.server });
+
+  constructor() {
+    this.sockets.on('connection', (socket) => {
+      const event = (method: string, params: Record<string, unknown> = {}): void => {
+        setTimeout(() => socket.send(JSON.stringify({ method, params })), 5);
+      };
+      socket.on('message', (data: Buffer) => {
+        const command = JSON.parse(data.toString('utf8')) as CdpCommand;
+        this.commands.push(command);
+        let result: Record<string, unknown> = {};
+        switch (command.method) {
+          case 'Page.navigate':
+            this.onNavigate();
+            if (this.navigateError !== null) result = { frameId: 'f', errorText: this.navigateError };
+            else {
+              result = { frameId: 'f' };
+              event('Page.loadEventFired', { timestamp: 1 });
+            }
+            break;
+          case 'Runtime.evaluate':
+            result = { result: { type: 'object', objectId: 'document-1' } };
+            break;
+          case 'Runtime.callFunctionOn':
+            result = { result: { type: 'object', value: this.login } };
+            if (this.login.found && this.login.submitted === true && this.navigates) event('Page.loadEventFired', { timestamp: 2 });
+            break;
+          case 'Input.dispatchKeyEvent':
+            if (command.params['type'] === 'keyUp' && this.navigates) event('Page.navigatedWithinDocument', { frameId: 'f', url: 'x' });
+            break;
+        }
+        socket.send(JSON.stringify({ id: command.id, result }));
+      });
+    });
+  }
+
+  get port(): number {
+    return (this.server.address() as AddressInfo).port;
+  }
+
+  get url(): string {
+    return `http://127.0.0.1:${String(this.port)}`;
+  }
+
+  listen(): Promise<void> {
+    return new Promise((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+  }
+
+  methods(): string[] {
+    return this.commands.map((command) => command.method);
+  }
+
+  close(): Promise<void> {
+    for (const client of this.sockets.clients) client.terminate();
+    this.sockets.close();
+    return new Promise((resolve) => this.server.close(() => resolve()));
+  }
+}
+
 const textOf = (reply: Record<string, unknown>): string => {
   const result = reply['result'] as { content: { type: string; text: string }[] };
   return result.content.map((c) => c.text).join('');
@@ -51,14 +141,20 @@ describe('runner/chief-mcp.js (voice feedback US-007)', () => {
   const dirs: string[] = [];
   let dir: string;
   let client: McpClient;
+  let cdp: FakeCdp;
 
-  const start = (timeoutMs = 5_000): void => {
+  const start = (timeoutMs = 5_000, env: Record<string, string> = {}): void => {
     // Run from outside the repository, as in the image: the repo's package.json
     // says `"type": "module"`, and the script is CommonJS.
     const script = path.join(path.dirname(dir), 'chief-mcp.js');
     fs.copyFileSync(SCRIPT, script);
     const child = spawn(process.execPath, [script], {
-      env: { ...process.env, CHIEF_MCP_BROWSER_DIR: dir, CHIEF_MCP_ANSWER_TIMEOUT_MS: String(timeoutMs), CHIEF_MCP_POLL_MS: '10' },
+      env: { ...process.env, CHIEF_MCP_BROWSER_DIR: dir, CHIEF_MCP_ANSWER_TIMEOUT_MS: String(timeoutMs), CHIEF_MCP_POLL_MS: '10',
+        CHIEF_MCP_CDP_URL: cdp.url,
+        CHIEF_MCP_FORM_WAIT_MS: '100',
+        CHIEF_MCP_LOGIN_WAIT_MS: '2000',
+        ...env,
+      },
     });
     client = new McpClient(child);
   };
@@ -76,14 +172,17 @@ describe('runner/chief-mcp.js (voice feedback US-007)', () => {
     fs.writeFileSync(path.join(dir, `${requestId}.answer`), JSON.stringify({ id: requestId, ...content }), { mode: 0o600 });
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    cdp = new FakeCdp();
+    await cdp.listen();
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-mcp-'));
     dirs.push(base);
     dir = path.join(base, 'browser');
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     client.child.kill();
+    await cdp.close();
   });
 
   after(() => {
@@ -109,7 +208,7 @@ describe('runner/chief-mcp.js (voice feedback US-007)', () => {
     assert.equal(client.messages.length, 2, 'a notification gets no reply');
   });
 
-  it('writes a request, waits for the answer, returns the URL and whether there was a login, and deletes both files', async () => {
+  it('deletes both files as soon as the answer is read, opens the URL, logs in, and never echoes the login (US-009)', async () => {
     start();
     const request = await call(3);
     assert.equal(request['hint'], 'the checkout page');
@@ -118,21 +217,79 @@ describe('runner/chief-mcp.js (voice feedback US-007)', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(client.messages.length, 0, 'the tool blocks until the answer');
 
-    answer(String(request['id']), { cancelled: false, url: 'http://host.docker.internal:3000/checkout', credentials: { username: 'ann', password: PASSWORD } });
-    const reply = await client.reply(3);
-    const text = textOf(reply);
-    assert.match(text, /http:\/\/host\.docker\.internal:3000\/checkout/);
-    assert.match(text, /supplied a username and password/);
-    assert.ok(!text.includes(PASSWORD) && !text.includes('ann'), 'the credentials never reach the agent');
-    assert.deepEqual(fs.readdirSync(dir), [], 'request and answer are gone');
+    let filesAtNavigate: string[] | null = null;
+    cdp.onNavigate = () => {
+      filesAtNavigate = fs.readdirSync(dir);
+    };
+    const url = 'http://host.docker.internal:3000/checkout';
+    answer(String(request['id']), { cancelled: false, url, credentials: { username: 'ann@example.com', password: PASSWORD } });
+    const text = textOf(await client.reply(3));
+    assert.equal(text, `opened ${url} and logged in`);
+    assert.deepEqual(filesAtNavigate, [], 'request and answer are gone before the browser is touched');
+
+    assert.deepEqual(cdp.methods(), ['Page.enable', 'Page.navigate', 'Runtime.evaluate', 'Runtime.callFunctionOn']);
+    assert.deepEqual(cdp.commands[1]?.params, { url });
+    const login = cdp.commands[3]?.params ?? {};
+    assert.equal(login['objectId'], 'document-1');
+    assert.deepEqual(login['arguments'], [{ value: 'ann@example.com' }, { value: PASSWORD }], 'the login goes in as arguments');
+    const declaration = String(login['functionDeclaration']);
+    assert.ok(!declaration.includes(PASSWORD), 'never as source text');
+    assert.match(declaration, /type === 'password'/);
+    assert.match(declaration, /el\.type === 'text' \|\| el\.type === 'email'/);
+    assert.match(declaration, /requestSubmit/);
+    assert.ok(!text.includes(PASSWORD) && !text.includes('ann@'), 'the credentials never reach the agent');
   });
 
-  it('says so when no login was supplied', async () => {
+  it('opens the URL without a login attempt when no login was supplied', async () => {
     start();
     const request = await call(4, {});
     assert.equal(request['hint'], '');
     answer(String(request['id']), { cancelled: false, url: 'https://example.com/' });
-    assert.match(textOf(await client.reply(4)), /did not supply a login/);
+    assert.equal(textOf(await client.reply(4)), 'opened https://example.com/');
+    assert.deepEqual(cdp.methods(), ['Page.enable', 'Page.navigate']);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
+  it('says so when the page has no login form, after looking for a while', async () => {
+    cdp.login = { found: false };
+    start();
+    const request = await call(8);
+    answer(String(request['id']), { cancelled: false, url: 'https://example.com/', credentials: { username: 'ann', password: PASSWORD } });
+    assert.equal(
+      textOf(await client.reply(8)),
+      'opened https://example.com/, could not find a login form; ask the operator to log in in the page view',
+    );
+    assert.ok(cdp.methods().filter((method) => method === 'Runtime.callFunctionOn').length > 1, 'it looked more than once');
+  });
+
+  it('presses Enter in the password field when it is not in a form, and waits for the navigation', async () => {
+    cdp.login = { found: true, submitted: false };
+    start();
+    const request = await call(9);
+    answer(String(request['id']), { cancelled: false, url: 'https://example.com/', credentials: { username: 'ann', password: PASSWORD } });
+    assert.equal(textOf(await client.reply(9)), 'opened https://example.com/ and logged in');
+    const keys = cdp.commands.filter((command) => command.method === 'Input.dispatchKeyEvent').map((command) => command.params['type']);
+    assert.deepEqual(keys, ['keyDown', 'keyUp']);
+  });
+
+  it('gives up waiting for the navigation after the login wait', async () => {
+    cdp.navigates = false;
+    start(5_000, { CHIEF_MCP_LOGIN_WAIT_MS: '200' });
+    const request = await call(10);
+    const started = Date.now();
+    answer(String(request['id']), { cancelled: false, url: 'https://example.com/', credentials: { username: 'ann', password: PASSWORD } });
+    assert.equal(textOf(await client.reply(10)), 'opened https://example.com/ and logged in');
+    assert.ok(Date.now() - started >= 200);
+  });
+
+  it('says it could not open the page when the navigation fails, not that nobody opened a browser', async () => {
+    cdp.navigateError = 'net::ERR_NAME_NOT_RESOLVED';
+    start();
+    const request = await call(11);
+    answer(String(request['id']), { cancelled: false, url: 'https://nope.invalid/', credentials: { username: 'ann', password: PASSWORD } });
+    const text = textOf(await client.reply(11));
+    assert.match(text, /^could not open https:\/\/nope\.invalid\/ \(net::ERR_NAME_NOT_RESOLVED\)/);
+    assert.ok(!text.includes(PASSWORD));
   });
 
   it('returns "the operator did not open a browser" on a cancelled answer', async () => {

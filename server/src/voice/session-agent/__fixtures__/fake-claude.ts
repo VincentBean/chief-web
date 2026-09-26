@@ -2,6 +2,9 @@ import type { FakeDockerDaemon, FakeExec } from '../../../docker/fake-daemon.js'
 
 export const CLAUDE_SESSION = 'claude-conv-1';
 
+/** The login `#secret` puts in a tool call and its result (US-009). */
+export const SECRET_LOGIN = { username: 'operator-ann@example.com', password: 'hunter2-s3cret!' } as const;
+
 /** What `#long` opens with: past the chunker's 40-character minimum, so it is a segment by itself (the chunker waits for the word after it). */
 export const LONG_OPENING = 'Heard you, and here is a longer thought about the export feature you asked for.';
 
@@ -10,7 +13,7 @@ const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
 /**
  * A stream-json `claude` on the fake daemon: one scripted turn per user line,
  * shaped like the recorded fixtures. Markers in the message steer it:
- * `#crash` exits, `#read` uses a tool first, `#long` opens with a sentence
+ * `#crash` exits, `#read` uses a tool first, `#secret` one whose input and result carry a login, `#long` opens with a sentence
  * long enough to be spoken on its own, `#hang` never ends the turn by itself
  * and `#deaf` also ignores the interrupt request (only a signal ends it).
  */
@@ -58,6 +61,12 @@ export class FakeClaude {
         if (said.includes('#read')) {
           emit({ type: 'assistant', message: { id: `${id}t`, content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/workspace/repo/server/src/auth/service.ts' } }] }, parent_tool_use_id: null });
           emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }] }, parent_tool_use_id: null });
+        }
+        if (said.includes('#secret')) {
+          const { username, password } = SECRET_LOGIN;
+          const input = { command: `curl -u ${username}:${password} http://localhost:3000/api/me`, username, password };
+          emit({ type: 'assistant', message: { id: `${id}s`, content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input }] }, parent_tool_use_id: null });
+          emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: `logged in as ${username} with ${password}` }] }, parent_tool_use_id: null });
         }
         emit({ type: 'stream_event', event: { type: 'message_start', message: { id } }, parent_tool_use_id: null });
         emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent_tool_use_id: null });

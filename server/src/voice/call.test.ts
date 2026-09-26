@@ -55,7 +55,7 @@ import {
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
 import { RESUME_WINDOW_MS } from './service.js';
-import { CLAUDE_SESSION, FakeClaude, LONG_OPENING } from './session-agent/__fixtures__/fake-claude.js';
+import { CLAUDE_SESSION, FakeClaude, LONG_OPENING, SECRET_LOGIN } from './session-agent/__fixtures__/fake-claude.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
 import type { SttResult } from './stt/index.js';
@@ -736,6 +736,24 @@ describe('barge-in', () => {
     const reply = listVoiceTurns(w.db, callId).find((t) => t.turn === 2 && t.speaker === 'session');
     assert.equal(reply?.interrupted, true);
     assert.equal(getVoiceSessionAgent(w.db, reply?.sessionId ?? '')?.claudeSessionId, CLAUDE_SESSION);
+  });
+
+  it('keeps a login in a tool call out of the socket, the tool card and the database (voice feedback US-009)', async () => {
+    const { w, client } = await sessionCall('redacted-login');
+    client.send({ type: 'text', text: '#secret check the account page' });
+    await client.until('agent.done', 2);
+
+    const card = client.messages('tool').find((message) => message.status === 'ok');
+    assert.equal(card?.name, 'Bash');
+    assert.equal(card?.summary, 'Running curl -u [redacted]:[redacted] http://localhost:3000/api/me');
+    const socket = JSON.stringify(client.received);
+    const tables = (w.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name);
+    const database = JSON.stringify(tables.map((table) => w.db.prepare(`SELECT * FROM "${table}"`).all()));
+    assert.match(database, /Running curl -u \[redacted\]/, 'the card is stored');
+    for (const secret of [SECRET_LOGIN.password, SECRET_LOGIN.username]) {
+      assert.ok(!socket.includes(secret), `${secret} reached the socket`);
+      assert.ok(!database.includes(secret), `${secret} reached the database`);
+    }
   });
 
   it('a misfire after a barge-in resumes nothing, and the aborted audio is not replayed', async () => {

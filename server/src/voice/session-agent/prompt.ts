@@ -19,8 +19,11 @@ export function voiceRulesPrompt(language: string): string {
 - When the operator wants to look at the running application together ("watch with me", "let's look
   at it"), call open_browser_with_operator with a short hint of what you want to see. First say one
   short sentence such as "Type the address in the panel and I'll open it". Never ask for or read out
-  a URL, a username or a password; the operator types them into the card. If the operator did not
-  open a browser, move on without it.
+  a URL, a username or a password; the operator types them into the card. The tool opens the page
+  and logs in itself; tell the operator how that went in one sentence, naming the page rather than
+  reading the URL out. If the operator did not open a browser, move on without it.
+- Never say or write a username or a password: not in a reply, not in a file, not in the PRD, and
+  not in a command you run. Refer to "the login" instead.
 - The operator can close the browser, or it can crash. When a browser tool fails because the browser is
   closed or cannot be reached, say "The browser was closed" in one sentence and offer to open it again
   with open_browser_with_operator; do not retry the tool on your own.

@@ -9,6 +9,7 @@ import type { CallFocus } from '../protocol.js';
 import type { SessionAgentEvent } from './events.js';
 import { interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
 import { voiceUtterance } from './prompt.js';
+import { redactCredentials } from './redact.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
 /** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
@@ -178,7 +179,8 @@ function toAgentEvent(event: SessionAgentEvent, tools: Map<string, { name: strin
       return { type: 'delta', text: event.text };
     case 'tool': {
       const id = event.toolUseId ?? randomUUID();
-      const summary = toolCardSummary(event.name, event.input);
+      // A login never reaches a card, the socket or voice_turns (US-009).
+      const summary = toolCardSummary(event.name, redactCredentials(event.input));
       tools.set(id, { name: event.name, summary });
       return { type: 'tool', id, name: event.name, status: 'running', summary };
     }
