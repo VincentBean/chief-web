@@ -350,10 +350,13 @@ export class VoiceService {
         this.drafted(sessionId, 'error', options.updated === true);
       },
     );
+    // `runDetached` marked the session drafting before its first await: the panel shows it (US-013).
+    this.active?.planningChanged();
   }
 
   /** A detached turn ended: `planning.drafted` with what `prd.md` holds now. */
   private drafted(sessionId: string, reason: DetachedTurnOutcome, updated: boolean): void {
+    this.active?.planningChanged();
     const registry = this.deps.sessionAgents;
     const events = this.deps.events;
     if (registry === undefined || events === undefined) return;

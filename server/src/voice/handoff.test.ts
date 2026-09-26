@@ -506,8 +506,8 @@ describe('returning to a waiting planning session (US-011)', () => {
     assert.equal(agent?.inputs[0]?.text, '');
     assert.equal(agent.inputs[0]?.resume, resumePrompt(questions(2), { state: 'waiting' }));
     assert.deepEqual(
-      t.of('planning').map(({ sessionId, state, openQuestions }) => [sessionId, state, openQuestions]),
-      [['s1', 'waiting', 2]],
+      t.of('planning').map(({ sessions }) => sessions.map(({ sessionId, state, openQuestions }) => [sessionId, state, openQuestions])),
+      [[['s1', 'waiting', 2]]],
     );
 
     // The operator answers; the count drops and the panel hears it once.
@@ -518,11 +518,8 @@ describe('returning to a waiting planning session (US-011)', () => {
     await until(() => agent.inputs.length === 2 && t.call.state.activeTurn === null);
     assert.equal(agent.inputs[1]?.resume, undefined);
     assert.deepEqual(
-      t.of('planning').map(({ state, openQuestions }) => [state, openQuestions]),
-      [
-        ['waiting', 2],
-        ['waiting', 1],
-      ],
+      t.of('planning').map(({ sessions }) => sessions.map(({ state, openQuestions }) => [state, openQuestions])),
+      [[['waiting', 2]], [['waiting', 1]]],
     );
   });
 
@@ -553,5 +550,49 @@ describe('returning to a waiting planning session (US-011)', () => {
     t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'briefing' }));
     await focusOn(t, 's1');
     assert.equal(t.agents.get('s1')?.inputs[0]?.resume, undefined);
+  });
+});
+
+describe('the call panel hears every planning session (US-013)', () => {
+  it('sends the whole list right after ready, then only when it changed', async () => {
+    const t = setup();
+    t.states.push(
+      planningSession({ sessionId: 's1', sessionName: 'billing-export', openQuestions: questions(4), stories: 3 }),
+      planningSession({ sessionId: 's2', sessionName: 'search', repositoryName: 'webshop', state: 'drafting' }),
+    );
+    await t.call.start('openrouter');
+    const types = t.sent.map((message) => message.type);
+    assert.equal(types.indexOf('planning'), types.indexOf('ready') + 2, 'after ready and state');
+    assert.deepEqual(t.of('planning'), [
+      {
+        type: 'planning',
+        sessions: [
+          { sessionId: 's1', name: 'billing-export', repository: 'shop-api', state: 'waiting', openQuestions: 4, stories: 3 },
+          { sessionId: 's2', name: 'search', repository: 'webshop', state: 'drafting', openQuestions: 0, stories: 0 },
+        ],
+      },
+    ]);
+
+    t.call.planningChanged();
+    assert.equal(t.of('planning').length, 1, 'nothing changed');
+
+    (t.states[1] as { state: string }).state = 'failed';
+    t.call.planningChanged();
+    assert.deepEqual(
+      t.of('planning').at(-1)?.sessions.map(({ sessionId, state }) => [sessionId, state]),
+      [
+        ['s1', 'waiting'],
+        ['s2', 'failed'],
+      ],
+    );
+  });
+
+  it('tells the panel of a PRD changed outside a turn when its event comes in', async () => {
+    const t = setup();
+    await t.call.start('openrouter');
+    assert.deepEqual(t.of('planning'), [{ type: 'planning', sessions: [] }]);
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'billing-export', state: 'done', stories: 2 }));
+    t.call.postEvent({ kind: 'prd.valid', sessionId: 's1', name: 'billing-export', stories: 2 });
+    assert.deepEqual(t.of('planning').at(-1)?.sessions.map(({ state, stories }) => [state, stories]), [['done', 2]]);
   });
 });

@@ -1201,6 +1201,11 @@ describe('a scripted call end to end (US-027)', () => {
     await s.say('back to chief');
     // Persists until the chip refocuses it; `running` may be over before `say` returns.
     await waitFor(() => s.agents().detachedState(sessionId).lastOutcome === 'ok');
+    // The panel saw it drafting, then back from its turn (US-013).
+    const states = (): (string | undefined)[] =>
+      s.client.messages('planning').map(({ sessions }) => sessions.find((view) => view.sessionId === sessionId)?.state);
+    await waitFor(() => states().length > 0 && states().at(-1) !== 'drafting');
+    assert.ok(states().includes('drafting'), `drafting was shown: ${states().join(', ')}`);
 
     // The draft it left behind: two questions for the operator.
     const session = getSession(s.w.db, sessionId) ?? assert.fail('no session');
@@ -1218,7 +1223,8 @@ describe('a scripted call end to end (US-027)', () => {
     await s.client.until('agent.done', done + 1);
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
     assert.equal(sessionStdin(sessionId).at(-1), resumePrompt(questions, { state: 'waiting' }));
-    assert.deepEqual(s.client.messages('planning').at(-1), { type: 'planning', sessionId, state: 'waiting', openQuestions: 2, stories: 0 });
+    const planned = (): unknown[] => s.client.messages('planning').map(({ sessions }) => sessions.find((view) => view.sessionId === sessionId));
+    assert.deepEqual(planned().at(-1), { sessionId, name: session.name, repository: 'chief-web', state: 'waiting', openQuestions: 2, stories: 0 });
 
     // The operator answers the first; the agent takes it off the list.
     const sent = s.client.messages('planning').length;
@@ -1226,7 +1232,7 @@ describe('a scripted call end to end (US-027)', () => {
     await s.say('Download');
     assert.ok(sessionStdin(sessionId).at(-1)?.includes('Download'));
     assert.equal(sessionStdin(sessionId).at(-1)?.includes('open questions'), false, 'the resume is sent once');
-    assert.deepEqual(s.client.messages('planning').slice(sent), [{ type: 'planning', sessionId, state: 'waiting', openQuestions: 1, stories: 0 }]);
+    assert.deepEqual(planned().slice(sent), [{ sessionId, name: session.name, repository: 'chief-web', state: 'waiting', openQuestions: 1, stories: 0 }]);
     await s.hangUp();
   });
 

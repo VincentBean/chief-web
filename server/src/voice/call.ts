@@ -26,6 +26,7 @@ import {
   decodeFrame,
   FRAME_KIND_UTTERANCE,
   parseClientMessage,
+  type PlanningSessionView,
   type ServerMessage,
   type TurnTimes,
   type SttMode,
@@ -389,8 +390,8 @@ export class VoiceCall {
   private readonly briefed = new Set<string>();
   /** The resume message (US-011) a planning session's agent still has to be sent, per session. */
   private readonly resumes = new Map<string, string>();
-  /** What the panel was last told of each planning session (US-011), to send only a change. */
-  private readonly planningSent = new Map<string, string>();
+  /** The planning list the panel was last sent (US-013), to send only a change; null forces the next one. */
+  private planningSent: string | null = null;
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
   private subscriptionTimer: unknown = null;
@@ -1202,7 +1203,7 @@ export class VoiceCall {
       this.pollPrd(sessionId);
       // Re-read after every turn (US-011): an answered question shows on the panel at once.
       const after = this.planningOf(sessionId);
-      if (after !== null) this.sendPlanning(after);
+      this.planningChanged();
       if (!interrupted && stateBefore !== 'done' && after?.state === 'done') this.remindOfOthers(sessionId);
     }
   }
@@ -1306,8 +1307,8 @@ export class VoiceCall {
   private prepareResume(sessionId: string): void {
     this.resumes.delete(sessionId);
     const planning = this.planningOf(sessionId);
+    this.planningChanged();
     if (planning === null) return;
-    this.sendPlanning(planning);
     const { state } = planning;
     if (state !== 'waiting' && state !== 'done' && state !== 'failed') return;
     this.resumes.set(
@@ -1319,18 +1320,31 @@ export class VoiceCall {
     );
   }
 
-  /** Tells the panel a planning session's state and open-question count, when they changed. */
-  private sendPlanning(planning: PlanningState): void {
-    const key = `${planning.state}:${String(planning.openQuestions.length)}:${String(planning.stories)}`;
-    if (this.planningSent.get(planning.sessionId) === key) return;
-    this.planningSent.set(planning.sessionId, key);
-    this.send({
-      type: 'planning',
-      sessionId: planning.sessionId,
-      state: planning.state,
-      openQuestions: planning.openQuestions.length,
-      stories: planning.stories,
-    });
+  /**
+   * Tells the panel where every planning session stands (US-013), when
+   * anything in the list changed since it was last sent. The service calls
+   * this too, when a detached turn starts or ends.
+   */
+  planningChanged(): void {
+    if (this.ended || this.deps.planningStates === undefined) return;
+    let sessions: PlanningSessionView[];
+    try {
+      sessions = this.deps.planningStates.listPlanningSessions().map((planning) => ({
+        sessionId: planning.sessionId,
+        name: planning.sessionName,
+        repository: planning.repositoryName,
+        state: planning.state,
+        openQuestions: planning.openQuestions.length,
+        stories: planning.stories,
+      }));
+    } catch (cause) {
+      logger.warn('voice call could not list the planning sessions', { error: String(cause) });
+      return;
+    }
+    const key = JSON.stringify(sessions);
+    if (this.planningSent === key || this.transport === null) return;
+    this.planningSent = key;
+    this.send({ type: 'planning', sessions });
   }
 
   /** Every planning session but `sessionId`, most recently updated first; empty on a failure. */
@@ -1619,6 +1633,8 @@ export class VoiceCall {
    */
   postEvent(event: VoiceBusEvent): void {
     if (this.ended || !this.persisted) return;
+    // A PRD edited in the planning terminal changes a planning session too (US-013).
+    this.planningChanged();
     const settings = getVoiceSettings(this.deps.db);
     const text = describeEvent(event, settings.timezone);
     this.send({ type: 'ui', action: 'toast', text });
@@ -1798,6 +1814,9 @@ export class VoiceCall {
       resumed,
     });
     this.sendState();
+    // A new socket has heard nothing yet.
+    this.planningSent = null;
+    this.planningChanged();
     this.sendEarconAudio();
   }
 

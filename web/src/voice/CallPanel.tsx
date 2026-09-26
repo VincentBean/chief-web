@@ -1,11 +1,11 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
 
 import { useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { Segmented } from '../ui.tsx';
 import { type CallStatus, type CallUsage, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
-import type { CallFocus, CallPhase, ConfirmationOutcome, ToolStatus } from './protocol.ts';
+import type { CallFocus, CallPhase, ConfirmationOutcome, PlanningSessionView, ToolStatus } from './protocol.ts';
 import { bindHoldToTalkButton } from './ptt.ts';
 import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
 
@@ -65,12 +65,43 @@ function focusValue(focus: CallFocus): string {
   return focus.kind === 'chief' ? 'chief' : `session:${focus.sessionId}`;
 }
 
+/** The words a planning session's badge shows and reads out (US-013); null for a session still being briefed. */
+function planningBadgeWords(planning: PlanningSessionView): string | null {
+  switch (planning.state) {
+    case 'briefing':
+      return null;
+    case 'drafting':
+      return 'drafting';
+    case 'waiting':
+      return `${String(planning.openQuestions)} open`;
+    case 'done':
+      return 'done';
+    case 'failed':
+      return 'stopped';
+  }
+}
+
+/** A planning session's state in the focus menu (US-013): the badge reads out the words it shows. */
+function PlanningBadge({ planning }: { readonly planning: PlanningSessionView }) {
+  const words = planningBadgeWords(planning);
+  if (words === null) return null;
+  return (
+    <span className={`call-badge call-badge--${planning.state}`} role="img" aria-label={words} title={words}>
+      {planning.state === 'drafting' && <span className="call-spinner" aria-hidden="true" />}
+      {planning.state === 'done' ? <Icon name="check" /> : <span aria-hidden="true">{words}</span>}
+    </span>
+  );
+}
+
 export function CallPanel() {
   const call = useCall();
   const { sessions } = useAppData();
   const [draft, setDraft] = useState('');
   const [now, setNow] = useState(() => Date.now());
   const body = useRef<HTMLOListElement | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = useRef<HTMLDivElement | null>(null);
+  const chip = useRef<HTMLButtonElement | null>(null);
   const holdButton = useRef<HTMLButtonElement | null>(null);
 
   const live = call.status === 'live' || call.status === 'reconnecting';
@@ -101,6 +132,27 @@ export function CallPanel() {
     );
   }, [ptt, call.panelOpen, inCall]);
 
+  // The focus menu closes on a click anywhere else, and whenever it cannot be used.
+  const menuUsable = call.panelOpen && call.status === 'live';
+  useEffect(() => {
+    if (!menuOpen) return;
+    if (!menuUsable) {
+      setMenuOpen(false);
+      return;
+    }
+    const away = (event: PointerEvent): void => {
+      if (event.target instanceof Node && menu.current?.contains(event.target) !== true) setMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', away);
+    return () => document.removeEventListener('pointerdown', away);
+  }, [menuOpen, menuUsable]);
+
+  // Opened, the menu puts the keyboard on the current choice.
+  useEffect(() => {
+    if (!menuOpen) return;
+    menu.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')?.focus();
+  }, [menuOpen]);
+
   if (!call.panelOpen) return null;
 
   const focused = call.focusedOn;
@@ -108,14 +160,46 @@ export function CallPanel() {
     focused.kind === 'chief'
       ? 'Chief'
       : ((sessions ?? []).find((session) => session.id === focused.sessionId)?.name ?? 'Session');
+  const planningOf = new Map(call.planning.map((planning) => [planning.sessionId, planning]));
   // Every cloned session: pending ones are planned, the rest asked about (voice US-025).
-  const focusOptions = (sessions ?? []).filter(
-    (session) => session.cloned || (focused.kind === 'session' && focused.sessionId === session.id),
+  const focusOptions: { readonly id: string; readonly name: string }[] = (sessions ?? []).filter(
+    (session) => session.cloned || planningOf.has(session.id) || (focused.kind === 'session' && focused.sessionId === session.id),
   );
+  // A planning session the page's data has not caught up with yet still gets its row.
+  for (const planning of call.planning) {
+    if (!focusOptions.some((option) => option.id === planning.sessionId)) focusOptions.push({ id: planning.sessionId, name: planning.name });
+  }
+  // Planning sessions that wait for the operator (US-013), counted on the chip while the menu is closed.
+  const needsYou = call.planning.filter((planning) => planning.state === 'waiting' || planning.state === 'failed').length;
+  const needsYouLabel = `${String(needsYou)} planning ${needsYou === 1 ? 'session needs' : 'sessions need'} you`;
   const status = statusLabel(call.status, call.phase);
   // The focused planning session's open questions (US-011), counted down as they are answered.
-  const openQuestions = focused.kind === 'session' ? (call.planning[focused.sessionId]?.openQuestions ?? 0) : 0;
+  const openQuestions = focused.kind === 'session' ? (planningOf.get(focused.sessionId)?.openQuestions ?? 0) : 0;
   const openQuestionsLabel = `${String(openQuestions)} open ${openQuestions === 1 ? 'question' : 'questions'}`;
+
+  const choose = (value: string): void => {
+    setMenuOpen(false);
+    chip.current?.focus();
+    if (value === focusValue(focused)) return;
+    call.focus(value === 'chief' ? 'chief' : { sessionId: value.slice('session:'.length) });
+  };
+
+  // Arrow keys walk the menu, Escape closes it; Enter and Space are the buttons' own.
+  const menuKeys = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (!menuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenuOpen(false);
+      chip.current?.focus();
+      return;
+    }
+    const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+    if (step === undefined) return;
+    event.preventDefault();
+    const items = [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])];
+    const at = items.findIndex((item) => item === document.activeElement);
+    items[(at + step + items.length) % items.length]?.focus();
+  };
 
   const send = (event: FormEvent): void => {
     event.preventDefault();
@@ -139,32 +223,54 @@ export function CallPanel() {
           <Icon name="broadcast" />
         </span>
         <div className="call-panel__who">
-          <label className="call-chip" title="Who you are talking to">
-            <span className="visually-hidden">Talk to</span>
-            <select
-              className="call-chip__select"
-              value={focusValue(call.focusedOn)}
+          <div className="call-focus" ref={menu} onKeyDown={menuKeys}>
+            <button
+              type="button"
+              ref={chip}
+              className="call-chip"
+              title="Who you are talking to"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
               disabled={call.status !== 'live'}
-              onChange={(event) => {
-                const value = event.target.value;
-                call.focus(value === 'chief' ? 'chief' : { sessionId: value.slice('session:'.length) });
-              }}
+              onClick={() => setMenuOpen((open) => !open)}
             >
-              <option value="chief">Chief</option>
-              {focusOptions.map((session) => (
-                <option key={session.id} value={`session:${session.id}`}>
-                  {session.name}
-                </option>
-              ))}
-            </select>
-            <span className="call-chip__label">{focusName}</span>
-            {openQuestions > 0 && (
-              <span className="call-chip__count" aria-label={openQuestionsLabel} title={openQuestionsLabel}>
-                {openQuestions}
-              </span>
+              <span className="visually-hidden">Talk to</span>
+              <span className="call-chip__label">{focusName}</span>
+              {openQuestions > 0 && (
+                <span className="call-chip__count" role="img" aria-label={openQuestionsLabel} title={openQuestionsLabel}>
+                  {openQuestions}
+                </span>
+              )}
+              <Icon name="chevron-down" />
+              {needsYou > 0 && (
+                <span className="call-chip__needs-you" role="img" aria-label={needsYouLabel} title={needsYouLabel}>
+                  {needsYou}
+                </span>
+              )}
+            </button>
+            {menuOpen && (
+              <div className="call-focus__menu" role="menu" aria-label="Talk to">
+                {[{ id: null, name: 'Chief' }, ...focusOptions].map((option) => {
+                  const value = option.id === null ? 'chief' : `session:${option.id}`;
+                  const planning = option.id === null ? undefined : planningOf.get(option.id);
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={value === focusValue(focused)}
+                      className="call-focus__item"
+                      tabIndex={-1}
+                      onClick={() => choose(value)}
+                    >
+                      <span className="call-focus__name">{option.name}</span>
+                      {planning !== undefined && <PlanningBadge planning={planning} />}
+                    </button>
+                  );
+                })}
+              </div>
             )}
-            <Icon name="chevron-down" />
-          </label>
+          </div>
           <span className="call-panel__status">
             {call.micOpen && (
               <span className="call-mic" title="The microphone is open">
