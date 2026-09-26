@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { parsePrd, prdPathFor, readPrdStatus, setStoryStatus, setStoryStatuses } from './index.js';
+import { parsePrd, prdParses, prdPathFor, readPrdStatus, setStoryStatus, setStoryStatuses } from './index.js';
 
 const VALID_PRD = `# PRD: Login
 
@@ -134,6 +134,63 @@ describe('prd parser', () => {
   });
 });
 
+describe('prd open questions', () => {
+  const withSection = (section: string): string => `${VALID_PRD}\n${section}`;
+
+  it('yields no questions when the PRD has no Open Questions section', () => {
+    assert.deepEqual(parsePrd(VALID_PRD).openQuestions, []);
+  });
+
+  it('yields no questions for an empty section, and skips blank bullets', () => {
+    assert.deepEqual(parsePrd(withSection('## Open Questions\n')).openQuestions, []);
+    assert.deepEqual(parsePrd(withSection('## Open Questions\n\n-   \n* \n')).openQuestions, []);
+  });
+
+  it('reads three bullets in file order, `-` or `*`, with a case-insensitive heading', () => {
+    const parsed = parsePrd(
+      withSection('## open QUESTIONS\n\n- Which CSV delimiter?\n* Include archived invoices?\n\nSome prose.\n-   Who may export?  \n'),
+    );
+
+    assert.deepEqual(parsed.openQuestions, ['Which CSV delimiter?', 'Include archived invoices?', 'Who may export?']);
+  });
+
+  it('counts only unchecked checkboxes, without their marker', () => {
+    const parsed = parsePrd(
+      withSection('### Open Questions\n- [ ] Still open\n- [x] Answered\n- [X] Also answered\n* [ ] Open too\n- Plain\n'),
+    );
+
+    assert.deepEqual(parsed.openQuestions, ['Still open', 'Open too', 'Plain']);
+  });
+
+  it('ends the section at the next heading of the same or a higher level', () => {
+    const parsed = parsePrd(
+      withSection('## Open Questions\n- First\n### Detail\n- Second\n## Non-Goals\n- Not a question\n'),
+    );
+
+    assert.deepEqual(parsed.openQuestions, ['First', 'Second']);
+  });
+
+  it('ends the section at a story heading, so story checklists are never questions', () => {
+    const parsed = parsePrd(`# PRD: X\n\n## Open Questions\n- Asked\n\n### US-001: Story\n**Status:** todo\n\n**Acceptance Criteria:**\n- [ ] Criterion\n`);
+
+    assert.deepEqual(parsed.openQuestions, ['Asked']);
+    assert.equal(parsed.stories[0]?.acceptanceCriteria.length, 1);
+  });
+
+  it('ignores a Dutch "Open vragen" section and bullets inside a code fence', () => {
+    assert.deepEqual(parsePrd(withSection('## Open vragen\n- Welk scheidingsteken?\n')).openQuestions, []);
+    assert.deepEqual(parsePrd(withSection('## Open Questions\n```\n- not a question\n```\n- Real\n')).openQuestions, ['Real']);
+  });
+
+  it('never makes a valid PRD invalid', () => {
+    const parsed = parsePrd(withSection('## Open Questions\n- Anything?\n- [ ]\n'));
+
+    assert.deepEqual(parsed.errors, []);
+    assert.equal(prdParses(parsed), true);
+    assert.equal(parsed.openQuestions.length, 1);
+  });
+});
+
 describe('prd status writer', () => {
   it('rewrites one status line and disturbs nothing else', () => {
     const { content, changed, missing } = setStoryStatus(VALID_PRD, 'US-001', 'done');
@@ -241,8 +298,19 @@ describe('prd file status', () => {
     assert.equal(status.exists, true);
     assert.equal(status.parses, true);
     assert.equal(status.storyCount, 2);
+    assert.equal(status.openQuestions, 0);
     assert.equal(status.bytes > 0, true);
     assert.notEqual(status.updatedAt, null);
+  });
+
+  it('counts the open questions of a file that still parses', () => {
+    const file = path.join(dir, 'questions.md');
+    fs.writeFileSync(file, `${VALID_PRD}\n## Open Questions\n- One?\n- [x] Answered\n- Two?\n`);
+
+    const status = readPrdStatus(file, '.chief/prds/demo/prd.md');
+
+    assert.equal(status.parses, true);
+    assert.equal(status.openQuestions, 2);
   });
 
   it('reports a file that exists but does not parse', () => {

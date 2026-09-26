@@ -68,6 +68,7 @@ const prd = (over: Partial<PrdStatus>): PrdStatus => ({
   exists: true,
   parses: false,
   storyCount: 0,
+  openQuestions: 0,
   errors: [],
   updatedAt: null,
   bytes: 10,

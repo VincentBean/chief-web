@@ -16,6 +16,8 @@ export interface PrdStatus {
   /** True only when the file exists *and* has no parse errors. */
   readonly parses: boolean;
   readonly storyCount: number;
+  /** Unanswered bullets under `## Open Questions`; `0` when there is no file. */
+  readonly openQuestions: number;
   readonly errors: readonly PrdParseError[];
   /** Last modification time, ISO-8601 UTC; `null` when there is no file. */
   readonly updatedAt: string | null;
@@ -56,6 +58,7 @@ export function readPrdDocument(absolutePath: string, displayPath: string): PrdD
       exists: false,
       parses: false,
       storyCount: 0,
+      openQuestions: 0,
       errors: [],
       updatedAt: null,
       bytes: 0,
@@ -69,6 +72,7 @@ export function readPrdDocument(absolutePath: string, displayPath: string): PrdD
       exists: true,
       parses: false,
       storyCount: 0,
+      openQuestions: 0,
       errors: [{ line: 0, message: `${displayPath} is larger than 2 MiB, which is not a PRD.` }],
       updatedAt,
       bytes: stats.size,
@@ -84,6 +88,7 @@ export function readPrdDocument(absolutePath: string, displayPath: string): PrdD
       exists: true,
       parses: false,
       storyCount: 0,
+      openQuestions: 0,
       errors: [{ line: 0, message: `${displayPath} could not be read: ${String(cause)}` }],
       updatedAt,
       bytes: stats.size,
@@ -97,6 +102,7 @@ export function readPrdDocument(absolutePath: string, displayPath: string): PrdD
       exists: true,
       parses: parsed.errors.length === 0,
       storyCount: parsed.stories.length,
+      openQuestions: parsed.openQuestions.length,
       errors: parsed.errors,
       updatedAt,
       bytes: stats.size,
