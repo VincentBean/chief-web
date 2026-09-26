@@ -24,11 +24,17 @@ const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
  * verbatim, `#read` uses a tool first, `#long` opens with a sentence
  * long enough to be spoken on its own, `#hang` never ends the turn by itself
  * and `#deaf` also ignores the interrupt request (only a signal ends it).
+ * {@link FakeClaude.onTurn} sees every user message first.
  */
 export class FakeClaude {
   /** Every stdin line per exec id, parsed. */
   readonly stdin = new Map<string, Record<string, unknown>[]>();
   private message = 0;
+  /**
+   * Runs before a user message is answered, like the agent working on it (e.g.
+   * writing its PRD); a returned promise holds the reply until it settles.
+   */
+  onTurn: ((turn: { containerId: string; text: string }) => Promise<void> | void) | null = null;
 
   constructor(private readonly daemon: FakeDockerDaemon) {
     daemon.onExec = (exec) => (exec.attachStdin && !exec.tty ? this.agent(exec) : this.signal(exec));
@@ -64,24 +70,29 @@ export class FakeClaude {
           this.daemon.finish(exec.id, 1);
           return;
         }
-        const replay = /#replay:([\w-]+)/.exec(said)?.[1];
-        if (replay !== undefined) {
-          for (const recorded of recording(replay)) this.daemon.emitFramed(exec.id, `${recorded}\n`);
-          return;
-        }
-        const id = `msg_${String(++this.message)}`;
-        emit({ type: 'system', subtype: 'init', session_id: CLAUDE_SESSION, model: 'claude-sonnet' });
-        if (said.includes('#read')) {
-          emit({ type: 'assistant', message: { id: `${id}t`, content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/workspace/repo/server/src/auth/service.ts' } }] }, parent_tool_use_id: null });
-          emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }] }, parent_tool_use_id: null });
-        }
-        emit({ type: 'stream_event', event: { type: 'message_start', message: { id } }, parent_tool_use_id: null });
-        emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent_tool_use_id: null });
-        emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: said.includes('#long') ? `${LONG_OPENING} And ` : 'Heard you. ' } }, parent_tool_use_id: null });
-        deaf = said.includes('#deaf');
-        if (said.includes('#hang') || deaf) return; // never ends the turn on its own
-        emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'What next?' } }, parent_tool_use_id: null });
-        emit({ type: 'result', subtype: 'success', is_error: false, duration_ms: 10, total_cost_usd: 0.01 });
+        const answer = (): void => {
+          const replay = /#replay:([\w-]+)/.exec(said)?.[1];
+          if (replay !== undefined) {
+            for (const recorded of recording(replay)) this.daemon.emitFramed(exec.id, `${recorded}\n`);
+            return;
+          }
+          const id = `msg_${String(++this.message)}`;
+          emit({ type: 'system', subtype: 'init', session_id: CLAUDE_SESSION, model: 'claude-sonnet' });
+          if (said.includes('#read')) {
+            emit({ type: 'assistant', message: { id: `${id}t`, content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/workspace/repo/server/src/auth/service.ts' } }] }, parent_tool_use_id: null });
+            emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }] }, parent_tool_use_id: null });
+          }
+          emit({ type: 'stream_event', event: { type: 'message_start', message: { id } }, parent_tool_use_id: null });
+          emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent_tool_use_id: null });
+          emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: said.includes('#long') ? `${LONG_OPENING} And ` : 'Heard you. ' } }, parent_tool_use_id: null });
+          deaf = said.includes('#deaf');
+          if (said.includes('#hang') || deaf) return; // never ends the turn on its own
+          emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'What next?' } }, parent_tool_use_id: null });
+          emit({ type: 'result', subtype: 'success', is_error: false, duration_ms: 10, total_cost_usd: 0.01 });
+        };
+        const held = this.onTurn?.({ containerId: exec.containerId, text: said });
+        if (held instanceof Promise) void held.then(answer);
+        else answer();
       },
     };
   }
