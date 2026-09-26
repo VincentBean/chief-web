@@ -692,7 +692,8 @@ function SavedLogins({ repository }: { readonly repository: Repository }) {
       <div className="field__row">
         <input
           className="field__input mono"
-          type="url"
+          type="text"
+          inputMode="url"
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           onKeyDown={addOnEnter}
