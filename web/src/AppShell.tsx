@@ -78,6 +78,7 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
   const active = (sessions ?? []).filter(isActive).length;
   const attention = (sessions ?? []).filter(needsAttention).length;
   const hold = stats?.hold.until ?? null;
+  const awaitingDecision = stats?.sentry.configured === true ? stats.sentry.awaitingDecision : 0;
 
   const counts: Partial<Record<string, ReactNode>> = {
     '/sessions': (
@@ -93,6 +94,11 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
           </span>
         )}
       </>
+    ),
+    '/sentry': awaitingDecision > 0 && (
+      <span className="nav__count nav__count--danger" title={`${String(awaitingDecision)} need your decision`}>
+        {awaitingDecision}
+      </span>
     ),
   };
 
