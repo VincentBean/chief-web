@@ -30,7 +30,7 @@ import { CLOSE_TERMINAL_PROMPT, focusSessionTool } from '../chief/focus.js';
 import type { ChiefServices, ToolContext } from '../chief/tools.js';
 import type { CallFocus } from '../protocol.js';
 import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './agent.js';
-import { VOICE_PID_DIR, voicePidFile } from './process.js';
+import { MCP_CONFIG_FILE, VOICE_PID_DIR, voicePidFile } from './process.js';
 import { voiceUtterance } from './prompt.js';
 import { SessionAgentError, SessionAgentRegistry } from './registry.js';
 import { CLAUDE_SESSION, FakeClaude } from './__fixtures__/fake-claude.js';
@@ -191,6 +191,8 @@ describe('session voice agents', () => {
       'stream-json',
       '--verbose',
       '--include-partial-messages',
+      '--mcp-config',
+      '/tmp/.chief-voice/mcp.json',
       '--append-system-prompt',
     ]);
     assert.match(argv.at(-1) as string, /You are on a live voice call/);
@@ -232,6 +234,49 @@ describe('session voice agents', () => {
     const argvOf = (execId: string): string[] => daemon.exec(execId)?.cmd.slice(4) ?? [];
     const flag = (argv: readonly string[], name: string): string | null =>
       argv.includes(name) ? (argv[argv.indexOf(name) + 1] ?? null) : null;
+
+    for (const status of ['pending', 'ready'] as const) {
+      it(`writes the MCP config as uid 1000 before a ${status} session's agent starts (voice feedback US-006)`, async () => {
+        const session = newSession(`mcp-${status}`, status);
+        const agent = await registry.acquire(session.id);
+        const inContainer = daemon.execs().filter((exec) => exec.containerId === `c-${session.id}`);
+        const writes = inContainer.filter((exec) => exec.cmd.join(' ').includes(`> ${MCP_CONFIG_FILE}`));
+        assert.equal(writes.length, 1);
+        const [write] = writes as [FakeExec];
+        assert.ok(inContainer.indexOf(write) < inContainer.findIndex((exec) => exec.id === agent.execId));
+        assert.equal(write.user, '1000');
+        assert.deepEqual(write.cmd.slice(0, 4), [
+          '/bin/sh',
+          '-c',
+          `mkdir -p ${VOICE_PID_DIR} && printf '%s' "$1" > ${MCP_CONFIG_FILE}`,
+          'chief-voice-mcp',
+        ]);
+        assert.deepEqual(JSON.parse(write.cmd[4] as string), {
+          mcpServers: {
+            playwright: {
+              type: 'stdio',
+              command: 'playwright-mcp',
+              args: ['--cdp-endpoint', 'http://127.0.0.1:9222', '--caps', 'core,vision'],
+            },
+            chief: { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] },
+          },
+        });
+        assert.equal(flag(argvOf(agent.execId), '--mcp-config'), MCP_CONFIG_FILE);
+      });
+    }
+
+    it('does not start the agent when the MCP config cannot be written', async () => {
+      const session = newSession('mcp-unwritable');
+      const previous = daemon.onExec;
+      daemon.onExec = (exec) =>
+        exec.cmd.join(' ').includes(MCP_CONFIG_FILE) && !exec.attachStdin ? { exitCode: 1, stderr: 'read-only file system\n' } : (previous?.(exec) ?? {});
+      try {
+        await assert.rejects(registry.acquire(session.id), /could not write \/tmp\/\.chief-voice\/mcp\.json: read-only file system/);
+        assert.equal(claude.agentExecs().filter((exec) => exec.containerId === `c-${session.id}`).length, 0);
+      } finally {
+        daemon.onExec = previous;
+      }
+    });
 
     it('plans a pending session: the planning prompt, no disallowed tools, mode plan', async () => {
       const session = newSession('plan-mode');
@@ -538,6 +583,21 @@ describe('session voice agents', () => {
     assert.equal(toolCardSummary('Read', { file_path: '/workspace/repo/server/src/auth/service.ts' }), 'Reading server/src/auth/service.ts');
     assert.equal(toolCardSummary('Grep', { pattern: 'invoice' }), 'Searching for "invoice"');
     assert.equal(toolCardSummary('Mystery', {}), 'Using Mystery');
+  });
+
+  it('describes browser tool uses for their cards (voice feedback US-006)', () => {
+    assert.equal(toolCardSummary('mcp__chief__open_browser_with_operator', { hint: 'the checkout' }), 'Opening the browser');
+    assert.equal(
+      toolCardSummary('mcp__playwright__browser_navigate', { url: 'http://host.docker.internal:3000/checkout?token=secret' }),
+      'Navigating to /checkout',
+    );
+    assert.equal(toolCardSummary('mcp__playwright__browser_click', { element: 'Apply coupon', target: 'e12' }), 'Clicking Apply coupon');
+    assert.equal(toolCardSummary('mcp__playwright__browser_snapshot', {}), 'Reading the page');
+    assert.equal(toolCardSummary('mcp__playwright__browser_take_screenshot', {}), 'Taking a screenshot');
+    // Typed text can be a password: never on the card.
+    assert.equal(toolCardSummary('mcp__playwright__browser_type', { element: 'Password', target: 'e3', text: 'hunter2' }), 'Typing into Password');
+    assert.equal(toolCardSummary('mcp__playwright__browser_navigate', { url: 'not a url?x=1' }), 'Navigating to not a url');
+    assert.equal(toolCardSummary('mcp__playwright__browser_unheard_of', {}), 'Using the browser');
   });
 });
 

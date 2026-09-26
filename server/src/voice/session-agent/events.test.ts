@@ -72,7 +72,7 @@ function textDeltaCount(name: string): number {
 
 describe('SessionAgentEventParser over the recorded fixtures', () => {
   it('has the recordings the story asks for', () => {
-    assert.deepEqual(OUTPUT_FIXTURES, ['interrupt', 'multi-turn', 'no-partials', 'text-reply', 'tool-use']);
+    assert.deepEqual(OUTPUT_FIXTURES, ['interrupt', 'mcp-config', 'multi-turn', 'no-partials', 'text-reply', 'tool-use']);
   });
 
   for (const name of OUTPUT_FIXTURES) {
@@ -107,6 +107,25 @@ describe('SessionAgentEventParser over the recorded fixtures', () => {
     assert.equal(end?.subtype, 'success');
     assert.ok((end?.costUsd ?? 0) > 0);
     assert.ok((end?.durationMs ?? 0) > 0);
+  });
+
+  it('mcp-config: the CLI takes --mcp-config with both servers, and prefixes the browser tools mcp__playwright__', () => {
+    const [init] = jsonLines('mcp-config');
+    const servers = init?.['mcp_servers'] as { name: string; status: string; source: string }[];
+    // Recorded on a host: Playwright's server runs, the image's chief-mcp.js is not there (US-007).
+    assert.deepEqual(
+      servers.filter((server) => server.source === 'dynamic'),
+      [
+        { name: 'playwright', status: 'connected', source: 'dynamic' },
+        { name: 'chief', status: 'failed', source: 'dynamic' },
+      ],
+    );
+    const tools = init?.['tools'] as string[];
+    for (const tool of ['browser_navigate', 'browser_click', 'browser_snapshot', 'browser_take_screenshot', 'browser_mouse_click_xy']) {
+      assert.ok(tools.includes(`mcp__playwright__${tool}`), tool);
+    }
+    // Connected with nothing listening on the DevTools port: no browser is needed until a tool asks for one.
+    assert.equal(spoken(parseByLine('mcp-config')), 'OK.');
   });
 
   it('no-partials: speaks the complete text block exactly once', () => {

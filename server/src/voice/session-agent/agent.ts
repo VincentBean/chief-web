@@ -181,6 +181,8 @@ export function toolCardSummary(name: string, input: unknown): string {
     const value = args[key];
     return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
   };
+  if (name.startsWith(BROWSER_TOOL_PREFIX)) return browserToolSummary(name.slice(BROWSER_TOOL_PREFIX.length), text);
+  if (name.startsWith(CHIEF_TOOL_PREFIX)) return chiefToolSummary(name.slice(CHIEF_TOOL_PREFIX.length));
   const path = relative(text('file_path') ?? text('notebook_path') ?? text('path'));
   switch (name) {
     case 'Read':
@@ -218,6 +220,81 @@ export function toolCardSummary(name: string, input: unknown): string {
     }
     default:
       return `Using ${name}`;
+  }
+}
+
+/** The session agent's MCP servers (`process.ts` `mcpConfig`), as the CLI prefixes their tools. */
+const BROWSER_TOOL_PREFIX = 'mcp__playwright__';
+const CHIEF_TOOL_PREFIX = 'mcp__chief__';
+
+/**
+ * `@playwright/mcp`'s tools: "Navigating to /checkout", "Clicking Apply coupon".
+ * Only a URL's path is shown (a query string can carry a token), and typed text
+ * never is (it can be a password).
+ */
+function browserToolSummary(tool: string, text: (key: string) => string | null): string {
+  const element = text('element');
+  switch (tool) {
+    case 'browser_navigate': {
+      const url = text('url');
+      return url === null ? 'Navigating' : `Navigating to ${urlPath(url)}`;
+    }
+    case 'browser_navigate_back':
+      return 'Going back';
+    case 'browser_click':
+      return element === null ? 'Clicking on the page' : `Clicking ${clip(element, 60)}`;
+    case 'browser_mouse_click_xy':
+      return 'Clicking on the page';
+    case 'browser_type':
+      return element === null ? 'Typing' : `Typing into ${clip(element, 60)}`;
+    case 'browser_fill_form':
+      return 'Filling in a form';
+    case 'browser_select_option':
+      return element === null ? 'Choosing an option' : `Choosing in ${clip(element, 60)}`;
+    case 'browser_hover':
+    case 'browser_mouse_move_xy':
+      return element === null ? 'Pointing at the page' : `Pointing at ${clip(element, 60)}`;
+    case 'browser_press_key': {
+      const key = text('key');
+      return key === null ? 'Pressing a key' : `Pressing ${clip(key, 20)}`;
+    }
+    case 'browser_snapshot':
+    case 'browser_find':
+      return 'Reading the page';
+    case 'browser_take_screenshot':
+      return 'Taking a screenshot';
+    case 'browser_wait_for':
+      return 'Waiting for the page';
+    case 'browser_console_messages':
+      return 'Reading the console';
+    case 'browser_network_requests':
+    case 'browser_network_request':
+      return 'Looking at the network requests';
+    case 'browser_mouse_wheel':
+      return 'Scrolling';
+    case 'browser_close':
+      return 'Closing the page';
+    default:
+      return 'Using the browser';
+  }
+}
+
+/** The `chief` MCP server's tools (US-007). */
+function chiefToolSummary(tool: string): string {
+  switch (tool) {
+    case 'open_browser_with_operator':
+      return 'Opening the browser';
+    default:
+      return `Using ${tool}`;
+  }
+}
+
+/** "/checkout" for "http://host.docker.internal:3000/checkout?token=…". */
+function urlPath(url: string): string {
+  try {
+    return clip(new URL(url).pathname, 60);
+  } catch {
+    return clip(url.replace(/[?#].*$/, ''), 60);
   }
 }
 

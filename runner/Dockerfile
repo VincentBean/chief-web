@@ -48,6 +48,14 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force \
  && claude --version
 
+# The session voice agent's browser tools (voice feedback US-006): the
+# `playwright-mcp` binary, which the agent's MCP config points at the Chromium
+# above over CDP (`--cdp-endpoint`), so Playwright never downloads a browser.
+ARG PLAYWRIGHT_MCP_VERSION=latest
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+ && npm cache clean --force \
+ && command -v playwright-mcp
+
 # SSH: GitHub's host keys are pinned, everything else is accept-new so a clone
 # from any other remote still runs non-interactively.
 COPY ssh/known_hosts /etc/ssh/ssh_known_hosts

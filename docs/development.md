@@ -40,3 +40,12 @@ and run with `docker exec`: one Chrome DevTools Protocol message per line on
 its stdin and stdout (see `server/src/browser/`). The service's tests play
 both processes on the fake Docker daemon (`FakeBrowser` in
 `server/src/docker/fake-daemon.ts`), so no Docker is needed to run them.
+
+The image also installs `@playwright/mcp` globally (about 18 MB, no browser
+download: `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`). A session voice agent starts
+with `--mcp-config /tmp/.chief-voice/mcp.json`, which the server writes into
+the container before every start: `playwright` (`playwright-mcp --cdp-endpoint
+http://127.0.0.1:9222 --caps core,vision`) and `chief`
+(`node /usr/local/lib/chief-web/chief-mcp.js`). Playwright only connects to
+the DevTools port on its first browser tool call, so an agent that never
+browses never needs Chromium running.
