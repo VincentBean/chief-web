@@ -140,8 +140,9 @@ next to everything above. Voice is off until you switch it on in Settings.
   opened and the login typed in. The tool tells the agent only that a login
   was supplied, never what it is, and any username or password that does show
   up in an agent's tool call is redacted before it reaches a tool card, the
-  call socket or the stored transcript. A login is never spoken, by you or the
-  agent. Deleting a repository deletes its saved logins. Use a test account, not a personal one: the session agent drives the
+  call socket or the stored transcript. The agent asks you to type a login into
+  the card and never says one itself; a password you read out loud goes to
+  speech-to-text and into the transcript like anything else you say. Deleting a repository deletes its saved logins. Use a test account, not a personal one: the session agent drives the
   logged-in page.
 - **The shared browser runs inside the session container.** Chromium there
   reaches what the container reaches, and the session agent drives it with the

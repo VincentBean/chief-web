@@ -235,8 +235,8 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 **What chief cannot do.** There is no tool to delete anything (sessions,
 repositories, tasks, transcripts), change settings, open a terminal, merge a
 pull request or touch the Claude login. Those stay in the UI. Chief has no
-browser either: "watch with me" goes to the session agent, and saved logins are
-managed on the Repositories page only.
+browser either: "watch with me" goes to the session agent, and it has no tool for
+saved logins, which are added on the Repositories page or from the card.
 
 ## Session agents
 
