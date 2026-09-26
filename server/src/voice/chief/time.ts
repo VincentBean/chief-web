@@ -3,7 +3,7 @@
  * a phrase ("tonight at 2", "in 3 hours", "morgen om 9 uur") read in the
  * operator's `voice_timezone`. Anything that could mean two different moments
  * is refused as `ambiguous_time` rather than guessed, so chief asks again; the
- * confirmation prompt then reads the resolved time back.
+ * result of `schedule_start` then says the resolved time back.
  *
  * No date library: wall-clock times are converted with `Intl.DateTimeFormat`.
  */

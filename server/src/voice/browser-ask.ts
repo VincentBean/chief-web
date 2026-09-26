@@ -1,8 +1,8 @@
 import type { BrowserInfo, BrowserListener } from '../browser/index.js';
-import type { AttachedExec, ExecOutput, ExecSpec, ExecState } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import type { CallClock } from './call.js';
 import type { BrowserAskOutcome, BrowserCredentials, SavedLoginView, ServerMessage } from './protocol.js';
+import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from './request-files.js';
 
 /**
  * The "watch with me" card (voice feedback US-007): the server's half of the
@@ -20,8 +20,6 @@ import type { BrowserAskOutcome, BrowserCredentials, SavedLoginView, ServerMessa
 
 /** Where the MCP server and the relay meet inside the container. */
 export const BROWSER_REQUEST_DIR = '/tmp/.chief-voice/browser';
-/** uid of the session agent, and so of its MCP server. */
-export const BROWSER_ASK_USER = '1000';
 /** How long the MCP server waits for an answer. */
 export const BROWSER_ANSWER_TIMEOUT_MS = 5 * 60_000;
 /**
@@ -30,13 +28,6 @@ export const BROWSER_ANSWER_TIMEOUT_MS = 5 * 60_000;
  * never leaves a login in a file nobody reads.
  */
 export const BROWSER_ASK_TTL_MS = BROWSER_ANSWER_TIMEOUT_MS - 15_000;
-/** How long the relay looks for the request file after the tool call showed up on the stream. */
-export const REQUEST_DISCOVERY_MS = 10_000;
-export const REQUEST_POLL_MS = 250;
-const EXEC_TIMEOUT_MS = 10_000;
-
-/** What the MCP server writes; the id names both files. */
-const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The answer file, as `runner/chief-mcp.js` reads it. */
 export type BrowserAnswerFile =
@@ -48,37 +39,8 @@ export type BrowserAnswerFile =
     }
   | { readonly id: string; readonly cancelled: true; readonly reason?: string };
 
-/** Lists every pending request file, one JSON object per line. */
-export function listRequestsSpec(): ExecSpec {
-  return {
-    cmd: ['/bin/sh', '-c', `for f in ${BROWSER_REQUEST_DIR}/*.request; do [ -f "$f" ] && cat "$f" && echo; done; true`],
-    user: BROWSER_ASK_USER,
-    tty: false,
-    attachStdin: false,
-  };
-}
-
-/**
- * Writes stdin to `<id>.answer`, owner-only, then renames it into place so
- * the MCP server never reads half a file. `id` must match {@link REQUEST_ID}.
- */
-export function answerWriteSpec(id: string): ExecSpec {
-  if (!REQUEST_ID.test(id)) throw new Error(`not a request id: ${id}`);
-  const file = `${BROWSER_REQUEST_DIR}/${id}.answer`;
-  return {
-    cmd: ['/bin/sh', '-c', `umask 077 && mkdir -p ${BROWSER_REQUEST_DIR} && cat > ${file}.tmp && mv ${file}.tmp ${file}`],
-    user: BROWSER_ASK_USER,
-    tty: false,
-    attachStdin: true,
-  };
-}
-
 /** The slice of `DockerApi` the relay uses. */
-export interface BrowserAskDocker {
-  runExec(container: string, spec: ExecSpec, timeoutMs?: number): Promise<ExecOutput>;
-  attachExec(container: string, spec: ExecSpec): Promise<AttachedExec>;
-  inspectExec(execId: string): Promise<ExecState>;
-}
+export type BrowserAskDocker = RequestFileDocker;
 
 /** A repository's saved logins (US-010); without them the card lists none. */
 export interface BrowserSavedLogins {
@@ -294,39 +256,16 @@ export class BrowserAsks {
     const deadline = Date.now() + (this.deps.discoveryMs ?? REQUEST_DISCOVERY_MS);
     for (;;) {
       if (discovery.stopped || this.closed) return null;
-      const found = await this.listRequests(containerId);
+      const found = (await listRequestFiles(this.deps.docker, containerId, BROWSER_REQUEST_DIR, 'browser')).map((request) => ({
+        id: request.id,
+        hint: typeof request['hint'] === 'string' ? request['hint'].slice(0, 200) : '',
+        createdAt: request.createdAt,
+      }));
       const fresh = found.filter((request) => !this.seen.has(request.id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       if (fresh[0] !== undefined) return fresh[0];
       if (Date.now() >= deadline) return null;
       await new Promise((resolve) => setTimeout(resolve, this.deps.pollMs ?? REQUEST_POLL_MS));
     }
-  }
-
-  private async listRequests(containerId: string): Promise<{ id: string; hint: string; createdAt: string }[]> {
-    let output: ExecOutput;
-    try {
-      output = await this.deps.docker.runExec(containerId, listRequestsSpec(), EXEC_TIMEOUT_MS);
-    } catch (cause) {
-      logger.warn('could not list browser requests', { container: containerId, error: String(cause) });
-      return [];
-    }
-    const requests: { id: string; hint: string; createdAt: string }[] = [];
-    for (const line of output.stdout.split('\n')) {
-      if (line.trim() === '') continue;
-      try {
-        const parsed = JSON.parse(line) as Record<string, unknown>;
-        const { id, hint, createdAt } = parsed;
-        if (typeof id !== 'string' || !REQUEST_ID.test(id)) continue;
-        requests.push({
-          id,
-          hint: typeof hint === 'string' ? hint.slice(0, 200) : '',
-          createdAt: typeof createdAt === 'string' ? createdAt : '',
-        });
-      } catch {
-        // A file the MCP server is still writing is renamed into place, so this is junk; skip it.
-      }
-    }
-    return requests;
   }
 
   private async resolveCancelled(ask: Ask, outcome: Exclude<BrowserAskOutcome, 'opened'>, reason?: string): Promise<void> {
@@ -351,21 +290,7 @@ export class BrowserAsks {
   }
 
   /** Writes the answer file through stdin; false when that failed (logged without its content). */
-  private async write(ask: Ask, answer: BrowserAnswerFile): Promise<boolean> {
-    try {
-      const exec = await this.deps.docker.attachExec(ask.containerId, answerWriteSpec(ask.id));
-      exec.stdin.end(JSON.stringify(answer));
-      let stderr = '';
-      for await (const chunk of exec.output) if (chunk.stream === 'stderr') stderr += chunk.text;
-      const state = await this.deps.docker.inspectExec(exec.execId);
-      if (state.exitCode !== 0) {
-        logger.warn('could not write the browser answer', { session: ask.sessionId, exitCode: state.exitCode, stderr: stderr.trim().slice(0, 200) });
-        return false;
-      }
-      return true;
-    } catch (cause) {
-      logger.warn('could not write the browser answer', { session: ask.sessionId, error: String(cause) });
-      return false;
-    }
+  private write(ask: Ask, answer: BrowserAnswerFile): Promise<boolean> {
+    return writeAnswerFile(this.deps.docker, ask.containerId, BROWSER_REQUEST_DIR, ask.id, answer, { what: 'browser', session: ask.sessionId });
   }
 }

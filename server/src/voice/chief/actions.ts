@@ -4,13 +4,14 @@ import { uniqueFixSessionName } from '../../sentry/index.js';
 import { type CreateSessionRequest, MAX_FEEDBACK_LENGTH } from '../../sessions/index.js';
 import { getVoiceSettings } from '../../settings/index.js';
 import type { UiAction } from '../protocol.js';
-import { confirmable, type PreparedAction } from './confirm.js';
 import { parseStartTime, speakTime } from './time.js';
 import {
+  acting,
   type ChiefServices,
   type ChiefTool,
   isResult,
   missing,
+  type PreparedAction,
   resolveName,
   SESSION_PARAM,
   sessionArg,
@@ -25,9 +26,9 @@ import {
  * Chief's session actions (voice US-012): create a session (or a feedback
  * session, voice feedback US-003), start and stop
  * its build, mark it ready or send it back to planning, schedule its start and
- * retry it. Every one of them is `confirmable`: `prepare` resolves the spoken
- * names, parses the time and words the prompt the operator answers; `execute`
- * calls the same services the dashboard's buttons do, with the stored ids.
+ * retry it. Every one of them is built with `acting`: `prepare` resolves the
+ * spoken names and parses the time; `execute` then calls, in the same tool
+ * call, the same services the dashboard's buttons do, with the resolved ids.
  *
  * A service refusal (a 409, a 404, the usage-limit hold) is a result with the
  * service's own message for chief to say, never an exception.
@@ -84,7 +85,7 @@ function idArg(args: Readonly<Record<string, unknown>>): { id: string; name: str
   return { id: args['sessionId'] as string, name: args['name'] as string };
 }
 
-/** A confirmable action on one existing session. */
+/** An action on one existing session: resolved in `prepare`, run by id. */
 function sessionAction(
   services: ChiefServices,
   name: string,
@@ -95,7 +96,7 @@ function sessionAction(
     execute(target: { id: string; name: string }, args: Readonly<Record<string, unknown>>, ctx: ToolContext): Promise<ToolResult>;
   },
 ): ChiefTool {
-  return confirmable(name, description, { session: SESSION_PARAM, ...steps.extra }, ['session'], {
+  return acting(name, description, { session: SESSION_PARAM, ...steps.extra }, ['session'], {
     prepare: (args) =>
       guarded(`Could not ${name.replace(/_/g, ' ')}`, () => {
         const session = sessionArg(services, args);
@@ -109,22 +110,14 @@ function sessionAction(
   });
 }
 
-function prepared(prompt: string, args: Readonly<Record<string, unknown>>): PreparedAction {
-  return { prompt, args };
+function prepared(args: Readonly<Record<string, unknown>>): PreparedAction {
+  return { args };
 }
-
-/** How much of the feedback the read-back quotes; the stored feedback is never cut. */
-export const FEEDBACK_QUOTE_MAX = 160;
 
 /** `feedback-<slug of its first words>`, or plain `feedback` when they make no slug. */
 export function feedbackSessionName(feedback: string): string {
   const slug = slugify(feedback);
   return slug === '' ? 'feedback' : `feedback-${slug}`;
-}
-
-function quoted(feedback: string): string {
-  const flat = feedback.replace(/\s+/g, ' ');
-  return flat.length <= FEEDBACK_QUOTE_MAX ? flat : `${flat.slice(0, FEEDBACK_QUOTE_MAX - 1).trimEnd()}…`;
 }
 
 /**
@@ -169,7 +162,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
   const open = (id: string): readonly UiAction[] => [{ action: 'navigate', path: sessionPath(id) }];
 
   return [
-    confirmable(
+    acting(
       'create_session',
       'Create a session in a repository. The name is turned into a slug. Setup (the clone) continues after this returns; ' +
         'a setup failure is announced separately.',
@@ -208,8 +201,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
             }
             const baseBranch = stringArg(args, 'base_branch')?.trim() ?? repository.defaultBaseBranch;
             const codeReview = typeof args['code_review'] === 'boolean' ? args['code_review'] : null;
-            const review = codeReview === null ? '' : codeReview ? ', with code review' : ', without code review';
-            return prepared(`Create session ${slug} in ${repository.name}, from ${baseBranch} with a pull request into ${target}${review}?`, {
+            return prepared({
               repositoryId: repository.id,
               repository: repository.name,
               name: slug,
@@ -237,7 +229,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
       },
     ),
 
-    confirmable(
+    acting(
       'start_feedback_session',
       'Start a session about feedback on an existing application: something wrong or wanted in what is already there. ' +
         "Pass the operator's words as feedback, verbatim. Once the clone is done the call goes to the session's agent " +
@@ -289,7 +281,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
                 };
               }
             }
-            return prepared(`Start a feedback session on ${repository.name} about "${quoted(feedback)}"?`, {
+            return prepared({
               repositoryId: repository.id,
               repository: repository.name,
               name,
@@ -320,7 +312,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
     ),
 
     sessionAction(services, 'start_build', 'Start the build of a ready session (it queues when every slot is busy).', {
-      prepare: (session) => prepared(`Start the build of ${session.name}?`, { sessionId: session.id, name: session.name }),
+      prepare: (session) => prepared({ sessionId: session.id, name: session.name }),
       execute: async (target) => {
         const build = await services.builds.start(target.id);
         return {
@@ -335,11 +327,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
     sessionAction(services, 'stop_build', 'Stop a running build, or take a queued session out of the queue.', {
       prepare: (session) => {
         const queued = services.builds.status(session.id).queued;
-        return prepared(queued ? `${session.name} is still queued. Remove from the queue?` : `Stop the build of ${session.name}?`, {
-          sessionId: session.id,
-          name: session.name,
-          dequeue: queued,
-        });
+        return prepared({ sessionId: session.id, name: session.name, dequeue: queued });
       },
       execute: async (target, args) => {
         const dequeue = args['dequeue'] === true;
@@ -354,7 +342,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
     }),
 
     sessionAction(services, 'mark_ready', "Parse a pending session's PRD and make it buildable. Parse errors come back to read out.", {
-      prepare: (session) => prepared(`Mark ${session.name} ready?`, { sessionId: session.id, name: session.name }),
+      prepare: (session) => prepared({ sessionId: session.id, name: session.name }),
       execute: async (target) => {
         const result = await services.sessions.markReady(target.id);
         const ui: readonly UiAction[] = [...open(target.id), { action: 'highlight', target: 'prd' }];
@@ -377,7 +365,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
     }),
 
     sessionAction(services, 'back_to_planning', 'Return a ready session to planning so its PRD can be edited.', {
-      prepare: (session) => prepared(`Take ${session.name} back to planning?`, { sessionId: session.id, name: session.name }),
+      prepare: (session) => prepared({ sessionId: session.id, name: session.name }),
       execute: (target) => {
         const result = services.sessions.backToPlanning(target.id);
         return Promise.resolve({
@@ -402,14 +390,14 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
         prepare: (session, args) => {
           const timeZone = getVoiceSettings(db).timezone;
           if (args['clear'] === true) {
-            return prepared(`Clear the scheduled start of ${session.name}?`, { sessionId: session.id, name: session.name, at: null });
+            return prepared({ sessionId: session.id, name: session.name, at: null });
           }
           const at = stringArg(args, 'at');
           if (at === null) return missing('at');
           const parsed = parseStartTime(at, { now: now(), timeZone });
           if (!parsed.ok) return { ok: false, data: { reason: parsed.reason, message: parsed.message }, summary: parsed.message };
           const spoken = speakTime(new Date(parsed.at), timeZone);
-          return prepared(`Schedule ${session.name} to start ${spoken}?`, { sessionId: session.id, name: session.name, at: parsed.at, spoken });
+          return prepared({ sessionId: session.id, name: session.name, at: parsed.at, spoken });
         },
         execute: (target, args) => {
           const at = typeof args['at'] === 'string' ? args['at'] : null;
@@ -425,7 +413,7 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
     ),
 
     sessionAction(services, 'retry', 'Retry a failed session from where it failed (the build, or the push and pull request).', {
-      prepare: (session) => prepared(`Retry ${session.name}?`, { sessionId: session.id, name: session.name }),
+      prepare: (session) => prepared({ sessionId: session.id, name: session.name }),
       execute: async (target) => {
         const result = await services.retries.retry(target.id);
         return {

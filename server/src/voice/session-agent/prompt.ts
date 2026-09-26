@@ -7,8 +7,28 @@ import { cutOffNote } from '../cut-off.js';
  * with a block of voice overrides as its first stdin message.
  */
 
-/** docs/voice-plan.md Appendix A.2 part 1, with the call's language filled in. */
-export function voiceRulesPrompt(language: string): string {
+/** How the agent says the PRD is done (US-008): the operator can say "build it". */
+const PRD_COMPLETE = 'say the PRD is complete in one sentence and that the operator can say "build it"';
+
+/**
+ * The planning agent's own way to build (US-008): `start_build`, only on the
+ * operator's word. A Q&A agent does not have the tool.
+ */
+const START_BUILD_RULE = `
+- When the operator asks to build ("go ahead and build it", "let's build this"), call start_build. Never
+  call it on your own. When the build starts, chief takes the call back: say nothing more. When it did
+  not start, say why in one sentence; if the PRD does not parse, fix it.`;
+
+/**
+ * docs/voice-plan.md Appendix A.2 part 1, with the call's language filled in;
+ * `planning` adds the PRD and `start_build` rules a Q&A agent has no use for.
+ */
+export function voiceRulesPrompt(language: string, planning = true): string {
+  const prd = planning
+    ? `
+- When you have written or updated the PRD, say so in one sentence and say how many stories it has.
+  Once it is complete, ${PRD_COMPLETE}.${START_BUILD_RULE}`
+    : '';
   return `You are on a live voice call. Everything you write is converted to speech.
 - Reply in at most three short spoken sentences, then stop and let the operator talk.
 - No markdown, no lists, no code blocks in replies. If code matters, say what it does in words;
@@ -29,9 +49,7 @@ export function voiceRulesPrompt(language: string): string {
   with open_browser_with_operator; do not retry the tool on your own.
 - Ask one question at a time. Never use lettered or numbered options; ask naturally.
 - Messages starting with [voice] are the operator's transcribed speech; transcription can be wrong,
-  so if something sounds odd, check rather than guess.
-- When you have written or updated the PRD, say so in one sentence, say how many stories it has,
-  and suggest saying "back to chief" to mark it ready and build it.
+  so if something sounds odd, check rather than guess.${prd}
 - Speak ${languageName(language)} unless the operator switches language.`;
 }
 
@@ -122,7 +140,7 @@ export function resumePrompt(openQuestions: readonly string[], options: ResumeOp
       ? `The operator is back on the call. Your last turn alone did not finish: ${options.failure ?? 'it failed'}. Pick up from what exists on disk: read the PRD if there is one, and finish it with the operator.`
       : 'The operator is back on the call.';
   if (state === 'done') {
-    return `${back} The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.`;
+    return `${back} The PRD is complete and has no open questions: ${PRD_COMPLETE}. When the operator asks to build, call start_build.`;
   }
   if (openQuestions.length === 0) {
     return `${back} The PRD has no open questions, but it is not finished: it is missing or does not parse in the story format. Greet the operator in one sentence, say what is left to do, and ask the first question you need answered.`;
@@ -131,7 +149,7 @@ export function resumePrompt(openQuestions: readonly string[], options: ResumeOp
   return `${back} These are the open questions in the PRD:
 ${numbered}
 
-Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`;
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, ${PRD_COMPLETE}. When the operator asks to build, call start_build.`;
 }
 
 export interface VoicePlanningPromptInput extends Omit<PlanningPromptInput, 'context'> {

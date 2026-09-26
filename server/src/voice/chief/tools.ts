@@ -22,7 +22,6 @@ import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView }
 import type { EarconName } from '../earcons.js';
 import type { PlanningStates } from '../session-agent/planning-state.js';
 import type { CallFocus, UiAction } from '../protocol.js';
-import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
 import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
 import { answerPlanningQuestionTool } from './answer.js';
@@ -38,8 +37,8 @@ import type { ChatTool } from './openrouter-client.js';
  * what the operator's browser is told to do.
  *
  * Tools that act (create a session, start a build) are built with
- * `confirmable` from `confirm.ts`: their first call only asks, and the
- * `confirm` tool runs them in a later turn.
+ * {@link acting}: they resolve what the operator named, then act on it in the
+ * same call.
  */
 
 /** The slices of chief-web's services the tools and the snapshot read, and the ones the action tools drive. */
@@ -82,8 +81,8 @@ export interface ChiefServices {
   /** Fires a recurring task by hand; the definitions themselves are read and written straight off `db`. */
   readonly recurringTasks: Pick<RecurringTaskRunner, 'fireNow'>;
   readonly hold: { until(): string | null };
-  /** The planning terminal, which `focus_session` offers to close (voice US-018). */
-  readonly planning?: { isTerminalRunning(sessionId: string): boolean; stop(sessionId: string): Promise<unknown> };
+  /** The planning terminal; `focus_session` refuses while it is open for the session. */
+  readonly planning?: { isTerminalRunning(sessionId: string): boolean };
   /** The session voice agents `focus_session` starts; without them it refuses. */
   readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown>; isAlive?(sessionId: string): boolean };
   /** Where each planning session stands (voice multi-planning US-010); without it chief knows none. */
@@ -103,8 +102,6 @@ export interface ToolContext {
   readonly focus: CallFocus;
   /** Hangs up once the turn in progress (the goodbye) has been spoken. */
   endCall(): void;
-  /** The call's one pending confirmation. */
-  readonly confirmations: Pick<ConfirmationGate, 'request' | 'take'>;
   /** Moves the call's focus (`focus_session`); absent outside a call. */
   readonly setFocus?: (focus: CallFocus) => void;
   /** Plays a cached earcon (US-021): "one sec" while `focus_session` boots an agent. */
@@ -123,8 +120,11 @@ export interface ToolResult {
 export interface ChiefTool {
   readonly definition: ChatTool;
   handler(args: Readonly<Record<string, unknown>>, ctx: ToolContext): Promise<ToolResult> | ToolResult;
-  /** A confirmable tool's action, run by `confirm` with the stored arguments. */
-  readonly execute?: (args: Readonly<Record<string, unknown>>, ctx: ToolContext) => Promise<ToolResult> | ToolResult;
+}
+
+/** What an acting tool's `prepare` hands to its `execute`: the arguments the server built. */
+export interface PreparedAction {
+  readonly args: Readonly<Record<string, unknown>>;
 }
 
 /** How many rendered log lines `build_status` looks at, and how much of them it keeps. */
@@ -305,9 +305,31 @@ export function tool(
   };
 }
 
+/**
+ * A tool that changes something. `prepare` resolves names, validates and
+ * builds the arguments to act on (or returns a failed result); `execute` then
+ * runs in the same call with exactly those arguments, never the model's own.
+ */
+export function acting(
+  name: string,
+  description: string,
+  properties: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  steps: {
+    prepare(args: Readonly<Record<string, unknown>>, ctx: ToolContext): PreparedAction | ToolResult | Promise<PreparedAction | ToolResult>;
+    execute(args: Readonly<Record<string, unknown>>, ctx: ToolContext): ToolResult | Promise<ToolResult>;
+  },
+): ChiefTool {
+  return tool(name, description, properties, required, async (args, ctx) => {
+    const prepared = await steps.prepare(args, ctx);
+    if ('summary' in prepared) return prepared;
+    return steps.execute(prepared.args, ctx);
+  });
+}
+
 export const SESSION_PARAM = { type: 'string', description: 'Session id or spoken name' };
 
-/** Chief's tools over `services`, keyed by name, `confirm` included. */
+/** Chief's tools over `services`, keyed by name. */
 export function createChiefTools(services: ChiefServices): ReadonlyMap<string, ChiefTool> {
   const { db } = services;
   const tools: ChiefTool[] = [
@@ -531,15 +553,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
     ...pullRequestTools(services),
     ...recurringTaskTools(services),
   ];
-  return withConfirmTool(tools);
-}
-
-/** `tools` keyed by name, plus the `confirm` tool that runs their confirmations. */
-export function withConfirmTool(tools: readonly ChiefTool[]): ReadonlyMap<string, ChiefTool> {
-  const map = new Map(tools.map((entry) => [entry.definition.function.name, entry]));
-  const confirm = confirmTool(() => map);
-  map.set(confirm.definition.function.name, confirm);
-  return map;
+  return new Map(tools.map((entry) => [entry.definition.function.name, entry]));
 }
 
 /** Busy work first, then what waits on the operator, then what is over. */

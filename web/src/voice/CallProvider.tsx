@@ -21,7 +21,6 @@ import {
   type CallFocus,
   type CallPhase,
   type ClientMessage,
-  type ConfirmationOutcome,
   type PlanningSessionView,
   type SavedLoginView,
   type ServerMessage,
@@ -80,14 +79,6 @@ export type TranscriptEntry =
       readonly name: string;
       readonly status: ToolStatus;
       readonly summary: string;
-    }
-  | {
-      readonly kind: 'confirm';
-      readonly key: string;
-      readonly id: string;
-      readonly prompt: string;
-      readonly expiresAt: string;
-      readonly resolution: ConfirmationOutcome | null;
     }
   /** The "watch with me" card (voice feedback US-007): the session agent wants to open a page. */
   | {
@@ -165,8 +156,6 @@ export interface CallActions {
   muteMic(muted: boolean): void;
   muteVoice(muted: boolean): void;
   setMode(mode: TalkMode): void;
-  /** Answers a confirmation pill; the server runs or drops exactly that one. */
-  resolve(id: string, confirm: boolean): void;
   /** The "watch with me" card's **Open**: the URL and login go to the server, never back. */
   answerBrowser(answer: BrowserAnswer, sessionId: string): void;
   /** Drops the page view; its **Close browser** has already stopped the browser. */
@@ -296,29 +285,6 @@ function applyToTranscript(entries: readonly TranscriptEntry[], message: ServerM
       };
       return index === -1 ? [...entries, next] : entries.map((entry, i) => (i === index ? next : entry));
     }
-    case 'confirm': {
-      // One confirmation is pending at a time; an older pill is superseded.
-      const others = entries.filter((entry) => entry.kind !== 'confirm' || entry.resolution !== null);
-      return [
-        ...others,
-        {
-          kind: 'confirm',
-          key: `c${message.id}`,
-          id: message.id,
-          prompt: message.prompt,
-          expiresAt: message.expiresAt,
-          resolution: null,
-        },
-      ];
-    }
-    case 'confirm.resolved':
-      // A spoken yes/no, a focus switch, expiry or the end of the call; the
-      // server's word also overrides a click it found stale.
-      return entries.map((entry) =>
-        entry.kind === 'confirm' && entry.id === message.id
-          ? { ...entry, resolution: message.outcome }
-          : entry,
-      );
     case 'browser.ask':
       return [
         ...entries,
@@ -699,20 +665,6 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     });
   }, []);
 
-  const resolve = useCallback(
-    (id: string, confirm: boolean): void => {
-      send({ type: 'confirm.resolve', id, accept: confirm });
-      setTranscript((entries) =>
-        entries.map((entry) =>
-          entry.kind === 'confirm' && entry.id === id
-            ? { ...entry, resolution: confirm ? 'confirmed' : 'cancelled' }
-            : entry,
-        ),
-      );
-    },
-    [send],
-  );
-
   const settleBrowser = useCallback((id: string, outcome: BrowserAskOutcome): void => {
     setTranscript((entries) =>
       entries.map((entry) => (entry.kind === 'browser' && entry.id === id ? { ...entry, resolution: outcome } : entry)),
@@ -794,7 +746,6 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteMic,
       muteVoice,
       setMode,
-      resolve,
       answerBrowser,
       cancelBrowser,
       setDebug,
@@ -828,7 +779,6 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteMic,
       muteVoice,
       setMode,
-      resolve,
       answerBrowser,
       cancelBrowser,
       setDebug,

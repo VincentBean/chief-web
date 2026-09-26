@@ -3,7 +3,8 @@
 
 /**
  * The `chief` MCP server of the session voice agent (voice feedback US-006,
- * US-007): a stdio server with one tool, `open_browser_with_operator`.
+ * US-007): a stdio server with two tools, `open_browser_with_operator` and,
+ * for a planning agent, `start_build` (below).
  *
  * Calling it writes `<dir>/<requestId>.request` (`{ id, hint, createdAt }`);
  * chief-web sees the tool call on the agent's stream, reads the request, and
@@ -20,6 +21,12 @@
  * submits, and waits for the navigation (at most ten seconds). The
  * credentials never leave this process: the tool result says only how it went.
  *
+ * `start_build` (no arguments) works the same way in its own directory:
+ * `<build dir>/<requestId>.request` (`{ id, createdAt }`), answered by chief-web
+ * once it has marked the session ready and started the build:
+ * `{ id, started: true, queued }`, `{ id, started: false, errors: [...] }` (the
+ * PRD does not parse) or `{ id, started: false, reason }` (a refusal).
+ *
  * Newline-delimited JSON-RPC 2.0 on stdin/stdout, no dependencies; the image
  * installs no npm packages for runner scripts.
  */
@@ -29,7 +36,10 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 const DIR = process.env.CHIEF_MCP_BROWSER_DIR || '/tmp/.chief-voice/browser';
+const BUILD_DIR = process.env.CHIEF_MCP_BUILD_DIR || '/tmp/.chief-voice/build';
 const ANSWER_TIMEOUT_MS = Number(process.env.CHIEF_MCP_ANSWER_TIMEOUT_MS) || 5 * 60_000;
+/** Marking ready and starting a build takes seconds, not an operator typing. */
+const BUILD_TIMEOUT_MS = Number(process.env.CHIEF_MCP_BUILD_TIMEOUT_MS) || 60_000;
 const POLL_MS = Number(process.env.CHIEF_MCP_POLL_MS) || 250;
 const CDP_URL = process.env.CHIEF_MCP_CDP_URL || 'http://127.0.0.1:9222';
 /** How long the page may take to appear, and to load. */
@@ -61,6 +71,20 @@ const TOOL = {
   },
 };
 
+const BUILD_TOOL = {
+  name: 'start_build',
+  description:
+    'Mark this session ready and start its build. Call it only when the operator asks to build ' +
+    '("I think we\'re done, go ahead and build it"), never on your own. When the build starts, chief takes ' +
+    'the call back and tells the operator: say nothing more. When it did not start, it says why (the PRD ' +
+    'does not parse, or the build was refused): tell the operator in one sentence.',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+
+/** A Q&A agent's server is started with `CHIEF_MCP_START_BUILD=0`: only a planning agent can build. */
+const BUILD_OFFERED = process.env.CHIEF_MCP_START_BUILD !== '0';
+const TOOLS = BUILD_OFFERED ? [TOOL, BUILD_TOOL] : [TOOL];
+
 /** In-flight tool calls by JSON-RPC id, so `notifications/cancelled` can stop one. */
 const running = new Map();
 
@@ -76,11 +100,12 @@ function removeQuietly(file) {
   }
 }
 
-function writeRequest(id, hint) {
-  fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  const file = path.join(DIR, `${id}.request`);
+function writeRequest(id, hint, dir = DIR) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${id}.request`);
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ id, hint, createdAt: new Date().toISOString() }), { mode: 0o600 });
+  const request = hint === null ? { id, createdAt: new Date().toISOString() } : { id, hint, createdAt: new Date().toISOString() };
+  fs.writeFileSync(tmp, JSON.stringify(request), { mode: 0o600 });
   fs.renameSync(tmp, file);
   return file;
 }
@@ -89,8 +114,8 @@ function writeRequest(id, hint) {
  * The answer, or null once the call was cancelled or timed out. Both files are
  * deleted the moment the answer has been read: it can hold a password.
  */
-function waitForAnswer(answerFile, requestFile, signal) {
-  const deadline = Date.now() + ANSWER_TIMEOUT_MS;
+function waitForAnswer(answerFile, requestFile, signal, timeoutMs = ANSWER_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
   return new Promise((resolve) => {
     const tick = () => {
       if (signal.aborted) return resolve(null);
@@ -150,6 +175,44 @@ async function openBrowser(requestId, args) {
       const reason = cause instanceof Error ? cause.message : String(cause);
       return `could not open ${answer.url} (${reason}); try browser_navigate, or ask the operator to open it in the page view`;
     }
+  } finally {
+    running.delete(requestId);
+    removeQuietly(answerFile);
+    removeQuietly(requestFile);
+  }
+}
+
+/** `text` without its closing full stop, to sit inside a sentence. */
+function sentence(text) {
+  return text.replace(/[.\s]+$/, '');
+}
+
+/** A build that did not start: the tool's error, for the agent to say. */
+class NotBuilt extends Error {}
+
+async function startBuild(requestId) {
+  const id = crypto.randomUUID();
+  const requestFile = writeRequest(id, null, BUILD_DIR);
+  const answerFile = path.join(BUILD_DIR, `${id}.answer`);
+  const controller = new AbortController();
+  running.set(requestId, controller);
+  try {
+    const answer = await waitForAnswer(answerFile, requestFile, controller.signal, BUILD_TIMEOUT_MS);
+    if (answer !== null && answer.started === true) {
+      return answer.queued === true
+        ? 'The session is ready and its build is queued behind the others. Chief has the call back and tells the operator: say nothing more.'
+        : 'The session is ready and its build started. Chief has the call back and tells the operator: say nothing more.';
+    }
+    if (answer !== null && Array.isArray(answer.errors) && answer.errors.length > 0) {
+      const errors = answer.errors.map((error) => sentence(String(error).slice(0, 300))).join('; ');
+      throw new NotBuilt(
+        `The PRD does not parse yet, so nothing was built: ${errors}. Tell the operator in one sentence, then fix the PRD.`,
+      );
+    }
+    if (answer !== null && typeof answer.reason === 'string' && answer.reason !== '') {
+      throw new NotBuilt(`The build did not start: ${sentence(answer.reason)}. Tell the operator why in one sentence.`);
+    }
+    throw new NotBuilt('chief-web did not answer, so the build did not start. Tell the operator to say "build it".');
   } finally {
     running.delete(requestId);
     removeQuietly(answerFile);
@@ -386,9 +449,18 @@ async function handle(message) {
       if (isRequest) send({ id, result: {} });
       return;
     case 'tools/list':
-      send({ id, result: { tools: [TOOL] } });
+      send({ id, result: { tools: TOOLS } });
       return;
     case 'tools/call': {
+      if (params?.name === BUILD_TOOL.name && BUILD_OFFERED) {
+        try {
+          send({ id, result: { content: [{ type: 'text', text: await startBuild(id) }] } });
+        } catch (cause) {
+          const text = cause instanceof NotBuilt ? cause.message : `The build did not start (${cause instanceof Error ? cause.message : String(cause)}).`;
+          send({ id, result: { content: [{ type: 'text', text }], isError: true } });
+        }
+        return;
+      }
       if (params?.name !== TOOL.name) {
         send({ id, error: { code: -32602, message: `Unknown tool: ${String(params?.name)}` } });
         return;

@@ -28,6 +28,7 @@ import {
   openDatabase,
   setSetting,
   updateSession,
+  upsertVoiceSessionAgent,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
@@ -66,8 +67,9 @@ import { CLAUDE_SESSION, FakeClaude, LONG_OPENING, SECRET_LOGIN } from './sessio
 import { PlanningStates } from './session-agent/planning-state.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
+import { switchingOver } from './speakable.js';
 import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
-import { FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
+import { FAKE_BUILD_REQUEST_ID, FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
 import type { SttResult, TranscribeOptions } from './stt/index.js';
 import { type SpeakCallbacks, type SpeakResult, SWITCHED_TOAST, type TtsSink } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
@@ -1100,28 +1102,19 @@ describe('a scripted call end to end (US-027)', () => {
     await s.hangUp();
   });
 
-  it('"create a session …" → confirm → "yes" → created, opened, and the setup event spoken after a quiet moment', async () => {
+  it('"create a session …" → created and opened on the first tool call, and the setup event spoken after a quiet moment', async () => {
     const s = await scriptedCall();
     openrouter.replies.push(
       toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
-      textReply(['Shall I create csv-export in shop-api?']),
+      textReply(['Done. csv-export is being set up.']),
     );
     await s.say('create a session for the CSV export on shop-api');
-    const pill = s.client.messages('confirm').at(-1);
-    assert.equal(pill?.prompt, 'Create session csv-export in shop-api, from develop with a pull request into main?');
-    assert.deepEqual(toolCards(s.client, 1).map(([name]) => name), ['create_session']);
-    assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
-    spoken(s.client, 1);
-
-    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
-    await s.say('yes');
     assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
     const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
     assert.ok(session);
-    assert.deepEqual(toolCards(s.client, 2), [['create_session', 'ok', 'Created session: csv-export']]);
+    assert.deepEqual(toolCards(s.client, 1), [['create_session', 'ok', 'Created session: csv-export']]);
     assert.ok(s.client.messages('ui').some((m) => m.action === 'navigate' && m.path === `/sessions/${session.id}`));
-    assert.equal(s.client.messages('confirm.resolved').at(-1)?.outcome, 'confirmed');
-    assert.equal(spoken(s.client, 2), 'Done. csv-export is being set up.');
+    assert.equal(spoken(s.client, 1), 'Done. csv-export is being set up.');
 
     // The clone finishes: toasted at once, spoken only once the call has been quiet.
     const done = s.client.messages('agent.done').length;
@@ -1133,34 +1126,29 @@ describe('a scripted call end to end (US-027)', () => {
     s.w.clock.advance(EVENT_QUIET_MS);
     await s.client.until('agent.done', done + 1);
     assert.match(lastModelInput(), /^\[event\] csv-export is cloned and ready to plan\./);
-    assert.equal(spoken(s.client, 3), 'csv-export is cloned and ready to plan.');
+    assert.equal(spoken(s.client, 2), 'csv-export is cloned and ready to plan.');
     await s.hangUp();
   });
 
-  it('"pause the nightly rector task" → confirm → "ja" → paused and read back', async () => {
+  it('"pause the nightly rector task" → paused on the first tool call and read back', async () => {
     const s = await scriptedCall();
-    openrouter.replies.push(
-      toolReply([{ id: 'p1', name: 'pause_recurring_task', args: '{"task":"nightly rector"}' }]),
-      textReply(['Zal ik nightly-rector pauzeren?']),
-    );
-    await s.say('pause the nightly rector task');
-    assert.equal(s.client.messages('confirm').at(-1)?.prompt, 'Pause the recurring task nightly-rector?');
     const task = (): boolean | undefined => getRecurringTaskByName(s.w.db, s.chief.ids['shop'] ?? '', 'nightly-rector')?.paused;
     assert.equal(task(), false);
-
-    const requests = openrouter.requests.length;
-    openrouter.replies.push(textReply(['nightly-rector is gepauzeerd; ', 'hij draait vannacht niet.']));
-    await s.say('ja');
+    openrouter.replies.push(
+      toolReply([{ id: 'p1', name: 'pause_recurring_task', args: '{"task":"nightly rector"}' }]),
+      textReply(['nightly-rector is gepauzeerd; ', 'hij draait vannacht niet.']),
+    );
+    await s.say('pause the nightly rector task');
     assert.equal(task(), true);
-    assert.deepEqual(toolCards(s.client, 2), [['pause_recurring_task', 'ok', 'Paused: nightly-rector']]);
-    // One model round trip: chief reads the outcome back.
-    assert.equal(openrouter.requests.length, requests + 1);
+    assert.deepEqual(toolCards(s.client, 1), [['pause_recurring_task', 'ok', 'Paused: nightly-rector']]);
+    // Two model round trips: the tool call, then chief reads the outcome back.
+    assert.equal(openrouter.requests.length, 2);
     assert.deepEqual(JSON.parse(lastModelInput()), { ok: true, name: 'nightly-rector', paused: true, nextRun: null });
-    assert.equal(spoken(s.client, 2), 'nightly-rector is gepauzeerd; hij draait vannacht niet.');
+    assert.equal(spoken(s.client, 1), 'nightly-rector is gepauzeerd; hij draait vannacht niet.');
     await s.hangUp();
   });
 
-  it('"change PR 213: …" → confirm → "yes" → the request is posted and a feedback run started', async () => {
+  it('"change PR 213: …" → the request is posted and a feedback run started on the first tool call', async () => {
     const s = await scriptedCall();
     const list = s.chief.state.pullRequests;
     const [shop] = list?.repositories ?? [];
@@ -1170,22 +1158,16 @@ describe('a scripted call end to end (US-027)', () => {
     s.chief.state.pullRequests = { ...list, repositories: [{ ...shop, pullRequests: [...shop.pullRequests, csv] }] };
     openrouter.replies.push(
       toolReply([{ id: 'r1', name: 'request_pr_change', args: '{"repository":"shop-api","number":213,"instruction":"use league csv instead of fgetcsv"}' }]),
-      textReply(['Shall I ask for that on 213?']),
+      textReply(['Posted, and a run is picking it up.']),
     );
     await s.say('change PR 213: use league csv instead of fgetcsv');
-    const prompt = s.client.messages('confirm').at(-1)?.prompt ?? '';
-    assert.match(prompt, /213, "CSV import", ask for: "use league csv instead of fgetcsv"\?$/);
-    assert.equal(s.chief.state.calls.length, 0);
-
-    openrouter.replies.push(textReply(['Posted, and a run is picking it up.']));
-    await s.say('yes');
     assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['pullRequests.feedback', 'github.postReview', 'prFeedback.start']);
     const posted = s.chief.state.calls[1]?.arg as { prNumber: number; body: string };
     assert.equal(posted.prNumber, 213);
     assert.match(posted.body, /use league csv instead of fgetcsv/);
     assert.deepEqual(s.chief.state.calls[2]?.arg, { repositoryId: s.chief.ids['shop'], prNumber: 213 });
-    assert.deepEqual(toolCards(s.client, 2).map(([name, status]) => [name, status]), [['request_pr_change', 'ok']]);
-    spoken(s.client, 2);
+    assert.deepEqual(toolCards(s.client, 1).map(([name, status]) => [name, status]), [['request_pr_change', 'ok']]);
+    assert.equal(spoken(s.client, 1), 'Posted, and a run is picking it up.');
     await s.hangUp();
   });
 
@@ -1226,6 +1208,30 @@ describe('a scripted call end to end (US-027)', () => {
       .agentExecs()
       .filter((exec) => exec.containerId === `c-${sessionId}`)
       .flatMap((exec) => claude.userTexts(exec.id));
+
+  it('a bare "ja" or "yes" is an ordinary utterance for chief and for a session agent', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['Waarmee kan ik helpen?']));
+    await s.say('Ja.');
+    assert.equal(openrouter.requests.length, 1, "chief's model was asked");
+    assert.match(lastModelInput(), /Ja\./);
+    assert.equal(spoken(s.client, 1), 'Waarmee kan ik helpen?');
+
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    const before = sessionStdin(sessionId).length;
+    const turn = s.client.messages('agent.done').at(-1)?.turn ?? 0;
+    await s.say('yes');
+    await waitFor(() => sessionStdin(sessionId).slice(before).some((text) => text.includes('yes')));
+    const reply = s.client.messages('agent.delta').filter((d) => d.turn > turn);
+    assert.ok(reply.length > 0 && reply.every((d) => d.agent === 'session'), 'the session agent answers');
+    await s.hangUp();
+  });
 
   it('brief a session → "back to chief" → it drafts alone while chief answers (US-005)', async () => {
     const s = await scriptedCall();
@@ -1321,6 +1327,146 @@ describe('a scripted call end to end (US-027)', () => {
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
     assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Heard you. What next?');
     assert.ok(sessionStdin(sessionId).some((text) => text.includes('carry on')));
+    await s.hangUp();
+  });
+
+  /** A scripted call with the focus on the planning session onboarding-copy. */
+  const onPlanningSession = async (
+    language: 'en' | 'nl',
+    browser = false,
+  ): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string }> => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', language), browser });
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    return { s, sessionId };
+  };
+  const lastSaid = (s: { client: Client }): string => said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0);
+
+  it('"bouw maar" to a planning session marks it ready, starts the build and chief takes the call (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('nl');
+    await s.say('add a download button');
+    const before = sessionStdin(sessionId).length;
+    const requests = openrouter.requests.length;
+    await s.say('Bouw maar.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Oké, onboarding-copy staat klaar en wordt gebouwd. Ik ben er weer.');
+    assert.deepEqual(s.chief.state.calls, [
+      { method: 'sessions.markReady', arg: sessionId },
+      { method: 'builds.start', arg: sessionId },
+    ]);
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    await flush();
+    assert.deepEqual(sessionStdin(sessionId).slice(before), [], 'the intent never reaches the agent, and a ready session is not detached');
+    await s.hangUp();
+  });
+
+  it('"build it" when every build slot is busy says the build is queued (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.pool = {
+      ...s.chief.state.pool,
+      queued: 2,
+      queue: [...s.chief.state.pool.queue, { kind: 'session', refId: sessionId, label: 'onboarding-copy', position: 2, queuedAt: '2026-09-25T12:00:00.000Z' }],
+    };
+    await s.say('Build it.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Okay, onboarding-copy is marked ready and queued, every build slot is busy. Back with me.');
+    await s.hangUp();
+  });
+
+  it('"build it" on a PRD that does not parse reads the first error and stays with the session (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.prdErrors = [
+      { line: 12, message: 'US-002 has no acceptance criteria' },
+      { line: 30, message: 'US-004 has no title' },
+    ];
+    await s.say('start the build');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The PRD does not parse yet: line 12: US-002 has no acceptance criteria.');
+    assert.deepEqual(s.chief.state.calls.map((call) => call.method), ['sessions.markReady'], 'no build is started');
+    await s.hangUp();
+  });
+
+  it('"build it" that the service refuses speaks its message and stays with the session (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.failures.set('builds.start', Object.assign(new Error('Builds are on hold until 18:00.'), { status: 409, code: 'usage_hold' }));
+    await s.say('build it');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'Builds are on hold until 18:00.');
+    await s.hangUp();
+  });
+
+  it('"build it" under chief focus is an ordinary utterance (US-007)', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['Which session should I build?']));
+    await s.say('build it');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Which session should I build?');
+    assert.deepEqual(s.chief.state.calls, []);
+    await s.hangUp();
+  });
+
+  /** A planning session whose agent calls `start_build` on `#build`; the fake MCP server writes the request. */
+  const withStartBuild = async (): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string; mcp: FakeMcpSide }> => {
+    const { s, sessionId } = await onPlanningSession('en', true);
+    const mcp = new FakeMcpSide(daemon, () => s.w.clock.now());
+    claude.onStartBuild = (containerId) => mcp.buildRequest(containerId);
+    // What the real tool returns for an answer that did not start a build.
+    mcp.onBuildAnswer = (_containerId, answer) => {
+      if (answer['started'] === true) return;
+      const errors = answer['errors'] as string[] | undefined;
+      claude.finishBuildTool(errors === undefined ? `The build did not start: ${String(answer['reason']).replace(/\.$/, '')}.` : `The PRD does not parse yet: ${errors.join('; ')}.`);
+    };
+    return { s, sessionId, mcp };
+  };
+
+  it('the session agent calls start_build: marked ready, built, the answer written, and chief takes the call (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    const requests = openrouter.requests.length;
+    s.w.stt.canned.push("#build I think we're done, go ahead and build it");
+    s.client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+    const line = 'Okay, onboarding-copy is marked ready and building. Back with me.';
+    await waitFor(() => s.client.messages('agent.delta').some((d) => d.agent === 'chief' && d.text === line));
+    assert.ok(s.client.messages('tool').some((m) => m.status === 'running' && m.summary === 'Starting the build'));
+    assert.deepEqual(mcp.buildAnswers, [{ containerId: `c-${sessionId}`, answer: { id: FAKE_BUILD_REQUEST_ID, started: true, queued: false } }]);
+    assert.deepEqual(s.chief.state.calls, [
+      { method: 'sessions.markReady', arg: sessionId },
+      { method: 'builds.start', arg: sessionId },
+    ]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    await waitFor(() => s.client.messages('state').at(-1)?.phase === 'listening');
+    await s.hangUp();
+  });
+
+  it('start_build on a PRD that does not parse: the errors are the answer, and the session agent says them (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    s.chief.state.prdErrors = [
+      { line: 12, message: 'US-002 has no acceptance criteria' },
+      { line: 30, message: 'US-004 has no title' },
+    ];
+    await s.say('#build go ahead and build it');
+    assert.deepEqual(mcp.buildAnswers.map((a) => a.answer), [
+      { id: FAKE_BUILD_REQUEST_ID, started: false, errors: ['line 12: US-002 has no acceptance criteria', 'line 30: US-004 has no title'] },
+    ]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The PRD does not parse yet: line 12: US-002 has no acceptance criteria; line 30: US-004 has no title.');
+    assert.equal(s.client.messages('agent.delta').filter((d) => d.agent === 'chief').at(-1)?.text.includes('does not parse'), false, 'chief says nothing');
+    assert.deepEqual(s.chief.state.calls.map((call) => call.method), ['sessions.markReady'], 'no build is started');
+    await s.hangUp();
+  });
+
+  it('start_build that the service refuses: the reason is the answer, and the focus stays (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    s.chief.state.failures.set('builds.start', Object.assign(new Error('Builds are on hold until 18:00.'), { status: 409, code: 'usage_hold' }));
+    await s.say('#build go ahead and build it');
+    assert.deepEqual(mcp.buildAnswers.map((a) => a.answer), [{ id: FAKE_BUILD_REQUEST_ID, started: false, reason: 'Builds are on hold until 18:00.' }]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The build did not start: Builds are on hold until 18:00.');
     await s.hangUp();
   });
 
@@ -1506,11 +1652,9 @@ describe('a scripted call end to end (US-027)', () => {
     // Chief creates B on shop-api and hands the call to it.
     openrouter.replies.push(
       toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
-      textReply(['Shall I create csv-export in shop-api?']),
+      textReply(['Done. csv-export is being set up.']),
     );
     await s.say('create a session for the CSV export on shop-api');
-    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
-    await s.say('yes');
     const created = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
     assert.ok(created);
     b = created.id;
@@ -1538,7 +1682,8 @@ describe('a scripted call end to end (US-027)', () => {
     const viewA = s.client.messages('planning').at(-1)?.sessions.find((view) => view.sessionId === a);
     assert.deepEqual([viewA?.state, viewA?.stories, viewA?.openQuestions], ['waiting', 3, 4]);
 
-    // B's agent finishes its PRD: the call reminds the operator of A.
+    // B's agent finishes its PRD: A is the one waiting session, so the call
+    // names it and moves there, and A's agent is sent its four questions.
     await s.say('the button goes on the invoices page');
     assert.equal(s.agents().detachedState(b).running, false);
     done = s.client.messages('agent.done').length;
@@ -1546,16 +1691,48 @@ describe('a scripted call end to end (US-027)', () => {
     await s.client.until('agent.done', done + 1);
     assert.equal(
       spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
-      'onboarding-copy on chief-web is waiting with 4 open questions. Shall I switch you over?',
+      "onboarding-copy on chief-web is waiting with 4 open questions. I'm switching you over to onboarding-copy.",
     );
-
-    // "Switch to A": chief moves the call, and A's agent is sent its four questions.
-    openrouter.replies.push(textReply(['Here is onboarding-copy.']));
-    await s.say('switch to onboarding copy', 2);
+    assert.equal(openrouter.requests.length, requests, 'the switch is not a model call');
+    await waitFor(() => sessionStdin(a).at(-1) === resumePrompt(A_QUESTIONS, { state: 'waiting' }));
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: a });
-    assert.equal(sessionStdin(a).at(-1), resumePrompt(A_QUESTIONS, { state: 'waiting' }));
     assert.equal(s.agents().detachedState(b).running, false, 'a done session is not sent off again');
     await s.hangUp();
+  });
+
+  it('with two other sessions waiting, the line names them and the focus stays (US-004)', async () => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', 'nl') });
+    const a = s.chief.ids['onboarding'] ?? '';
+    for (const name of ['csv-export', 'search']) {
+      const other = createSession(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '', name, baseBranch: 'develop', prTargetBranch: 'main', status: 'pending' });
+      upsertVoiceSessionAgent(s.w.db, { sessionId: other.id, claudeSessionId: `claude-${name}`, mode: 'plan' });
+      writePrd(s, other.id, 1, ['Which columns?', 'Who may see it?']);
+    }
+    claude.onTurn = ({ containerId, text }) => {
+      if (containerId === `c-${a}` && text.includes('invoices page')) writePrd(s, a, 2, []);
+      return undefined;
+    };
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('the button goes on the invoices page');
+    const done = s.client.messages('agent.done').length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    const line = spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0);
+    assert.match(line, /csv-export op shop-api wacht met 2 open vragen/);
+    assert.match(line, /search op shop-api wacht met 2 open vragen/);
+    assert.match(line, /vragen\.$/, 'no switch-over is announced');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: a });
+    await s.hangUp();
+  });
+
+  it('the switch-over sentence in both call languages (US-004)', () => {
+    assert.equal(switchingOver('en', 'csv-export'), "I'm switching you over to csv-export.");
+    assert.equal(switchingOver('nl', 'csv-export'), 'Ik verbind je door met csv-export.');
   });
 
   it('chief answers an open question of A while B is being planned, and the update is announced with one question fewer (US-014)', async () => {
@@ -1667,7 +1844,7 @@ describe('a scripted call end to end (US-027)', () => {
     await s.hangUp();
   });
 
-  it('"I have feedback on shop-api about …" → confirm → cloned → handed over → the agent opens a browser → frames → Close browser (voice feedback US-013)', async () => {
+  it('"I have feedback on shop-api about …" → created on the first tool call → cloned → handed over → the agent opens a browser → frames → Close browser (voice feedback US-013)', async () => {
     const FEEDBACK = 'the checkout total is wrong with a coupon';
     const LOGIN = { username: 'qa-ann@example.com', password: 'c0upon-hunter2!' };
     const URL_ = 'http://host.docker.internal:3000/checkout';
@@ -1685,18 +1862,12 @@ describe('a scripted call end to end (US-027)', () => {
       const browser = new FakeBrowser(daemon);
       browser.replies.set('Page.getFrameTree', () => ({ result: { frameTree: { frame: { id: 'main', url: URL_ } } } }));
 
-      // Chief reads the request back and parks it.
+      // Chief's one tool call writes the session with the feedback, and its clone starts.
       openrouter.replies.push(
         toolReply([{ id: 'fb1', name: 'start_feedback_session', args: JSON.stringify({ repository: 'shop-api', feedback: FEEDBACK }) }]),
-        textReply(['Shall I start a feedback session on shop-api?']),
+        textReply(['Done. I will hand you over once it is cloned.']),
       );
       await s.say(`I have feedback on shop-api about ${FEEDBACK}`);
-      assert.equal(s.client.messages('confirm').at(-1)?.prompt, `Start a feedback session on shop-api about "${FEEDBACK}"?`);
-      assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
-
-      // "yes": the session is written with the feedback and its clone starts.
-      openrouter.replies.push(textReply(['Done. I will hand you over once it is cloned.']));
-      await s.say('yes');
       assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
       const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.feedback === FEEDBACK);
       assert.ok(session, 'the session carries the feedback');

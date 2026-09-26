@@ -14,6 +14,7 @@ import {
   getVoiceSettings,
 } from '../settings/index.js';
 import {
+  type CallBuilds,
   type CallClock,
   type CallEarcons,
   type CallPlanning,
@@ -273,8 +274,8 @@ export class VoiceService {
   }
 
   /**
-   * The planning terminal takes the session over (voice US-025, after the
-   * operator confirmed): a call talking to its agent goes back to chief, and
+   * The planning terminal takes the session over (voice US-025, once the
+   * operator agreed to it on the dashboard): a call talking to its agent goes back to chief, and
    * the agent stops, so the terminal can resume its conversation.
    */
   async handOverToTerminal(sessionId: string): Promise<void> {
@@ -293,6 +294,7 @@ export class VoiceService {
 
   private newCall(focus: CallFocus): VoiceCall {
     const { db, config } = this;
+    const chief = this.deps.chief;
     const call = new VoiceCall(this.deps.newCallId?.() ?? randomUUID(), focus, {
       db,
       config,
@@ -309,6 +311,7 @@ export class VoiceService {
       onSessionFocused: (sessionId) => this.deps.sessionAgents?.focused(sessionId),
       onSessionLeft: (sessionId) => this.detach(sessionId),
       ...(this.deps.browser === undefined ? {} : { browser: this.deps.browser }),
+      ...(chief === undefined ? {} : { builds: this.callBuilds(chief) }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
@@ -401,8 +404,23 @@ export class VoiceService {
         askBrowser: (sessionId) => call.askBrowser(sessionId),
         browserToolDone: (sessionId) => call.browserToolDone(sessionId),
         browserActivity: (sessionId) => call.browserActivity(sessionId),
+        startBuild: (sessionId) => call.startBuild(sessionId),
+        buildToolDone: (sessionId) => call.buildToolDone(sessionId),
       },
     });
+  }
+
+  /**
+   * What the `build` intent and the session agent's `start_build` (US-007, US-008)
+   * drive; the tool's request is found in the same container as the browser card's.
+   */
+  private callBuilds(chief: ChiefServices): CallBuilds {
+    const browser = this.deps.browser;
+    return {
+      markReady: (id) => chief.sessions.markReady(id),
+      start: (id) => chief.builds.start(id),
+      ...(browser === undefined ? {} : { requests: { docker: browser.docker, container: browser.container } }),
+    };
   }
 
   private chiefFor(call: VoiceCall): VoiceAgent {

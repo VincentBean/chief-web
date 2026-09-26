@@ -1,9 +1,25 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { answerPrompt, detachPrompt, resumePrompt, voiceModeOverrides } from './prompt.js';
+import { answerPrompt, detachPrompt, resumePrompt, voiceModeOverrides, voiceRulesPrompt } from './prompt.js';
 
 const PRD = '/workspace/repo/.chief/prds/demo/prd.md';
+
+describe('voiceRulesPrompt (US-008)', () => {
+  it('tells a planning agent the operator can say build it, and to call start_build only when asked', () => {
+    const rules = voiceRulesPrompt('en').replace(/\s+/g, ' ');
+    assert.doesNotMatch(rules, /back to chief/);
+    assert.ok(rules.includes('Once it is complete, say the PRD is complete in one sentence and that the operator can say "build it".'));
+    assert.ok(rules.includes('When the operator asks to build ("go ahead and build it", "let\'s build this"), call start_build. Never call it on your own.'));
+    assert.ok(rules.includes('When the build starts, chief takes the call back: say nothing more.'));
+  });
+
+  it('gives a Q&A agent neither the PRD rule nor start_build', () => {
+    const rules = voiceRulesPrompt('en', false);
+    assert.doesNotMatch(rules, /start_build|back to chief|build it/);
+    assert.ok(rules.includes('Speak English unless the operator switches language.'));
+  });
+});
 
 describe('voiceModeOverrides', () => {
   it('explains the detached workflow before the greeting', () => {
@@ -60,14 +76,14 @@ describe('resumePrompt', () => {
 1. Should archived sessions count?
 2. What is the badge called?
 
-Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`,
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and that the operator can say "build it". When the operator asks to build, call start_build.`,
     );
   });
 
-  it('says a done PRD is complete and suggests back to chief', () => {
+  it('says a done PRD is complete, that the operator can say build it, and when to call start_build (US-008)', () => {
     assert.equal(
       resumePrompt([]),
-      'The operator is back on the call. The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.',
+      'The operator is back on the call. The PRD is complete and has no open questions: say the PRD is complete in one sentence and that the operator can say "build it". When the operator asks to build, call start_build.',
     );
   });
 
@@ -84,7 +100,7 @@ Greet the operator in one sentence and ask the first question. As soon as a ques
       `The operator is back on the call. Your last turn alone did not finish: it ran out of time before it finished. Pick up from what exists on disk: read the PRD if there is one, and finish it with the operator. These are the open questions in the PRD:
 1. What is the badge called?
 
-Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`,
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and that the operator can say "build it". When the operator asks to build, call start_build.`,
     );
   });
 });

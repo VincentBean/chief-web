@@ -246,7 +246,7 @@ server/src/voice/
 ├── socket.ts              the /api/voice/stream socket on the shared gateway, with the Origin check
 ├── protocol.ts            every message and close code of the call socket (server copy)
 ├── call.ts                VoiceCall: one call's state machine between STT, the agent, TTS and the database
-├── intents.ts             short phrases the call handles itself: yes/no, back to chief, stop, repeat, mute, hang up
+├── intents.ts             short phrases the call handles itself: back to chief, carry on, build it, switch to a session, stop, repeat, mute, hang up
 ├── speakable.ts           markdown to speakable text, cut into sentences for TTS
 ├── cut-off.ts             the "you were interrupted after saying …" note for the next turn
 ├── earcons.ts             "mm-hm", "one sec" and friends, rendered once per voice into <DATA_DIR>/voice-cache
@@ -276,7 +276,6 @@ server/src/voice/
 │   ├── snapshot.ts        the STATE block: sessions, queue and pull requests in every request
 │   ├── speculation.ts     speculative chief: a first model step started on a stable partial transcript
 │   ├── tools.ts           the tool registry, the read-only tools and spoken-name resolution
-│   ├── confirm.ts         server-enforced confirmation and the confirm tool
 │   ├── actions.ts         session tools: create, build, stop, mark ready, schedule, retry
 │   ├── pull-requests.ts   pull request tools: list, review, feedback, change, conflicts
 │   ├── recurring-tasks.ts recurring task tools: list, create, update, pause, resume, run now

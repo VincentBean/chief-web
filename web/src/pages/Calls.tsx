@@ -364,7 +364,7 @@ function CallTranscript({ id }: { readonly id: string }) {
           <ol className="call-transcript" aria-label="Transcript">
             {entries.length === 0 && <li className="call-transcript__empty">Nothing was said on this call.</li>}
             {entries.map(({ entry, latency }) => [
-              <TranscriptLine key={entry.key} entry={entry} onResolve={() => undefined} />,
+              <TranscriptLine key={entry.key} entry={entry} />,
               latency !== null && (
                 <li key={`${entry.key}-latency`} className="call-history__latency">
                   {latency}

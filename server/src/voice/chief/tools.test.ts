@@ -8,8 +8,8 @@ import { SessionError } from '../../sessions/index.js';
 import type { PlanningState } from '../session-agent/planning-state.js';
 import { answerPrompt } from '../session-agent/prompt.js';
 import { prdPathFor } from '../../prd/index.js';
-import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
-import { FEEDBACK_QUOTE_MAX, feedbackSessionName, SLUG_MAX, slugify } from './actions.js';
+import { chiefWorld, NOW } from './__fixtures__/world.js';
+import { feedbackSessionName, SLUG_MAX, slugify } from './actions.js';
 import { parseStartTime, speakTime } from './time.js';
 import {
   BUILD_LOG_SUMMARY_CHARS,
@@ -81,7 +81,6 @@ describe('chief read-only tools (voice US-008)', () => {
     turn: 1,
     focus: { kind: 'chief' },
     endCall: onEnd,
-    confirmations: testGate().gate,
   });
 
   async function call(name: string, args: Record<string, unknown> = {}, context = ctx()): Promise<{ result: ToolResult; w: ReturnType<typeof chiefWorld> }> {
@@ -91,7 +90,7 @@ describe('chief read-only tools (voice US-008)', () => {
     return { result: await tool.handler(args, context), w };
   }
 
-  it('registers the read-only tools, the session actions and confirm with OpenAI-shaped definitions', () => {
+  it('registers the read-only tools and the session actions with OpenAI-shaped definitions', () => {
     const w = chiefWorld();
     const tools = createChiefTools(w.services);
     assert.deepEqual([...tools.keys()].sort(), [
@@ -99,7 +98,6 @@ describe('chief read-only tools (voice US-008)', () => {
       'answer_planning_question',
       'back_to_planning',
       'build_status',
-      'confirm',
       'create_recurring_task',
       'create_session',
       'end_call',
@@ -329,46 +327,30 @@ describe('spoken start times (voice US-012)', () => {
 });
 
 describe('chief session actions (voice US-012)', () => {
-  const ctxAt = (gate: ToolContext['confirmations'], turn: number): ToolContext => ({
+  const ctx: ToolContext = {
     signal: new AbortController().signal,
-    turn,
+    turn: 1,
     focus: { kind: 'chief' },
     endCall: () => undefined,
-    confirmations: gate,
-  });
+  };
 
-  /** Asks in turn 1, checks nothing ran, confirms in turn 2. */
-  async function roundTrip(
-    name: string,
-    args: Record<string, unknown>,
-    w = chiefWorld(),
-  ): Promise<{ w: ReturnType<typeof chiefWorld>; prompt: string; asked: ToolResult; ran: ToolResult }> {
-    const { gate, sent } = testGate();
-    const tools = createChiefTools(w.services);
-    const tool = tools.get(name);
+  /** One handler call: it resolves what was said and acts on it. */
+  async function run(name: string, args: Record<string, unknown>, w = chiefWorld()): Promise<{ w: ReturnType<typeof chiefWorld>; ran: ToolResult }> {
+    const tool = createChiefTools(w.services).get(name);
     assert.ok(tool, `no tool ${name}`);
-    const asked = await tool.handler(args, ctxAt(gate, 1));
-    assert.equal(asked.ok, true, asked.summary);
-    const confirm = sent.find((message) => message.type === 'confirm');
-    assert.ok(confirm !== undefined && confirm.type === 'confirm');
-    assert.deepEqual(w.state.calls, [], 'nothing runs before the operator answers');
-    const early = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 1));
-    assert.equal(early.ok, false, 'not in the turn that asked');
-    assert.deepEqual(w.state.calls, []);
-    const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 2));
-    return { w, prompt: confirm.prompt, asked, ran };
+    return { w, ran: await tool.handler(args, ctx) };
   }
 
-  async function ask(name: string, args: Record<string, unknown>, w = chiefWorld()): Promise<{ result: ToolResult; parked: boolean }> {
-    const { gate, sent } = testGate();
-    const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
-    return { result, parked: sent.some((message) => message.type === 'confirm') };
+  /** A call `prepare` refuses: the failed result, and no service touched. */
+  async function refused(name: string, args: Record<string, unknown>, w = chiefWorld()): Promise<ToolResult> {
+    const { ran } = await run(name, args, w);
+    assert.equal(ran.ok, false, JSON.stringify(args).slice(0, 80));
+    assert.deepEqual(w.state.calls, [], `${name} called no service`);
+    return ran;
   }
 
-  it('create_session: slug and repository in the prompt, create with the mapped fields, returns while setup runs', async () => {
-    const { w, prompt, ran } = await roundTrip('create_session', { repository: 'shop api', name: 'CSV export for invoices', code_review: true });
-    assert.match(prompt, /csv-export-invoices/);
-    assert.match(prompt, /shop-api/);
+  it('create_session: creates with the mapped fields and the slug, and returns while setup runs', async () => {
+    const { w, ran } = await run('create_session', { repository: 'shop api', name: 'CSV export for invoices', code_review: true });
     assert.deepEqual(w.state.calls, [
       {
         method: 'sessions.create',
@@ -383,19 +365,19 @@ describe('chief session actions (voice US-012)', () => {
   });
 
   it('create_session: pr_target and base_branch pass through; code_review is left to the default when not said', async () => {
-    const { w } = await roundTrip('create_session', { repository: 'chief-web', name: 'Dark mode toggle', pr_target: 'develop', base_branch: 'release' });
-    assert.deepEqual(w.state.calls[0]?.arg, {
-      repositoryId: w.ids['web'],
-      name: 'dark-mode-toggle',
-      baseBranch: 'release',
-      prTargetBranch: 'develop',
-    });
+    const { w } = await run('create_session', { repository: 'chief-web', name: 'Dark mode toggle', pr_target: 'develop', base_branch: 'release' });
+    assert.deepEqual(w.state.calls, [
+      {
+        method: 'sessions.create',
+        arg: { repositoryId: w.ids['web'], name: 'dark-mode-toggle', baseBranch: 'release', prTargetBranch: 'develop' },
+      },
+    ]);
   });
 
   it("create_session: a service refusal comes back with the service's message", async () => {
     const w = chiefWorld();
     w.state.failures.set('sessions.create', new SessionError(400, 'repository_key_missing', '"shop-api" has no private key on the data volume.'));
-    const { ran } = await roundTrip('create_session', { repository: 'shop-api', name: 'Invoices' }, w);
+    const { ran } = await run('create_session', { repository: 'shop-api', name: 'Invoices' }, w);
     assert.deepEqual(ran, {
       ok: false,
       data: { error: 'repository_key_missing', status: 400, message: '"shop-api" has no private key on the data volume.' },
@@ -403,44 +385,35 @@ describe('chief session actions (voice US-012)', () => {
     });
   });
 
-  it('create_session: an unknown repository, a bad target or a taken name is refused without asking', async () => {
+  it('create_session: an unknown repository, a bad target or a taken name is refused without creating anything', async () => {
     for (const args of [
       { repository: 'marketing', name: 'x' },
       { repository: 'shop-api', name: 'y', pr_target: 'staging' },
       { repository: 'shop-api', name: 'Billing export' },
       { repository: 'shop-api', name: '??' },
     ]) {
-      const { result, parked } = await ask('create_session', args);
-      assert.equal(result.ok, false, JSON.stringify(args));
-      assert.equal(parked, false);
+      await refused('create_session', args);
     }
   });
 
   const FEEDBACK = 'The checkout total is wrong with a coupon';
 
-  it('start_feedback_session: schema, and a read-back naming the repository and quoting the feedback', async () => {
+  it('start_feedback_session: schema', () => {
     const tool = createChiefTools(chiefWorld().services).get('start_feedback_session');
     assert.ok(tool);
     const parameters = tool.definition.function.parameters as { properties: Record<string, unknown>; required: string[] };
     assert.deepEqual(Object.keys(parameters.properties).sort(), ['feedback', 'name', 'repository', 'targetBranch']);
     assert.deepEqual(parameters.required, ['repository', 'feedback']);
-
-    const { result, parked } = await ask('start_feedback_session', { repository: 'shop api', feedback: `  ${FEEDBACK} ` });
-    assert.equal(parked, true);
-    assert.equal((result.data as { say: string }).say, `Start a feedback session on shop-api about "${FEEDBACK}"?`);
   });
 
-  it('start_feedback_session: confirm creates the session with the feedback, navigates, and asks the call to hand over', async () => {
+  it('start_feedback_session: creates the session with the feedback, navigates, and asks the call to hand over', async () => {
     const handOffs: string[] = [];
     const w = chiefWorld();
-    const { gate, sent } = testGate();
     const tools = createChiefTools({ ...w.services, sessionAgents: { acquire: () => Promise.resolve() } });
-    const ctx = (turn: number): ToolContext => ({ ...ctxAt(gate, turn), handOffWhenReady: (id) => handOffs.push(id) });
-    await (tools.get('start_feedback_session') as ChiefTool).handler({ repository: 'shop-api', feedback: FEEDBACK }, ctx(1));
-    const confirm = sent.find((message) => message.type === 'confirm');
-    assert.ok(confirm !== undefined && confirm.type === 'confirm');
-    assert.deepEqual(handOffs, []);
-    const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctx(2));
+    const ran = await (tools.get('start_feedback_session') as ChiefTool).handler(
+      { repository: 'shop api', feedback: `  ${FEEDBACK} ` },
+      { ...ctx, handOffWhenReady: (id) => handOffs.push(id) },
+    );
 
     assert.equal(ran.ok, true, ran.summary);
     assert.deepEqual(w.state.calls, [
@@ -463,29 +436,18 @@ describe('chief session actions (voice US-012)', () => {
   });
 
   it('start_feedback_session: no handoff is promised without session agents', async () => {
-    const { ran } = await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK });
+    const { ran } = await run('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK });
     assert.equal(ran.ok, true);
     assert.equal((ran.data as { handOffWhenReady: boolean }).handOffWhenReady, false);
   });
 
-  it('start_feedback_session: cancel creates nothing', async () => {
-    const w = chiefWorld();
-    const { gate } = testGate();
-    const tools = createChiefTools(w.services);
-    await (tools.get('start_feedback_session') as ChiefTool).handler({ repository: 'shop-api', feedback: FEEDBACK }, ctxAt(gate, 1));
-    assert.ok(gate.cancel());
-    assert.deepEqual(w.state.calls, []);
-    assert.deepEqual(listSessions(w.db).filter((session) => session.feedback !== null), []);
-  });
-
-  it('start_feedback_session: an ambiguous repository asks which one, without parking anything', async () => {
+  it('start_feedback_session: an ambiguous repository asks which one, creating nothing', async () => {
     const w = chiefWorld();
     createRepository(w.db, { name: 'shop-web', sshUrl: 'git@github.com:acme/shop-web.git', githubSlug: 'acme/shop-web', defaultBaseBranch: 'main' });
-    const { result, parked } = await ask('start_feedback_session', { repository: 'shop', feedback: FEEDBACK }, w);
-    assert.equal(parked, false);
-    assert.equal(result.ok, false);
+    const result = await refused('start_feedback_session', { repository: 'shop', feedback: FEEDBACK }, w);
     assert.equal((result.data as { error: string }).error, 'ambiguous');
     assert.deepEqual([...(result.data as { candidates: string[] }).candidates].sort(), ['shop-api', 'shop-web']);
+    assert.deepEqual(listSessions(w.db).filter((session) => session.feedback !== null), []);
   });
 
   it('start_feedback_session: the name is feedback-<slug>, made unique; a given name and targetBranch are used', async () => {
@@ -495,70 +457,63 @@ describe('chief session actions (voice US-012)', () => {
     assert.ok(long.length <= 'feedback-'.length + SLUG_MAX, long);
 
     const w = chiefWorld();
-    await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
+    await run('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
     w.state.calls.length = 0;
-    const second = await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
+    const second = await run('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
     assert.equal(second.ran.summary, 'Created session: feedback-checkout-total-is-wrong-with-coupon-2');
 
-    const named = await roundTrip('start_feedback_session', { repository: 'chief-web', feedback: FEEDBACK, name: 'Coupon total', targetBranch: 'develop' });
-    assert.deepEqual(named.w.state.calls[0]?.arg, {
-      repositoryId: named.w.ids['web'],
-      name: 'coupon-total',
-      baseBranch: 'main',
-      prTargetBranch: 'develop',
-      feedback: FEEDBACK,
-    });
+    const named = await run('start_feedback_session', { repository: 'chief-web', feedback: FEEDBACK, name: 'Coupon total', targetBranch: 'develop' });
+    assert.deepEqual(named.w.state.calls, [
+      {
+        method: 'sessions.create',
+        arg: { repositoryId: named.w.ids['web'], name: 'coupon-total', baseBranch: 'main', prTargetBranch: 'develop', feedback: FEEDBACK },
+      },
+    ]);
 
-    const quote = await ask('start_feedback_session', { repository: 'shop-api', feedback: 'x'.repeat(FEEDBACK_QUOTE_MAX * 2) });
-    assert.ok((quote.result.data as { say: string }).say.length < FEEDBACK_QUOTE_MAX + 60);
     for (const args of [
       { repository: 'shop-api', feedback: '   ' },
       { repository: 'shop-api', feedback: FEEDBACK, targetBranch: 'staging' },
       { repository: 'shop-api', feedback: FEEDBACK, name: 'Billing export' },
       { repository: 'shop-api', feedback: 'x'.repeat(4001) },
     ]) {
-      const { result, parked } = await ask('start_feedback_session', args);
-      assert.equal(result.ok, false, JSON.stringify(args).slice(0, 80));
-      assert.equal(parked, false);
+      await refused('start_feedback_session', args);
     }
   });
 
-  it('start_build: starts the stored session, and a usage-limit hold is spoken, not thrown', async () => {
-    const { w, prompt, ran } = await roundTrip('start_build', { session: 'onboarding copy' });
-    assert.equal(prompt, 'Start the build of onboarding-copy?');
+  it('start_build: starts the resolved session, and a usage-limit hold is spoken, not thrown', async () => {
+    const { w, ran } = await run('start_build', { session: 'onboarding copy' });
     assert.deepEqual(w.state.calls, [{ method: 'builds.start', arg: w.ids['onboarding'] }]);
+    assert.equal(ran.ok, true);
     assert.equal(ran.summary, 'Started build: onboarding-copy');
 
     const held = chiefWorld();
     held.state.failures.set('builds.start', new BuildError(429, 'usage_limit_hold', 'Claude is on hold until 16:00; onboarding-copy is queued.'));
-    const refused = await roundTrip('start_build', { session: 'onboarding copy' }, held);
-    assert.equal(refused.ran.ok, false);
-    assert.equal(refused.ran.summary, 'Claude is on hold until 16:00; onboarding-copy is queued.');
+    const refusal = await run('start_build', { session: 'onboarding copy' }, held);
+    assert.equal(refusal.ran.ok, false);
+    assert.equal(refusal.ran.summary, 'Claude is on hold until 16:00; onboarding-copy is queued.');
   });
 
   it('stop_build: stops a running build', async () => {
-    const { w, prompt, ran } = await roundTrip('stop_build', { session: 'billing export' });
-    assert.equal(prompt, 'Stop the build of billing-export?');
+    const { w, ran } = await run('stop_build', { session: 'billing export' });
     assert.deepEqual(w.state.calls, [{ method: 'builds.stop', arg: w.ids['billing'] }]);
     assert.equal(ran.summary, 'Stopped build: billing-export');
   });
 
-  it('stop_build: a queued session is dequeued instead, and the prompt says so', async () => {
-    const { w, prompt, ran } = await roundTrip('stop_build', { session: 'dark mode' });
-    assert.match(prompt, /remove from the queue/i);
+  it('stop_build: a queued session is dequeued instead', async () => {
+    const { w, ran } = await run('stop_build', { session: 'dark mode' });
     assert.deepEqual(w.state.calls, [{ method: 'builds.dequeue', arg: w.ids['dark'] }]);
     assert.equal(ran.summary, 'Removed from the queue: dark-mode');
   });
 
   it('mark_ready: highlights the PRD, and returns parse errors as data', async () => {
-    const good = await roundTrip('mark_ready', { session: 'onboarding' });
+    const good = await run('mark_ready', { session: 'onboarding' });
     assert.equal(good.ran.ok, true);
     assert.deepEqual(good.w.state.calls, [{ method: 'sessions.markReady', arg: good.w.ids['onboarding'] }]);
     assert.ok(good.ran.ui?.some((action) => action.action === 'highlight' && action.target === 'prd'));
 
     const w = chiefWorld();
     w.state.prdErrors = [{ line: 12, message: 'Story US-002 has no acceptance criteria.' }];
-    const bad = await roundTrip('mark_ready', { session: 'onboarding' }, w);
+    const bad = await run('mark_ready', { session: 'onboarding' }, w);
     assert.equal(bad.ran.ok, false);
     assert.deepEqual((bad.ran.data as { errors: unknown }).errors, [{ line: 12, message: 'Story US-002 has no acceptance criteria.' }]);
     assert.match(bad.ran.summary, /onboarding-copy/);
@@ -566,41 +521,37 @@ describe('chief session actions (voice US-012)', () => {
   });
 
   it('back_to_planning: returns a ready session to planning', async () => {
-    const { w, ran } = await roundTrip('back_to_planning', { session: 'dark-mode' });
+    const { w, ran } = await run('back_to_planning', { session: 'dark-mode' });
     assert.deepEqual(w.state.calls, [{ method: 'sessions.backToPlanning', arg: w.ids['dark'] }]);
     assert.equal(ran.summary, 'Back to planning: dark-mode');
   });
 
-  it('schedule_start: parses the time in voice_timezone, reads it back, and sets it', async () => {
-    const { w, prompt, ran } = await roundTrip('schedule_start', { session: 'dark mode', at: 'tonight at 2' });
-    assert.equal(prompt, 'Schedule dark-mode to start Saturday 26 September at 02:00?');
+  it('schedule_start: parses the time in voice_timezone and sets it', async () => {
+    const { w, ran } = await run('schedule_start', { session: 'dark mode', at: 'tonight at 2' });
     assert.deepEqual(w.state.calls, [{ method: 'sessions.setSchedule', arg: { id: w.ids['dark'], scheduledStartAt: '2026-09-26T00:00:00.000Z' } }]);
     assert.equal(ran.summary, 'Scheduled: dark-mode, Saturday 26 September at 02:00');
   });
 
   it('schedule_start: clear sets the schedule to null', async () => {
-    const { w, prompt } = await roundTrip('schedule_start', { session: 'dark mode', clear: true });
-    assert.equal(prompt, 'Clear the scheduled start of dark-mode?');
+    const { w } = await run('schedule_start', { session: 'dark mode', clear: true });
     assert.deepEqual(w.state.calls, [{ method: 'sessions.setSchedule', arg: { id: w.ids['dark'], scheduledStartAt: null } }]);
   });
 
-  it('schedule_start: an ambiguous time asks again instead of parking anything', async () => {
-    const { result, parked } = await ask('schedule_start', { session: 'dark mode', at: 'tomorrow at 9' });
-    assert.equal(result.ok, false);
+  it('schedule_start: an ambiguous or missing time asks again without scheduling', async () => {
+    const result = await refused('schedule_start', { session: 'dark mode', at: 'tomorrow at 9' });
     assert.equal((result.data as { reason: string }).reason, 'ambiguous_time');
-    assert.equal(parked, false);
-    assert.equal((await ask('schedule_start', { session: 'dark mode' })).result.ok, false);
+    await refused('schedule_start', { session: 'dark mode' });
   });
 
   it('retry: retries the failed session; a 404 comes back as a result', async () => {
-    const { w, ran } = await roundTrip('retry', { session: 'billing exports' });
+    const { w, ran } = await run('retry', { session: 'billing exports' });
     assert.deepEqual(w.state.calls, [{ method: 'retries.retry', arg: w.ids['exports'] }]);
     assert.equal(ran.ok, true);
     assert.equal(ran.summary, 'Retried: billing-exports');
 
     const gone = chiefWorld();
     gone.state.failures.set('retries.retry', new RetryError(404, 'session_not_found', 'This session no longer exists.'));
-    const missingOne = await roundTrip('retry', { session: 'billing exports' }, gone);
+    const missingOne = await run('retry', { session: 'billing exports' }, gone);
     assert.deepEqual(missingOne.ran, {
       ok: false,
       data: { error: 'session_not_found', status: 404, message: 'This session no longer exists.' },
@@ -608,19 +559,18 @@ describe('chief session actions (voice US-012)', () => {
     });
   });
 
-  it('an unknown or ambiguous session is refused before anything is parked', async () => {
+  it('an unknown or ambiguous session is refused before any service is called', async () => {
     for (const name of ['start_build', 'stop_build', 'mark_ready', 'back_to_planning', 'retry']) {
-      const { result, parked } = await ask(name, { session: 'billing' });
-      assert.equal(result.ok, false, name);
-      assert.equal((result.data as { error: string }).error, 'ambiguous');
-      assert.equal(parked, false);
+      const result = await refused(name, { session: 'billing' });
+      assert.equal((result.data as { error: string }).error, 'ambiguous', name);
+      await refused(name, { session: 'marketing site' });
     }
   });
 
   it('a thrown non-service error is a failed result too', async () => {
     const w = chiefWorld();
     w.state.failures.set('builds.stop', new Error('docker went away'));
-    const { ran } = await roundTrip('stop_build', { session: 'billing export' }, w);
+    const { ran } = await run('stop_build', { session: 'billing export' }, w);
     assert.equal(ran.ok, false);
     assert.match(ran.summary, /billing-export: docker went away/);
   });
@@ -632,7 +582,6 @@ describe('chief tools on planning sessions (voice multi-planning US-010)', () =>
     turn: 1,
     focus: { kind: 'chief' },
     endCall: () => undefined,
-    confirmations: testGate().gate,
   });
 
   function world(): { w: ReturnType<typeof chiefWorld>; tools: ReturnType<typeof createChiefTools> } {
@@ -737,7 +686,6 @@ describe('answer_planning_question (voice multi-planning US-012)', () => {
     turn: 1,
     focus: { kind: 'chief' },
     endCall: () => undefined,
-    confirmations: testGate().gate,
   });
 
   function world(): {
@@ -785,9 +733,8 @@ describe('answer_planning_question (voice multi-planning US-012)', () => {
     return { w, tool, started, ids: { onboarding, drafting, done } };
   }
 
-  it('is not confirmed and takes session, question and answer', () => {
+  it('takes session, question and answer', () => {
     const { tool } = world();
-    assert.equal(tool.execute, undefined);
     const parameters = tool.definition.function.parameters;
     assert.deepEqual(Object.keys(parameters['properties'] as object), ['session', 'question', 'answer']);
     assert.deepEqual(parameters['required'], ['session', 'answer']);
