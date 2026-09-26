@@ -565,6 +565,8 @@ export interface Session {
   cloned: boolean;
   /** Whether the pull request this session opens is reviewed automatically. */
   codeReview: boolean;
+  /** The feedback the session was started from; null when it was not. */
+  feedback: string | null;
   createdAt: string;
   updatedAt: string;
 }

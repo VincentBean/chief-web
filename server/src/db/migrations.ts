@@ -1073,6 +1073,19 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE voice_calls ADD COLUMN scribe_seconds REAL NOT NULL DEFAULT 0;
     `,
   },
+  {
+    id: '0018_session_feedback',
+    sql: `
+      -- The feedback a session was started from (voice feedback US-001), read
+      -- by planning, a resume in the terminal and the session page. NULL for
+      -- every session from before the feature and every session not started
+      -- from feedback.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK the way
+      -- 0005/0007/0008/0010/0011 did: this column has to be carried across.
+      ALTER TABLE sessions ADD COLUMN feedback TEXT;
+    `,
+  },
 ];
 
 /**
