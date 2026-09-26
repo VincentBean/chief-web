@@ -123,6 +123,20 @@ next to everything above. Voice is off until you switch it on in Settings.
   matched only on your transcript, never on agent output. In Q&A mode (any
   session that is not being planned) the agent is also started with the edit
   tools disallowed.
+- **Saved logins are stored in plain text.** A login saved for a repository
+  (on the **Repositories** page, or with "Save this login" on the "watch with
+  me" card) is kept in the SQLite database in plain text, like the GitHub
+  token: the server has to type it into a page unattended. The API never
+  returns the password — `GET /api/repositories/:id/logins` lists only the
+  label, URL, username and creation time, and the card is sent only the label
+  and URL. Choosing a saved login sends just its id; the server looks up the
+  password itself, and only for a login of the session's own repository. It is
+  written into the session container only for the duration of one browser
+  open: over `docker exec` stdin (never a command line) into a `0600` answer
+  file, which the MCP tool deletes the moment it reads it, before the page is
+  opened and the login typed in. Deleting a repository deletes its saved
+  logins. Use a test account, not a personal one: the session agent drives the
+  logged-in page.
 - **The call socket** uses the same cookie check as every other WebSocket, and
   when `PUBLIC_URL` is set it also refuses a browser whose `Origin` is not that
   address (`4403`).

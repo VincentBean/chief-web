@@ -491,6 +491,45 @@ export async function deleteRepository(id: string): Promise<void> {
   await api<void>(`/api/repositories/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/** Mirrors the server's `RepositoryLoginView`: the password is never returned. */
+export interface RepositoryLogin {
+  id: string;
+  label: string;
+  url: string;
+  username: string;
+  created_at: string;
+}
+
+export interface RepositoryLoginInput {
+  /** Omit or leave blank for the URL's host plus the username. */
+  label?: string;
+  url: string;
+  username: string;
+  password: string;
+}
+
+export async function fetchRepositoryLogins(repositoryId: string, signal?: AbortSignal): Promise<RepositoryLogin[]> {
+  const body = await api<{ logins: RepositoryLogin[] }>(
+    `/api/repositories/${encodeURIComponent(repositoryId)}/logins`,
+    signal ? { signal } : {},
+  );
+  return body.logins;
+}
+
+export async function createRepositoryLogin(repositoryId: string, input: RepositoryLoginInput): Promise<RepositoryLogin> {
+  return api<RepositoryLogin>(`/api/repositories/${encodeURIComponent(repositoryId)}/logins`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteRepositoryLogin(repositoryId: string, loginId: string): Promise<void> {
+  await api<void>(
+    `/api/repositories/${encodeURIComponent(repositoryId)}/logins/${encodeURIComponent(loginId)}`,
+    { method: 'DELETE' },
+  );
+}
+
 /** Runs `git ls-remote` in a runner container; a failed remote still resolves. */
 export async function testRepositoryConnection(id: string): Promise<ConnectionTestResult> {
   return api<ConnectionTestResult>(

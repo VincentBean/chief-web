@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { BrowserService } from '../browser/index.js';
 import { loadConfig } from '../config.js';
+import { closeDatabase, createRepository, createSession, IN_MEMORY, openDatabase } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { type FakeExec, FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
 import {
@@ -14,6 +15,7 @@ import {
 } from './browser-ask.js';
 import { type AgentEvent, type AgentInput, type CallClock, type CallTts, type VoiceAgent, VoiceCall } from './call.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
+import { createBrowserSavedLogins, saveRepositoryLogin } from '../repositories/index.js';
 import { parseBrowserUrl, parseClientMessage, type ServerMessage } from './protocol.js';
 import type { SpeakResult } from './tts/index.js';
 
@@ -240,6 +242,56 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
     await cards.ask(sessionId);
     await cards.answer({ id: OTHER_ID, url: 'https://x.example/', credentials: { username: 'bob', password: 'pw' }, save: true });
     assert.deepEqual(saved, [{ url: 'https://x.example/', username: 'bob', password: 'pw' }]);
+  });
+
+  it('resolves a repository saved login into the answer file and saves a typed one (US-010)', async () => {
+    const db = openDatabase(IN_MEMORY);
+    const repository = createRepository(db, { name: 'shop', sshUrl: 'git@github.com:o/shop.git', githubSlug: 'o/shop' });
+    const other = createRepository(db, { name: 'other', sshUrl: 'git@github.com:o/other.git', githubSlug: 'o/other' });
+    const session = createSession(db, { repositoryId: repository.id, name: 's', baseBranch: 'main', prTargetBranch: 'main' });
+    const staging = saveRepositoryLogin(db, repository.id, {
+      url: 'https://staging.example.com/login',
+      username: 'admin',
+      password: PASSWORD,
+    });
+    const foreign = saveRepositoryLogin(db, other.id, { url: 'https://other.example/', username: 'x', password: 'y' });
+    const containerId = `c-${session.id}`;
+    daemon.addContainer({ id: containerId, name: 'chief-web-saved-logins' });
+    mcp.request(containerId);
+    const cards = relay({ savedLogins: createBrowserSavedLogins(db) });
+
+    await cards.ask(session.id);
+    assert.deepEqual(asks()[0]?.savedLogins, [
+      { id: staging.id, label: 'staging.example.com (admin)', url: 'https://staging.example.com/login' },
+    ]);
+    assert.ok(!JSON.stringify(sent).includes(PASSWORD), 'the card never gets the password');
+
+    await cards.answer({ id: REQUEST_ID, url: 'https://other.example/', credentials: { savedLoginId: foreign.id } });
+    assert.equal(sent[sent.length - 1]?.type, 'error', 'a login of another repository does not resolve');
+    assert.deepEqual(mcp.answersFor(containerId), []);
+
+    await cards.answer({ id: REQUEST_ID, url: 'https://staging.example.com/login', credentials: { savedLoginId: staging.id } });
+    await until(() => mcp.answersFor(containerId).length === 1);
+    assert.deepEqual(mcp.answersFor(containerId), [
+      {
+        id: REQUEST_ID,
+        cancelled: false,
+        url: 'https://staging.example.com/login',
+        credentials: { username: 'admin', password: PASSWORD },
+      },
+    ]);
+    assert.ok(!JSON.stringify(sent).includes(PASSWORD));
+
+    // "Save this login" on Open goes through the same saveRepositoryLogin.
+    mcp.request(containerId, OTHER_ID);
+    await cards.ask(session.id);
+    await cards.answer({ id: OTHER_ID, url: 'http://host.docker.internal:3000/', credentials: { username: 'bob', password: 'pw' }, save: true });
+    const rows = db.prepare('SELECT label, url, username, password FROM repository_logins WHERE repository_id = ? ORDER BY created_at, rowid').all(repository.id);
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { label: 'staging.example.com (admin)', url: 'https://staging.example.com/login', username: 'admin', password: PASSWORD },
+      { label: 'host.docker.internal:3000 (bob)', url: 'http://host.docker.internal:3000/', username: 'bob', password: 'pw' },
+    ]);
+    closeDatabase(db);
   });
 
   it('Cancel writes cancelled: true', async () => {

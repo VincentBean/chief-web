@@ -1086,6 +1086,24 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN feedback TEXT;
     `,
   },
+  {
+    id: '0019_repository_logins',
+    sql: `
+      -- Saved logins per repository (voice feedback US-010), offered by the
+      -- "watch with me" card. The password is stored in plain text like the
+      -- GitHub token; the API never returns it.
+      CREATE TABLE repository_logins (
+        id            TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+        label         TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        username      TEXT NOT NULL,
+        password      TEXT NOT NULL,
+        created_at    TEXT NOT NULL
+      );
+      CREATE INDEX idx_repository_logins_repository ON repository_logins (repository_id);
+    `,
+  },
 ];
 
 /**

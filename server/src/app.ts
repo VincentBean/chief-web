@@ -59,6 +59,7 @@ import {
 } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRecurringTaskRunner } from './recurringtasks/index.js';
+import { createBrowserSavedLogins } from './repositories/index.js';
 import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -519,7 +520,14 @@ export function createApp(
     events,
     sessionAgents,
     planning,
-    browser: { docker, container: sessionContainer, browsers, stopAll: () => browsers.stopAll() },
+    browser: {
+      docker,
+      container: sessionContainer,
+      browsers,
+      // A repository's saved logins on the card (voice feedback US-010).
+      savedLogins: createBrowserSavedLogins(db),
+      stopAll: () => browsers.stopAll(),
+    },
     ...deps.voice,
   });
   api.use(voice.router);

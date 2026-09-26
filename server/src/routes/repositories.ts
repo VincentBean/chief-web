@@ -7,10 +7,14 @@ import { isValidSentrySlug } from '../lib/sentry-slug.js';
 import {
   type CreateRepositoryRequest,
   createRepositoryWithKey,
+  deleteRepositoryLoginOf,
   deleteRepositoryWithKey,
   getRepositoryView,
+  listRepositoryLoginViews,
   listRepositoryViews,
   RepositoryError,
+  saveRepositoryLogin,
+  type SaveRepositoryLoginRequest,
   testRepositoryConnection,
   type UpdateRepositoryRequest,
   updateRepositoryWithKey,
@@ -104,6 +108,38 @@ export function createRepositoriesRouter(
       .catch((cause: unknown) => {
         respondWithFailure(res, cause);
       });
+  });
+
+  // Saved logins (voice feedback US-010): listed without their password, which
+  // only the server ever reads back, to write it into a session container.
+  router.get('/repositories/:id/logins', (req, res) => {
+    try {
+      res.status(200).json({ logins: listRepositoryLoginViews(db, req.params.id) });
+    } catch (cause) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  router.post('/repositories/:id/logins', (req, res) => {
+    const parsed = parseLogin(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(201).json(saveRepositoryLogin(db, req.params.id, parsed));
+    } catch (cause) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  router.delete('/repositories/:id/logins/:loginId', (req, res) => {
+    try {
+      deleteRepositoryLoginOf(db, req.params.id, req.params.loginId);
+      res.status(204).end();
+    } catch (cause) {
+      respondWithFailure(res, cause);
+    }
   });
 
   return router;
@@ -373,4 +409,28 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
   if (review.reviewContext !== undefined) update.reviewContext = review.reviewContext;
 
   return update;
+}
+
+/** The shape of a saved login; the values themselves are checked by `saveRepositoryLogin`. */
+function parseLogin(body: unknown): SaveRepositoryLoginRequest | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return badBody;
+  const input = body as Record<string, unknown>;
+  const { label, url, username, password } = input;
+  if (typeof url !== 'string') return { error: 'invalid_url', message: 'A URL is required.' };
+  if (username !== undefined && typeof username !== 'string') {
+    return { error: 'invalid_username', message: 'username must be a string.' };
+  }
+  if (typeof password !== 'string') {
+    return { error: 'invalid_password', message: 'A password is required.' };
+  }
+  if (label !== undefined && label !== null && typeof label !== 'string') {
+    return { error: 'invalid_label', message: 'label must be a string.' };
+  }
+  return {
+    url,
+    username: username ?? '',
+    password,
+    ...(typeof label === 'string' ? { label } : {}),
+  };
 }

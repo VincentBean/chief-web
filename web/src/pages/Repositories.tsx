@@ -1,11 +1,15 @@
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, useEffect, useState } from 'react';
 
 import {
   type ConnectionTestResult,
   createRepository,
+  createRepositoryLogin,
   deleteRepository,
+  deleteRepositoryLogin,
+  fetchRepositoryLogins,
   type Repository,
   type RepositoryInput,
+  type RepositoryLogin,
   testRepositoryConnection,
   updateRepository,
 } from '../api.ts';
@@ -17,6 +21,7 @@ import { type MarkdownBlock, parseMarkdown } from '../markdown.ts';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, EmptyState, Notice, PageHeader, Panel, Segmented, Skeleton } from '../ui.tsx';
+import { MAX_CREDENTIAL_CHARS, parseBrowserUrl } from '../voice/protocol.ts';
 
 type TestState = { status: 'running' } | ({ status: 'done' } & ConnectionTestResult);
 
@@ -41,6 +46,9 @@ const SENTRY_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /** Mirrors `MAX_REVIEW_CONTEXT_LENGTH` in `routes/repositories.ts` (US-003). */
 const MAX_REVIEW_CONTEXT_LENGTH = 10_000;
+
+/** Mirrors `MAX_LOGIN_LABEL_LENGTH` in `repositories/logins.ts` (voice feedback US-010). */
+const MAX_LOGIN_LABEL_LENGTH = 100;
 
 /**
  * Repository management (US-005): register a git remote, get an ed25519 deploy
@@ -539,6 +547,8 @@ function RepositoryForm({
           </p>
         </div>
 
+        {mode === 'edit' && initial !== undefined && <SavedLogins repository={initial} />}
+
         {error !== null && <Notice kind="error">{error}</Notice>}
 
         <div className="field__actions">
@@ -551,6 +561,201 @@ function RepositoryForm({
         </div>
       </div>
     </form>
+  );
+}
+
+/** The host of a saved login's URL, for the list; the stored URL itself if it no longer parses. */
+function loginHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * A repository's saved logins (voice feedback US-010), offered by the "watch
+ * with me" card of a session on it. Lives inside the editor's `<form>`, so it
+ * uses plain inputs and buttons: Enter adds a login rather than saving the
+ * repository.
+ */
+function SavedLogins({ repository }: { readonly repository: Repository }) {
+  const toast = useToast();
+  const [logins, setLogins] = useState<RepositoryLogin[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<RepositoryLogin | null>(null);
+  const [label, setLabel] = useState('');
+  const [url, setUrl] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchRepositoryLogins(repository.id, controller.signal)
+      .then(setLogins)
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) setLoadError(describeError(cause));
+      });
+    return () => controller.abort();
+  }, [repository.id]);
+
+  const add = (): void => {
+    setError(null);
+    const parsedUrl = parseBrowserUrl(url);
+    if (parsedUrl === null) {
+      setError('Enter a full http:// or https:// address.');
+      return;
+    }
+    if (password === '') {
+      setError('A saved login needs a password.');
+      return;
+    }
+    if (label.trim().length > MAX_LOGIN_LABEL_LENGTH) {
+      setError(`The label must be at most ${MAX_LOGIN_LABEL_LENGTH} characters.`);
+      return;
+    }
+    setAdding(true);
+    createRepositoryLogin(repository.id, {
+      url: parsedUrl,
+      username: username.trim(),
+      password,
+      ...(label.trim() === '' ? {} : { label: label.trim() }),
+    })
+      .then((login) => {
+        setLogins((current) => [...(current ?? []), login]);
+        setLabel('');
+        setUrl('');
+        setUsername('');
+        setPassword('');
+        toast.ok(`Saved the login ${login.label}.`);
+      })
+      .catch((cause: unknown) => setError(describeError(cause)))
+      .finally(() => setAdding(false));
+  };
+
+  const onDelete = (): void => {
+    if (deleting === null) return;
+    const login = deleting;
+    setDeleting(null);
+    deleteRepositoryLogin(repository.id, login.id)
+      .then(() => {
+        setLogins((current) => (current ?? []).filter((saved) => saved.id !== login.id));
+        toast.ok(`Deleted the login ${login.label}.`);
+      })
+      .catch((cause: unknown) => toast.error(describeError(cause)));
+  };
+
+  const addOnEnter = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (!adding) add();
+  };
+
+  return (
+    <div className="field">
+      <span className="field__label">Saved logins</span>
+      {loadError !== null ? (
+        <Notice kind="error">{loadError}</Notice>
+      ) : logins === null ? (
+        <Skeleton lines={2} />
+      ) : logins.length === 0 ? (
+        <p className="field__hint">None yet. A session on this repository can pick a saved login when it opens a page with you.</p>
+      ) : (
+        <ul className="rows rows--tight">
+          {logins.map((login) => (
+            <li className="row" key={login.id}>
+              <div className="row__main">
+                <span>{login.label}</span>
+                <span className="row__meta mono">
+                  {loginHost(login.url)}
+                  {login.username === '' ? '' : ` · ${login.username}`}
+                </span>
+              </div>
+              <div className="row__actions">
+                <button
+                  type="button"
+                  className="button button--small button--quiet button--danger button--icon"
+                  onClick={() => setDeleting(login)}
+                  aria-label={`Delete the login ${login.label}`}
+                  title="Delete"
+                >
+                  <Icon name="trash" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="field__row">
+        <input
+          className="field__input mono"
+          type="url"
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          onKeyDown={addOnEnter}
+          placeholder="http://host.docker.internal:3000/login"
+          aria-label="Login URL"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <input
+          className="field__input"
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          onKeyDown={addOnEnter}
+          placeholder="Label (optional)"
+          aria-label="Login label"
+          maxLength={MAX_LOGIN_LABEL_LENGTH}
+          autoComplete="off"
+        />
+      </div>
+      <div className="field__pair">
+        <input
+          className="field__input"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          onKeyDown={addOnEnter}
+          placeholder="Username"
+          aria-label="Login username"
+          maxLength={MAX_CREDENTIAL_CHARS}
+          autoComplete="off"
+        />
+        <input
+          className="field__input"
+          type="password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          onKeyDown={addOnEnter}
+          placeholder="Password"
+          aria-label="Login password"
+          maxLength={MAX_CREDENTIAL_CHARS}
+          autoComplete="new-password"
+        />
+        <button type="button" className="button button--small" onClick={add} disabled={adding}>
+          <Icon name="plus" />
+          {adding ? 'Adding…' : 'Add login'}
+        </button>
+      </div>
+      {error !== null && <p className="field__error">{error}</p>}
+      <p className="field__hint">
+        Stored in plain text on this server, like the GitHub token, and never shown again. The label defaults to the host plus the
+        username.
+      </p>
+
+      <ConfirmDialog
+        open={deleting !== null}
+        title={deleting === null ? '' : `Delete the login ${deleting.label}?`}
+        confirmLabel="Delete login"
+        danger
+        onConfirm={onDelete}
+        onCancel={() => setDeleting(null)}
+      >
+        <p>Sessions on {repository.name} will no longer offer it. Nothing changes on the site itself.</p>
+      </ConfirmDialog>
+    </div>
   );
 }
 
