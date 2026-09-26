@@ -5,6 +5,7 @@ import { listSessions } from '../db/index.js';
 import { resolveName } from './chief/tools.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import {
+  CARRY_ON,
   HANGUP,
   matchCallIntent,
   matchConfirmIntent,
@@ -110,7 +111,7 @@ describe('repeat and mute intents (voice US-021)', () => {
   });
 
   it('never lists one phrase under two intents (the later list would silently win)', () => {
-    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE };
+    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE, CARRY_ON };
     const seen = new Map<string, string>();
     for (const [list, phrases] of Object.entries(lists)) {
       for (const phrase of phrases) {
@@ -119,5 +120,30 @@ describe('repeat and mute intents (voice US-021)', () => {
         seen.set(key, list);
       }
     }
+  });
+});
+
+describe('the carry on intent (US-006)', () => {
+  it('matches every carry_on phrase, in English and Dutch', () => {
+    for (const phrase of CARRY_ON) assert.deepEqual(matchCallIntent(phrase), { kind: 'carry_on' }, phrase);
+    assert.deepEqual(matchCallIntent('Carry on.'), { kind: 'carry_on' });
+    assert.deepEqual(matchCallIntent('Work it out yourself!'), { kind: 'carry_on' });
+    assert.deepEqual(matchCallIntent('Werk het uit.'), { kind: 'carry_on' });
+    assert.deepEqual(matchCallIntent('Ga je gang!'), { kind: 'carry_on' });
+  });
+
+  it('leaves a longer sentence to the agent', () => {
+    for (const text of [
+      'carry on with the export but skip the header row',
+      'werk het uit in de PRD en stuur me de vragen',
+      'go ahead and add a download button',
+    ]) {
+      assert.equal(matchCallIntent(text), null, text);
+    }
+  });
+
+  it('is not a confirmation: "go ahead" still answers a pending one', () => {
+    assert.equal(matchConfirmIntent('go ahead'), 'yes');
+    assert.equal(matchConfirmIntent('carry on'), null);
   });
 });

@@ -25,6 +25,7 @@ import {
   listVoiceTurns,
   openDatabase,
   setSetting,
+  updateSession,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
@@ -1068,6 +1069,56 @@ describe('a scripted call end to end (US-027)', () => {
     assert.equal(s.agents().detachedState(sessionId).running, false);
     assert.equal(s.agents().detachedState(sessionId).lastOutcome, null);
     assert.equal(sessionStdin(sessionId).slice(before).length, 1, 'only the opening was sent');
+    await s.hangUp();
+  });
+
+  it('"werk het uit" sends a planning session off and chief takes the call (US-006)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    const requests = openrouter.requests.length;
+    await s.say('Werk het maar uit.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(
+      said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
+      'Oké, onboarding-copy gaat ermee aan de slag. Je bent weer bij mij.',
+    );
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    const detach = detachPrompt(prdPathFor('onboarding-copy'));
+    await waitFor(() => sessionStdin(sessionId).slice(before).includes(detach));
+    assert.equal(sessionStdin(sessionId).includes('Werk het maar uit.'), false, 'the intent never reaches the agent');
+    await s.agents().detachedTurnEnded(sessionId);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, 'ok');
+    await s.hangUp();
+  });
+
+  it('"carry on" under chief focus is an ordinary utterance (US-006)', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['Carrying on with what?']));
+    await s.say('carry on');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Carrying on with what?');
+    await s.hangUp();
+  });
+
+  it('"carry on" to a qa session goes to its agent (US-006)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    updateSession(s.w.db, sessionId, { status: 'ready' });
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's talk about the onboarding copy", 2);
+    await s.say('carry on');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Heard you. What next?');
+    assert.ok(sessionStdin(sessionId).some((text) => text.includes('carry on')));
     await s.hangUp();
   });
 

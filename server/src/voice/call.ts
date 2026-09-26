@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import {
   createVoiceCall,
   type Database,
+  getSession,
   insertVoiceTurn,
   updateVoiceCall,
   updateVoiceTurn,
@@ -32,6 +33,7 @@ import {
   type UiAction,
   WS_CLOSE_CALL_ENDED,
 } from './protocol.js';
+import { voiceAgentMode } from './session-agent/registry.js';
 import { SentenceChunker, toSpeakable } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult } from './stt/index.js';
@@ -243,6 +245,16 @@ export function backWithMe(language: string, session: { readonly sessionName: st
   else if (nl) state = `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en is in orde.`;
   else state = `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} that parses cleanly.`;
   return `${back} ${state}`;
+}
+
+/**
+ * What chief says when the `carry_on` intent sends a planning session off to
+ * work alone (US-006): "Okay, csv-export is working on it. Back with me."
+ */
+export function carryingOn(language: string, sessionName: string): string {
+  return language === 'nl'
+    ? `Oké, ${sessionName} gaat ermee aan de slag. Je bent weer bij mij.`
+    : `Okay, ${sessionName} is working on it. Back with me.`;
 }
 
 /** What the `mute` intent answers, as text: it is never spoken. */
@@ -960,6 +972,17 @@ export class VoiceCall {
         this.setFocus({ kind: 'chief' });
         await this.sayLine(tts, turn, backWithMe(getVoiceSettings(this.deps.db).language, this.readPlanning(focus.sessionId)), signal);
         return;
+      case 'carry_on': {
+        // Only a planning session is sent off; anywhere else it is just words for the agent.
+        if (focus.kind !== 'session' || !this.isPlanning(focus.sessionId)) break;
+        const { sessionId } = focus;
+        // Asked outright, so it goes off even if all it said so far was its greeting.
+        this.briefed.add(sessionId);
+        this.setFocus({ kind: 'chief' });
+        const name = this.readPlanning(sessionId)?.sessionName ?? getSession(this.deps.db, sessionId)?.name ?? sessionId;
+        await this.sayLine(tts, turn, carryingOn(getVoiceSettings(this.deps.db).language, name), signal);
+        return;
+      }
       case 'repeat':
         await this.replay(tts, turn, signal);
         return;
@@ -1149,6 +1172,12 @@ export class VoiceCall {
   }
 
   /** The session's name and PRD as the planning poller sees them; null without one, or on a failure. */
+  /** A session whose agent plans (`plan` mode), not one it only answers questions about. */
+  private isPlanning(sessionId: string): boolean {
+    const session = getSession(this.deps.db, sessionId);
+    return session !== null && voiceAgentMode(session) === 'plan';
+  }
+
   private readPlanning(sessionId: string): { sessionName: string; prd: PrdStatus } | null {
     try {
       return this.deps.planning?.status(sessionId) ?? null;

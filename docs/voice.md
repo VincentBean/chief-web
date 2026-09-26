@@ -267,6 +267,7 @@ exactly the phrase, so a normal sentence is never taken.
 | Intent | Examples | What happens |
 | --- | --- | --- |
 | back to chief | "chief", "back to chief", "terug naar chief" | focus returns to chief, who says one line |
+| carry on | "carry on", "work it out", "you take it from here", "werk het uit", "ga je gang" | only while you talk to a planning session: it drafts the PRD alone and the call goes back to chief, who says one line; anywhere else the words go to the agent |
 | switch to a session | "switch to billing export", "talk to …", "ga naar …", "praat met …" | the call moves to that session's agent |
 | stop talking | "stop", "wait", "hold on", "wacht" | cuts the current reply; no answer |
 | repeat | "say that again", "repeat", "wat zei je", "herhaal" | replays the last reply without a new provider call |
