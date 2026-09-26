@@ -70,7 +70,7 @@ import { originAllowed } from './socket.js';
 import { switchingOver } from './speakable.js';
 import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
 import { FAKE_BUILD_REQUEST_ID, FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
-import type { SttResult } from './stt/index.js';
+import type { SttResult, TranscribeOptions } from './stt/index.js';
 import { type SpeakCallbacks, type SpeakResult, SWITCHED_TOAST, type TtsSink } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
 
@@ -111,8 +111,11 @@ class FakeClock implements CallClock {
 class FakeStt implements CallStt {
   calls = 0;
   readonly canned: (string | SttResult)[] = [];
-  transcribe(): Promise<SttResult> {
+  /** The provider each request forced, `undefined` for the setting's. */
+  readonly providers: (string | undefined)[] = [];
+  transcribe(_wav: Buffer, _signal?: AbortSignal, options?: TranscribeOptions): Promise<SttResult> {
     this.calls += 1;
+    this.providers.push(options?.provider);
     const next = this.canned.shift() ?? "what's building?";
     if (typeof next !== 'string') return Promise.resolve(next);
     return Promise.resolve({ kind: 'text', text: next, durationMs: 900, costUsd: 0.001, seconds: 0.9 });
@@ -738,6 +741,20 @@ describe('an operator who pauses while chief thinks', () => {
     assert.deepEqual(w.agents[0]?.heard, ['#wait maak een sessie', 'die de sessie op het scherm toont en ook de PR']);
     const said = listVoiceTurns(w.db, callId).filter((t) => t.speaker === 'user').map((t) => t.text);
     assert.deepEqual(said, ['#wait maak een sessie', 'die de sessie op het scherm toont en ook de PR']);
+  });
+
+  it('transcribes on OpenRouter after Scribe fell back, whatever voice_stt_provider says', async () => {
+    const w = await world();
+    setSetting(w.db, 'voice_stt_provider', 'elevenlabs-realtime');
+    setSetting(w.db, 'elevenlabs_api_key', 'xi-test');
+    const client = await w.connect('?focus=chief');
+    client.hello('elevenlabs-realtime');
+    assert.equal((await client.until('ready')).sttMode, 'elevenlabs-realtime');
+    client.send({ type: 'stt.fallback', reason: 'token_rate_limited' });
+    utterance(client);
+    await client.until('agent.done');
+    assert.deepEqual(w.stt.providers, ['openrouter']);
+    assert.equal(client.messages('error').length, 0);
   });
 
   it('still lets push-to-talk interrupt a thinking turn', async () => {

@@ -5,10 +5,13 @@
  * partials become captions (and the barge-in signal), commits become
  * `transcript.final` on the call socket.
  *
- * Silence is billed, so it is not streamed: nothing is sent while the agent
- * speaks unless barge-in is on, the socket closes after
- * `VOICE_SCRIBE_IDLE_CLOSE_MS` without speech, and the next local VAD speech
- * start opens a new one (with a new token) and sends the last 300 ms first.
+ * Silence is billed, so only speech is streamed: the local VAD (or the talk
+ * button) starts an utterance, which sends the last 300 ms first and then
+ * the microphone, and ends it with a manual commit, after which nothing is
+ * sent until the next one. Nothing goes out while the agent speaks unless
+ * barge-in is on. ElevenLabs closes a socket that has had no audio for about
+ * 15 s (so does `VOICE_SCRIBE_IDLE_CLOSE_MS`); the next utterance opens a new
+ * one with a new token, holding its audio until the session starts.
  */
 import { ApiError } from '../api.ts';
 import { CAPTURE_SAMPLE_RATE } from './mic.ts';
@@ -38,11 +41,13 @@ export async function mintScribeSession(): Promise<ScribeSession> {
   return (await res.json()) as ScribeSession;
 }
 
-/** docs/voice-plan.md §7.2: VAD commits after 0.8 s of silence. */
-export const SCRIBE_VAD_SILENCE_SECS = 0.8;
 export const SCRIBE_MODEL = 'scribe_v2_realtime';
-/** Kept locally before a (re)open, so the first syllable is not lost. */
-export const PRE_ROLL_MS = 300;
+/**
+ * Sent ahead of each utterance, so the first syllable is not lost: the VAD
+ * announces speech a little late, and in `careful` barge-in only after
+ * `CAREFUL_MIN_SPEECH_MS` of it.
+ */
+export const PRE_ROLL_MS = 800;
 /** A partial unchanged this long goes to chief early (`voice_speculative_chief`). */
 export const STABLE_PARTIAL_MS = 300;
 /** Errors after which Scribe is given up for the rest of the call. */
@@ -51,6 +56,8 @@ export const FATAL_SCRIBE_ERRORS = ['quota_exceeded', 'auth_error', 'session_tim
 const MAX_FAILED_OPENS = 3;
 /** Audio held while a socket opens, at most. */
 const MAX_PENDING_MS = 10_000;
+/** An utterance nothing ends (a lost button release, say) is committed after this long. */
+export const MAX_SCRIBE_UTTERANCE_MS = 90_000;
 const USAGE_REPORT_MS = 5_000;
 const BYTES_PER_SECOND = CAPTURE_SAMPLE_RATE * 2;
 
@@ -59,8 +66,9 @@ export function scribeUrl(session: ScribeSession): string {
   params.append('model_id', SCRIBE_MODEL);
   params.append('token', session.token);
   params.append('audio_format', `pcm_${String(CAPTURE_SAMPLE_RATE)}`);
-  params.append('commit_strategy', 'vad');
-  params.append('vad_silence_threshold_secs', String(SCRIBE_VAD_SILENCE_SECS));
+  // The browser's VAD decides where an utterance ends; Scribe's own would
+  // need the silence streamed (and billed) to find it.
+  params.append('commit_strategy', 'manual');
   params.append('language_code', session.language);
   if (session.secondaryLanguage !== null) params.append('secondary_languages', session.secondaryLanguage);
   for (const term of session.keyterms) params.append('keyterms', term);
@@ -96,9 +104,12 @@ export class ScribeClient {
   /** The last {@link PRE_ROLL_MS} of microphone audio, always. */
   private readonly ring: ArrayBuffer[] = [];
   private ringBytes = 0;
-  /** Audio waiting for the socket to open. */
-  private pending: ArrayBuffer[] = [];
+  /** Audio, and the commits that end utterances, waiting for the socket to open. */
+  private pending: (ArrayBuffer | 'commit')[] = [];
   private pendingBytes = 0;
+  /** Between the start of an utterance and its commit (or misfire): the microphone streams. */
+  private speaking = false;
+  private speakingSince = 0;
   private lastSpeechAt = 0;
   private idleCloseMs = 20_000;
   private failedOpens = 0;
@@ -123,21 +134,53 @@ export class ScribeClient {
     while (this.ring.length > 1 && this.ringBytes - (this.ring[0]?.byteLength ?? 0) >= (BYTES_PER_SECOND * PRE_ROLL_MS) / 1000) {
       this.ringBytes -= this.ring.shift()?.byteLength ?? 0;
     }
-    if (this.options.paused()) return;
-    if (this.state === 'open') this.send(batch);
-    else if (this.state === 'opening' && this.pendingBytes < (BYTES_PER_SECOND * MAX_PENDING_MS) / 1000) {
-      this.pending.push(batch);
-      this.pendingBytes += batch.byteLength;
-    }
+    if (!this.speaking || this.options.paused()) return;
+    this.lastSpeechAt = Date.now();
+    if (this.state === 'closed') {
+      // The socket went away mid-utterance: a new one gets the pre-roll.
+      this.pending = [...this.ring];
+      this.pendingBytes = this.ringBytes;
+      void this.open();
+    } else if (this.state === 'open') this.send(batch);
+    else this.hold(batch);
   }
 
-  /** The local VAD heard speech start: (re)open with the pre-roll. */
-  speechStarted(): void {
+  /**
+   * The local VAD heard speech start, or the talk button went down: stream,
+   * pre-roll first. `preRoll: false` continues speech whose audio already went.
+   */
+  speechStarted({ preRoll = true }: { preRoll?: boolean } = {}): void {
     this.lastSpeechAt = Date.now();
-    if (this.state !== 'closed') return;
-    this.pending = [...this.ring];
-    this.pendingBytes = this.ringBytes;
-    void this.open();
+    if (this.speaking || this.state === 'dead') return;
+    this.speaking = true;
+    this.speakingSince = Date.now();
+    if (this.options.paused() || !preRoll) {
+      if (this.state === 'closed' && !this.options.paused()) void this.open();
+      return;
+    }
+    if (this.state === 'open') {
+      for (const batch of this.ring) this.send(batch);
+      return;
+    }
+    // Opening: what was held is an earlier utterance's; the pre-roll follows it.
+    for (const batch of this.ring) this.hold(batch);
+    if (this.state === 'closed') void this.open();
+  }
+
+  /** The utterance is over (the VAD's silence, or the talk button up): Scribe commits it now. */
+  speechEnded(): void {
+    if (!this.speaking) return;
+    this.speaking = false;
+    if (this.state === 'open') this.sendCommit();
+    else if (this.state === 'opening') this.pending.push('commit');
+  }
+
+  /**
+   * A VAD misfire: streaming stops without a commit. The little that went
+   * out stays uncommitted, and is at worst the start of the next utterance.
+   */
+  speechCancelled(): void {
+    this.speaking = false;
   }
 
   get active(): boolean {
@@ -179,7 +222,10 @@ export class ScribeClient {
         started = true;
         this.failedOpens = 0;
         this.state = 'open';
-        for (const batch of this.pending) this.send(batch);
+        for (const item of this.pending) {
+          if (item === 'commit') this.sendCommit();
+          else this.send(item);
+        }
         this.pending = [];
         this.pendingBytes = 0;
         return;
@@ -252,8 +298,22 @@ export class ScribeClient {
     this.unreportedBytes += batch.byteLength;
   }
 
+  private hold(batch: ArrayBuffer): void {
+    if (this.pendingBytes >= (BYTES_PER_SECOND * MAX_PENDING_MS) / 1000) return;
+    this.pending.push(batch);
+    this.pendingBytes += batch.byteLength;
+  }
+
+  /** An empty chunk with `commit`: Scribe answers with the utterance's `committed_transcript`. */
+  private sendCommit(): void {
+    const ws = this.ws;
+    if (ws === null || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: '', commit: true, sample_rate: CAPTURE_SAMPLE_RATE }));
+  }
+
   private tick(): void {
-    if (this.state === 'open' && Date.now() - this.lastSpeechAt >= this.idleCloseMs) {
+    if (this.speaking && Date.now() - this.speakingSince >= MAX_SCRIBE_UTTERANCE_MS) this.speechEnded();
+    if (this.state === 'open' && !this.speaking && Date.now() - this.lastSpeechAt >= this.idleCloseMs) {
       this.state = 'closed';
       this.shut();
     }

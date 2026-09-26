@@ -41,7 +41,7 @@ import { resumePrompt } from './session-agent/prompt.js';
 import { voiceAgentMode } from './session-agent/registry.js';
 import { SentenceChunker, toSpeakable, type WaitingSession, switchingOver, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
-import type { SttResult } from './stt/index.js';
+import type { SttResult, TranscribeOptions } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
 import type { TtsFormat, TtsProviderName, TtsSegment } from './tts/types.js';
 import {
@@ -126,7 +126,7 @@ export interface VoiceAgent {
 
 /** The slice of `SttService` a call uses. */
 export interface CallStt {
-  transcribe(wav: Buffer, signal?: AbortSignal): Promise<SttResult>;
+  transcribe(wav: Buffer, signal?: AbortSignal, options?: TranscribeOptions): Promise<SttResult>;
 }
 
 /** The slice of `TtsService` a call uses. */
@@ -1019,7 +1019,9 @@ export class VoiceCall {
     if (this.ended || this.tts === null) return null;
     let result: SttResult;
     try {
-      result = await this.deps.stt.transcribe(wav, this.lifetime.signal);
+      // Audio only reaches the server in OpenRouter mode, which may be a
+      // fallback from Scribe while `voice_stt_provider` still says Scribe.
+      result = await this.deps.stt.transcribe(wav, this.lifetime.signal, { provider: 'openrouter' });
     } catch (cause) {
       if (this.ended) return null;
       logger.warn('voice transcription failed', { error: String(cause) });

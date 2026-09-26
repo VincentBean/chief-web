@@ -172,10 +172,19 @@ Overview shows **Voice this month** (calls, minutes, ElevenLabs credits,
 OpenRouter dollars) for the calendar month. Once you have made a Scribe call of
 at least 30 seconds, Settings shows what Scribe costs per minute on your plan.
 
+**Only your speech is streamed.** In Scribe mode the browser's own speech
+detector (or the talk button) decides when you talk. An utterance streams the
+0.8 s before it was detected and then the microphone; when you stop (after
+**End of speech after**, or on releasing the button) the browser commits it
+and Scribe returns the transcript at once. Nothing is sent between
+utterances, so pauses cost no credits and noise in them never becomes words.
+
 **Scribe tokens.** In Scribe mode the browser talks to ElevenLabs directly with a
-single-use token the server mints, at most 10 per hour. Each Scribe socket needs
-a fresh token, and an idle one closes after `VOICE_SCRIBE_IDLE_CLOSE_MS`. When
-the hour's tokens run out, the call falls back to OpenRouter with a toast.
+single-use token the server mints, at most 120 per hour. Each Scribe socket needs
+a fresh token. ElevenLabs closes a socket that has had no audio for about 15 s
+(and so does `VOICE_SCRIBE_IDLE_CLOSE_MS`), and the next utterance opens a new
+one, holding its audio meanwhile. When the hour's tokens run out, the call
+falls back to OpenRouter with a toast.
 
 ## HTTPS
 
@@ -692,10 +701,11 @@ the planning terminal is open (close it in the browser, then ask again), or Clau
 is on hold until the time it gives. Claude Code must also be logged in, as for
 builds; see [Claude authentication](claude-auth.md).
 
-**Scribe falls back to OpenRouter mid-call.** The hour's 10 single-use tokens ran
-out, or ElevenLabs refused one. A long, talkative call can hit this because an
-idle Scribe socket closes after `VOICE_SCRIBE_IDLE_CLOSE_MS` and the next one
-needs a new token; raise that value.
+**Scribe falls back to OpenRouter mid-call.** The hour's 120 single-use tokens
+ran out, or ElevenLabs refused one. Each idle Scribe socket closes after
+`VOICE_SCRIBE_IDLE_CLOSE_MS` and the next one needs a new token; raise that
+value if a long call still runs out. The rest of the call transcribes through
+OpenRouter's **Speech to text** model.
 
 **Replies are slow.** Open the latency strip (pulse icon) and see which stage is
 long; [Latency](#latency) lists what moves each one.
