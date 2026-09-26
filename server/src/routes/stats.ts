@@ -1,10 +1,16 @@
 import { Router } from 'express';
 
 import type { BuildPoolView, BuildSlotUse, QueuedBuildView } from '../build/index.js';
-import { type Database, readStats, type Stats, sumVoiceUsageSince } from '../db/index.js';
+import {
+  countSentryIssuesAwaitingDecision,
+  type Database,
+  readStats,
+  type Stats,
+  sumVoiceUsageSince,
+} from '../db/index.js';
 import { type HostLoad, readHostLoad } from '../lib/host.js';
 import type { UsageLimitHold } from '../limits/index.js';
-import { getVoiceScribeCreditsPerMin, getVoiceSettings } from '../settings/index.js';
+import { getSentryToken, getVoiceScribeCreditsPerMin, getVoiceSettings } from '../settings/index.js';
 
 /**
  * The build pool, as the overview page needs it (US-006).
@@ -40,6 +46,15 @@ export interface StatsView extends Stats {
   readonly host: HostLoad;
   /** Voice calls this calendar month (UTC), for the "Voice this month" figure (voice US-023). */
   readonly voice: VoiceMonthView;
+  /** What the sidebar's Sentry badge reads (sentry-badge US-001). */
+  readonly sentry: SentryBadgeView;
+}
+
+export interface SentryBadgeView {
+  /** Whether a Sentry token is saved; the same test as `tokenConfigured` on the Sentry tab. */
+  readonly configured: boolean;
+  /** Issues with local status `planned`: a fix plan waiting on the operator. */
+  readonly awaitingDecision: number;
 }
 
 export interface VoiceMonthView {
@@ -98,6 +113,10 @@ export function createStatsRouter(
       hold: { until: hold.until() },
       host: readHostLoad(),
       voice: readVoiceMonth(db, new Date()),
+      sentry: {
+        configured: getSentryToken(db) !== null,
+        awaitingDecision: countSentryIssuesAwaitingDecision(db),
+      },
     };
     res.status(200).json(view);
   });

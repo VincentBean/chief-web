@@ -12,6 +12,7 @@ import {
   createPrReview,
   createPrRun,
   createRepository,
+  createSentryIssue,
   createSession,
   type Database,
   enqueueBuild,
@@ -20,9 +21,12 @@ import {
   listSessions,
   openDatabase,
   prRefId,
+  SENTRY_ISSUE_STATUSES,
+  setSetting,
   syncStories,
   updatePrReview,
   updatePrRun,
+  updateSentryIssue,
   updateSession,
   updateStory,
 } from '../db/index.js';
@@ -147,6 +151,49 @@ describe('stats api', () => {
     const response = await fetch(`${baseUrl}/api/stats?days=3`, { headers: { cookie } });
     const body = (await response.json()) as StatsView;
     assert.equal(body.activity.length, 3);
+  });
+
+  /*
+   * In order: the empty answer first, then the seeded issues, then the token —
+   * each test leaves its rows behind for the next one.
+   */
+  describe('sentry badge (sentry-badge US-001)', () => {
+    const read = async (): Promise<StatsView['sentry']> => {
+      const response = await fetch(`${baseUrl}/api/stats`, { headers: { cookie } });
+      assert.equal(response.status, 200);
+      return ((await response.json()) as StatsView).sentry;
+    };
+
+    it('answers not configured and nothing waiting when Sentry is untouched', async () => {
+      assert.deepEqual(await read(), { configured: false, awaitingDecision: 0 });
+    });
+
+    it('counts only the issues whose plan waits on a decision', async () => {
+      // One issue in every status, and a second planned one so the count is
+      // not merely "is there a planned row".
+      const statuses = [...SENTRY_ISSUE_STATUSES, 'planned'] as const;
+      statuses.forEach((status, index) => {
+        const issue = createSentryIssue(db, {
+          repositoryId,
+          sentryIssueId: String(1000 + index),
+          shortId: `DEMO-${String(index)}`,
+          title: `boom ${String(index)}`,
+          permalink: `https://sentry.io/organizations/acme/issues/${String(1000 + index)}/`,
+          firstSeen: '2026-09-01T00:00:00.000Z',
+          lastSeen: '2026-09-02T00:00:00.000Z',
+        });
+        updateSentryIssue(db, issue.id, { status });
+      });
+
+      assert.deepEqual(await read(), { configured: false, awaitingDecision: 2 });
+    });
+
+    it('reports a saved Sentry token as configured', async () => {
+      setSetting(db, 'sentry_token', 'sntrys_secret');
+      const sentry = await read();
+      assert.equal(sentry.configured, true);
+      assert.equal(sentry.awaitingDecision, 2);
+    });
   });
 
   /*
