@@ -18,10 +18,17 @@ ARG CLAUDE_CODE_VERSION=latest
 # bash/ripgrep/jq/curl/less: the shell and search tools the agent expects.
 # libgcc/libstdc++: musl runtime deps of the CLI's native pieces.
 # tini: PID 1 that reaps the processes the server execs into the container.
+# chromium: the headless browser a feedback session shares between the agent
+#   and the operator (voice feedback US-005); ~750 MB, see docs/development.md.
+# font-dejavu/font-liberation: Latin text for it; Liberation is metric-compatible
+#   with Arial, Helvetica and Times, the fonts pages name most.
 RUN apk add --no-cache \
         bash \
         ca-certificates \
+        chromium \
         curl \
+        font-dejavu \
+        font-liberation \
         git \
         jq \
         less \
@@ -52,6 +59,11 @@ RUN cat /etc/ssh/chief-web_ssh_config /etc/ssh/ssh_config > /etc/ssh/ssh_config.
 
 COPY entrypoint.sh /usr/local/bin/chief-web-entrypoint
 RUN chmod 755 /usr/local/bin/chief-web-entrypoint
+
+# The server's only way to Chromium's DevTools port, which stays on the
+# container's loopback: CDP over the stdio of a `docker exec` (US-005).
+COPY cdp-relay.js /usr/local/lib/chief-web/cdp-relay.js
+RUN chmod 644 /usr/local/lib/chief-web/cdp-relay.js
 
 # `node` (uid 1000) already exists in the base image; the container never runs
 # as root. Both directories are created here so that the volumes mounted over

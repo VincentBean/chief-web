@@ -40,6 +40,14 @@ export default tseslint.config(
     },
   },
   {
+    // Scripts copied into the runner image and run there with its node.
+    files: ['runner/**/*.js'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: { ...globals.node },
+    },
+  },
+  {
     files: ['**/*.config.{js,ts}', 'eslint.config.js'],
     languageOptions: {
       globals: { ...globals.node },
