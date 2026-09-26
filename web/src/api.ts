@@ -443,6 +443,8 @@ export interface Repository {
   sentryProject: string | null;
   /** Markdown folded into this repository's AI code review prompt; null if unset. */
   reviewContext: string | null;
+  /** The starting value of "open a pull request" on a new session for this repository. */
+  openPullRequestDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -460,6 +462,7 @@ export interface RepositoryInput {
   sentryProject?: string | null;
   /** `null` or an empty string clears the review context. */
   reviewContext?: string | null;
+  openPullRequestDefault?: boolean;
 }
 
 export interface ConnectionTestResult {
