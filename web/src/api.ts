@@ -926,6 +926,17 @@ export async function setSessionCodeReview(id: string, codeReview: boolean): Pro
   });
 }
 
+/**
+ * Turns opening a pull request for this session on or off (US-008). Refused
+ * once the pull request exists or the delivery is over.
+ */
+export async function setSessionOpenPullRequest(id: string, openPullRequest: boolean): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/open-pull-request`, {
+    method: 'PUT',
+    body: JSON.stringify({ openPullRequest }),
+  });
+}
+
 /** "Back to planning": returns a ready session to pending so the PRD can change. */
 export async function backToPlanning(id: string): Promise<Readiness> {
   return api<Readiness>(`/api/sessions/${encodeURIComponent(id)}/ready`, { method: 'DELETE' });

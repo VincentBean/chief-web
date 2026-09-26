@@ -837,6 +837,34 @@ describe('retrying a delivery', () => {
     assert.equal(delivered.lastError, null);
   });
 
+  it('finishes without a pull request when the flag is turned off after the pull request failed', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    opener.failure = new GithubApiError('github_rejected', 'GitHub is having a moment', 500);
+    const delivery = serviceFor(world, opener);
+
+    await delivery.complete(world.session, world.stories());
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'pull_request');
+    assert.equal(failed.prUrl, null);
+
+    // The push worked; the user gives up on the pull request (US-008).
+    updateSession(world.db, world.session.id, { openPullRequest: false });
+    opener.failure = null;
+    const result = await delivery.retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.code, 'pushed');
+    assert.equal(result.prUrl, null);
+    assert.equal(opener.calls.length, 1, 'only the first, failed attempt asked GitHub');
+    const delivered = world.reload();
+    assert.equal(delivered.status, 'finished');
+    assert.equal(delivered.prUrl, null);
+    assert.equal(delivered.failureStage, null);
+    assert.equal(delivered.lastError, null);
+  });
+
   it('reports a failure as an answer, not as a failed request', async () => {
     const world = new World();
     updateSession(world.db, world.session.id, { status: 'failed' });

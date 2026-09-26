@@ -330,6 +330,83 @@ describe('sessions api', () => {
     assert.equal(((await response.json()) as ErrorBody).error, 'code_review_locked');
   });
 
+  it('turns the pull request flag off and on after create', async () => {
+    const { body } = await create();
+    assert.equal(body.session.openPullRequest, true);
+
+    const off = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, {
+      openPullRequest: false,
+    });
+    assert.equal(off.status, 200);
+    assert.equal(((await off.json()) as SessionView).openPullRequest, false);
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).openPullRequest, false);
+
+    const on = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, {
+      openPullRequest: true,
+    });
+    assert.equal(on.status, 200);
+    assert.equal(((await on.json()) as SessionView).openPullRequest, true);
+  });
+
+  it('stores the pull request flag while building and on a failed session', async () => {
+    const { body } = await create();
+    for (const status of ['building', 'failed'] as const) {
+      updateSession(db, body.session.id, { status, openPullRequest: true });
+
+      const response = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, {
+        openPullRequest: false,
+      });
+
+      assert.equal(response.status, 200, status);
+      assert.equal(((await response.json()) as SessionView).openPullRequest, false, status);
+    }
+  });
+
+  it('refuses to change the pull request flag once it is locked', async () => {
+    const { body } = await create();
+    for (const status of ['reviewing', 'fixing', 'finished', 'pr-open', 'merged'] as const) {
+      updateSession(db, body.session.id, { status });
+
+      const response = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, {
+        openPullRequest: false,
+      });
+
+      assert.equal(response.status, 409, status);
+      assert.equal(((await response.json()) as ErrorBody).error, 'open_pull_request_locked', status);
+    }
+    assert.equal(
+      ((await (await call('GET', `/api/sessions/${body.session.id}`)).json()) as SessionView)
+        .openPullRequest,
+      true,
+    );
+  });
+
+  it('refuses to change the pull request flag of a session that has a pull request', async () => {
+    const { body } = await create();
+    updateSession(db, body.session.id, {
+      status: 'failed',
+      prUrl: 'https://github.com/acme/demo/pull/7',
+    });
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, {
+      openPullRequest: false,
+    });
+
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ErrorBody).error, 'open_pull_request_locked');
+  });
+
+  it('rejects a pull request flag body that is missing or not a boolean', async () => {
+    const { body } = await create();
+    for (const payload of [{}, { openPullRequest: 'false' }, { openPullRequest: 0 }, { openPullRequest: null }]) {
+      const response = await call('PUT', `/api/sessions/${body.session.id}/open-pull-request`, payload);
+
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.equal(((await response.json()) as ErrorBody).error, 'invalid_open_pull_request');
+    }
+  });
+
   it('stores a scheduled start as UTC', async () => {
     const { body } = await create({ scheduledStartAt: '2026-09-01T10:30:00+02:00' });
 

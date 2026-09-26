@@ -23,6 +23,7 @@ import {
   retrySessionSetup,
   type Session as SessionData,
   setSessionCodeReview,
+  setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
   startPlanning,
@@ -73,6 +74,7 @@ type Busy =
   | 'setup'
   | 'schedule'
   | 'code-review'
+  | 'open-pull-request'
   | 'delete'
   | null;
 
@@ -228,6 +230,15 @@ export function Session() {
       return next.codeReview
         ? 'Code review on: the pull request is reviewed as soon as it is opened.'
         : 'Code review off: the pull request is opened without one.';
+    });
+
+  const onOpenPullRequest = (openPullRequest: boolean): void =>
+    run('open-pull-request', async () => {
+      const next = await setSessionOpenPullRequest(id, openPullRequest);
+      setSession(next);
+      return next.openPullRequest
+        ? 'Pull request on: a pull request is opened after the branch is pushed.'
+        : 'Pull request off: the branch is pushed without a pull request.';
     });
 
   const onBackToPlanning = (): void =>
@@ -560,6 +571,8 @@ export function Session() {
           <PrdPanel prd={planning.prd} />
 
           <SchedulePanel session={session} busy={busy} onSave={onSchedule} />
+
+          <OpenPullRequestPanel session={session} busy={busy} onToggle={onOpenPullRequest} />
 
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
         </aside>
@@ -1249,6 +1262,63 @@ function DraftPanel({ status, prUrl }: { readonly status: 'reviewing' | 'fixing'
           </a>
         </p>
       )}
+    </Panel>
+  );
+}
+
+/* ---------------------------------------------------------- pull request */
+
+/**
+ * Why the pull-request flag is frozen, per status — the mirror of the
+ * server's guard (US-008). A session with a pull request URL is frozen too.
+ */
+const OPEN_PULL_REQUEST_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  reviewing: 'the pull request is open and the review is running.',
+  fixing: 'the pull request is open and its review feedback is being fixed.',
+  finished: 'this session has finished, so its delivery is over.',
+  'pr-open': 'the pull request is already open.',
+  merged: 'the pull request has already been merged.',
+};
+
+/**
+ * Whether delivery opens a pull request after pushing the branch (US-008).
+ * Changeable until the pull request exists, so a failed pull request can be
+ * given up on and the session retried as a push only.
+ */
+function OpenPullRequestPanel({
+  session,
+  busy,
+  onToggle,
+}: {
+  readonly session: SessionData;
+  readonly busy: Busy;
+  readonly onToggle: (openPullRequest: boolean) => void;
+}) {
+  const locked =
+    OPEN_PULL_REQUEST_LOCKED[session.status] ??
+    (session.prUrl === null ? undefined : 'the pull request has already been opened.');
+  return (
+    <Panel
+      title="Pull request"
+      icon="git-pull-request"
+      meta={
+        <Badge tone={session.openPullRequest ? 'ready' : 'neutral'}>{session.openPullRequest ? 'on' : 'off'}</Badge>
+      }
+    >
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={session.openPullRequest}
+          disabled={locked !== undefined || busy !== null}
+          onChange={(event) => onToggle(event.target.checked)}
+        />
+        Open pull request
+      </label>
+      <p className="field__hint">
+        {locked !== undefined
+          ? `The pull request can no longer be turned ${session.openPullRequest ? 'off' : 'on'}: ${locked}`
+          : 'When this is off, the feature branch is still pushed but no pull request is opened.'}
+      </p>
     </Panel>
   );
 }

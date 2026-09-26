@@ -120,6 +120,21 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // Turns opening a pull request on or off (US-008). Refused once the pull
+  // request exists or the delivery is over.
+  router.put('/sessions/:id/open-pull-request', (req, res) => {
+    const parsed = parseSetOpenPullRequest(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setOpenPullRequest(req.params.id, parsed.openPullRequest));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   // "Back to planning": the same transition in reverse.
   router.delete('/sessions/:id/ready', (req, res) => {
     try {
@@ -250,6 +265,19 @@ function parseCodeReview(body: unknown): { codeReview: boolean } | Invalid {
     return { error: 'invalid_code_review', message: 'codeReview is required.' };
   }
   return { codeReview };
+}
+
+/** The body of `PUT /sessions/:id/open-pull-request`: the flag is required. */
+function parseSetOpenPullRequest(body: unknown): { openPullRequest: boolean } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return badBody;
+
+  const parsed = parseOpenPullRequest(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.openPullRequest === undefined) {
+    return { error: 'invalid_open_pull_request', message: 'openPullRequest is required.' };
+  }
+  return { openPullRequest: parsed.openPullRequest };
 }
 
 /** `undefined` when the field is absent; an `Invalid` when it is not a boolean. */
