@@ -27,11 +27,17 @@ import { bindHoldToTalkButton } from './ptt.ts';
 import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
 
 /**
- * The call panel (voice US-010): docked bottom-right at `lg`, a bottom sheet
- * below it. The header says who is listening and what they are doing, the
- * body is the live transcript with tool cards and confirmation pills, and the
- * footer holds every control. All of it reads {@link useCall}; closing the
- * panel only hides it, the call goes on.
+ * The call view (calling-interface US-003): a full-screen column over the
+ * whole app, like a phone call. The header says who is listening and what they
+ * are doing, the main area in the middle is the live transcript with tool
+ * cards and confirmation pills, and the footer holds every control, with the
+ * hang-up button as the last thing on the screen. All of it reads
+ * {@link useCall}.
+ *
+ * While a call is connecting, live or reconnecting there is no way to hide the
+ * view: hanging up ends the call and closes it in one step. A call that ended
+ * any other way (the server ended it, or it failed) leaves the view open with
+ * its reason and a close button, as does a view opened without a call.
  */
 
 const PHASE_LABEL: Record<CallPhase, string> = {
@@ -132,6 +138,17 @@ export function CallPanel() {
     return () => window.clearInterval(timer);
   }, [call.startedAt, live]);
 
+  // The page underneath does not scroll while the call covers it.
+  useEffect(() => {
+    if (!call.panelOpen) return;
+    const root = document.documentElement;
+    const before = root.style.overflow;
+    root.style.overflow = 'hidden';
+    return () => {
+      root.style.overflow = before;
+    };
+  }, [call.panelOpen]);
+
   // Follow the newest line unless the operator scrolled up to read.
   useEffect(() => {
     const list = body.current;
@@ -190,7 +207,11 @@ export function CallPanel() {
   // Planning sessions that wait for the operator (US-013), counted on the chip while the menu is closed.
   const needsYou = call.planning.filter((planning) => planning.state === 'waiting' || planning.state === 'failed').length;
   const needsYouLabel = `${String(needsYou)} planning ${needsYou === 1 ? 'session needs' : 'sessions need'} you`;
-  const status = statusLabel(call.status, call.phase);
+  // A call that ended without the operator hanging up says why, until the next call starts.
+  const status =
+    call.status === 'ended' && call.endReason !== null
+      ? `${statusLabel(call.status, call.phase)}: ${call.endReason}`
+      : statusLabel(call.status, call.phase);
   // The focused planning session's open questions (US-011), counted down as they are answered.
   const openQuestions = focused.kind === 'session' ? (planningOf.get(focused.sessionId)?.openQuestions ?? 0) : 0;
   const openQuestionsLabel = `${String(openQuestions)} open ${openQuestions === 1 ? 'question' : 'questions'}`;
@@ -217,6 +238,11 @@ export function CallPanel() {
     const items = [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])];
     const at = items.findIndex((item) => item === document.activeElement);
     items[(at + step + items.length) % items.length]?.focus();
+  };
+
+  const hangup = (): void => {
+    call.hangup();
+    call.closePanel();
   };
 
   const send = (event: FormEvent): void => {
@@ -319,72 +345,76 @@ export function CallPanel() {
         <span className="call-panel__timer mono" aria-label="Call duration">
           {call.startedAt === null ? '0:00' : clock(now - call.startedAt)}
         </span>
-        <button
-          type="button"
-          className="button button--icon button--quiet"
-          onClick={call.closePanel}
-          aria-label={inCall ? 'Hide the call panel (the call continues)' : 'Close the call panel'}
-          title={inCall ? 'Hide (the call continues)' : 'Close'}
-        >
-          <Icon name="x" />
-        </button>
+        {!inCall && (
+          <button
+            type="button"
+            className="button button--icon button--quiet"
+            onClick={call.closePanel}
+            aria-label="Close the call"
+            title="Close"
+          >
+            <Icon name="x" />
+          </button>
+        )}
         <span className="visually-hidden" aria-live="polite">
           {call.status === 'live' ? `${focusName}: ${status}` : status}
         </span>
       </header>
 
-      {call.problem !== null && (
-        <div className="call-panel__problem" role="alert">
-          <Icon name="alert" />
-          {call.problem.kind === 'insecure' ? (
-            <p>
-              The microphone only works over HTTPS (or on localhost), and this page was opened over plain HTTP.{' '}
-              <a href={HTTPS_DOCS_URL} target="_blank" rel="noreferrer">
-                How to serve chief over HTTPS
-              </a>
-              .
-            </p>
-          ) : call.problem.kind === 'in-progress' ? (
-            <p>
-              A call is already open in another tab.{' '}
-              <button type="button" className="call-panel__link" onClick={() => call.start({ takeover: true })}>
-                Take it over here
-              </button>
-            </p>
-          ) : (
-            <p>{call.problem.message}</p>
+      <div className="call-panel__main">
+        {call.problem !== null && (
+          <div className="call-panel__problem" role="alert">
+            <Icon name="alert" />
+            {call.problem.kind === 'insecure' ? (
+              <p>
+                The microphone only works over HTTPS (or on localhost), and this page was opened over plain HTTP.{' '}
+                <a href={HTTPS_DOCS_URL} target="_blank" rel="noreferrer">
+                  How to serve chief over HTTPS
+                </a>
+                .
+              </p>
+            ) : call.problem.kind === 'in-progress' ? (
+              <p>
+                A call is already open in another tab.{' '}
+                <button type="button" className="call-panel__link" onClick={() => call.start({ takeover: true })}>
+                  Take it over here
+                </button>
+              </p>
+            ) : (
+              <p>{call.problem.message}</p>
+            )}
+          </div>
+        )}
+
+        {call.debug && <LatencyOverlay times={lastTimedTurn(call.latency)} />}
+
+        {call.pageView !== null && (
+          <PageView key={call.pageView.sessionId} sessionId={call.pageView.sessionId} onClose={call.closePageView} />
+        )}
+
+        <ol className="call-transcript" ref={body} aria-label="Transcript">
+          {call.transcript.length === 0 && (
+            <li className="call-transcript__empty">
+              {inCall ? 'Say something, or type below.' : 'Start a call to talk to chief from any page.'}
+            </li>
           )}
-        </div>
-      )}
-
-      {call.debug && <LatencyOverlay times={lastTimedTurn(call.latency)} />}
-
-      {call.pageView !== null && (
-        <PageView key={call.pageView.sessionId} sessionId={call.pageView.sessionId} onClose={call.closePageView} />
-      )}
-
-      <ol className="call-transcript" ref={body} aria-label="Transcript">
-        {call.transcript.length === 0 && (
-          <li className="call-transcript__empty">
-            {inCall ? 'Say something, or type below.' : 'Start a call to talk to chief from any page.'}
-          </li>
-        )}
-        {call.transcript.map((entry) => (
-          <TranscriptLine
-            key={entry.key}
-            entry={entry}
-            onResolve={call.resolve}
-            onBrowserAnswer={call.answerBrowser}
-            onBrowserCancel={call.cancelBrowser}
-            {...(call.debug && entry.kind === 'user' ? { stt: sttMs(call.latency[entry.turn]) } : {})}
-          />
-        ))}
-        {call.caption !== '' && (
-          <li className="call-transcript__caption" aria-live="off">
-            {call.caption}…
-          </li>
-        )}
-      </ol>
+          {call.transcript.map((entry) => (
+            <TranscriptLine
+              key={entry.key}
+              entry={entry}
+              onResolve={call.resolve}
+              onBrowserAnswer={call.answerBrowser}
+              onBrowserCancel={call.cancelBrowser}
+              {...(call.debug && entry.kind === 'user' ? { stt: sttMs(call.latency[entry.turn]) } : {})}
+            />
+          ))}
+          {call.caption !== '' && (
+            <li className="call-transcript__caption" aria-live="off">
+              {call.caption}…
+            </li>
+          )}
+        </ol>
+      </div>
 
       <footer className="call-panel__foot">
         <form className="call-panel__text" onSubmit={send}>
@@ -444,16 +474,6 @@ export function CallPanel() {
               <Icon name="stop" />
             </button>
           )}
-          <span className="call-panel__spacer" />
-          {inCall ? (
-            <button type="button" className="button button--danger-solid" onClick={call.hangup}>
-              Hang up
-            </button>
-          ) : (
-            <button type="button" className="button button--primary" onClick={() => call.start()}>
-              {call.status === 'ended' ? 'Call again' : 'Call chief'}
-            </button>
-          )}
         </div>
         <div className="call-panel__meta">
           <Segmented
@@ -468,6 +488,19 @@ export function CallPanel() {
           <span className="call-usage" title={call.usage === null ? undefined : usageTitle(call.usage)}>
             {call.usage === null ? 'Usage —' : usageLine(call.usage)}
           </span>
+        </div>
+        <div className="call-panel__end">
+          {inCall ? (
+            <button type="button" className="button button--danger-solid" onClick={hangup}>
+              <Icon name="sign-out" />
+              Hang up
+            </button>
+          ) : (
+            <button type="button" className="button button--primary" onClick={() => call.start()}>
+              <Icon name="broadcast" />
+              {call.status === 'ended' ? 'Call again' : 'Call chief'}
+            </button>
+          )}
         </div>
       </footer>
     </section>
