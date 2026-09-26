@@ -1366,6 +1366,8 @@ describe('a scripted call end to end (US-027)', () => {
     assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), announced);
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: b });
     assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    const viewA = s.client.messages('planning').at(-1)?.sessions.find((view) => view.sessionId === a);
+    assert.deepEqual([viewA?.state, viewA?.stories, viewA?.openQuestions], ['waiting', 3, 4]);
 
     // B's agent finishes its PRD: the call reminds the operator of A.
     await s.say('the button goes on the invoices page');
@@ -1416,7 +1418,8 @@ describe('a scripted call end to end (US-027)', () => {
     s.w.clock.advance(EVENT_QUIET_MS);
     await s.client.until('agent.done', done + 1);
 
-    // B has the focus, then the operator steps back to chief for a word about A.
+    // B has the focus, then the operator steps back to chief for a word about A:
+    // under a session focus every utterance goes to that session's agent.
     done = s.client.messages('agent.done').length;
     s.client.send({ type: 'focus', target: { sessionId: b.id } });
     await s.client.until('agent.done', done + 1);
