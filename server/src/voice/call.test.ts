@@ -105,14 +105,15 @@ class FakeClock implements CallClock {
   }
 }
 
-/** Hears the next canned line per utterance, and "what's building?" once they run out. */
+/** Hears the next canned line (or result) per utterance, and "what's building?" once they run out. */
 class FakeStt implements CallStt {
   calls = 0;
-  readonly canned: string[] = [];
+  readonly canned: (string | SttResult)[] = [];
   transcribe(): Promise<SttResult> {
     this.calls += 1;
-    const text = this.canned.shift() ?? "what's building?";
-    return Promise.resolve({ kind: 'text', text, durationMs: 900, costUsd: 0.001, seconds: 0.9 });
+    const next = this.canned.shift() ?? "what's building?";
+    if (typeof next !== 'string') return Promise.resolve(next);
+    return Promise.resolve({ kind: 'text', text: next, durationMs: 900, costUsd: 0.001, seconds: 0.9 });
   }
 }
 
@@ -143,12 +144,27 @@ class FakeTts implements CallTts {
   }
 }
 
-/** Replies with {@link REPLY}, one delta per piece. */
+/** Replies with {@link REPLY}, one delta per piece; `#wait` thinks until {@link release} (or an abort). */
 class ScriptedAgent implements VoiceAgent {
   readonly kind = 'chief' as const;
   readonly heard: string[] = [];
-  async *run(input: { text: string }): AsyncGenerator<AgentEvent> {
+  private releases: (() => void)[] = [];
+  /** Lets every `#wait` turn that is thinking go on to answer. */
+  release(): void {
+    for (const go of this.releases.splice(0)) go();
+  }
+  get waiting(): number {
+    return this.releases.length;
+  }
+  async *run(input: { text: string; signal: AbortSignal }): AsyncGenerator<AgentEvent> {
     this.heard.push(input.text);
+    if (input.text.includes('#wait')) {
+      await new Promise<void>((resolve) => {
+        this.releases.push(resolve);
+        input.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      if (input.signal.aborted) return;
+    }
     yield { type: 'tool', id: 't1', name: 'overview', status: 'running', summary: 'Looking' };
     yield { type: 'tool', id: 't1', name: 'overview', status: 'ok', summary: 'Nothing building' };
     for (const text of REPLY) {
@@ -678,6 +694,58 @@ describe('voice call socket', () => {
     assert.equal(originAllowed(req('https://chief.example'), 'https://chief.example/app'), true);
     assert.equal(originAllowed(req('https://evil.example'), 'https://chief.example'), false);
     assert.equal(originAllowed(req(), 'https://chief.example'), false);
+  });
+});
+
+describe('an operator who pauses while chief thinks', () => {
+  const utterance = (client: Client): void => {
+    client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+  };
+
+  it('keeps thinking through the start of speech and an utterance that transcribes to nothing', async () => {
+    const w = await world();
+    const { client } = await w.call('?focus=chief');
+    w.stt.canned.push('#wait build me a feature', { kind: 'dropped', reason: 'hallucination', text: 'Thank you.', durationMs: 600, costUsd: 0.001, seconds: 0.6 });
+    utterance(client);
+    await waitFor(() => w.agents[0]?.waiting === 1);
+
+    client.send({ type: 'speech.start' });
+    utterance(client);
+    await waitFor(() => w.stt.calls === 2);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(client.messages('agent.done').length, 0);
+    assert.equal(client.messages('tts.stop').length, 0);
+
+    w.agents[0]?.release();
+    assert.deepEqual(await client.until('agent.done'), { type: 'agent.done', turn: 1, interrupted: false });
+    assert.deepEqual(w.agents[0]?.heard, ['#wait build me a feature']);
+  });
+
+  it('interrupts the thinking turn for real words, and answers an overtaken utterance together with the next', async () => {
+    const w = await world();
+    const { client, callId } = await w.call('?focus=chief');
+    w.stt.canned.push('#wait maak een sessie', 'die de sessie op het scherm toont', 'en ook de PR');
+    utterance(client);
+    await waitFor(() => w.agents[0]?.waiting === 1);
+
+    // Both arrive while the first turn winds down: the second overtakes the first in the queue.
+    utterance(client);
+    utterance(client);
+    await client.until('agent.done', 2);
+    assert.deepEqual(client.messages('agent.done')[0], { type: 'agent.done', turn: 1, interrupted: true });
+    assert.deepEqual(w.agents[0]?.heard, ['#wait maak een sessie', 'die de sessie op het scherm toont en ook de PR']);
+    const said = listVoiceTurns(w.db, callId).filter((t) => t.speaker === 'user').map((t) => t.text);
+    assert.deepEqual(said, ['#wait maak een sessie', 'die de sessie op het scherm toont en ook de PR']);
+  });
+
+  it('still lets push-to-talk interrupt a thinking turn', async () => {
+    const w = await world();
+    const { client } = await w.call('?focus=chief');
+    w.stt.canned.push('#wait think hard');
+    utterance(client);
+    await waitFor(() => w.agents[0]?.waiting === 1);
+    client.send({ type: 'ptt', down: true });
+    assert.deepEqual(await client.until('agent.done'), { type: 'agent.done', turn: 1, interrupted: true });
   });
 });
 

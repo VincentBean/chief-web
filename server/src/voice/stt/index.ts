@@ -2,10 +2,12 @@ import type { Config } from '../../config.js';
 import type { Database } from '../../db/index.js';
 import { getOpenRouterApiKey, getVoiceSettings, type VoiceSettings } from '../../settings/index.js';
 import { isHallucination } from './hallucinations.js';
-import { SttError, transcribeWithOpenRouter } from './openrouter.js';
+import { inOtherLanguage } from './language-guard.js';
+import { SttError, type Transcript, transcribeWithOpenRouter } from './openrouter.js';
 import { checkWav, type WavRejection } from './wav.js';
 
 export { HALLUCINATION_MAX_MS, isHallucination } from './hallucinations.js';
+export { inOtherLanguage } from './language-guard.js';
 export { OPENROUTER_REFERER, OPENROUTER_TITLE, SttError, type SttErrorKind, type Transcript, transcribeWithOpenRouter } from './openrouter.js';
 export { checkWav, MIN_UTTERANCE_MS, WAV_SAMPLE_RATE, type WavCheck, type WavRejection } from './wav.js';
 
@@ -76,16 +78,25 @@ export class SttService {
     const apiKey = getOpenRouterApiKey(this.db);
     if (apiKey === null) throw new SttError('unconfigured', 0, '', 'Save an OpenRouter API key first.');
 
-    const transcript = await transcribeWithOpenRouter(wav, {
-      baseUrl: this.config.openrouterApiUrl,
-      apiKey,
-      model: settings.orSttModel,
-      // With a secondary language the model detects Dutch or English per
-      // utterance; pinning the primary would transcribe English as Dutch.
-      language: settings.secondaryLanguage === null ? settings.language : undefined,
-      timeoutMs: this.config.voiceSttTimeoutMs,
-      signal,
-    });
+    const request = (language: string | undefined): Promise<Transcript> =>
+      transcribeWithOpenRouter(wav, {
+        baseUrl: this.config.openrouterApiUrl,
+        apiKey,
+        model: settings.orSttModel,
+        language,
+        timeoutMs: this.config.voiceSttTimeoutMs,
+        signal,
+      });
+    // With a secondary language the model detects Dutch or English per
+    // utterance; pinning the primary would transcribe English as Dutch.
+    const secondary = settings.secondaryLanguage;
+    let transcript = await request(secondary === null ? settings.language : undefined);
+    // A detection that landed on neither language is retried with the primary
+    // pinned; both requests are billed, so both count.
+    if (secondary !== null && inOtherLanguage(transcript.text, [settings.language, secondary])) {
+      const pinned = await request(settings.language);
+      transcript = { text: pinned.text, costUsd: transcript.costUsd + pinned.costUsd, seconds: transcript.seconds + pinned.seconds };
+    }
     const result = { ...transcript, durationMs: check.durationMs };
     return isHallucination(transcript.text, check.durationMs)
       ? { kind: 'dropped', reason: 'hallucination', ...result }

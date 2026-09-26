@@ -54,7 +54,10 @@ Everything is in **Settings → Voice**. Nothing needs to go in `.env`; the
    is used for chief and every session agent.
 4. **Language** (default `nl`), **Second language** (default `en`, blank for
    none) and **Time zone** (default `Europe/Amsterdam`; this is what "tonight"
-   and "tomorrow at 9" mean).
+   and "tomorrow at 9" mean). With a second language, OpenRouter speech-to-text
+   detects the language per utterance. A transcript in neither language (a
+   short clip of Dutch heard as Icelandic, say) is transcribed again with
+   **Language** pinned, and both requests count toward the call's cost.
 5. **Enable voice calls with chief**, then **Save**. A save checks any model
    name you changed against OpenRouter's catalog first. It is only refused when
    the catalog says a name is unusable, not when OpenRouter cannot be reached.
@@ -130,6 +133,11 @@ the red dot says the microphone is open.
 - **Mute microphone**, **Mute voice** (text only for the rest of the call) and
   **Stop the agent** are in the panel's footer. Talking over the agent stops it
   too, depending on **Interrupting the agent**.
+- While the agent is still **thinking** (nothing said yet), you can carry on
+  talking: a pause mid-sentence, a cough or noise does not throw its answer
+  away. Only an utterance that transcribes to words replaces the turn, and
+  words that were waiting unanswered are sent along with it, so "make a
+  session… that shows the PR" reaches the agent as one request.
 - The **focus chip** in the header says who you are talking to: chief, or a
   session. Pick a session there to hand the call to it.
 - The footer shows the ElevenLabs credits left this billing month and what

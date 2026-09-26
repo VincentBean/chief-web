@@ -45,6 +45,8 @@ interface Seen {
 
 /** What the fake OpenRouter answers next; `delayMs` holds the answer back. */
 let reply: { status: number; body: unknown; delayMs?: number } = { status: 200, body: { text: 'hallo' } };
+/** Answers ahead of `reply`, one per request, for a test that needs a second request to differ. */
+let replies: { status: number; body: unknown }[] = [];
 let seen: Seen[] = [];
 
 describe('speech-to-text (voice US-004)', () => {
@@ -62,12 +64,13 @@ describe('speech-to-text (voice US-004)', () => {
           headers: req.headers,
           body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
         });
+        const next = replies.shift() ?? reply;
         const answer = (): void => {
           if (res.destroyed) return;
-          res.writeHead(reply.status, { 'content-type': 'application/json' });
-          res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body));
+          res.writeHead(next.status, { 'content-type': 'application/json' });
+          res.end(typeof next.body === 'string' ? next.body : JSON.stringify(next.body));
         };
-        if (reply.delayMs === undefined) answer();
+        if (reply.delayMs === undefined || next !== reply) answer();
         else setTimeout(answer, reply.delayMs);
       });
     });
@@ -88,6 +91,7 @@ describe('speech-to-text (voice US-004)', () => {
     for (const { key } of Object.values(VOICE_FIELDS)) deleteSetting(db, key);
     setSetting(db, 'openrouter_api_key', 'sk-or-v1-test');
     reply = { status: 200, body: { text: '  Hallo chief.  ', usage: { cost: 0.00012, seconds: 2 } } };
+    replies = [];
     seen = [];
   });
 
@@ -233,6 +237,30 @@ describe('speech-to-text (voice US-004)', () => {
       await service().transcribe(makeWav(2_000));
 
       assert.equal(seen[0]?.body['language'], 'nl');
+    });
+
+    it('retries with the primary pinned when detection lands on neither language, and bills both', async () => {
+      replies = [
+        { status: 200, body: { text: 'Men við dyrir að Kristján hefur...', usage: { cost: 0.25, seconds: 2 } } },
+        { status: 200, body: { text: 'Maar wij willen dat Chief het doet.', usage: { cost: 0.5, seconds: 2 } } },
+      ];
+
+      const result = await service().transcribe(makeWav(2_000));
+
+      assert.deepEqual(result, { kind: 'text', text: 'Maar wij willen dat Chief het doet.', costUsd: 0.75, seconds: 4, durationMs: 2_000 });
+      assert.equal(seen.length, 2);
+      assert.ok(!('language' in (seen[0]?.body ?? {})));
+      assert.equal(seen[1]?.body['language'], 'nl');
+    });
+
+    it('keeps a transcript in either language with one request', async () => {
+      for (const text of ['Welke sessies staan er open?', 'Hello? Hey, what do you do?']) {
+        seen = [];
+        reply = { status: 200, body: { text } };
+        const result = await service().transcribe(makeWav(2_000));
+        assert.equal(result.kind === 'text' ? result.text : null, text);
+        assert.equal(seen.length, 1);
+      }
     });
 
     it('rejects a too-short utterance without calling OpenRouter', async () => {

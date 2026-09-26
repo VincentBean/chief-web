@@ -385,6 +385,16 @@ export class VoiceCall {
   private running: Promise<void> = Promise.resolve();
   /** Bumped by every utterance; a stale one that was superseded while waiting gives up. */
   private ticket = 0;
+  /** Aborted when the call ends: the transcriptions still in flight give up. */
+  private readonly lifetime = new AbortController();
+  /** The utterances being transcribed, one after another, so they reach the queue in the order spoken. */
+  private transcribing: Promise<void> = Promise.resolve();
+  /**
+   * What the operator said that no turn has taken yet. The next operator turn
+   * takes all of it, so an utterance overtaken while it waited for the queue is
+   * answered together with the one that overtook it instead of being lost.
+   */
+  private readonly unanswered: string[] = [];
   private idleTimer: unknown = null;
   /** Set by chief's `end_call`: hang up once the turn's goodbye is out. */
   private hangUpAfter = false;
@@ -777,6 +787,7 @@ export class VoiceCall {
       logger.warn('could not stop the session browsers', { call: this.id, error: String(cause) });
     });
     this.state.activeTurn?.abort(new Error('call ended'));
+    this.lifetime.abort(new Error('call ended'));
     this.dropSpeculation();
     this.state.phase = 'ended';
     this.sendState();
@@ -898,6 +909,10 @@ export class VoiceCall {
     const turn = this.state.activeTurn;
     const phase = this.state.phase;
     if (turn === null || (phase !== 'thinking' && phase !== 'speaking')) return;
+    // While the agent thinks, the start of speech is not yet words: a pause
+    // mid-sentence, a cough or a misfire would throw the answer away. The
+    // utterance interrupts it once it transcribes to something.
+    if (source === 'speech' && phase === 'thinking') return;
     if (source === 'speech' && phase === 'speaking' && getVoiceSettings(this.deps.db).bargeIn === 'off') return;
     turn.abort(new Error('barge-in'));
   }
@@ -932,33 +947,52 @@ export class VoiceCall {
     this.speechOpenSince = null;
     this.touch();
     const ack = this.armAck();
-    void this.enqueue(async (controller) => {
-      try {
-        const tts = this.tts;
-        if (tts === null) return;
-        let result: SttResult;
-        try {
-          result = await this.deps.stt.transcribe(wav, controller.signal);
-        } catch (cause) {
-          if (controller.signal.aborted) return;
-          logger.warn('voice transcription failed', { error: String(cause) });
-          // docs/voice-plan.md §7.1: say so, and keep listening.
-          this.clearAck(ack);
-          this.earcon('sorry');
-          this.send({ type: 'error', code: 'stt_failed', message: 'I could not transcribe that.', fatal: false });
-          return;
-        }
-        if (result.kind === 'rejected') {
-          this.send({ type: 'error', code: `audio_${result.reason}`, message: result.message, fatal: false });
-          return;
-        }
-        this.addUsage({ sttSeconds: result.seconds, sttCostUsd: result.costUsd });
-        if (result.kind === 'dropped') return;
-        await this.runTurn(result.text, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() });
-      } finally {
+    if (this.state.activeTurn === null) this.setPhase('thinking');
+    // Transcribed before anything is interrupted: only words stop the turn
+    // that is running, not a cough, a rejected clip or a failed request.
+    const text = this.transcribing.then(() => this.transcribe(wav));
+    this.transcribing = text.then(
+      () => undefined,
+      () => undefined,
+    );
+    void text.then((said) => {
+      if (said === null) {
         this.clearAck(ack);
+        if (this.state.activeTurn === null && !this.ended) {
+          this.setPhase('listening');
+          this.armIdle();
+        }
+        return;
       }
+      this.unanswered.push(said);
+      void this.enqueue((controller) =>
+        this.runTurn(said, controller, { tSpeechEnd: speechEnd, tTranscript: this.isoNow() }).finally(() => this.clearAck(ack)),
+      );
+    }, (cause: unknown) => {
+      logger.error('voice transcription failed', { call: this.id, error: String(cause) });
     });
+  }
+
+  /** One utterance's words, or null when there are none to answer (said so where it failed). */
+  private async transcribe(wav: Buffer): Promise<string | null> {
+    if (this.ended || this.tts === null) return null;
+    let result: SttResult;
+    try {
+      result = await this.deps.stt.transcribe(wav, this.lifetime.signal);
+    } catch (cause) {
+      if (this.ended) return null;
+      logger.warn('voice transcription failed', { error: String(cause) });
+      // docs/voice-plan.md §7.1: say so, and keep listening.
+      this.earcon('sorry');
+      this.send({ type: 'error', code: 'stt_failed', message: 'I could not transcribe that.', fatal: false });
+      return null;
+    }
+    if (result.kind === 'rejected') {
+      this.send({ type: 'error', code: `audio_${result.reason}`, message: result.message, fatal: false });
+      return null;
+    }
+    this.addUsage({ sttSeconds: result.seconds, sttCostUsd: result.costUsd });
+    return result.kind === 'dropped' || this.ended ? null : result.text;
   }
 
   /**
@@ -983,6 +1017,7 @@ export class VoiceCall {
     this.speechOpenSince = null;
     this.touch();
     const ack = this.armAck();
+    this.unanswered.push(text);
     void this.enqueue((controller) => this.runTurn(text, controller, { tTranscript }).finally(() => this.clearAck(ack)));
   }
 
@@ -1081,6 +1116,11 @@ export class VoiceCall {
     const background = mode === 'event';
     // Background events are always chief's to speak; the focus stays put.
     let focus: CallFocus = background ? { kind: 'chief' } : this.state.focus;
+    // Words an overtaken utterance left behind come first; a click is not words.
+    if (mode === 'user' && clicked === undefined) {
+      const said = this.unanswered.splice(0);
+      if (said.length > 1) text = said.join(' ');
+    }
 
     if (mode !== 'greeting') {
       if (!background) this.send({ type: 'user.transcript', turn, text });
