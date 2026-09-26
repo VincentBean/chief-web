@@ -607,6 +607,8 @@ export interface Session {
   cloned: boolean;
   /** Whether the pull request this session opens is reviewed automatically. */
   codeReview: boolean;
+  /** Whether delivery opens a pull request, or only pushes the branch. */
+  openPullRequest: boolean;
   /** The feedback the session was started from; null when it was not. */
   feedback: string | null;
   createdAt: string;
@@ -665,6 +667,8 @@ export interface SessionInput {
   scheduledStartAt?: string | null;
   /** Omit to fall back to the global "code review by default" setting. */
   codeReview?: boolean;
+  /** Omit to fall back to the repository's "open a pull request by default". */
+  openPullRequest?: boolean;
   /**
    * What a user reported; planning then opens on it. At most
    * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
