@@ -941,6 +941,7 @@ function PrdPanel({ prd }: { readonly prd: PrdStatus }) {
           ...(prd.exists
             ? [
                 { label: 'Stories', value: prd.storyCount },
+                { label: 'Open questions', value: prd.openQuestions },
                 { label: 'Written', value: prd.updatedAt === null ? 'unknown' : localTime(prd.updatedAt) },
               ]
             : []),

@@ -100,13 +100,16 @@ export class SessionVoiceAgent implements VoiceAgent {
       if (signal.aborted) return;
 
       // A greeting (the switch to this session, US-019) is only for a fresh
-      // conversation; one that is already going waits for the operator.
-      if (input.text === '' && agent.opened) return;
+      // conversation; one that is already going waits for the operator,
+      // unless it is a planning session waiting for them (US-011).
+      if (input.text === '' && agent.opened && input.resume === undefined) return;
       agent.discardPending();
       if (agent.opened) {
-        agent.write(userMessageLine(utterance));
+        const resumed = input.resume === undefined ? null : input.text === '' ? input.resume : `${input.resume}\n\n${utterance}`;
+        agent.write(userMessageLine(resumed ?? utterance));
       } else {
-        agent.write(userMessageLine(this.deps.registry.openingPrompt(this.deps.sessionId, input.text === '' ? null : utterance)));
+        const opening = this.deps.registry.openingPrompt(this.deps.sessionId, input.text === '' ? null : utterance);
+        agent.write(userMessageLine(input.resume === undefined ? opening : `${opening}\n\n${input.resume}`));
         agent.opened = true;
       }
 

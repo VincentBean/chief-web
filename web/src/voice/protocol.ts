@@ -132,6 +132,17 @@ export type ServerMessage =
     }
   /** `muted`: the voice is off (the `mute` intent or `voice.mute`); replies are text only. */
   | { readonly type: 'state'; readonly phase: CallPhase; readonly focus: CallFocus; readonly muted: boolean }
+  /**
+   * Where a planning session stands (US-011): sent when the focus moves to
+   * one and whenever its state or open-question count changed after a turn.
+   */
+  | {
+      readonly type: 'planning';
+      readonly sessionId: string;
+      readonly state: 'briefing' | 'drafting' | 'waiting' | 'done' | 'failed';
+      readonly openQuestions: number;
+      readonly stories: number;
+    }
   /** Plays a cached earcon now (US-021): no agent audio 700 ms after the operator stopped, a booting session agent, a missed utterance. */
   | { readonly type: 'earcon'; readonly name: string }
   | { readonly type: 'user.transcript'; readonly turn: number; readonly text: string }

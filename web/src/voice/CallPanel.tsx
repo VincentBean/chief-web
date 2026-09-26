@@ -113,6 +113,9 @@ export function CallPanel() {
     (session) => session.cloned || (focused.kind === 'session' && focused.sessionId === session.id),
   );
   const status = statusLabel(call.status, call.phase);
+  // The focused planning session's open questions (US-011), counted down as they are answered.
+  const openQuestions = focused.kind === 'session' ? (call.planning[focused.sessionId]?.openQuestions ?? 0) : 0;
+  const openQuestionsLabel = `${String(openQuestions)} open ${openQuestions === 1 ? 'question' : 'questions'}`;
 
   const send = (event: FormEvent): void => {
     event.preventDefault();
@@ -155,6 +158,11 @@ export function CallPanel() {
               ))}
             </select>
             <span className="call-chip__label">{focusName}</span>
+            {openQuestions > 0 && (
+              <span className="call-chip__count" aria-label={openQuestionsLabel} title={openQuestionsLabel}>
+                {openQuestions}
+              </span>
+            )}
             <Icon name="chevron-down" />
           </label>
           <span className="call-panel__status">

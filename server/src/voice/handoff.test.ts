@@ -20,6 +20,7 @@ import {
 } from './call.js';
 import type { AgentKind, CallFocus, ServerMessage } from './protocol.js';
 import type { PlanningState } from './session-agent/planning-state.js';
+import { resumePrompt } from './session-agent/prompt.js';
 import { waitingSummary } from './speakable.js';
 import type { SpeakCallbacks, SpeakResult } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
@@ -487,5 +488,70 @@ describe('reminding of the other planning sessions (US-009)', () => {
     say(t.call, 'Anything else?');
     await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 2);
     assert.equal(t.call.state.queue.length, 0);
+  });
+});
+
+describe('returning to a waiting planning session (US-011)', () => {
+  const focusOn = async (t: ReturnType<typeof setup>, sessionId: string): Promise<void> => {
+    await t.call.start('openrouter');
+    t.call.handleMessage({ type: 'focus', target: { sessionId } });
+    await until(() => t.agents.get(sessionId)?.inputs.length === 1 && t.call.state.activeTurn === null);
+  };
+
+  it('opens a waiting session with its questions instead of the greeting, once', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', openQuestions: questions(2) }));
+    await focusOn(t, 's1');
+    const agent = t.agents.get('s1');
+    assert.equal(agent?.inputs[0]?.text, '');
+    assert.equal(agent.inputs[0]?.resume, resumePrompt(questions(2), { state: 'waiting' }));
+    assert.deepEqual(
+      t.of('planning').map(({ sessionId, state, openQuestions }) => [sessionId, state, openQuestions]),
+      [['s1', 'waiting', 2]],
+    );
+
+    // The operator answers; the count drops and the panel hears it once.
+    t.planning.onPoll = () => {
+      (t.states[0] as { openQuestions: string[] }).openQuestions = questions(1);
+    };
+    say(t.call, 'Only admins.');
+    await until(() => agent.inputs.length === 2 && t.call.state.activeTurn === null);
+    assert.equal(agent.inputs[1]?.resume, undefined);
+    assert.deepEqual(
+      t.of('planning').map(({ state, openQuestions }) => [state, openQuestions]),
+      [
+        ['waiting', 2],
+        ['waiting', 1],
+      ],
+    );
+  });
+
+  it('sends the operator\'s first words with the resume when they speak first', async () => {
+    const t = setup({ kind: 'session', sessionId: 's2' });
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'done', stories: 3 }));
+    await t.call.start('openrouter');
+    // The operator speaks before the greeting has gone out: one turn, the resume and their words.
+    t.call.handleMessage({ type: 'focus', target: { sessionId: 's1' } });
+    say(t.call, 'Is it finished?');
+    await until(() => (t.agents.get('s1')?.inputs.some((input) => input.text === 'Is it finished?') ?? false) && t.call.state.activeTurn === null);
+    const input = t.agents.get('s1')?.inputs.find((i) => i.text === 'Is it finished?');
+    assert.equal(input?.resume, resumePrompt([], { state: 'done' }));
+    assert.equal(t.agents.get('s1')?.inputs.length, 1);
+  });
+
+  it('quotes why a failed session stopped', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'failed', failure: 'timeout', openQuestions: questions(1) }));
+    await focusOn(t, 's1');
+    const resume = t.agents.get('s1')?.inputs[0]?.resume ?? '';
+    assert.equal(resume, resumePrompt(questions(1), { state: 'failed', failure: 'it ran out of time before the PRD was finished' }));
+    assert.match(resume, /did not finish: it ran out of time/);
+  });
+
+  it('greets a session that is still being briefed as before', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'briefing' }));
+    await focusOn(t, 's1');
+    assert.equal(t.agents.get('s1')?.inputs[0]?.resume, undefined);
   });
 });

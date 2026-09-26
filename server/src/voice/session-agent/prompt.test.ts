@@ -38,7 +38,7 @@ describe('resumePrompt', () => {
 1. Should archived sessions count?
 2. What is the badge called?
 
-Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories.`,
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`,
     );
   });
 
@@ -46,6 +46,23 @@ Greet the operator in one sentence and ask the first question. As soon as a ques
     assert.equal(
       resumePrompt([]),
       'The operator is back on the call. The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.',
+    );
+  });
+
+  it('does not call a waiting PRD with no questions complete', () => {
+    assert.equal(
+      resumePrompt([], { state: 'waiting' }),
+      'The operator is back on the call. The PRD has no open questions, but it is not finished: it is missing or does not parse in the story format. Greet the operator in one sentence, say what is left to do, and ask the first question you need answered.',
+    );
+  });
+
+  it('quotes the failure reason of a failed session before its questions', () => {
+    assert.equal(
+      resumePrompt(['What is the badge called?'], { state: 'failed', failure: 'it ran out of time before it finished' }),
+      `The operator is back on the call. Your last turn alone did not finish: it ran out of time before it finished. Pick up from what exists on disk: read the PRD if there is one, and finish it with the operator. These are the open questions in the PRD:
+1. What is the badge called?
+
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`,
     );
   });
 });

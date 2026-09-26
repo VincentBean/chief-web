@@ -18,6 +18,7 @@ import {
   type Database,
   featureBranchFor,
   getRecurringTaskByName,
+  getSession,
   getVoiceCall,
   getVoiceSessionAgent,
   IN_MEMORY,
@@ -31,6 +32,7 @@ import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
 import { prdPathFor } from '../prd/index.js';
+import { sessionPrdFile } from '../sessions/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
 import { type ChiefWorld, chiefWorld } from './chief/__fixtures__/world.js';
 import {
@@ -57,7 +59,7 @@ import {
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
 import { RESUME_WINDOW_MS } from './service.js';
-import { detachPrompt } from './session-agent/prompt.js';
+import { detachPrompt, resumePrompt } from './session-agent/prompt.js';
 import { CLAUDE_SESSION, FakeClaude, LONG_OPENING } from './session-agent/__fixtures__/fake-claude.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
@@ -206,6 +208,7 @@ class Client {
 
 interface World {
   readonly db: Database;
+  readonly config: Config;
   readonly clock: FakeClock;
   readonly stt: FakeStt;
   readonly agents: ScriptedAgent[];
@@ -304,6 +307,7 @@ async function world(
   };
   return {
     db,
+    config,
     clock,
     stt,
     agents,
@@ -1182,6 +1186,47 @@ describe('a scripted call end to end (US-027)', () => {
     await s.client.until('agent.done', done + 1);
     assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Je sessie csv-export op shop-api is klaar met 4 open vragen.');
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    await s.hangUp();
+  });
+
+  it('returning to a waiting session asks its open questions, and an answer re-reads the PRD (US-011)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    await s.say('back to chief');
+    // Persists until the chip refocuses it; `running` may be over before `say` returns.
+    await waitFor(() => s.agents().detachedState(sessionId).lastOutcome === 'ok');
+
+    // The draft it left behind: two questions for the operator.
+    const session = getSession(s.w.db, sessionId) ?? assert.fail('no session');
+    const prd = sessionPrdFile(s.w.config, session);
+    const draft = (questions: string[]): void => {
+      fs.mkdirSync(path.dirname(prd), { recursive: true });
+      fs.writeFileSync(prd, `# PRD: Onboarding copy\n\n## Open Questions\n${questions.map((q) => `- ${q}\n`).join('')}`);
+    };
+    const questions = ['Should the button say Download or Export?', 'Which file formats?'];
+    draft(questions);
+
+    // The chip moves the call back: the agent is sent the questions, not left waiting.
+    const done = s.client.messages('agent.done').length;
+    s.client.send({ type: 'focus', target: { sessionId } });
+    await s.client.until('agent.done', done + 1);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(sessionStdin(sessionId).at(-1), resumePrompt(questions, { state: 'waiting' }));
+    assert.deepEqual(s.client.messages('planning').at(-1), { type: 'planning', sessionId, state: 'waiting', openQuestions: 2, stories: 0 });
+
+    // The operator answers the first; the agent takes it off the list.
+    const sent = s.client.messages('planning').length;
+    draft(questions.slice(1));
+    await s.say('Download');
+    assert.ok(sessionStdin(sessionId).at(-1)?.includes('Download'));
+    assert.equal(sessionStdin(sessionId).at(-1)?.includes('open questions'), false, 'the resume is sent once');
+    assert.deepEqual(s.client.messages('planning').slice(sent), [{ type: 'planning', sessionId, state: 'waiting', openQuestions: 1, stories: 0 }]);
     await s.hangUp();
   });
 

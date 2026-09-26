@@ -28,6 +28,8 @@ export interface PlanningState {
   readonly state: PlanningStateName;
   readonly openQuestions: string[];
   readonly stories: number;
+  /** How the last detached turn failed; only on a `failed` session (US-011). */
+  readonly failure?: 'error' | 'timeout';
   /** The latest of the session row, its voice conversation and `prd.md`, ISO-8601 UTC. */
   readonly updatedAt: string;
 }
@@ -84,6 +86,7 @@ function stateOf(session: Session, agent: VoiceSessionAgent, deps: PlanningState
     state,
     openQuestions,
     stories: status.storyCount,
+    ...(state === 'failed' && (detached.lastOutcome === 'error' || detached.lastOutcome === 'timeout') ? { failure: detached.lastOutcome } : {}),
     updatedAt: [session.updatedAt, agent.updatedAt, status.updatedAt ?? ''].reduce((a, b) => (b > a ? b : a)),
   };
 }

@@ -55,20 +55,37 @@ export function detachPrompt(prdPath: string): string {
   return `[detached] The operator has left the call. Nobody is listening and nobody will answer, so do not ask anything. Continue alone: finish your research, then write the draft PRD in the exact story format to ${prdPath} before this reply ends, with every question you would have asked under a \`## Open Questions\` heading as a plain bullet list, most important first. End your reply with one sentence stating the number of stories and the number of open questions.`;
 }
 
+/** How a planning session the operator returns to stands (US-011). */
+export interface ResumeOptions {
+  /** `done` by default when there are no open questions, else `waiting`. */
+  readonly state?: 'waiting' | 'done' | 'failed';
+  /** Why the last detached turn failed, quoted for a `failed` session. */
+  readonly failure?: string;
+}
+
 /**
  * The message sent when the operator returns to a planning session (US-004):
  * the open questions of a `waiting` session one by one, or, when none are
- * left (`done`), a one-sentence "the PRD is complete".
+ * left (`done`), a one-sentence "the PRD is complete". A `failed` session
+ * (US-011) hears why its detached turn failed and picks up from the disk.
  */
-export function resumePrompt(openQuestions: readonly string[]): string {
+export function resumePrompt(openQuestions: readonly string[], options: ResumeOptions = {}): string {
+  const state = options.state ?? (openQuestions.length === 0 ? 'done' : 'waiting');
+  const back =
+    state === 'failed'
+      ? `The operator is back on the call. Your last turn alone did not finish: ${options.failure ?? 'it failed'}. Pick up from what exists on disk: read the PRD if there is one, and finish it with the operator.`
+      : 'The operator is back on the call.';
+  if (state === 'done') {
+    return `${back} The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.`;
+  }
   if (openQuestions.length === 0) {
-    return 'The operator is back on the call. The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.';
+    return `${back} The PRD has no open questions, but it is not finished: it is missing or does not parse in the story format. Greet the operator in one sentence, say what is left to do, and ask the first question you need answered.`;
   }
   const numbered = openQuestions.map((question, i) => `${i + 1}. ${question}`).join('\n');
-  return `The operator is back on the call. These are the open questions in the PRD:
+  return `${back} These are the open questions in the PRD:
 ${numbered}
 
-Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories.`;
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories. When the last one is answered, say the PRD is complete in one sentence and suggest saying "back to chief" to mark it ready and build it.`;
 }
 
 export interface VoicePlanningPromptInput extends Omit<PlanningPromptInput, 'context'> {

@@ -34,6 +34,7 @@ import {
   WS_CLOSE_CALL_ENDED,
 } from './protocol.js';
 import type { PlanningState, PlanningStateName } from './session-agent/planning-state.js';
+import { resumePrompt } from './session-agent/prompt.js';
 import { voiceAgentMode } from './session-agent/registry.js';
 import { SentenceChunker, toSpeakable, type WaitingSession, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
@@ -101,6 +102,12 @@ export interface AgentInput {
    * started for this utterance's partial. Only the agent that made it reads it.
    */
   readonly prefetched?: SpeculativeStep;
+  /**
+   * Set on the first turn to a planning session the focus has just moved to
+   * while it waits for the operator (US-011): a session agent sends this
+   * instead of its greeting, with the operator's first words when there are any.
+   */
+  readonly resume?: string;
 }
 
 /** Opaque to the call: whatever an agent's `speculate` hands back. */
@@ -287,6 +294,12 @@ export function switchOverQuestion(language: string): string {
   return language === 'nl' ? 'Zal ik je doorverbinden?' : 'Shall I switch you over?';
 }
 
+/** Why a detached turn failed, as the resume message quotes it (US-011). */
+const FAILURE_REASONS: Readonly<Record<NonNullable<PlanningState['failure']>, string>> = {
+  timeout: 'it ran out of time before the PRD was finished',
+  error: 'it stopped with an error before the PRD was finished',
+};
+
 function asWaiting(state: PlanningState): WaitingSession {
   return {
     sessionName: state.sessionName,
@@ -374,6 +387,10 @@ export class VoiceCall {
   private readonly agents = new Map<string, VoiceAgent>();
   /** Sessions whose agent answered the operator in this call: only those have something to draft from. */
   private readonly briefed = new Set<string>();
+  /** The resume message (US-011) a planning session's agent still has to be sent, per session. */
+  private readonly resumes = new Map<string, string>();
+  /** What the panel was last told of each planning session (US-011), to send only a change. */
+  private readonly planningSent = new Map<string, string>();
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
   private subscriptionTimer: unknown = null;
@@ -463,6 +480,8 @@ export class VoiceCall {
     }
     this.sendState();
     if (sessionId === null) return;
+    // Before `onSessionFocused`: it forgets how the last detached turn ended.
+    this.prepareResume(sessionId);
     this.deps.onSessionFocused?.(sessionId);
     this.send({ type: 'ui', action: 'navigate', path: `/sessions/${encodeURIComponent(sessionId)}` });
     this.greetPending = sessionId;
@@ -1082,6 +1101,7 @@ export class VoiceCall {
     const agent = this.agentFor(focus);
     if (mode === 'user' && sessionId !== null && agent.kind === 'session') this.briefed.add(sessionId);
     const stateBefore = sessionId !== null && agent.kind === 'session' ? this.planningStateOf(sessionId) : null;
+    const resume = sessionId !== null && agent.kind === 'session' ? this.resumes.get(sessionId) : undefined;
     const prefetched =
       mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
         ? this.adoptSpeculation(text, signal)
@@ -1105,7 +1125,10 @@ export class VoiceCall {
         ...(resolution === undefined ? {} : { resolution }),
         ...(invoke === undefined ? {} : { invoke }),
         ...(prefetched === undefined ? {} : { prefetched }),
+        ...(resume === undefined ? {} : { resume }),
       })) {
+        // Anything past the "one sec" means the agent was sent the resume.
+        if (resume !== undefined && sessionId !== null && event.type !== 'earcon') this.resumes.delete(sessionId);
         // Past a barge-in only a finished tool's card still goes out.
         const late = signal.aborted;
         if (late && !(event.type === 'tool' && event.status !== 'running')) break;
@@ -1175,8 +1198,12 @@ export class VoiceCall {
     }
     this.noteReply(turn, agent.kind, reply);
     if (sessionId !== null && agent.kind === 'session') {
+      if (!interrupted && resume !== undefined) this.resumes.delete(sessionId);
       this.pollPrd(sessionId);
-      if (!interrupted && stateBefore !== 'done' && this.planningStateOf(sessionId) === 'done') this.remindOfOthers(sessionId);
+      // Re-read after every turn (US-011): an answered question shows on the panel at once.
+      const after = this.planningOf(sessionId);
+      if (after !== null) this.sendPlanning(after);
+      if (!interrupted && stateBefore !== 'done' && after?.state === 'done') this.remindOfOthers(sessionId);
     }
   }
 
@@ -1259,12 +1286,51 @@ export class VoiceCall {
   }
 
   private planningStateOf(sessionId: string): PlanningStateName | null {
+    return this.planningOf(sessionId)?.state ?? null;
+  }
+
+  private planningOf(sessionId: string): PlanningState | null {
     try {
-      return this.deps.planningStates?.planningState(sessionId)?.state ?? null;
+      return this.deps.planningStates?.planningState(sessionId) ?? null;
     } catch (cause) {
       logger.warn('voice call could not read the planning state', { session: sessionId, error: String(cause) });
       return null;
     }
+  }
+
+  /**
+   * The focus moved to `sessionId` (US-011): a planning session that waits
+   * for the operator (`waiting`, `done` or `failed`) is resumed with its
+   * open questions instead of greeted, and the panel hears where it stands.
+   */
+  private prepareResume(sessionId: string): void {
+    this.resumes.delete(sessionId);
+    const planning = this.planningOf(sessionId);
+    if (planning === null) return;
+    this.sendPlanning(planning);
+    const { state } = planning;
+    if (state !== 'waiting' && state !== 'done' && state !== 'failed') return;
+    this.resumes.set(
+      sessionId,
+      resumePrompt(planning.openQuestions, {
+        state,
+        ...(planning.failure === undefined ? {} : { failure: FAILURE_REASONS[planning.failure] }),
+      }),
+    );
+  }
+
+  /** Tells the panel a planning session's state and open-question count, when they changed. */
+  private sendPlanning(planning: PlanningState): void {
+    const key = `${planning.state}:${String(planning.openQuestions.length)}:${String(planning.stories)}`;
+    if (this.planningSent.get(planning.sessionId) === key) return;
+    this.planningSent.set(planning.sessionId, key);
+    this.send({
+      type: 'planning',
+      sessionId: planning.sessionId,
+      state: planning.state,
+      openQuestions: planning.openQuestions.length,
+      stories: planning.stories,
+    });
   }
 
   /** Every planning session but `sessionId`, most recently updated first; empty on a failure. */

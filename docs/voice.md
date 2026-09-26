@@ -306,6 +306,14 @@ session you are talking to finishes its PRD, chief names the others at the next
 quiet moment. If exactly one is waiting it asks "Shall I switch you over?"; say
 yes (or press Confirm) to go there.
 
+Going back to a planning session that is waiting for you (by name, the focus
+chip or that "yes") does not start with a greeting: its agent is handed its open
+questions and asks them one at a time, and if you speak first your words go
+along with them. A finished session says its PRD is complete; one whose draft
+failed is told why and picks up from what is on disk. After every reply the PRD
+is read again, so the chip's open-question count and the session page's PRD
+panel count down as you answer.
+
 ## Privacy
 
 - **Audio is never stored.** chief-web holds your speech in memory only long

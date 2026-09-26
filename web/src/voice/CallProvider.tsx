@@ -120,11 +120,16 @@ export interface CallState {
   readonly debug: boolean;
   /** Each recent turn's timing, by turn number, from the server's `latency` messages. */
   readonly latency: Readonly<Record<number, TurnTimes>>;
+  /** What the call last said of each planning session (US-011), by session id, for the focus chip. */
+  readonly planning: Readonly<Record<string, PlanningView>>;
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
   readonly panelOpen: boolean;
   readonly panelRef: RefObject<HTMLElement | null>;
 }
+
+/** A planning session as the call's `planning` message describes it. */
+export type PlanningView = Omit<Extract<ServerMessage, { type: 'planning' }>, 'type' | 'sessionId'>;
 
 export type CallProblem =
   | { readonly kind: 'insecure' }
@@ -323,6 +328,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [usage, setUsage] = useState<CallUsage | null>(null);
   const [debug, setDebugState] = useState(readDebug);
   const [latency, setLatency] = useState<Readonly<Record<number, TurnTimes>>>({});
+  const [planning, setPlanning] = useState<Readonly<Record<string, PlanningView>>>({});
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -411,6 +417,11 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
         case 'latency':
           setLatency((current) => ({ ...current, [message.turn]: message.times }));
           return;
+        case 'planning': {
+          const view: PlanningView = { state: message.state, openQuestions: message.openQuestions, stories: message.stories };
+          setPlanning((current) => ({ ...current, [message.sessionId]: view }));
+          return;
+        }
         case 'ui':
           if (message.action === 'navigate') navigate(message.path);
           else if (message.action === 'highlight') highlight(message.target);
@@ -520,6 +531,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       setTranscript([]);
       setUsage(null);
       setLatency({});
+      setPlanning({});
       setCaption('');
       sttMode.current = 'openrouter';
       setStartedAt(null);
@@ -693,6 +705,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       usage,
       debug,
       latency,
+      planning,
       problem,
       panelOpen,
       panelRef,
@@ -729,6 +742,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       usage,
       debug,
       latency,
+      planning,
       problem,
       panelOpen,
       open,
