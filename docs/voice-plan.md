@@ -9,7 +9,7 @@
 | No new subscriptions | Only **ElevenLabs** (121k credits/month, already paid), **OpenRouter** (pay per use) and the existing **Claude subscription** through Claude Code |
 | No Anthropic API key in chief-web | Session agents are `claude -p` processes in session containers, as the build loop already runs them |
 | chief-web is self-hosted and private | No cloud service may need to call *into* chief-web. Every connection goes outward. |
-| Agents run with `--dangerously-skip-permissions` | Session agents get no management tools. Anything irreversible needs a spoken confirmation that the **server** enforces. |
+| Agents run with `--dangerously-skip-permissions` | Session agents get no management tools. ~~Anything irreversible needs a spoken confirmation that the **server** enforces.~~ Superseded: chief acts on the first tool call, and a planning agent has one tool, `start_build` (see §9.4). |
 
 ---
 
@@ -156,7 +156,6 @@ server/src/voice/
     agent.ts                ChiefAgent: OpenRouter streaming chat loop with tools
     openrouter-client.ts    fetch-based SSE client (no SDK dependency)
     tools.ts                tool definitions + handlers over existing services
-    confirm.ts              server-enforced confirmation tokens
     snapshot.ts             compact state snapshot for the system prompt
     prompt.ts               system prompt (Appendix A.1)
   session-agent/
@@ -213,11 +212,12 @@ interface VoiceCallState {
   turn: number;                    // increments per user utterance
   activeTurn: AbortController | null; // aborts LLM stream + TTS context for this turn
   spokenSoFar: string;             // text actually confirmed played (for cut-off notes)
-  pendingConfirmation: Confirmation | null;
   ttsProvider: 'elevenlabs' | 'openrouter';
   queue: VoiceEvent[];             // background events waiting for a quiet moment
 }
 ```
+
+*(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): the `pendingConfirmation` field is gone; there is nothing pending between turns.)*
 
 Rules:
 
@@ -264,10 +264,11 @@ Text frames are JSON. Binary frames have a 5-byte header: `u8 kind` + `u32 LE se
 | `tts.end` | `{ segmentId }` | |
 | `tts.stop` | `{ turn }` | barge-in: flush everything queued |
 | `tool` | `{ turn, id, name, status: 'running'\|'ok'\|'error', summary, detail? }` | tool card |
-| `confirm` | `{ id, prompt, expiresAt }` | show a Confirm / Cancel pill (voice "yes" also works) |
 | `ui` | `{ action: 'navigate', path } \| { action: 'highlight', target } \| { action: 'toast', text }` | the UI follows the call |
 | `usage` | `{ elCreditsUsed, orCostUsd, elCreditsRemaining? }` | meter |
 | `error` | `{ code, message, fatal }` | |
+
+*(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): the `confirm` / `confirm.resolved` server messages and the `confirm.resolve` browser message are deleted.)*
 
 Close codes: `4401` unauthorized (gateway), `4409` call in progress, `4410` taken over, `4422` voice not configured.
 
@@ -516,14 +517,15 @@ Each tool is `{ definition (JSON schema), handler(args, ctx) → ToolResult }`. 
 | `review_pull_request({repository, number})` | prreview service | **yes** | – |
 | `overview()` | stats service + queue + limits hold | – | navigate `/` |
 | `show({page})` | – | – | navigate to Overview/Sessions/PRs/… |
-| `confirm({confirmation_id})` | executes a pending action (§9.4) | – | – |
 | `end_call()` | ends call after goodbye | – | – |
+
+*(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): the Confirmation column no longer applies and the `confirm` tool is deleted; every tool runs on its first call (§9.4).)*
 
 Deliberately **not** exposed: deleting sessions or repositories, settings changes, terminals, the Claude login. Those stay manual.
 
 **Name resolution.** `session` and `repository` args accept an id *or* a spoken name. A resolver in `tools.ts` normalizes both sides (lowercase, spaces/underscores → `-`, strip "the"/"session"), then tries exact, then prefix, then Levenshtein ≤ 2. When there are 0 or >1 matches it returns `{ok:false, data:{candidates:[…]}}` so chief asks "Did you mean billing-export or billing-exports?".
 
-**Session names from speech.** `create_session` slugifies `name` (`"CSV export for invoices"` → `csv-export-invoices`, max 40 chars, `[a-z0-9-_]`), and the confirmation prompt reads the slug back.
+**Session names from speech.** `create_session` slugifies `name` (`"CSV export for invoices"` → `csv-export-invoices`, max 40 chars, `[a-z0-9-_]`), and the tool result names the slug, which chief says.
 
 **Times.** `schedule_start.at` accepts ISO or phrases ("tonight at 2", "in 3 hours"). Parse with a tiny parser in `chief/time.ts` in the operator's timezone (setting `voice_timezone`, default `Europe/Amsterdam`). Reject ambiguous input so the model asks again.
 
@@ -546,14 +548,9 @@ FOCUS: chief
 
 With this in the prompt, "what's building?" and "anything need me?" are answered with **zero tool calls**.
 
-### 9.4 Server-enforced confirmation (`chief/confirm.ts`)
+### 9.4 ~~Server-enforced confirmation~~ Chief acts at once
 
-The model must not be able to start a build just because it misheard. Tools marked **yes**:
-
-1. On the first call, *don't execute*. Create `Confirmation { id, tool, args, prompt, createdAtTurn, expiresAt: now+60s }`, send `confirm` to the browser, and return `{ok:true, data:{needs_confirmation:true, confirmation_id, say: prompt}}`. Chief speaks the prompt: *"Create session csv-export-invoices on shop-api, targeting develop, is that right?"*
-2. `confirm({confirmation_id})` executes **only if** a *new user utterance* has arrived since `createdAtTurn` (`call.turn > createdAtTurn`) and the confirmation hasn't expired. Otherwise it returns `{ok:false, reason:'await_user'}`. The model can't confirm on its own in the same turn.
-3. As a shortcut, `intents.ts` recognizes a bare "yes / ja / do it / go / klopt" or "no / nee / cancel" as the whole utterance while a confirmation is pending. It resolves directly without an LLM round trip, then tells chief what happened via a tool-result message.
-4. Clicking **Confirm** or **Cancel** in the panel works the same way.
+*(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): there is no confirmation step, `chief/confirm.ts` is deleted.)* Every changing tool runs on its first call, with the arguments it resolved itself (ids, parsed time, slug); a failure (unknown or ambiguous name, unparseable time, a refusal, the usage-limit hold) comes back as the tool result for chief to say. Chief then says in one short sentence what happened. There is no `confirm` tool, no pill in the panel and no yes/no intent. When exactly one other planning session is waiting after a PRD finishes, the call switches there without asking (§10.7). "Build it" said to a planning session marks it ready and starts its build: as an intent (§11), or through the planning agent's `start_build` MCP tool.
 
 ### 9.5 Chief model settings
 
@@ -631,7 +628,7 @@ On barge-in:
 
 ### 10.6 PRD written
 
-The existing planning poller (`readPrdStatus`) already detects `prd.md` changes. `VoiceEventBus` subscribes. When `prd.md` parses with ≥ 1 story and no errors after a voice turn, the server sends `ui.highlight('prd')` and queues a chief event: *"The PRD for csv-export-invoices has 6 stories and parses cleanly."* The session agent itself is told in its prompt to say so and suggest going back to chief to mark it ready and build.
+The existing planning poller (`readPrdStatus`) already detects `prd.md` changes. `VoiceEventBus` subscribes. When `prd.md` parses with ≥ 1 story and no errors after a voice turn, the server sends `ui.highlight('prd')` and queues a chief event: *"The PRD for csv-export-invoices has 6 stories and parses cleanly."* The session agent itself is told in its prompt to say so and that the operator can say "build it" (since the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`); before, it suggested going back to chief).
 
 ### 10.7 Detached turns: planning several sessions at once
 
@@ -642,7 +639,7 @@ Added later by the PRD *Voice planning of several sessions at once* (`.chief/prd
 - **Planning state** (US-001, US-002): the parser returns `openQuestions`, which never make a PRD invalid. `PlanningStates` derives `briefing | drafting | waiting | done | failed` for every pending plan-mode session from the registry and the PRD on disk.
 - **Triggers** (US-005, US-006): `VoiceCall.setFocus` leaving a briefed session calls `onSessionLeft` → `VoiceService.detach`, and so does the `carry_on` intent. Sessions that are `done` or already `drafting` are skipped.
 - **Capacity** (US-007): eviction skips a drafting agent, and `acquire` refuses with `session_agents_busy`, naming the sessions, when every slot is drafting.
-- **Chief** (US-008 to US-010, US-012): a finished turn publishes `planning.drafted` (important tier, spoken under any focus, a fixed line and no model call, and a same-batch `prd.valid` is dropped). "Back to chief" and a session becoming `done` name the other planning sessions and may offer a switch. The snapshot lists `PLANNING SESSIONS`, and `answer_planning_question` starts a detached turn with the answer.
+- **Chief** (US-008 to US-010, US-012): a finished turn publishes `planning.drafted` (important tier, spoken under any focus, a fixed line and no model call, and a same-batch `prd.valid` is dropped). "Back to chief" and a session becoming `done` name the other planning sessions; after a session becomes `done` with exactly one other waiting, the call switches there (no longer an offer since the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`)). The snapshot lists `PLANNING SESSIONS`, and `answer_planning_question` starts a detached turn with the answer.
 - **Panel** (US-013): a `planning` server message carries every planning session's state, shown as badges in the focus chip's menu.
 - **Tests** (US-014): scripted end-to-end runs in `call.test.ts` plan two sessions on two repositories in one call and exercise the cap.
 
@@ -658,11 +655,11 @@ Added later by the PRD *Voice planning of several sessions at once* (`.chief/prd
 | `to_session` | "switch to <name>", "ga naar <name>", "talk to <name>" | resolve name → focus_session |
 | `stop_talking` | "stop", "wait", "hold on", "wacht" | interrupt current turn, stay listening, no reply |
 | `repeat` | "say that again", "wat zei je" | replay last turn's segments from cache |
-| `yes` / `no` | see §9.4 | resolve pending confirmation |
+| `build` | "build it", "start the build", "bouw maar" | only under a planning-session focus: mark ready, start the build, focus → chief |
 | `mute` / `unmute` | "mute", "stil" | stop TTS for the rest of the call (text only) |
 | `hangup` | "hang up", "that's all", "ophangen" | goodbye + end |
 
-Everything else goes to the focused agent. Chief can change focus through `focus_session`. The session agent can't (no tools into chief-web), so it asks the user to say "back to chief".
+Everything else goes to the focused agent. Chief can change focus through `focus_session`. The session agent can't (no tools into chief-web), so it asks the user to say "back to chief". *(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): the `yes` / `no` row is gone and `build` is new; a planning agent's `start_build` tool also hands the call back to chief when the build starts.)*
 
 **Focus switch mechanics**
 1. Abort the active turn.
@@ -724,7 +721,7 @@ web/public/voice/vad/…  (silero model + onnxruntime wasm, copied at build)
 ### 13.2 Panel UI
 
 - **Header:** focus chip (`Chief` / `csv-export-invoices`) with a dropdown to switch, status ring (listening / thinking / speaking), and a timer.
-- **Body:** the transcript. Each user line shows its STT latency in debug mode. Agent lines stream in. Tool cards appear inline (icon, name, one-line summary, status spinner/check/cross). A confirmation pill has **Confirm** and **Cancel** buttons.
+- **Body:** the transcript. Each user line shows its STT latency in debug mode. Agent lines stream in. Tool cards appear inline (icon, name, one-line summary, status spinner/check/cross). *(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): there is no confirmation pill.)*
 - **Footer:**
   - hold-to-talk button (also **Space** while the panel has focus, or globally with the `voice_ptt_global` setting)
   - mute mic, mute voice (text only), text input (type instead of speak)
@@ -952,8 +949,8 @@ Typed accessors in `server/src/db/voice.ts` with tests, following `db/pr-runs.ts
 ## 17. Security
 
 - **Keys stay on the server.** The only credential the browser ever gets is a Scribe single-use token (15 min, one session, rate limited).
-- **Voice actions are gated.** Irreversible or costly tools require server-enforced confirmation (§9.4). Deletion isn't exposed at all.
-- **Session agents** are as privileged as build agents already are (skip-permissions inside their own container), no more. They get **no** chief-web tools and no network path to the server. Q&A mode disallows edit tools.
+- ~~**Voice actions are gated.**~~ *(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): chief runs every action on its first call and reports the result (§9.4).)* Deletion isn't exposed at all.
+- **Session agents** are as privileged as build agents already are (skip-permissions inside their own container), no more. They get **no** chief-web tools and no network path to the server. *(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): a planning agent has one, `start_build`, relayed through a request file the call answers; Q&A agents do not get it.)* Q&A mode disallows edit tools.
 - **Prompt injection:** repository content read by a session agent can't reach chief's tools, because the session agent has none, and intents are matched only on *user* transcripts. Chief sees session names and statuses (operator-controlled) but no repo content.
 - **Transcripts** are stored locally in SQLite, with retention and per-call delete. **Audio isn't stored** anywhere by chief-web. OpenRouter/ElevenLabs retention follows their policies. Note this in `docs/voice.md` and `docs/security.md`.
 - **Microphone** only while a call is active. The browser's mic indicator is the source of truth, and the panel shows a red dot too.
@@ -969,7 +966,6 @@ Follow the repo style: `node:test` + `tsx`, fakes over mocks, and `fake-daemon.t
 **Unit**
 - `speakable.test.ts`: markdown stripping, code fences across deltas, chunker boundaries (abbreviations, decimals, file names, first-chunk rule, runaway sentences).
 - `intents.test.ts`: NL/EN phrases, the ≤ 8-word rule, name extraction for `to_session`.
-- `confirm.test.ts`: can't confirm in the same turn, expiry, yes/no shortcut.
 - `chief/tools.test.ts`: name resolution (exact / prefix / fuzzy / ambiguous), slugify, time parsing, each tool against in-memory services.
 - `chief/openrouter-client.test.ts`: SSE parser with fragmented tool-call arguments, comments, `[DONE]`, usage chunk.
 - `session-agent/events.test.ts`: recorded stream-json fixtures (init, partial deltas, tool use, result, unknown events).
@@ -979,7 +975,7 @@ Follow the repo style: `node:test` + `tsx`, fakes over mocks, and `fake-daemon.t
 **Integration (`voice/call.test.ts`)**
 - A scripted call with the fake STT (returns canned text per utterance), fake chief model (scripted SSE), fake TTS (returns N bytes per char) and a fake session agent (fake daemon exec that runs a script echoing stream-json):
   - "what's building" → spoken answer with no tool call
-  - create session → confirm → yes → navigate + setup event spoken later
+  - create session → navigate + setup event spoken later
   - focus session → agent boots → reply streamed → "back to chief"
   - barge-in mid-reply → `tts.stop`, interrupt written to stdin, cut-off note on the next message
   - EL quota error → fallback provider used, toast sent
@@ -1004,7 +1000,7 @@ Each phase is shippable on its own and behind `voice_enabled`.
 - *Done when:* "what's building and does anything need me?" is answered by voice in ≤ 2.5 s, and the Overview page opens.
 
 **Phase 2: Actions**
-- Confirmation system; `create_session`, `start_build`, `stop_build`, `mark_ready`, `back_to_planning`, `schedule_start`, `retry`, `review_pull_request`
+- ~~Confirmation system~~ (superseded, §9.4); `create_session`, `start_build`, `stop_build`, `mark_ready`, `back_to_planning`, `schedule_start`, `retry`, `review_pull_request`
 - Background events (§12)
 - *Done when:* a session is created, planned manually in the terminal, marked ready and built, with every step triggered by voice, and completion announced.
 
@@ -1031,7 +1027,7 @@ Each phase is shippable on its own and behind `voice_enabled`.
 | False barge-in on laptop speakers | `careful` default, headset recommendation, PTT |
 | OpenRouter batch STT adds ~0.5 s | Scribe mode switch; PTT; earcons mask it |
 | Scribe credit cost unclear on the Creator plan | Default to OpenRouter STT; measure via subscription delta after one call |
-| Chief hallucinating actions | Server-enforced confirmation; tool results are the only source of truth; snapshot in the prompt |
+| Chief hallucinating actions | ~~Server-enforced confirmation~~ (superseded, §9.4); tool results are the only source of truth; snapshot in the prompt |
 | Model slugs disappearing on OpenRouter | Validate in Settings; the error surfaces as a spoken + toast message, not a crash |
 | Dutch pronunciation of code terms | `voice_pronunciations` map; EL multilingual voice for Dutch |
 | Session agent editing files while a build runs | Q&A mode with disallowed edit tools; voice planning only for `pending` |
@@ -1040,12 +1036,14 @@ Each phase is shippable on its own and behind `voice_enabled`.
 **Open questions for the owner**
 1. Dutch, English, or both in one call (affects `language` pinning vs auto-detect)?
 2. One voice for everything, or a distinct voice for session agents?
-3. Should chief ever start a build *without* confirmation for sessions you marked "auto-build"?
+3. ~~Should chief ever start a build *without* confirmation for sessions you marked "auto-build"?~~ Answered by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): it never asks.
 4. Keep transcripts 30 days, or never store them?
 
 ---
 
 ## Appendix A: prompts
+
+The prompts as planned. The live ones are in `server/src/voice/chief/prompt.ts` and `server/src/voice/session-agent/prompt.ts`; the action and PRD-complete lines below were rewritten by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`).
 
 ### A.1 Chief system prompt (`chief/prompt.ts`)
 
@@ -1067,9 +1065,8 @@ What you know:
   result says so.
 
 Actions:
-- Creating sessions, starting or stopping builds, scheduling, retrying and reviewing need confirmation:
-  the tool returns needs_confirmation with a sentence to say. Say it, then wait. Only call confirm
-  after the operator answered in a new message.
+- When the operator asks for an action, run the tool at once, never ask first, then say in one short
+  sentence what happened.
 - When the operator wants to think a feature through, plan it, or talk about the code of one session,
   use focus_session. The session agent has the repository open; you do not.
 - When a new session is created, offer to talk it through once setup is done.
@@ -1109,7 +1106,7 @@ You are on a live voice call. Everything you write is converted to speech.
 - Messages starting with [voice] are the operator's transcribed speech; transcription can be wrong,
   so if something sounds odd, check rather than guess.
 - When you have written or updated the PRD, say so in one sentence, say how many stories it has,
-  and suggest saying "back to chief" to mark it ready and build it.
+  and that the operator can say "build it"; call start_build when they ask.
 - Speak {{language}} unless the operator switches language.
 ```
 
@@ -1142,20 +1139,19 @@ OpenAI-compatible `tools` array (abbreviated descriptions; put the full ones in 
   {"type":"function","function":{"name":"list_sessions","description":"List sessions, active first.","parameters":{"type":"object","properties":{"status":{"type":"string","enum":["pending","ready","building","waiting","failed","finished"]},"repository":{"type":"string"}}}}},
   {"type":"function","function":{"name":"get_session","description":"Details of one session: status, stories, build progress, PRD state, PR.","parameters":{"type":"object","properties":{"session":{"type":"string","description":"Session id or spoken name"}},"required":["session"]}}},
   {"type":"function","function":{"name":"list_repositories","description":"Registered repositories.","parameters":{"type":"object","properties":{}}}},
-  {"type":"function","function":{"name":"create_session","description":"Create a session (needs confirmation). Setup (clone) continues in the background.","parameters":{"type":"object","properties":{"repository":{"type":"string"},"name":{"type":"string","description":"Human name; will be slugified"},"base_branch":{"type":"string"},"pr_target":{"type":"string","enum":["develop","main"]},"code_review":{"type":"boolean"}},"required":["repository","name"]}}},
+  {"type":"function","function":{"name":"create_session","description":"Create a session. Setup (clone) continues in the background.","parameters":{"type":"object","properties":{"repository":{"type":"string"},"name":{"type":"string","description":"Human name; will be slugified"},"base_branch":{"type":"string"},"pr_target":{"type":"string","enum":["develop","main"]},"code_review":{"type":"boolean"}},"required":["repository","name"]}}},
   {"type":"function","function":{"name":"focus_session","description":"Hand the call to the session's own agent, which has the repository open, to plan or discuss it.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
   {"type":"function","function":{"name":"mark_ready","description":"Parse the session's PRD and mark it ready; returns parse errors if any.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
   {"type":"function","function":{"name":"back_to_planning","description":"Return a ready session to pending.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
-  {"type":"function","function":{"name":"start_build","description":"Start or queue the build (needs confirmation).","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
-  {"type":"function","function":{"name":"stop_build","description":"Stop a running build (needs confirmation).","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
-  {"type":"function","function":{"name":"schedule_start","description":"Schedule a ready session's build (needs confirmation).","parameters":{"type":"object","properties":{"session":{"type":"string"},"at":{"type":"string","description":"ISO time or phrase like 'tonight at 2'"}},"required":["session","at"]}}},
+  {"type":"function","function":{"name":"start_build","description":"Start or queue the build.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
+  {"type":"function","function":{"name":"stop_build","description":"Stop a running build.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
+  {"type":"function","function":{"name":"schedule_start","description":"Schedule a ready session's build.","parameters":{"type":"object","properties":{"session":{"type":"string"},"at":{"type":"string","description":"ISO time or phrase like 'tonight at 2'"}},"required":["session","at"]}}},
   {"type":"function","function":{"name":"build_status","description":"Current story and a short summary of the latest build log.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
-  {"type":"function","function":{"name":"retry","description":"Retry a failed session at the stage it failed (needs confirmation).","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
+  {"type":"function","function":{"name":"retry","description":"Retry a failed session at the stage it failed.","parameters":{"type":"object","properties":{"session":{"type":"string"}},"required":["session"]}}},
   {"type":"function","function":{"name":"list_pull_requests","description":"Open pull requests chief-web knows about.","parameters":{"type":"object","properties":{"state":{"type":"string","enum":["open","all"]}}}}},
-  {"type":"function","function":{"name":"review_pull_request","description":"Run a code review on a pull request (needs confirmation).","parameters":{"type":"object","properties":{"repository":{"type":"string"},"number":{"type":"integer"}},"required":["repository","number"]}}},
+  {"type":"function","function":{"name":"review_pull_request","description":"Run a code review on a pull request.","parameters":{"type":"object","properties":{"repository":{"type":"string"},"number":{"type":"integer"}},"required":["repository","number"]}}},
   {"type":"function","function":{"name":"overview","description":"Dashboard numbers: running, queued, needs attention, usage-limit hold.","parameters":{"type":"object","properties":{}}}},
   {"type":"function","function":{"name":"show","description":"Open a page in the operator's browser.","parameters":{"type":"object","properties":{"page":{"type":"string","enum":["overview","sessions","pull-requests","recurring-tasks","repositories","sentry","settings"]}},"required":["page"]}}},
-  {"type":"function","function":{"name":"confirm","description":"Execute an action the operator just confirmed in a new message.","parameters":{"type":"object","properties":{"confirmation_id":{"type":"string"}},"required":["confirmation_id"]}}},
   {"type":"function","function":{"name":"end_call","description":"End the call after saying goodbye.","parameters":{"type":"object","properties":{}}}}
 ]
 ```
@@ -1268,6 +1264,9 @@ The full design is in docs/voice-plan.md.
 - [ ] ui.navigate events navigate the router
 
 ### US-009: Server-enforced confirmations and action tools
+
+*(Superseded by the PRD "No confirmations in the voice agent" (`.chief/prds/improve-voice-agent-confirmations/prd.md`): the confirmations below were removed; the action tools remain and run on their first call.)*
+
 **Status:** todo
 **Priority:** 9
 **Description:** As the operator, I want chief to create sessions and start builds only after I confirm so that a misheard sentence cannot start work.

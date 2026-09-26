@@ -198,52 +198,50 @@ session wants to know and chief reads its questions with `get_session`. Sessions
 the way you say them: "billing export" finds `billing-export`, and when a name
 matches more than one, chief asks which.
 
-### The confirmation rule
+### Chief acts at once
 
-Anything that changes something is **confirmed first, and the server enforces
-it**. Chief's first call of such a tool does nothing: it reads back what it is
-about to do ("Create session csv-export-invoices on shop-api, targeting
-develop?") and the panel shows **Confirm** / **Cancel**. The action only runs
-on a later turn: a bare "yes", "ja" or "do it", a click on **Confirm**, or chief
-confirming after you answered. It runs exactly what was read back, not what the
-model asks for then. Chief cannot confirm in the same turn it asked, a question
-expires after 60 seconds, a new question replaces the old one, and moving the
-call to a session cancels it. "No", "nee" or **Cancel** drops it.
+Anything you ask chief to do (create a session, start or stop a build, mark a
+session ready, review a pull request, pause a task…) **runs on the first tool
+call**, without a read-back question. Chief then says in one short sentence
+what happened: the session and its new state, or why the service refused (an
+unknown or ambiguous name, a PRD that does not parse, the usage-limit hold).
+The tool card in the panel shows the same result; there is nothing to click and
+no "yes" to say. Saying "build it" about a pending session marks it ready and
+starts its build in the same reply.
 
 ### Tools
 
-| Tool | What it does | Confirmed |
-| --- | --- | --- |
-| `list_sessions` | sessions, active first, filtered by status or repository; `planning` for only the planning sessions with their state | – |
-| `get_session` | one session: status, stories, build progress, PRD, pull request; a planning session's state and open questions | – |
-| `list_repositories` | the registered repositories | – |
-| `overview` | the dashboard numbers and the usage-limit hold | – |
-| `build_status` | the current story and a summary of the latest build log | – |
-| `show` | opens a page: Overview, Sessions, Pull requests, Recurring tasks, Repositories, Sentry, Settings | – |
-| `focus_session` | hands the call to a session's agent | – |
-| `answer_planning_question` | passes an answer to one open question (by number) or all of a planning session's open questions; the session updates its PRD alone and its end is announced like a finished draft ("csv-export updated its PRD; 3 open questions left"). Refused for a session that is not planning, is drafting or has no open questions, and during the usage-limit hold or with the planning terminal open | – (read back) |
-| `create_session` | creates a session; the clone continues in the background | yes |
-| `start_feedback_session` | creates a session from your feedback on an existing application ("the checkout total is wrong with a coupon"), named `feedback-…` unless you name it; once the clone is announced the call goes to its agent, which starts from the feedback | yes |
-| `start_build` | starts (or queues) a ready session | yes |
-| `stop_build` | stops a build, or takes a session out of the queue | yes |
-| `mark_ready` | parses the PRD and reads out any errors | yes |
-| `back_to_planning` | returns a ready session to planning | yes |
-| `schedule_start` | sets or clears a session's start time ("tonight at 2") | yes |
-| `retry` | retries a failed session | yes |
-| `list_pull_requests` | open pull requests with their runs and conflicts | – |
-| `review_pull_request` | starts a code review, posted on GitHub | yes |
-| `address_pr_feedback` | starts a run that works through the unresolved review comments | yes |
-| `request_pr_change` | posts your instruction as a review comment, then starts a run that implements it | yes |
-| `stop_pr_run` | stops the feedback run on a pull request | yes |
-| `fix_pr_conflicts` | checks a pull request for conflicts and starts the fix — the same entry point as the **Fix conflicts** button ([merge conflicts](merge-conflicts.md#fixing-one-pull-request-by-hand)) | yes |
-| `list_recurring_tasks` | recurring tasks with schedule, next run and last outcome | – |
-| `get_recurring_task` | one task with its prompt and last five runs | – |
-| `create_recurring_task` | creates a task; the schedule is read back in words | yes |
-| `update_recurring_task` | changes a task | yes |
-| `pause_recurring_task` / `resume_recurring_task` | pauses or resumes a task | yes |
-| `run_recurring_task_now` | runs one occurrence now | yes |
-| `confirm` | runs the pending confirmation (only on a later turn) | – |
-| `end_call` | says goodbye and hangs up | – |
+| Tool | What it does |
+| --- | --- |
+| `list_sessions` | sessions, active first, filtered by status or repository; `planning` for only the planning sessions with their state |
+| `get_session` | one session: status, stories, build progress, PRD, pull request; a planning session's state and open questions |
+| `list_repositories` | the registered repositories |
+| `overview` | the dashboard numbers and the usage-limit hold |
+| `build_status` | the current story and a summary of the latest build log |
+| `show` | opens a page: Overview, Sessions, Pull requests, Recurring tasks, Repositories, Sentry, Settings |
+| `focus_session` | hands the call to a session's agent |
+| `answer_planning_question` | passes an answer to one open question (by number) or all of a planning session's open questions; the session updates its PRD alone and its end is announced like a finished draft ("csv-export updated its PRD; 3 open questions left"). Refused for a session that is not planning, is drafting or has no open questions, and during the usage-limit hold or with the planning terminal open; chief reads back what it passed on |
+| `create_session` | creates a session; the clone continues in the background |
+| `start_feedback_session` | creates a session from your feedback on an existing application ("the checkout total is wrong with a coupon"), named `feedback-…` unless you name it; once the clone is announced the call goes to its agent, which starts from the feedback |
+| `start_build` | starts (or queues) a ready session |
+| `stop_build` | stops a build, or takes a session out of the queue |
+| `mark_ready` | parses the PRD and reads out any errors |
+| `back_to_planning` | returns a ready session to planning |
+| `schedule_start` | sets or clears a session's start time ("tonight at 2") |
+| `retry` | retries a failed session |
+| `list_pull_requests` | open pull requests with their runs and conflicts |
+| `review_pull_request` | starts a code review, posted on GitHub |
+| `address_pr_feedback` | starts a run that works through the unresolved review comments |
+| `request_pr_change` | posts your instruction as a review comment, then starts a run that implements it |
+| `stop_pr_run` | stops the feedback run on a pull request |
+| `fix_pr_conflicts` | checks a pull request for conflicts and starts the fix — the same entry point as the **Fix conflicts** button ([merge conflicts](merge-conflicts.md#fixing-one-pull-request-by-hand)) |
+| `list_recurring_tasks` | recurring tasks with schedule, next run and last outcome |
+| `get_recurring_task` | one task with its prompt and last five runs |
+| `create_recurring_task` | creates a task; chief says the schedule in words |
+| `update_recurring_task` | changes a task |
+| `pause_recurring_task` / `resume_recurring_task` | pauses or resumes a task |
+| `run_recurring_task_now` | runs one occurrence now |
+| `end_call` | says goodbye and hangs up |
 
 **What chief cannot do.** There is no tool to delete anything (sessions,
 repositories, tasks, transcripts), change settings, open a terminal, merge a
@@ -280,8 +278,9 @@ call and `VOICE_KEEP_AGENTS_MS` after it.
 A session agent refuses to start for a session without a clone yet, and while
 Claude's usage-limit hold is on. It has no chief-web management tools beyond
 building its own planning session: it cannot create or change anything else
-outside its own container, so it asks you to say "back to chief". Its one tool
-that reaches the call panel,
+outside its own container, so for anything else it asks you to say "back to
+chief". Its `start_build` tool, given only to a planning agent, is what "build
+it" said in your own words calls. Its one tool that reaches the call panel,
 `open_browser_with_operator`, only asks you for a page to open (see
 [Watch with me](#watch-with-me)).
 
@@ -291,10 +290,8 @@ A feedback session starts from something that is wrong, or could be better, in
 an application a repository already has. Say it to chief the way you would say
 it to a colleague: "I have feedback on shop-api: the checkout total is wrong
 when you use a coupon." Chief calls `start_feedback_session` with the
-repository and your feedback, and reads it back like any other change:
-"Start a feedback session on shop-api about "the checkout total is wrong when
-you use a coupon"?" (a long feedback is clipped in the read-back, not in what
-is stored). **Confirm** or "yes" creates it, exactly as read back.
+repository and your feedback, and the session is created at once, like any
+other change, and chief says which session it made.
 
 - **The name** is `feedback-` plus the gist of what you said
   (`feedback-checkout-total-is-wrong-with-coupon`), with `-2`, `-3`… when that
@@ -452,7 +449,8 @@ own while you plan another session or talk to chief.
   out is announced too, and shows as stopped.
 - **The reminder.** "Back to chief" names the planning sessions waiting for
   you, and when the session you are talking to finishes its PRD, chief names
-  the others and, if exactly one is waiting, offers to switch you over. Going
+  the others and, if exactly one is waiting, switches you over to it at once
+  ("I'm switching you over to billing-export."). Going
   back to a waiting session starts with its open questions, one at a time (see
   [Background events](#background-events)). The focus chip's menu shows every
   planning session with its state: drafting, the number of open questions,
@@ -483,7 +481,6 @@ exactly the phrase, so a normal sentence is never taken.
 | stop talking | "stop", "wait", "hold on", "wacht" | cuts the current reply; no answer |
 | repeat | "say that again", "repeat", "wat zei je", "herhaal" | replays the last reply without a new provider call |
 | mute / unmute | "mute", "text only", "stil" / "unmute", "stem aan" | text only for the rest of the call / voice again |
-| yes / no | "yes", "do it", "ja", "klopt" / "no", "cancel", "nee", "laat maar" | answers the pending confirmation |
 | hang up | "hang up", "that's all", "bye", "ophangen", "dat was het" | goodbye, and the call ends |
 
 The full lists are in `server/src/voice/intents.ts`.
@@ -511,11 +508,12 @@ Chief also keeps track of your other planning sessions. "Back to chief" names
 them ("Back with me. csv-export has a draft PRD with 2 open questions.
 billing-export on shop-api is waiting with 4 open questions."), and when the
 session you are talking to finishes its PRD, chief names the others at the next
-quiet moment. If exactly one is waiting it asks "Shall I switch you over?"; say
-yes (or press Confirm) to go there.
+quiet moment. If exactly one is waiting, chief ends that line with "I'm
+switching you over to billing-export." and the call moves there on its own;
+with two or more waiting it only names them, and you say which one.
 
 Going back to a planning session that is waiting for you (by name, the focus
-chip or that "yes") does not start with a greeting: its agent is handed its open
+chip or that switch-over) does not start with a greeting: its agent is handed its open
 questions and asks them one at a time, and if you speak first your words go
 along with them. A finished session says its PRD is complete; one whose draft
 failed is told why and picks up from what is on disk. After every reply the PRD
@@ -639,16 +637,17 @@ trusting a change to the call, go through this list:
       **Second language** set; check the transcript and the pronunciation of
       session names.
 - [ ] **A 30-minute planning call end to end:** "let's start a new session for
-      …", confirm, wait for the clone, plan the feature by voice until the PRD
-      is written, then "back to chief" and have it marked ready. The PRD must
-      parse and **Mark ready** must go green.
+      …", wait for the clone, plan the feature by voice until the PRD is
+      written, then say "build it". The PRD must parse, the session must turn
+      ready and its build must start (or queue), and the call must be back
+      with chief.
 - [ ] **Two planning sessions in one call, on two repositories:** brief one,
       say "carry on", create and brief a second on another repository while
       the first drafts, then hear the first announced, answer one of its open
       questions through chief, and walk through the rest by switching back.
       Both PRDs must end with no open questions and parse.
-- [ ] **A feedback call with the browser:** "I have feedback on …", confirm,
-      wait for the automatic hand-off, say "watch with me", open a page of an
+- [ ] **A feedback call with the browser:** "I have feedback on …", wait
+      for the automatic hand-off, say "watch with me", open a page of an
       app on your machine with a login, click around in the page view, then
       let the agent write the PRD. The `## Feedback` section must list the
       steps and screenshots, and **Mark ready** must go green.
