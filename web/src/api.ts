@@ -830,6 +830,37 @@ export async function fetchPlanning(id: string, signal?: AbortSignal): Promise<P
   return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, signal ? { signal } : {});
 }
 
+/** One story of `prd.md`, as parsed; mirrors the server's `SessionPrdStoryView`. */
+export interface SessionPrdStory {
+  /** Identifier from the PRD, e.g. `US-001`. */
+  id: string;
+  title: string;
+  description: string;
+  priority: number;
+  status: 'todo' | 'in-progress' | 'done';
+  acceptanceCriteria: { text: string; checked: boolean }[];
+}
+
+/**
+ * Mirrors the server's `SessionPrdView`: the session's `prd.md`, parsed. A
+ * missing or unparsable PRD is still a 200 — `status` says which, and the
+ * parsed fields are then `null` or empty.
+ */
+export interface SessionPrd {
+  status: PrdStatus;
+  /** From `# PRD: Name`. */
+  project: string | null;
+  /** The paragraph under the title. */
+  description: string | null;
+  stories: SessionPrdStory[];
+  /** Unanswered bullets under `## Open Questions`. */
+  openQuestions: string[];
+}
+
+export async function fetchPrd(id: string, signal?: AbortSignal): Promise<SessionPrd> {
+  return api<SessionPrd>(`/api/sessions/${encodeURIComponent(id)}/prd`, signal ? { signal } : {});
+}
+
 /**
  * Starts the interactive `claude` that writes the PRD. `context` fills chief's
  * `{{CONTEXT}}` slot and is only used when no `prd.md` exists yet — otherwise
