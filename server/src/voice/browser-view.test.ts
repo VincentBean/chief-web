@@ -330,7 +330,7 @@ describe('page view', () => {
     assert.deepEqual(sink.json(), [{ type: 'url', url: 'http://host.docker.internal:3000/login' }]);
   });
 
-  it('a view that leaves stops the screencast; one that is replaced does not', async () => {
+  it('a view that leaves stops the screencast and drops its size; one that is replaced does not', async () => {
     const { sessionId, view, sink, relay } = await openView();
 
     view.detach({ replaced: true });
@@ -341,7 +341,11 @@ describe('page view', () => {
     assert.equal(commandsOf(relay).filter((command) => command.method === 'Page.stopScreencast').length, 0);
 
     next.detach();
-    await until(() => commandsOf(relay).some((command) => command.method === 'Page.stopScreencast'));
+    await until(() => commandsOf(relay).some((command) => command.method === 'Emulation.clearDeviceMetricsOverride'));
+    assert.deepEqual(
+      commandsOf(relay).slice(-2).map((command) => command.method),
+      ['Page.stopScreencast', 'Emulation.clearDeviceMetricsOverride'],
+    );
     assert.equal(service.isRunning(sessionId), true);
   });
 });

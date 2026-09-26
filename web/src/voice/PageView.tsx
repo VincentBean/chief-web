@@ -88,29 +88,37 @@ export function PageView({ sessionId, onClose }: { readonly sessionId: string; r
     socket.current = ws;
     let closedMessage: string | null = null;
     let drawing = false;
+    /** The newest frame that came in while one was decoding; never dropped, or the last change could go unseen. */
+    let pending: Blob | null = null;
+
+    const draw = (frame: Blob): void => {
+      drawing = true;
+      void createImageBitmap(frame)
+        .then((bitmap) => {
+          const target = canvas.current;
+          const context = target?.getContext('2d');
+          if (target && context) {
+            if (target.width !== bitmap.width) target.width = bitmap.width;
+            if (target.height !== bitmap.height) target.height = bitmap.height;
+            context.drawImage(bitmap, 0, 0);
+          }
+          bitmap.close();
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          drawing = false;
+          const next = pending;
+          pending = null;
+          if (next !== null) draw(next);
+        });
+    };
 
     ws.onopen = () => setState({ kind: 'live' });
     ws.onmessage = (event: MessageEvent<Blob | string>) => {
       if (typeof event.data !== 'string') {
-        // Chromium waits for the server's acknowledgement, so frames come one
-        // at a time; one still decoding when the next lands is simply skipped.
-        if (drawing) return;
-        drawing = true;
-        void createImageBitmap(event.data)
-          .then((bitmap) => {
-            const target = canvas.current;
-            const context = target?.getContext('2d');
-            if (target && context) {
-              if (target.width !== bitmap.width) target.width = bitmap.width;
-              if (target.height !== bitmap.height) target.height = bitmap.height;
-              context.drawImage(bitmap, 0, 0);
-            }
-            bitmap.close();
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            drawing = false;
-          });
+        // A frame landing while another decodes waits; only the newest is kept.
+        if (drawing) pending = event.data;
+        else draw(event.data);
         return;
       }
       let message: unknown;
@@ -137,8 +145,10 @@ export function PageView({ sessionId, onClose }: { readonly sessionId: string; r
       });
     };
     return () => {
+      ws.onopen = null;
       ws.onmessage = null;
       ws.onclose = null;
+      pending = null;
       ws.close();
       if (socket.current === ws) socket.current = null;
       window.cancelAnimationFrame(moveFrame.current);
@@ -268,8 +278,9 @@ export function PageView({ sessionId, onClose }: { readonly sessionId: string; r
     if (pinned.current || document.activeElement !== canvas.current) return;
     const previous = focusBefore.current;
     focusBefore.current = null;
-    if (previous !== null && previous.isConnected) previous.focus({ preventScroll: true });
-    else canvas.current?.blur();
+    // Blur first: giving focus back to <body> is a no-op and would leave the canvas holding every key.
+    canvas.current?.blur();
+    if (previous !== null && previous !== document.body && previous.isConnected) previous.focus({ preventScroll: true });
   };
 
   const close = (): void => {

@@ -342,7 +342,11 @@ export class BrowserView {
     }
   }
 
-  /** The socket closed: stop listening, and stop the screencast unless another view took over. */
+  /**
+   * The socket closed: stop listening, and unless another view took over, stop
+   * the screencast and drop the size an expanded view set, which would
+   * otherwise stay in force for the agent.
+   */
   detach(options: { replaced?: boolean } = {}): void {
     if (this.dead) return;
     this.dead = true;
@@ -353,6 +357,7 @@ export class BrowserView {
       return;
     }
     this.browsers.send(this.sessionId, 'Page.stopScreencast').catch(() => undefined);
+    this.browsers.send(this.sessionId, 'Emulation.clearDeviceMetricsOverride').catch(() => undefined);
   }
 
   /** **Close browser**: from here on nothing more is sent, then Chromium is stopped. */

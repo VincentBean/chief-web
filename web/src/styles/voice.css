@@ -530,9 +530,11 @@
     overflow: auto;
   }
 
+  /* No scrollbar here: one would shrink the area, resize the page, and loop. */
   .call-page--expanded .call-page__body {
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
     flex: 1 1 auto;
+    overflow: hidden;
   }
 
   .call-page__canvas {
