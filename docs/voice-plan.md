@@ -859,6 +859,7 @@ VOICE_STT_TIMEOUT_MS=8000
 VOICE_MAX_UTTERANCE_MS=60000
 VOICE_CHIEF_MAX_TOOL_HOPS=6
 VOICE_SCRIBE_IDLE_CLOSE_MS=20000
+VOICE_BROWSER_IDLE_MS=600000         # stop a session browser unused for 10 min
 ```
 
 Parse them the way `config.ts` parses the existing numeric vars, with bounds.
