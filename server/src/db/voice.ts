@@ -225,7 +225,8 @@ export function deleteVoiceCallsEndedBefore(db: Database, cutoff: string): numbe
 
 /* -------------------------------------------------------------------- turns */
 
-export const VOICE_SPEAKERS = ['user', 'chief', 'session', 'event'] as const;
+/** `agent`: a session agent's detached turn, one nobody on the call heard. */
+export const VOICE_SPEAKERS = ['user', 'chief', 'session', 'event', 'agent'] as const;
 export type VoiceSpeaker = (typeof VOICE_SPEAKERS)[number];
 
 export interface VoiceTurn {

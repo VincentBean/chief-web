@@ -105,7 +105,8 @@ server with a message. They are listed in `.env.example` as well.
 | --- | --- | --- |
 | `VOICE_IDLE_TIMEOUT_MS` | `600000` | end a silent call after 10 minutes |
 | `VOICE_KEEP_AGENTS_MS` | `900000` | keep session agents alive this long after a call |
-| `VOICE_MAX_SESSION_AGENTS` | `3` | session agents running at once; the least recently used one is stopped |
+| `VOICE_MAX_SESSION_AGENTS` | `3` | session agents running at once; the least recently used idle one is stopped; one still drafting never is, and when all of them are drafting a new one is refused |
+| `VOICE_DETACHED_TURN_TIMEOUT_MS` | `600000` | a session agent's detached turn (one it runs while the call is elsewhere) is interrupted after this long (60000..3600000) |
 | `VOICE_STT_TIMEOUT_MS` | `8000` | cap on one speech-to-text request |
 | `VOICE_MAX_UTTERANCE_MS` | `60000` | longest utterance sent to speech-to-text |
 | `VOICE_CHIEF_MAX_TOOL_HOPS` | `6` | tool round trips chief may make for one thing you say |
@@ -182,7 +183,10 @@ is not that address.
 
 Chief answers most questions ("what's building?", "does anything need me?")
 from a snapshot of the sessions, queue and pull requests that it gets with every
-request, without calling a tool. Sessions, repositories and tasks can be named
+request, without calling a tool. The snapshot also lists the planning sessions
+with their state and number of open questions, so "what's still open?" or
+"welke sessies wachten op mij?" is answered with names and counts; ask what a
+session wants to know and chief reads its questions with `get_session`. Sessions, repositories and tasks can be named
 the way you say them: "billing export" finds `billing-export`, and when a name
 matches more than one, chief asks which.
 
@@ -202,13 +206,14 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 
 | Tool | What it does | Confirmed |
 | --- | --- | --- |
-| `list_sessions` | sessions, active first, filtered by status or repository | – |
-| `get_session` | one session: status, stories, build progress, PRD, pull request | – |
+| `list_sessions` | sessions, active first, filtered by status or repository; `planning` for only the planning sessions with their state | – |
+| `get_session` | one session: status, stories, build progress, PRD, pull request; a planning session's state and open questions | – |
 | `list_repositories` | the registered repositories | – |
 | `overview` | the dashboard numbers and the usage-limit hold | – |
 | `build_status` | the current story and a summary of the latest build log | – |
 | `show` | opens a page: Overview, Sessions, Pull requests, Recurring tasks, Repositories, Sentry, Settings | – |
 | `focus_session` | hands the call to a session's agent | – |
+| `answer_planning_question` | passes an answer to one open question (by number) or all of a planning session's open questions; the session updates its PRD alone and its end is announced like a finished draft ("csv-export updated its PRD; 3 open questions left"). Refused for a session that is not planning, is drafting or has no open questions, and during the usage-limit hold or with the planning terminal open | – (read back) |
 | `create_session` | creates a session; the clone continues in the background | yes |
 | `start_feedback_session` | creates a session from your feedback on an existing application ("the checkout total is wrong with a coupon"), named `feedback-…` unless you name it; once the clone is announced the call goes to its agent, which starts from the feedback | yes |
 | `start_build` | starts (or queues) a ready session | yes |
@@ -394,6 +399,53 @@ container.
   The build loop, code reviews and the other headless runs get no browser tools
   and no page view, even though Chromium is in the same runner image.
 
+### Planning several sessions at once
+
+You do not have to finish one PRD before starting the next. Brief a planning
+session's agent for as long as you like, then leave it: it drafts the PRD on its
+own while you plan another session or talk to chief.
+
+- **Brief and leave.** Tell the agent what the feature is for and what you
+  already know, then say "back to chief", "switch to …" or pick another session
+  on the focus chip. A session you answered at least once carries on alone the
+  moment you leave; one you only heard the greeting of does not, and neither
+  does one whose PRD is already complete. Hanging up does not start it.
+- **"Carry on".** "Carry on", "work it out", "you take it from here", "werk het
+  uit" or "ga je gang" says it outright: the session carries on alone even if
+  you only just got there, and chief takes over with one line ("Okay,
+  csv-export is working on it. Back with me.").
+- **What the agent does alone.** It is told that nobody is listening, so it
+  asks nothing. It finishes reading the code, writes the draft `prd.md` in the
+  usual story format and stops. Anything it can find out from the code it looks
+  up; a decision only you can make becomes an open question, and the stories
+  take the most conservative reading until you answer. A turn alone is
+  interrupted after `VOICE_DETACHED_TURN_TIMEOUT_MS` (10 minutes by default).
+- **Open questions.** Those questions go under a `## Open Questions` heading in
+  the PRD, as plain bullets, most important first. The heading must be in
+  English. The section never makes a PRD invalid, but a session only counts as
+  done when it is empty.
+- **The announcement.** When the draft is written, chief says so at the next
+  quiet moment, whoever you are talking to: "Your session csv-export on
+  shop-api has finished with 4 open questions." A draft that failed or timed
+  out is announced too, and shows as stopped.
+- **The reminder.** "Back to chief" names the planning sessions waiting for
+  you, and when the session you are talking to finishes its PRD, chief names
+  the others and, if exactly one is waiting, offers to switch you over. Going
+  back to a waiting session starts with its open questions, one at a time (see
+  [Background events](#background-events)). The focus chip's menu shows every
+  planning session with its state: drafting, the number of open questions,
+  done or stopped.
+- **Answering through chief.** You do not have to go back to answer. "Tell
+  csv-export that exports are per team" or "the answer to csv-export's second
+  question is no" has chief pass the answer on (`answer_planning_question`);
+  the session updates its PRD alone and chief reports the new count
+  ("csv-export updated its PRD; 3 open questions left"). Ask chief "anything
+  for me?" or about a session to hear its questions.
+- **The cap.** Only `VOICE_MAX_SESSION_AGENTS` session agents run at once, and
+  one that is drafting is never stopped to make room. When every one of them is
+  drafting, a new session is refused with their names ("Three sessions are
+  still drafting: …"); wait for one to finish, or talk to one of them.
+
 ## Intents
 
 A few short phrases are handled by the call itself, in English and Dutch, before
@@ -403,6 +455,7 @@ exactly the phrase, so a normal sentence is never taken.
 | Intent | Examples | What happens |
 | --- | --- | --- |
 | back to chief | "chief", "back to chief", "terug naar chief" | focus returns to chief, who says one line |
+| carry on | "carry on", "work it out", "you take it from here", "werk het uit", "ga je gang" | only while you talk to a planning session: it drafts the PRD alone and the call goes back to chief, who says one line; anywhere else the words go to the agent |
 | switch to a session | "switch to billing export", "talk to …", "ga naar …", "praat met …" | the call moves to that session's agent |
 | stop talking | "stop", "wait", "hold on", "wacht" | cuts the current reply; no answer |
 | repeat | "say that again", "repeat", "wat zei je", "herhaal" | replays the last reply without a new provider call |
@@ -419,13 +472,32 @@ quiet moment (2 s of silence on both sides):
 
 - **Important** (default): a session cloned or failed to set up, a build
   finished or failed, a pull request opened, a feedback run finished, a conflict
-  fixed, Claude's usage-limit hold.
+  fixed, Claude's usage-limit hold, a planning session that finished drafting
+  on its own (`planning.drafted`: "Your session csv-export on shop-api has
+  finished with 4 open questions.").
 - **All** adds: each finished story, a build waiting, a recurring task fired, a
   review finished, a PRD that just became valid.
 - **None** speaks nothing.
 
 Every event is also shown as a toast in the panel. With a session agent in
-focus, only events about that session are spoken.
+focus, only events about that session are spoken — except a finished draft,
+which is announced whoever has the focus. A PRD that became valid is not
+announced separately when its finished draft is.
+
+Chief also keeps track of your other planning sessions. "Back to chief" names
+them ("Back with me. csv-export has a draft PRD with 2 open questions.
+billing-export on shop-api is waiting with 4 open questions."), and when the
+session you are talking to finishes its PRD, chief names the others at the next
+quiet moment. If exactly one is waiting it asks "Shall I switch you over?"; say
+yes (or press Confirm) to go there.
+
+Going back to a planning session that is waiting for you (by name, the focus
+chip or that "yes") does not start with a greeting: its agent is handed its open
+questions and asks them one at a time, and if you speak first your words go
+along with them. A finished session says its PRD is complete; one whose draft
+failed is told why and picks up from what is on disk. After every reply the PRD
+is read again, so the chip's open-question count and the session page's PRD
+panel count down as you answer.
 
 ## Privacy
 
@@ -438,6 +510,10 @@ focus, only events about that session are spoken.
   **Keep transcripts for** days (default 30). Delete a call by hand under
   **Call → History**. The **Voice this month** figure is summed from these
   rows, so a retention under a month undercounts it.
+- **Turns alone are stored too.** What a session agent writes while it drafts
+  or updates its PRD on its own (a detached turn) is never spoken, but its text
+  and tool summaries are stored in the call's transcript like a spoken reply,
+  marked `[detached]`, and deleted with it.
 - **What leaves the server, and where to:**
   - **OpenRouter** receives your speech (in OpenRouter speech-to-text mode), the
     whole chief conversation including the state snapshot (session, repository
@@ -543,6 +619,11 @@ trusting a change to the call, go through this list:
       …", confirm, wait for the clone, plan the feature by voice until the PRD
       is written, then "back to chief" and have it marked ready. The PRD must
       parse and **Mark ready** must go green.
+- [ ] **Two planning sessions in one call, on two repositories:** brief one,
+      say "carry on", create and brief a second on another repository while
+      the first drafts, then hear the first announced, answer one of its open
+      questions through chief, and walk through the rest by switching back.
+      Both PRDs must end with no open questions and parse.
 - [ ] **A feedback call with the browser:** "I have feedback on …", confirm,
       wait for the automatic hand-off, say "watch with me", open a page of an
       app on your machine with a login, click around in the page view, then

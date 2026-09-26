@@ -4,6 +4,7 @@ import {
   type Database,
   failureStageLabel,
   getRepository,
+  getSession,
   listRepositories,
   listSessions,
   SESSION_STATUSES,
@@ -19,10 +20,12 @@ import type { RecurringTaskRunner } from '../../recurringtasks/index.js';
 import type { RetryResult } from '../../recovery/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView, SessionView } from '../../sessions/index.js';
 import type { EarconName } from '../earcons.js';
+import type { PlanningStates } from '../session-agent/planning-state.js';
 import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
 import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
+import { answerPlanningQuestionTool } from './answer.js';
 import { focusSessionTool } from './focus.js';
 import { recurringTaskTools } from './recurring-tasks.js';
 import type { ChatTool } from './openrouter-client.js';
@@ -83,6 +86,13 @@ export interface ChiefServices {
   readonly planning?: { isTerminalRunning(sessionId: string): boolean; stop(sessionId: string): Promise<unknown> };
   /** The session voice agents `focus_session` starts; without them it refuses. */
   readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown>; isAlive?(sessionId: string): boolean };
+  /** Where each planning session stands (voice multi-planning US-010); without it chief knows none. */
+  readonly planningStates?: Pick<PlanningStates, 'planningState' | 'listPlanningSessions'>;
+  /**
+   * Starts a detached turn of a session agent and announces its end as
+   * `planning.drafted` (US-012); without it `answer_planning_question` refuses.
+   */
+  readonly detachedTurns?: { start(sessionId: string, message: string): void };
 }
 
 /** What a handler knows about the call it runs in. */
@@ -307,6 +317,10 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       {
         status: { type: 'string', enum: [...SESSION_STATUSES] },
         repository: { type: 'string', description: 'Repository id or spoken name' },
+        planning: {
+          type: 'boolean',
+          description: 'Only planning sessions, most recently updated first, each with its planning state',
+        },
       },
       [],
       (args) => {
@@ -320,6 +334,31 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
           const resolution = resolveName(repoQuery, listRepositories(db));
           if (resolution.kind !== 'one') return unresolved('repository', repoQuery, resolution);
           repositoryId = resolution.item.id;
+        }
+        if (args['planning'] === true) {
+          const planning = (services.planningStates?.listPlanningSessions() ?? []).filter((state) => {
+            const session = getSession(db, state.sessionId);
+            return (
+              session !== null &&
+              (repositoryId === undefined || session.repositoryId === repositoryId) &&
+              (status === null || session.status === status)
+            );
+          });
+          return {
+            ok: true,
+            data: {
+              sessions: planning.slice(0, 30).map((state) => ({
+                id: state.sessionId,
+                name: state.sessionName,
+                repository: state.repositoryName,
+                state: state.state,
+                openQuestions: state.openQuestions.length,
+                stories: state.stories,
+              })),
+              total: planning.length,
+            },
+            summary: `${planning.length} planning session${planning.length === 1 ? '' : 's'}`,
+          };
         }
         const names = new Map<string, string>();
         const sessions = orderActiveFirst(
@@ -347,13 +386,14 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
     ),
     tool(
       'get_session',
-      'Details of one session: status, stories, build progress, PRD state, PR.',
+      'Details of one session: status, stories, build progress, PRD state, PR; for a planning session also its planning state and the open questions themselves.',
       { session: SESSION_PARAM },
       ['session'],
       (args) => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
         const build = services.builds.status(session.id);
+        const planning = services.planningStates?.planningState(session.id) ?? null;
         return {
           ok: true,
           data: {
@@ -381,6 +421,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
               stories: build.prd.storyCount,
               errors: build.prd.errors.length,
             },
+            ...(planning === null ? {} : { planning: { state: planning.state, openQuestions: planning.openQuestions } }),
           },
           summary: `${session.name}: ${session.status}`,
         };
@@ -485,6 +526,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       },
     ),
     focusSessionTool(services),
+    answerPlanningQuestionTool(services),
     ...sessionActionTools(services),
     ...pullRequestTools(services),
     ...recurringTaskTools(services),

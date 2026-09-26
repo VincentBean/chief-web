@@ -142,6 +142,8 @@ export interface Config {
   readonly voiceIdleTimeoutMs: number;
   /** How long session agents a call started stay alive after it ends. */
   readonly voiceKeepAgentsMs: number;
+  /** Longest a detached session-agent turn may run before it is interrupted. */
+  readonly voiceDetachedTurnTimeoutMs: number;
   /** Cap on session agents running at once across calls. */
   readonly voiceMaxSessionAgents: number;
   /** Cap on one speech-to-text request. */
@@ -297,6 +299,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicUrl: str('PUBLIC_URL', '').replace(/\/+$/, ''),
     voiceIdleTimeoutMs: bounded('VOICE_IDLE_TIMEOUT_MS', 600_000, 60_000, 86_400_000),
     voiceKeepAgentsMs: bounded('VOICE_KEEP_AGENTS_MS', 900_000, 0, 86_400_000),
+    voiceDetachedTurnTimeoutMs: bounded('VOICE_DETACHED_TURN_TIMEOUT_MS', 600_000, 60_000, 3_600_000),
     voiceMaxSessionAgents: bounded('VOICE_MAX_SESSION_AGENTS', 3, 1, 20),
     voiceSttTimeoutMs: bounded('VOICE_STT_TIMEOUT_MS', 8_000, 1_000, 60_000),
     // Upstream speech-to-text providers time out around 60 s (docs/voice-plan.md §7.1).

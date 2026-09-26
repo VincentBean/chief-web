@@ -19,6 +19,7 @@ import {
   type Database,
   featureBranchFor,
   getRecurringTaskByName,
+  getSession,
   getVoiceCall,
   getVoiceSessionAgent,
   IN_MEMORY,
@@ -26,11 +27,14 @@ import {
   listVoiceTurns,
   openDatabase,
   setSetting,
+  updateSession,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
+import { prdPathFor } from '../prd/index.js';
 import { createBrowserSavedLogins } from '../repositories/index.js';
+import { sessionPrdFile } from '../sessions/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
 import { type ChiefWorld, chiefWorld } from './chief/__fixtures__/world.js';
 import {
@@ -43,7 +47,7 @@ import {
 import type { ChiefServices } from './chief/tools.js';
 import type { AgentEvent, CallClock, CallEarcons, CallStt, CallTts, VoiceAgent } from './call.js';
 import { EVENT_QUIET_MS, IDLE_GOODBYE } from './call.js';
-import { VoiceEventBus } from './events.js';
+import { draftedLine, type VoiceBusEvent, VoiceEventBus } from './events.js';
 import { createVoice, type Voice } from './index.js';
 import {
   decodeFrame,
@@ -57,7 +61,9 @@ import {
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
 import { RESUME_WINDOW_MS, type VoiceServiceDeps } from './service.js';
+import { answerPrompt, detachPrompt, resumePrompt } from './session-agent/prompt.js';
 import { CLAUDE_SESSION, FakeClaude, LONG_OPENING, SECRET_LOGIN } from './session-agent/__fixtures__/fake-claude.js';
+import { PlanningStates } from './session-agent/planning-state.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
 import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
@@ -228,6 +234,7 @@ class ViewClient {
 
 interface World {
   readonly db: Database;
+  readonly config: Config;
   readonly clock: FakeClock;
   readonly stt: FakeStt;
   readonly agents: ScriptedAgent[];
@@ -342,6 +349,7 @@ async function world(
   };
   return {
     db,
+    config,
     clock,
     stt,
     agents,
@@ -845,6 +853,17 @@ describe('a scripted call end to end (US-027)', () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-e2e-call-'));
   });
 
+  /** Sessions whose clone and container are in place. */
+  const cloned = new Set<string>();
+
+  /** A clone for the session to plan against, and a running container on the fake daemon. */
+  const clone = (config: Config, session: { id: string; name: string }): void => {
+    if (cloned.has(session.id)) return;
+    cloned.add(session.id);
+    fs.mkdirSync(path.join(sessionRepoDir(config, session.id), '.git'), { recursive: true });
+    daemon.addContainer({ id: `c-${session.id}`, name: `chief-web-${session.name}-${session.id}` });
+  };
+
   after(async () => {
     await openrouter.close();
     await daemon.close();
@@ -854,9 +873,10 @@ describe('a scripted call end to end (US-027)', () => {
   /**
    * A call on the real chief over the seeded install, scripted through
    * {@link openrouter}, with the pending `onboarding-copy` session's agent
-   * running as the fake `claude` on the fake daemon. `say` goes through STT as
-   * an utterance and waits for `turns` turns to finish. `browser` adds the
-   * session browsers on the fake daemon, the card and the page view socket.
+   * running as the fake `claude` on the fake daemon (any other session's too,
+   * once `clone`d). `say` goes through STT as an utterance and waits for
+   * `turns` turns to finish. `browser` adds the session browsers on the fake
+   * daemon, the card and the page view socket.
    */
   const scriptedCall = async (
     opts: { env?: Record<string, string>; providerTts?: boolean; before?: (db: Database) => void; browser?: boolean } = {},
@@ -864,11 +884,15 @@ describe('a scripted call end to end (US-027)', () => {
     openrouter.replies.length = 0;
     openrouter.requests.length = 0;
     openrouter.speech.length = 0;
+    claude.onTurn = null;
     const events = new VoiceEventBus();
     let seeded: ChiefWorld | null = null;
     let registry: SessionAgentRegistry | null = null;
-    let config: Config | null = null;
+    let settings: Config | null = null;
+    let voice: Voice | null = null;
     const agents = (): SessionAgentRegistry => registry ?? assert.fail('no session agent registry');
+    const planning = (): PlanningStates =>
+      new PlanningStates({ db: (seeded ?? assert.fail('chief was not seeded')).db, config: settings ?? assert.fail('no config'), registry: agents() });
     const w = await world(
       { DATA_DIR: dataDir, OPENROUTER_API_URL: openrouter.baseUrl, ...opts.env },
       {
@@ -886,14 +910,22 @@ describe('a scripted call end to end (US-027)', () => {
           : {}),
         chief: (db) => {
           seeded = chiefWorld(db);
-          // Like app.ts: chief reaches the registry built after it.
-          return { ...seeded.services, sessionAgents: { acquire: (id) => agents().acquire(id), isAlive: (id) => agents().isAlive(id) } };
+          // Like app.ts: chief reaches the registry and the voice service built after it.
+          return {
+            ...seeded.services,
+            sessionAgents: { acquire: (id) => agents().acquire(id), isAlive: (id) => agents().isAlive(id) },
+            planningStates: { planningState: (id) => planning().planningState(id), listPlanningSessions: () => planning().listPlanningSessions() },
+            detachedTurns: {
+              start: (id, message) => {
+                (voice ?? assert.fail('no voice')).service.runDetachedTurn(id, message, { updated: true });
+              },
+            },
+          };
         },
         sessionAgents: (db, loaded) => {
-          config = loaded;
+          settings = loaded;
           const id = (seeded ?? assert.fail('chief was not seeded')).ids['onboarding'] ?? '';
-          fs.mkdirSync(path.join(sessionRepoDir(loaded, id), '.git'), { recursive: true });
-          daemon.addContainer({ id: `c-${id}`, name: `chief-web-onboarding-copy-${id}` });
+          clone(loaded, { id, name: 'onboarding-copy' });
           registry = new SessionAgentRegistry({
             config: loaded,
             db,
@@ -909,6 +941,7 @@ describe('a scripted call end to end (US-027)', () => {
         },
       },
     );
+    voice = w.voice;
     const chief: ChiefWorld = seeded ?? assert.fail('chief was not seeded');
     opts.before?.(w.db);
     const { client, callId } = await w.call();
@@ -923,12 +956,18 @@ describe('a scripted call end to end (US-027)', () => {
       client.send({ type: 'hangup' });
       assert.equal((await client.closed).code, WS_CLOSE_CALL_ENDED);
     };
-    /** What the clone leaves behind: a checkout on the data volume and a container to run its agent in. */
-    const cloned = (sessionId: string, name: string): void => {
-      fs.mkdirSync(path.join(sessionRepoDir(config ?? assert.fail('no config'), sessionId), '.git'), { recursive: true });
-      daemon.addContainer({ id: `c-${sessionId}`, name: `chief-web-${name}-${sessionId}` });
+    return {
+      w,
+      chief,
+      events,
+      client,
+      callId,
+      say,
+      hangUp,
+      agents,
+      /** What the clone leaves behind: a checkout on the data volume and a container to run its agent in. */
+      cloned: (sessionId: string, name: string): void => clone(settings ?? assert.fail('no config'), { id: sessionId, name }),
     };
-    return { w, chief, events, client, callId, say, hangUp, cloned };
   };
 
   /** The deltas of one turn, joined. */
@@ -1093,6 +1132,453 @@ describe('a scripted call end to end (US-027)', () => {
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
     assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
     assert.equal(openrouter.requests.length, requests, 'the handback is a fixed line, not a model call');
+    await s.hangUp();
+  });
+
+  /** Every user message the session's fake `claude` processes were sent, across restarts. */
+  const sessionStdin = (sessionId: string): string[] =>
+    claude
+      .agentExecs()
+      .filter((exec) => exec.containerId === `c-${sessionId}`)
+      .flatMap((exec) => claude.userTexts(exec.id));
+
+  it('brief a session → "back to chief" → it drafts alone while chief answers (US-005)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    assert.equal(s.agents().detachedState(sessionId).running, false);
+
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
+    const detach = detachPrompt(prdPathFor('onboarding-copy'));
+    await waitFor(() => sessionStdin(sessionId).slice(before).includes(detach));
+    assert.deepEqual(sessionStdin(sessionId).slice(before).slice(-1), [detach]);
+    await s.agents().detachedTurnEnded(sessionId);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, 'ok');
+    assert.ok(listVoiceTurns(s.w.db, s.callId).some((t) => t.speaker === 'agent' && t.text.startsWith('[detached]')));
+
+    // Chief goes on as usual.
+    openrouter.replies.push(textReply(['Nothing else is running.']));
+    await s.say("what's building");
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Nothing else is running.');
+    await s.hangUp();
+  });
+
+  it('a session left before the operator said anything to it is not detached (US-005)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    await flush();
+    assert.equal(s.agents().detachedState(sessionId).running, false);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, null);
+    assert.equal(sessionStdin(sessionId).slice(before).length, 1, 'only the opening was sent');
+    await s.hangUp();
+  });
+
+  it('"werk het uit" sends a planning session off and chief takes the call (US-006)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const before = sessionStdin(sessionId).length;
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    const requests = openrouter.requests.length;
+    await s.say('Werk het maar uit.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(
+      said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
+      'Oké, onboarding-copy gaat ermee aan de slag. Je bent weer bij mij.',
+    );
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    const detach = detachPrompt(prdPathFor('onboarding-copy'));
+    await waitFor(() => sessionStdin(sessionId).slice(before).includes(detach));
+    assert.equal(sessionStdin(sessionId).includes('Werk het maar uit.'), false, 'the intent never reaches the agent');
+    await s.agents().detachedTurnEnded(sessionId);
+    assert.equal(s.agents().detachedState(sessionId).lastOutcome, 'ok');
+    await s.hangUp();
+  });
+
+  it('"carry on" under chief focus is an ordinary utterance (US-006)', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['Carrying on with what?']));
+    await s.say('carry on');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Carrying on with what?');
+    await s.hangUp();
+  });
+
+  it('"carry on" to a qa session goes to its agent (US-006)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    updateSession(s.w.db, sessionId, { status: 'ready' });
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's talk about the onboarding copy", 2);
+    await s.say('carry on');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Heard you. What next?');
+    assert.ok(sessionStdin(sessionId).some((text) => text.includes('carry on')));
+    await s.hangUp();
+  });
+
+  it('a detached turn that ends is announced at the next quiet moment, once, in the call language (US-008)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const seen: VoiceBusEvent[] = [];
+    s.events.subscribe((event) => {
+      if (event.kind === 'planning.drafted' || event.kind === 'prd.valid') seen.push(event);
+    });
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('Werk het maar uit.');
+    await s.agents().detachedTurnEnded(sessionId);
+    await waitFor(() => seen.length > 0);
+    const event = seen[0];
+    assert.equal(event?.kind, 'planning.drafted');
+    assert.equal(event.ok, true);
+    assert.equal(event.reason, 'ok');
+    assert.equal(event.sessionId, sessionId);
+    assert.equal(event.name, 'onboarding-copy');
+    const line = draftedLine('nl', event);
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text === draftedLine('en', event)));
+
+    // The PRD also became valid in the same stretch: said once, by the fixed line.
+    s.events.publish({ kind: 'prd.valid', sessionId, name: 'onboarding-copy', stories: event.stories });
+    const done = s.client.messages('agent.done').length;
+    const requests = openrouter.requests.length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    await flush();
+    assert.equal(s.client.messages('agent.done').length, done + 1);
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), line);
+    await s.hangUp();
+  });
+
+  it('a finished draft of another session is spoken while a session agent has the focus (US-008)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    const done = s.client.messages('agent.done').length;
+    s.events.publish({
+      kind: 'planning.drafted',
+      sessionId: 'another-session',
+      name: 'csv-export',
+      repository: 'shop-api',
+      stories: 5,
+      openQuestions: 4,
+      ok: true,
+      reason: 'ok',
+    });
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Je sessie csv-export op shop-api is klaar met 4 open vragen.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    await s.hangUp();
+  });
+
+  it('returning to a waiting session asks its open questions, and an answer re-reads the PRD (US-011)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    await s.say('back to chief');
+    // Persists until the chip refocuses it; `running` may be over before `say` returns.
+    await waitFor(() => s.agents().detachedState(sessionId).lastOutcome === 'ok');
+    // The panel saw it drafting, then back from its turn (US-013).
+    const states = (): (string | undefined)[] =>
+      s.client.messages('planning').map(({ sessions }) => sessions.find((view) => view.sessionId === sessionId)?.state);
+    await waitFor(() => states().length > 0 && states().at(-1) !== 'drafting');
+    assert.ok(states().includes('drafting'), `drafting was shown: ${states().join(', ')}`);
+
+    // The draft it left behind: two questions for the operator.
+    const session = getSession(s.w.db, sessionId) ?? assert.fail('no session');
+    const prd = sessionPrdFile(s.w.config, session);
+    const draft = (questions: string[]): void => {
+      fs.mkdirSync(path.dirname(prd), { recursive: true });
+      fs.writeFileSync(prd, `# PRD: Onboarding copy\n\n## Open Questions\n${questions.map((q) => `- ${q}\n`).join('')}`);
+    };
+    const questions = ['Should the button say Download or Export?', 'Which file formats?'];
+    draft(questions);
+
+    // The chip moves the call back: the agent is sent the questions, not left waiting.
+    const done = s.client.messages('agent.done').length;
+    s.client.send({ type: 'focus', target: { sessionId } });
+    await s.client.until('agent.done', done + 1);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(sessionStdin(sessionId).at(-1), resumePrompt(questions, { state: 'waiting' }));
+    const planned = (): unknown[] => s.client.messages('planning').map(({ sessions }) => sessions.find((view) => view.sessionId === sessionId));
+    assert.deepEqual(planned().at(-1), { sessionId, name: session.name, repository: 'chief-web', state: 'waiting', openQuestions: 2, stories: 0 });
+
+    // The operator answers the first; the agent takes it off the list.
+    const sent = s.client.messages('planning').length;
+    draft(questions.slice(1));
+    await s.say('Download');
+    assert.ok(sessionStdin(sessionId).at(-1)?.includes('Download'));
+    assert.equal(sessionStdin(sessionId).at(-1)?.includes('open questions'), false, 'the resume is sent once');
+    assert.deepEqual(planned().slice(sent), [{ sessionId, name: session.name, repository: 'chief-web', state: 'waiting', openQuestions: 1, stories: 0 }]);
+    await s.hangUp();
+  });
+
+  /** A PRD of `stories` stories and these open questions, as the session agent would leave it. */
+  const writePrd = (s: { w: World }, sessionId: string, stories: number, questions: readonly string[]): void => {
+    const session = getSession(s.w.db, sessionId) ?? assert.fail('no session');
+    const file = sessionPrdFile(s.w.config, session);
+    const story = (n: number): string[] => [
+      `### US-00${String(n)}: Story ${String(n)}`,
+      '**Status:** todo',
+      `**Priority:** ${String(n)}`,
+      `**Description:** As a user, I want part ${String(n)}.`,
+      '',
+      '**Acceptance Criteria:**',
+      '- [ ] It works',
+      '',
+    ];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      [
+        `# PRD: ${session.name}`,
+        '',
+        '## Introduction',
+        '',
+        'Planned over voice.',
+        '',
+        '## User Stories',
+        '',
+        ...Array.from({ length: stories }, (_, i) => story(i + 1)).flat(),
+        ...(questions.length === 0 ? [] : ['## Open Questions', '', ...questions.map((q) => `- ${q}`), '']),
+      ].join('\n'),
+    );
+  };
+
+  /** A promise the test settles later: a session agent that keeps working until `release()`. */
+  const hold = (): { promise: Promise<void>; release: () => void } => {
+    let release = (): void => undefined;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  };
+
+  const A_QUESTIONS = ['Download or Export?', 'Which file formats?', 'Who may download?', 'Keep old exports?'];
+
+  it('two planning sessions: A drafts alone while B is planned, is announced, reminded of, and resumed (US-014)', async () => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', 'en') });
+    const a = s.chief.ids['onboarding'] ?? '';
+    const detachA = detachPrompt(prdPathFor('onboarding-copy'));
+    const draftingA = hold();
+    let b = '';
+    claude.onTurn = ({ containerId, text }) => {
+      // A's detached turn: done only once B is being planned, with 3 stories and 4 questions.
+      if (containerId === `c-${a}` && text === detachA) return draftingA.promise.then(() => writePrd(s, a, 3, A_QUESTIONS));
+      // B's agent finishes its PRD during the operator's last answer.
+      if (containerId === `c-${b}` && text.includes('invoices page')) writePrd(s, b, 2, []);
+      return undefined;
+    };
+
+    // Brief A on chief-web, then hand the call back: A drafts alone.
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Handing you to onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    await s.say('back to chief');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    await waitFor(() => sessionStdin(a).includes(detachA));
+    assert.equal(s.agents().detachedState(a).running, true);
+
+    // Chief creates B on shop-api and hands the call to it.
+    openrouter.replies.push(
+      toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
+      textReply(['Shall I create csv-export in shop-api?']),
+    );
+    await s.say('create a session for the CSV export on shop-api');
+    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
+    await s.say('yes');
+    const created = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
+    assert.ok(created);
+    b = created.id;
+    clone(s.w.config, created);
+    openrouter.replies.push(
+      toolReply([{ id: 'f2', name: 'focus_session', args: '{"session":"csv export"}' }]),
+      textReply(['Handing you to csv-export.']),
+    );
+    await s.say("let's plan the csv export", 2);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: b });
+    await s.say('it needs one column per invoice line');
+    assert.equal(s.agents().detachedState(a).running, true, 'A is still drafting while B is planned');
+
+    // A finishes: toasted at once, spoken at the next quiet moment, with B still in focus.
+    const announced = 'Your session onboarding-copy on chief-web has finished with 4 open questions.';
+    draftingA.release();
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text === announced));
+    let done = s.client.messages('agent.done').length;
+    const requests = openrouter.requests.length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), announced);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: b });
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    const viewA = s.client.messages('planning').at(-1)?.sessions.find((view) => view.sessionId === a);
+    assert.deepEqual([viewA?.state, viewA?.stories, viewA?.openQuestions], ['waiting', 3, 4]);
+
+    // B's agent finishes its PRD: the call reminds the operator of A.
+    await s.say('the button goes on the invoices page');
+    assert.equal(s.agents().detachedState(b).running, false);
+    done = s.client.messages('agent.done').length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    assert.equal(
+      spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
+      'onboarding-copy on chief-web is waiting with 4 open questions. Shall I switch you over?',
+    );
+
+    // "Switch to A": chief moves the call, and A's agent is sent its four questions.
+    openrouter.replies.push(textReply(['Here is onboarding-copy.']));
+    await s.say('switch to onboarding copy', 2);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: a });
+    assert.equal(sessionStdin(a).at(-1), resumePrompt(A_QUESTIONS, { state: 'waiting' }));
+    assert.equal(s.agents().detachedState(b).running, false, 'a done session is not sent off again');
+    await s.hangUp();
+  });
+
+  it('chief answers an open question of A while B is being planned, and the update is announced with one question fewer (US-014)', async () => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', 'en') });
+    const a = s.chief.ids['onboarding'] ?? '';
+    const b = createSession(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '', name: 'csv-export', baseBranch: 'develop', prTargetBranch: 'main', status: 'pending' });
+    clone(s.w.config, b);
+    const detachA = detachPrompt(prdPathFor('onboarding-copy'));
+    const answerA = answerPrompt(prdPathFor('onboarding-copy'), [A_QUESTIONS[0] ?? ''], 'Export');
+    const updating = hold();
+    claude.onTurn = ({ containerId, text }) => {
+      if (containerId !== `c-${a}`) return undefined;
+      if (text === detachA) writePrd(s, a, 3, A_QUESTIONS);
+      // Takes the answer in, until the test lets it finish: the first question is settled.
+      if (text === answerA) return updating.promise.then(() => writePrd(s, a, 3, A_QUESTIONS.slice(1)));
+      return undefined;
+    };
+
+    // A is briefed and drafts alone to a PRD with four questions; its announcement is heard.
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Handing you to onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('add a download button');
+    await s.say('back to chief');
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text.includes('has finished with 4 open questions')));
+    let done = s.client.messages('agent.done').length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+
+    // B has the focus, then the operator steps back to chief for a word about A:
+    // under a session focus every utterance goes to that session's agent.
+    done = s.client.messages('agent.done').length;
+    s.client.send({ type: 'focus', target: { sessionId: b.id } });
+    await s.client.until('agent.done', done + 1);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: b.id });
+    await s.say('back to chief');
+    openrouter.replies.push(
+      toolReply([{ id: 'q1', name: 'answer_planning_question', args: '{"session":"onboarding copy","question":1,"answer":"Export"}' }]),
+      textReply(['Passed it on to onboarding-copy.']),
+    );
+    await s.say('tell onboarding copy the button says Export');
+    assert.deepEqual(toolCards(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), [
+      ['answer_planning_question', 'ok', 'Passed the answer to onboarding-copy; it is working on it'],
+    ]);
+    await waitFor(() => sessionStdin(a).at(-1) === answerA);
+    assert.equal(s.agents().detachedState(a).running, true);
+
+    // Back on B while A works the answer in; A's update is spoken there, one question fewer.
+    done = s.client.messages('agent.done').length;
+    s.client.send({ type: 'focus', target: { sessionId: b.id } });
+    await s.client.until('agent.done', done + 1);
+    await waitFor(() => s.client.messages('state').at(-1)?.phase === 'listening');
+    const updated = 'Your session onboarding-copy on chief-web updated its PRD; 3 open questions left.';
+    updating.release();
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text === updated));
+    done = s.client.messages('agent.done').length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    const turn = s.client.messages('agent.done').at(-1)?.turn ?? 0;
+    assert.equal(said(s.client, turn), updated);
+    assert.equal(spoken(s.client, turn), updated.replace('PRD', 'P R D'));
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: b.id });
+    await s.hangUp();
+  });
+
+  it('with three sessions drafting, focusing a fourth is refused with their names (US-014)', async () => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', 'en') });
+    const a = s.chief.ids['onboarding'] ?? '';
+    const [c, d, e] = ['csv-export', 'pdf-invoices', 'dark-checkout'].map((name) => {
+      const session = createSession(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '', name, baseBranch: 'develop', prTargetBranch: 'main', status: 'pending' });
+      clone(s.w.config, session);
+      return session.id;
+    });
+    assert.ok(c !== undefined && d !== undefined && e !== undefined);
+    const drafting = hold();
+    claude.onTurn = ({ text }) => (text.startsWith('[detached]') ? drafting.promise : undefined);
+
+    // Each session is briefed and left: it drafts alone, and none of them finishes.
+    const focus = async (sessionId: string): Promise<void> => {
+      const done = s.client.messages('agent.done').length;
+      s.client.send({ type: 'focus', target: { sessionId } });
+      await s.client.until('agent.done', done + 1);
+      await waitFor(() => s.client.messages('state').at(-1)?.phase === 'listening');
+    };
+    for (const sessionId of [a, c, d]) {
+      await focus(sessionId);
+      assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+      await s.say('add a download button');
+    }
+    await s.say('back to chief');
+    await waitFor(() => [a, c, d].every((id) => s.agents().detachedState(id).running));
+    await waitFor(() => [a, c, d].every((id) => s.agents().aliveSessions().includes(id)));
+
+    // The fourth cannot get an agent: the refusal is spoken and chief has the call again.
+    await focus(e);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(
+      spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
+      'Three sessions are still drafting: onboarding-copy, csv-export and pdf-invoices. Wait for one to finish, or talk to one of them instead.',
+    );
+    assert.equal(s.agents().isAlive(e), false, 'no fourth agent was started');
+    assert.ok([a, c, d].every((id) => s.agents().detachedState(id).running), 'the drafts go on');
+
+    drafting.release();
+    await Promise.all([a, c, d].map((id) => s.agents().detachedTurnEnded(id)));
+    assert.deepEqual([a, c, d].map((id) => s.agents().detachedState(id).lastOutcome), ['ok', 'ok', 'ok']);
     await s.hangUp();
   });
 

@@ -2,14 +2,18 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BuildError } from '../../build/index.js';
+import { createRepository, createSession, getSession, listSessions } from '../../db/index.js';
 import { RetryError } from '../../recovery/index.js';
 import { SessionError } from '../../sessions/index.js';
-import { createRepository, getSession, listSessions } from '../../db/index.js';
+import type { PlanningState } from '../session-agent/planning-state.js';
+import { answerPrompt } from '../session-agent/prompt.js';
+import { prdPathFor } from '../../prd/index.js';
 import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
 import { FEEDBACK_QUOTE_MAX, feedbackSessionName, SLUG_MAX, slugify } from './actions.js';
 import { parseStartTime, speakTime } from './time.js';
 import {
   BUILD_LOG_SUMMARY_CHARS,
+  type ChiefServices,
   type ChiefTool,
   createChiefTools,
   levenshtein,
@@ -92,6 +96,7 @@ describe('chief read-only tools (voice US-008)', () => {
     const tools = createChiefTools(w.services);
     assert.deepEqual([...tools.keys()].sort(), [
       'address_pr_feedback',
+      'answer_planning_question',
       'back_to_planning',
       'build_status',
       'confirm',
@@ -618,5 +623,250 @@ describe('chief session actions (voice US-012)', () => {
     const { ran } = await roundTrip('stop_build', { session: 'billing export' }, w);
     assert.equal(ran.ok, false);
     assert.match(ran.summary, /billing-export: docker went away/);
+  });
+});
+
+describe('chief tools on planning sessions (voice multi-planning US-010)', () => {
+  const ctx = (): ToolContext => ({
+    signal: new AbortController().signal,
+    turn: 1,
+    focus: { kind: 'chief' },
+    endCall: () => undefined,
+    confirmations: testGate().gate,
+  });
+
+  function world(): { w: ReturnType<typeof chiefWorld>; tools: ReturnType<typeof createChiefTools> } {
+    const w = chiefWorld();
+    const onboarding = w.ids['onboarding'] ?? '';
+    const shopSession = createSession(w.db, {
+      repositoryId: w.ids['shop'] ?? '',
+      name: 'csv-import',
+      baseBranch: 'develop',
+      prTargetBranch: 'develop',
+      status: 'pending',
+    });
+    const states: PlanningState[] = [
+      {
+        sessionId: shopSession.id,
+        sessionName: 'csv-import',
+        repositoryName: 'shop-api',
+        state: 'drafting',
+        openQuestions: [],
+        stories: 0,
+        updatedAt: '2026-09-25T12:01:00.000Z',
+      },
+      {
+        sessionId: onboarding,
+        sessionName: 'onboarding-copy',
+        repositoryName: 'chief-web',
+        state: 'waiting',
+        openQuestions: ['Formal or informal tone?', 'Which screens?'],
+        stories: 3,
+        updatedAt: '2026-09-25T12:00:00.000Z',
+      },
+    ];
+    const services: ChiefServices = {
+      ...w.services,
+      planningStates: {
+        listPlanningSessions: () => states,
+        planningState: (id) => states.find((state) => state.sessionId === id) ?? null,
+      },
+    };
+    return { w, tools: createChiefTools(services) };
+  }
+
+  it('get_session: the planning state and the open questions themselves for a planning session only', async () => {
+    const { tools } = world();
+    const getSession = tools.get('get_session');
+    assert.ok(getSession);
+    const planning = await getSession.handler({ session: 'onboarding copy' }, ctx());
+    assert.equal(planning.ok, true);
+    assert.deepEqual((planning.data as Record<string, unknown>)['planning'], {
+      state: 'waiting',
+      openQuestions: ['Formal or informal tone?', 'Which screens?'],
+    });
+
+    const building = await getSession.handler({ session: 'billing export' }, ctx());
+    assert.equal(building.ok, true);
+    assert.equal('planning' in (building.data as object), false);
+  });
+
+  it('list_sessions: planning true lists only planning sessions, latest first, with their state', async () => {
+    const { tools } = world();
+    const list = tools.get('list_sessions');
+    assert.ok(list);
+    assert.deepEqual(Object.keys(list.definition.function.parameters['properties'] as object), [
+      'status',
+      'repository',
+      'planning',
+    ]);
+
+    const all = await list.handler({ planning: true }, ctx());
+    assert.equal(all.summary, '2 planning sessions');
+    type Row = { name: string; repository: string; state: string; openQuestions: number; stories: number };
+    const data = all.data as { sessions: Row[]; total: number };
+    assert.equal(data.total, 2);
+    assert.deepEqual(
+      data.sessions.map(({ name, repository, state, openQuestions, stories }) => ({ name, repository, state, openQuestions, stories })),
+      [
+        { name: 'csv-import', repository: 'shop-api', state: 'drafting', openQuestions: 0, stories: 0 },
+        { name: 'onboarding-copy', repository: 'chief-web', state: 'waiting', openQuestions: 2, stories: 3 },
+      ],
+    );
+
+    const shop = await list.handler({ planning: true, repository: 'shop api' }, ctx());
+    assert.deepEqual((shop.data as { sessions: Row[] }).sessions.map((s) => s.name), ['csv-import']);
+    assert.equal(shop.summary, '1 planning session');
+
+    const everything = await list.handler({}, ctx());
+    assert.ok((everything.data as { total: number }).total > 2, 'without the flag every session is listed');
+  });
+
+  it('list_sessions: planning true without planning states lists none', async () => {
+    const w = chiefWorld();
+    const list = createChiefTools(w.services).get('list_sessions');
+    assert.ok(list);
+    const result = await list.handler({ planning: true }, ctx());
+    assert.deepEqual(result.data, { sessions: [], total: 0 });
+  });
+});
+
+describe('answer_planning_question (voice multi-planning US-012)', () => {
+  const ctx = (): ToolContext => ({
+    signal: new AbortController().signal,
+    turn: 1,
+    focus: { kind: 'chief' },
+    endCall: () => undefined,
+    confirmations: testGate().gate,
+  });
+
+  function world(): {
+    w: ReturnType<typeof chiefWorld>;
+    tool: ChiefTool;
+    started: { sessionId: string; message: string }[];
+    ids: Record<string, string>;
+  } {
+    const w = chiefWorld();
+    const onboarding = w.ids['onboarding'] ?? '';
+    const session = (name: string): string =>
+      createSession(w.db, {
+        repositoryId: w.ids['shop'] ?? '',
+        name,
+        baseBranch: 'develop',
+        prTargetBranch: 'develop',
+        status: 'pending',
+      }).id;
+    const drafting = session('csv-import');
+    const done = session('csv-export');
+    const state = (sessionId: string, sessionName: string, rest: Pick<PlanningState, 'state' | 'openQuestions'>): PlanningState => ({
+      sessionId,
+      sessionName,
+      repositoryName: 'shop-api',
+      stories: 3,
+      updatedAt: '2026-09-25T12:00:00.000Z',
+      ...rest,
+    });
+    const states: PlanningState[] = [
+      state(onboarding, 'onboarding-copy', { state: 'waiting', openQuestions: ['Formal or informal tone?', 'Which screens?'] }),
+      state(drafting, 'csv-import', { state: 'drafting', openQuestions: ['Old question?'] }),
+      state(done, 'csv-export', { state: 'done', openQuestions: [] }),
+    ];
+    const started: { sessionId: string; message: string }[] = [];
+    const tools = createChiefTools({
+      ...w.services,
+      planningStates: {
+        listPlanningSessions: () => states,
+        planningState: (id) => states.find((entry) => entry.sessionId === id) ?? null,
+      },
+      detachedTurns: { start: (sessionId, message) => started.push({ sessionId, message }) },
+    });
+    const tool = tools.get('answer_planning_question');
+    assert.ok(tool);
+    return { w, tool, started, ids: { onboarding, drafting, done } };
+  }
+
+  it('is not confirmed and takes session, question and answer', () => {
+    const { tool } = world();
+    assert.equal(tool.execute, undefined);
+    const parameters = tool.definition.function.parameters;
+    assert.deepEqual(Object.keys(parameters['properties'] as object), ['session', 'question', 'answer']);
+    assert.deepEqual(parameters['required'], ['session', 'answer']);
+  });
+
+  it('passes one answered question to a detached turn and returns at once', async () => {
+    const { tool, started, ids } = world();
+    const result = await tool.handler({ session: 'onboarding copy', question: 2, answer: 'Only the settings screen' }, ctx());
+    assert.equal(result.ok, true);
+    assert.equal(result.summary, 'Passed the answer to onboarding-copy; it is working on it');
+    assert.deepEqual(result.data, {
+      id: ids['onboarding'],
+      name: 'onboarding-copy',
+      questions: ['Which screens?'],
+      answer: 'Only the settings screen',
+    });
+    assert.deepEqual(started, [
+      {
+        sessionId: ids['onboarding'],
+        message: answerPrompt(prdPathFor('onboarding-copy'), ['Which screens?'], 'Only the settings screen'),
+      },
+    ]);
+    assert.ok(started[0]?.message.startsWith('[detached] '));
+    assert.ok(started[0]?.message.includes('"Which screens?"'));
+    assert.ok(!started[0]?.message.includes('Formal or informal tone?'));
+  });
+
+  it('quotes every open question when no question is named', async () => {
+    const { tool, started } = world();
+    const result = await tool.handler({ session: 'onboarding copy', answer: 'Informal, and only settings' }, ctx());
+    assert.equal(result.ok, true);
+    assert.equal(started.length, 1);
+    assert.ok(started[0]?.message.includes('1. "Formal or informal tone?"\n2. "Which screens?"'));
+    assert.ok(started[0]?.message.includes('Answer: "Informal, and only settings"'));
+  });
+
+  it('refuses a session that is not planning, one that is drafting and one without open questions', async () => {
+    const { tool, started } = world();
+    const cases: [string, string, string][] = [
+      ['billing export', 'not_planning', 'billing-export is not a planning session, so there is no question to answer'],
+      ['csv import', 'drafting', 'csv-import is still drafting; give it the answer once it is done'],
+      ['csv export', 'no_open_questions', 'csv-export has no open questions'],
+    ];
+    for (const [session, error, summary] of cases) {
+      const result = await tool.handler({ session, answer: 'CSV only' }, ctx());
+      assert.equal(result.ok, false, session);
+      assert.deepEqual(result.data, { error });
+      assert.equal(result.summary, summary);
+    }
+    const outOfRange = await tool.handler({ session: 'onboarding copy', question: 3, answer: 'CSV only' }, ctx());
+    assert.equal(outOfRange.summary, 'onboarding-copy has 2 open questions; there is no question 3');
+    assert.equal(started.length, 0, 'no refusal starts a turn');
+    const asString = await tool.handler({ session: 'onboarding copy', question: '1', answer: 'Informal' }, ctx());
+    assert.equal(asString.ok, true, 'a question number sent as a string still counts');
+    assert.ok(started[0]?.message.includes('"Formal or informal tone?"'));
+  });
+
+  it('refuses during the usage-limit hold without starting a turn', async () => {
+    const { w, started, ids } = world();
+    const tool = createChiefTools({
+      ...w.services,
+      hold: { until: () => '2026-09-25T18:00:00.000Z' },
+      planningStates: {
+        listPlanningSessions: () => [],
+        planningState: (id) => ({
+          sessionId: id,
+          sessionName: 'onboarding-copy',
+          repositoryName: 'chief-web',
+          state: 'waiting',
+          openQuestions: ['Which screens?'],
+          stories: 3,
+          updatedAt: '2026-09-25T12:00:00.000Z',
+        }),
+      },
+      detachedTurns: { start: (sessionId, message) => started.push({ sessionId, message }) },
+    }).get('answer_planning_question');
+    assert.ok(tool);
+    const result = await tool.handler({ session: ids['onboarding'] ?? '', answer: 'Settings only' }, ctx());
+    assert.deepEqual(result.data, { error: 'usage_limit_hold' });
+    assert.deepEqual(started, []);
   });
 });

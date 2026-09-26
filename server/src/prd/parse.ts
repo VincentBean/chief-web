@@ -53,6 +53,12 @@ export interface ParsedPrd {
   readonly description: string | null;
   readonly stories: readonly PrdStory[];
   readonly errors: readonly PrdParseError[];
+  /**
+   * The bullets under a `## Open Questions` heading, in file order: what the
+   * planning agent still wants the operator to decide. Informational only — it
+   * never produces an error, so it never stops a PRD from parsing.
+   */
+  readonly openQuestions: readonly string[];
 }
 
 /**
@@ -66,6 +72,12 @@ const PRIORITY_LINE = /^\*\*Priority:\*\*\s*(.+)$/;
 const DESCRIPTION_LINE = /^\*\*Description:\*\*\s*(.+)$/;
 const CHECKBOX = /^-\s+\[([ xX])\]\s+(.+)$/;
 const PROJECT_HEADING = /^#\s+(?:PRD:\s+)?(.+)$/;
+/** Any ATX heading, for the level at which the open-questions section ends. */
+const ANY_HEADING = /^(#{1,6})\s+(.*)$/;
+/** English only: the story format is English, so `## Open vragen` is just another section. */
+const OPEN_QUESTIONS_TITLE = /^open questions$/i;
+const BULLET = /^[-*]\s+(.*)$/;
+const BULLET_CHECKBOX = /^\[([ xX])\](?:\s+(.*))?$/;
 
 /**
  * Fenced code blocks (\`\`\` or ~~~): text nobody wrote as PRD structure.
@@ -129,6 +141,9 @@ export function parsePrd(content: string): ParsedPrd {
   let introStarted = false;
   let introDone = false;
   let current: StoryDraft | null = null;
+  const openQuestions: string[] = [];
+  /** Heading level of the open-questions section being read; `null` outside it. */
+  let openQuestionsLevel: number | null = null;
   /** Highest priority seen so far, so an omitted one continues the sequence. */
   let autoPriority = 0;
 
@@ -172,6 +187,24 @@ export function parsePrd(content: string): ParsedPrd {
 
     const lineNumber = index + 1;
     const trimmed = raw.trim();
+
+    // The open-questions section runs until the next heading of the same or a
+    // higher level; a story heading always ends it, so a story's own checklist
+    // is never mistaken for questions.
+    const anyHeading = ANY_HEADING.exec(raw);
+    if (anyHeading !== null) {
+      const level = (anyHeading[1] ?? '').length;
+      if (openQuestionsLevel !== null && (level <= openQuestionsLevel || STORY_HEADING_PATTERN.test(trimmed))) {
+        openQuestionsLevel = null;
+      }
+      if ((level === 2 || level === 3) && OPEN_QUESTIONS_TITLE.test((anyHeading[2] ?? '').trim())) {
+        openQuestionsLevel = level;
+      }
+    } else if (openQuestionsLevel !== null) {
+      const question = readOpenQuestion(trimmed);
+      if (question !== null) openQuestions.push(question);
+      return;
+    }
 
     // A story heading first: `### US-001: …` also matches the generic `### `
     // section test below, and only one of them may win.
@@ -243,7 +276,23 @@ export function parsePrd(content: string): ParsedPrd {
     });
   }
 
-  return { project, description, stories, errors };
+  return { project, description, stories, errors, openQuestions };
+}
+
+/**
+ * One line of the open-questions section: the bullet's text, or `null` when it
+ * is not a bullet, is blank, or is a checked-off checkbox (already answered).
+ */
+function readOpenQuestion(trimmed: string): string | null {
+  const bullet = BULLET.exec(trimmed);
+  if (bullet === null) return null;
+  let text = (bullet[1] ?? '').trim();
+  const checkbox = BULLET_CHECKBOX.exec(text);
+  if (checkbox !== null) {
+    if (checkbox[1] !== ' ') return null;
+    text = (checkbox[2] ?? '').trim();
+  }
+  return text === '' ? null : text;
 }
 
 /** True when the file is usable as it stands. */

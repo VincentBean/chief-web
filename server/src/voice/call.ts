@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import {
   createVoiceCall,
   type Database,
+  getSession,
   insertVoiceTurn,
   updateVoiceCall,
   updateVoiceTurn,
@@ -16,7 +17,7 @@ import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
-import { describeEvent, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
+import { describeEvent, draftedLine, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
 import { matchCallIntent, matchConfirmIntent } from './intents.js';
 import {
   type AgentKind,
@@ -26,6 +27,7 @@ import {
   decodeFrame,
   FRAME_KIND_UTTERANCE,
   parseClientMessage,
+  type PlanningSessionView,
   type ServerMessage,
   type TurnTimes,
   type SttMode,
@@ -33,7 +35,10 @@ import {
   type UiAction,
   WS_CLOSE_CALL_ENDED,
 } from './protocol.js';
-import { SentenceChunker, toSpeakable } from './speakable.js';
+import type { PlanningState, PlanningStateName } from './session-agent/planning-state.js';
+import { resumePrompt } from './session-agent/prompt.js';
+import { voiceAgentMode } from './session-agent/registry.js';
+import { SentenceChunker, toSpeakable, type WaitingSession, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
@@ -99,6 +104,12 @@ export interface AgentInput {
    * started for this utterance's partial. Only the agent that made it reads it.
    */
   readonly prefetched?: SpeculativeStep;
+  /**
+   * Set on the first turn to a planning session the focus has just moved to
+   * while it waits for the operator (US-011): a session agent sends this
+   * instead of its greeting, with the operator's first words when there are any.
+   */
+  readonly resume?: string;
 }
 
 /** Opaque to the call: whatever an agent's `speculate` hands back. */
@@ -156,12 +167,25 @@ export interface VoiceCallDeps {
   readonly clock: CallClock;
   /** Told once, when the call has ended, so the service can let go of it. */
   readonly onEnded?: (call: VoiceCall) => void;
+  /** Told whenever the call's focus moves to a session (not when it opens on one). */
+  readonly onSessionFocused?: (sessionId: string) => void;
+  /**
+   * Told when the focus has left a session the operator spoke to in this
+   * call, once the turn that was running has wound down (US-005); the service
+   * sends a planning session's agent off to draft alone. Never awaited.
+   */
+  readonly onSessionLeft?: (sessionId: string) => void;
   /**
    * The planning poller (US-019): read after every session-agent turn, so a
    * `prd.md` that just became valid publishes `prd.valid`, and for the
    * PRD state chief names on the way back.
    */
   readonly planning?: CallPlanning;
+  /**
+   * Where the planning sessions stand (US-009), for the other sessions chief
+   * names on the way back and when the focused one is done.
+   */
+  readonly planningStates?: CallPlanningStates;
   /** Pre-rendered acknowledgements (US-021); without them the call has none. */
   readonly earcons?: CallEarcons;
   /** The providers' own usage numbers (US-023); without them the meter is local only. */
@@ -182,6 +206,18 @@ export interface CallUsageSources {
 export interface CallPlanning {
   status(sessionId: string): { readonly sessionName: string; readonly prd: PrdStatus };
 }
+
+/** The slice of `PlanningStates` a call reads. */
+export interface CallPlanningStates {
+  planningState(sessionId: string): PlanningState | null;
+  listPlanningSessions(): readonly PlanningState[];
+}
+
+/**
+ * The confirmation the call parks itself after naming the one waiting session
+ * (US-009): a "yes" moves the focus there, with no model deciding anything.
+ */
+export const SWITCH_OVER_TOOL = 'switch_over';
 
 export type { Confirmation } from './chief/confirm.js';
 export type { VoiceEvent } from './events.js';
@@ -224,21 +260,74 @@ export const HANGUP_GOODBYE: Readonly<Record<string, string>> = {
 
 /**
  * The one line chief says when the operator comes back from a session agent
- * (docs/voice-plan.md §11): "Back with me. csv-export-invoices has a draft PRD."
+ * (docs/voice-plan.md §11): "Back with me. csv-export-invoices has a draft PRD
+ * with 2 open questions.", followed by the other planning sessions (US-009).
  */
-export function backWithMe(language: string, session: { readonly sessionName: string; readonly prd: PrdStatus } | null): string {
+export function backWithMe(
+  language: string,
+  session: { readonly sessionName: string; readonly prd: PrdStatus } | null,
+  others: readonly WaitingSession[] = [],
+): string {
   const nl = language === 'nl';
   const back = nl ? 'Je bent weer bij mij.' : 'Back with me.';
-  if (session === null) return back;
+  const summary = waitingSummary(language, others);
+  if (session === null) return summary === '' ? back : `${back} ${summary}`;
   const { sessionName: name, prd } = session;
   const stories = prd.storyCount;
+  const questions = prd.exists ? prd.openQuestions : 0;
+  const withQuestions =
+    questions <= 0
+      ? ''
+      : nl
+        ? ` met ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}`
+        : ` with ${String(questions)} open ${questions === 1 ? 'question' : 'questions'}`;
   let state: string;
   if (!prd.exists) state = nl ? `${name} heeft nog geen PRD.` : `${name} has no PRD yet.`;
-  else if (!prd.parses || stories === 0) state = nl ? `${name} heeft een concept-PRD.` : `${name} has a draft PRD.`;
-  else if (nl) state = `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en is in orde.`;
+  else if (!prd.parses || stories === 0) state = nl ? `${name} heeft een concept-PRD${withQuestions}.` : `${name} has a draft PRD${withQuestions}.`;
+  else if (questions > 0) {
+    state = nl
+      ? `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}.`
+      : `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} and ${String(questions)} open ${questions === 1 ? 'question' : 'questions'}.`;
+  } else if (nl) state = `De PRD van ${name} heeft ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en is in orde.`;
   else state = `${name} has a PRD with ${String(stories)} ${stories === 1 ? 'story' : 'stories'} that parses cleanly.`;
-  return `${back} ${state}`;
+  return summary === '' ? `${back} ${state}` : `${back} ${state} ${summary}`;
 }
+
+/** What chief adds to the waiting summary when exactly one session waits (US-009). */
+export function switchOverQuestion(language: string): string {
+  return language === 'nl' ? 'Zal ik je doorverbinden?' : 'Shall I switch you over?';
+}
+
+/** Why a detached turn failed, as the resume message quotes it (US-011). */
+const FAILURE_REASONS: Readonly<Record<NonNullable<PlanningState['failure']>, string>> = {
+  timeout: 'it ran out of time before the PRD was finished',
+  error: 'it stopped with an error before the PRD was finished',
+};
+
+function asWaiting(state: PlanningState): WaitingSession {
+  return {
+    sessionName: state.sessionName,
+    repositoryName: state.repositoryName,
+    state: state.state,
+    openQuestions: state.openQuestions.length,
+  };
+}
+
+/**
+ * What chief says when the `carry_on` intent sends a planning session off to
+ * work alone (US-006): "Okay, csv-export is working on it. Back with me."
+ */
+export function carryingOn(language: string, sessionName: string): string {
+  return language === 'nl'
+    ? `Oké, ${sessionName} gaat ermee aan de slag. Je bent weer bij mij.`
+    : `Okay, ${sessionName} is working on it. Back with me.`;
+}
+
+/** A "no" to switching over to the waiting session (US-009). */
+export const SWITCH_OVER_DECLINED: Readonly<Record<string, string>> = {
+  nl: 'Oké, we blijven hier.',
+  en: 'Okay, staying here.',
+};
 
 /** What the `mute` intent answers, as text: it is never spoken. */
 export const MUTED_LINE: Readonly<Record<string, string>> = {
@@ -304,6 +393,12 @@ export class VoiceCall {
   /** A session chief created from feedback: the call goes to its agent once its setup is announced (voice feedback US-003). */
   private handOffOnSetup: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
+  /** Sessions whose agent answered the operator in this call: only those have something to draft from. */
+  private readonly briefed = new Set<string>();
+  /** The resume message (US-011) a planning session's agent still has to be sent, per session. */
+  private readonly resumes = new Map<string, string>();
+  /** The planning list the panel was last sent (US-013), to send only a change; null forces the next one. */
+  private planningSent: string | null = null;
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
   private subscriptionTimer: unknown = null;
@@ -408,6 +503,7 @@ export class VoiceCall {
     // The call moved elsewhere: the feedback session no longer takes it over.
     this.handOffOnSetup = null;
     this.state.focus = focus;
+    if (current.kind === 'session') this.leave(current.sessionId);
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     if (this.persisted) {
       const name = sessionId === null ? 'chief' : (this.readPlanning(sessionId)?.sessionName ?? sessionId);
@@ -415,6 +511,9 @@ export class VoiceCall {
     }
     this.sendState();
     if (sessionId === null) return;
+    // Before `onSessionFocused`: it forgets how the last detached turn ended.
+    this.prepareResume(sessionId);
+    this.deps.onSessionFocused?.(sessionId);
     this.send({ type: 'ui', action: 'navigate', path: `/sessions/${encodeURIComponent(sessionId)}` });
     this.greetPending = sessionId;
     if (this.state.activeTurn === null) void this.enqueue((controller) => this.greet(controller));
@@ -448,6 +547,21 @@ export class VoiceCall {
     // focus is in effect at once, and its agent speaks once that turn is out.
     this.state.activeTurn?.abort(new Error('focus switched'));
     this.setFocus(focus);
+  }
+
+  /**
+   * The focus left `sessionId` (US-005), whichever way: the detach waits for
+   * the turn that was running, since an interrupted session agent reads its
+   * process up to the `result` first, but the new focus does not wait for it.
+   */
+  private leave(sessionId: string): void {
+    const onLeft = this.deps.onSessionLeft;
+    if (onLeft === undefined || !this.briefed.has(sessionId)) return;
+    void this.running.then(() => {
+      // Back on it already: the operator talks to it instead.
+      if (sameFocus(this.state.focus, { kind: 'session', sessionId })) return;
+      onLeft(sessionId);
+    });
   }
 
   /**
@@ -855,7 +969,8 @@ export class VoiceCall {
   private submitResolution(id: string, accept: boolean): void {
     this.touch();
     void this.enqueue(async (controller) => {
-      if (this.state.focus.kind !== 'chief' || this.confirmations.pending?.id !== id) {
+      const pending = this.confirmations.pending;
+      if ((this.state.focus.kind !== 'chief' && pending?.tool !== SWITCH_OVER_TOOL) || pending?.id !== id) {
         this.send({ type: 'error', code: 'confirmation_gone', message: 'That confirmation is no longer pending.', fatal: false });
         return;
       }
@@ -925,6 +1040,8 @@ export class VoiceCall {
     clicked?: AgentInput['resolution'],
     /** `event`: background events for chief; `greeting`: a session agent's opening, with no utterance. */
     mode: 'user' | 'event' | 'greeting' = 'user',
+    /** An `event` turn the call answers with this fixed line instead of chief's model. */
+    line?: string,
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
@@ -943,7 +1060,7 @@ export class VoiceCall {
     if (signal.aborted) cut();
     else signal.addEventListener('abort', cut, { once: true });
     try {
-      await this.answer(text, turn, controller, times, clicked, mode);
+      await this.answer(text, turn, controller, times, clicked, mode, line);
     } finally {
       signal.removeEventListener('abort', cut);
     }
@@ -956,6 +1073,7 @@ export class VoiceCall {
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
     clicked: AgentInput['resolution'],
     mode: 'user' | 'event' | 'greeting',
+    line?: string,
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
@@ -977,10 +1095,18 @@ export class VoiceCall {
       });
     }
     this.noteTimes(turn, { speechEnd: times.tSpeechEnd ?? null, transcript: times.tTranscript ?? null });
+    if (line !== undefined) {
+      await this.sayLine(tts, turn, line, signal);
+      return;
+    }
 
     // The operator spoke first: the session agent answers that, not a greeting.
     if (mode === 'user') this.greetPending = null;
     const resolution = mode === 'user' ? (clicked ?? this.spokenResolution(text, focus)) : undefined;
+    if (resolution !== undefined && this.confirmations.pending?.tool === SWITCH_OVER_TOOL) {
+      await this.switchOver(resolution, turn, tts, signal);
+      return;
+    }
     let invoke: AgentInput['invoke'];
     const intent = mode === 'user' && resolution === undefined ? matchCallIntent(text) : null;
     switch (intent?.kind) {
@@ -995,8 +1121,28 @@ export class VoiceCall {
       case 'to_chief':
         if (focus.kind === 'chief') break;
         this.setFocus({ kind: 'chief' });
-        await this.sayLine(tts, turn, backWithMe(getVoiceSettings(this.deps.db).language, this.readPlanning(focus.sessionId)), signal);
+        await this.sayLine(
+          tts,
+          turn,
+          backWithMe(
+            getVoiceSettings(this.deps.db).language,
+            this.readPlanning(focus.sessionId),
+            this.otherPlanningSessions(focus.sessionId).map(asWaiting),
+          ),
+          signal,
+        );
         return;
+      case 'carry_on': {
+        // Only a planning session is sent off; anywhere else it is just words for the agent.
+        if (focus.kind !== 'session' || !this.isPlanning(focus.sessionId)) break;
+        const { sessionId } = focus;
+        // Asked outright, so it goes off even if all it said so far was its greeting.
+        this.briefed.add(sessionId);
+        this.setFocus({ kind: 'chief' });
+        const name = this.readPlanning(sessionId)?.sessionName ?? getSession(this.deps.db, sessionId)?.name ?? sessionId;
+        await this.sayLine(tts, turn, carryingOn(getVoiceSettings(this.deps.db).language, name), signal);
+        return;
+      }
       case 'repeat':
         await this.replay(tts, turn, signal);
         return;
@@ -1018,6 +1164,9 @@ export class VoiceCall {
     }
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     const agent = this.agentFor(focus);
+    if (mode === 'user' && sessionId !== null && agent.kind === 'session') this.briefed.add(sessionId);
+    const stateBefore = sessionId !== null && agent.kind === 'session' ? this.planningStateOf(sessionId) : null;
+    const resume = sessionId !== null && agent.kind === 'session' ? this.resumes.get(sessionId) : undefined;
     const prefetched =
       mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
         ? this.adoptSpeculation(text, signal)
@@ -1041,7 +1190,10 @@ export class VoiceCall {
         ...(resolution === undefined ? {} : { resolution }),
         ...(invoke === undefined ? {} : { invoke }),
         ...(prefetched === undefined ? {} : { prefetched }),
+        ...(resume === undefined ? {} : { resume }),
       })) {
+        // Anything past the "one sec" means the agent was sent the resume.
+        if (resume !== undefined && sessionId !== null && event.type !== 'earcon') this.resumes.delete(sessionId);
         // Past a barge-in only a finished tool's card still goes out.
         const late = signal.aborted;
         if (late && !(event.type === 'tool' && event.status !== 'running')) break;
@@ -1110,7 +1262,14 @@ export class VoiceCall {
       this.replyRows.set(turn, row.id);
     }
     this.noteReply(turn, agent.kind, reply);
-    if (sessionId !== null && agent.kind === 'session') this.pollPrd(sessionId);
+    if (sessionId !== null && agent.kind === 'session') {
+      if (!interrupted && resume !== undefined) this.resumes.delete(sessionId);
+      this.pollPrd(sessionId);
+      // Re-read after every turn (US-011): an answered question shows on the panel at once.
+      const after = this.planningOf(sessionId);
+      this.planningChanged();
+      if (!interrupted && stateBefore !== 'done' && after?.state === 'done') this.remindOfOthers(sessionId);
+    }
   }
 
   /** A fixed line the call says itself, as chief: an intent's answer, not a model's. */
@@ -1185,6 +1344,120 @@ export class VoiceCall {
   }
 
   /** The session's name and PRD as the planning poller sees them; null without one, or on a failure. */
+  /** A session whose agent plans (`plan` mode), not one it only answers questions about. */
+  private isPlanning(sessionId: string): boolean {
+    const session = getSession(this.deps.db, sessionId);
+    return session !== null && voiceAgentMode(session) === 'plan';
+  }
+
+  private planningStateOf(sessionId: string): PlanningStateName | null {
+    return this.planningOf(sessionId)?.state ?? null;
+  }
+
+  private planningOf(sessionId: string): PlanningState | null {
+    try {
+      return this.deps.planningStates?.planningState(sessionId) ?? null;
+    } catch (cause) {
+      logger.warn('voice call could not read the planning state', { session: sessionId, error: String(cause) });
+      return null;
+    }
+  }
+
+  /**
+   * The focus moved to `sessionId` (US-011): a planning session that waits
+   * for the operator (`waiting`, `done` or `failed`) is resumed with its
+   * open questions instead of greeted, and the panel hears where it stands.
+   */
+  private prepareResume(sessionId: string): void {
+    this.resumes.delete(sessionId);
+    const planning = this.planningOf(sessionId);
+    this.planningChanged();
+    if (planning === null) return;
+    const { state } = planning;
+    if (state !== 'waiting' && state !== 'done' && state !== 'failed') return;
+    this.resumes.set(
+      sessionId,
+      resumePrompt(planning.openQuestions, {
+        state,
+        ...(planning.failure === undefined ? {} : { failure: FAILURE_REASONS[planning.failure] }),
+      }),
+    );
+  }
+
+  /**
+   * Tells the panel where every planning session stands (US-013), when
+   * anything in the list changed since it was last sent. The service calls
+   * this too, when a detached turn starts or ends.
+   */
+  planningChanged(): void {
+    if (this.ended || this.deps.planningStates === undefined) return;
+    let sessions: PlanningSessionView[];
+    try {
+      sessions = this.deps.planningStates.listPlanningSessions().map((planning) => ({
+        sessionId: planning.sessionId,
+        name: planning.sessionName,
+        repository: planning.repositoryName,
+        state: planning.state,
+        openQuestions: planning.openQuestions.length,
+        stories: planning.stories,
+      }));
+    } catch (cause) {
+      logger.warn('voice call could not list the planning sessions', { error: String(cause) });
+      return;
+    }
+    const key = JSON.stringify(sessions);
+    if (this.planningSent === key || this.transport === null) return;
+    this.planningSent = key;
+    this.send({ type: 'planning', sessions });
+  }
+
+  /** Every planning session but `sessionId`, most recently updated first; empty on a failure. */
+  private otherPlanningSessions(sessionId: string): PlanningState[] {
+    try {
+      return (this.deps.planningStates?.listPlanningSessions() ?? []).filter((state) => state.sessionId !== sessionId);
+    } catch (cause) {
+      logger.warn('voice call could not list the planning sessions', { error: String(cause) });
+      return [];
+    }
+  }
+
+  /**
+   * The focused planning session has just become `done` (US-009): the other
+   * planning sessions are named at the next quiet moment, with an offer to
+   * switch when exactly one of them waits for the operator.
+   */
+  private remindOfOthers(sessionId: string): void {
+    const settings = getVoiceSettings(this.deps.db);
+    if (settings.eventVerbosity === 'none') return;
+    const others = this.otherPlanningSessions(sessionId);
+    const summary = waitingSummary(settings.language, others.map(asWaiting));
+    if (summary === '') return;
+    const waiting = others.filter((state) => state.state === 'waiting');
+    const offer = waiting.length === 1 ? (waiting[0] as PlanningState) : null;
+    this.state.queue.push({
+      kind: 'planning.waiting',
+      text: summary,
+      sessionId,
+      line: offer === null ? summary : `${summary} ${switchOverQuestion(settings.language)}`,
+      ...(offer === null ? {} : { offer: { sessionId: offer.sessionId, name: offer.sessionName } }),
+    });
+    this.scheduleDrain();
+  }
+
+  /** A "yes" or "no" to {@link SWITCH_OVER_TOOL}: the call answers it itself. */
+  private async switchOver(resolution: NonNullable<AgentInput['resolution']>, turn: number, tts: CallTts, signal: AbortSignal): Promise<void> {
+    if (!resolution.accept) {
+      this.confirmations.cancel();
+      await this.sayLine(tts, turn, this.inLanguage(SWITCH_OVER_DECLINED), signal);
+      return;
+    }
+    const taken = this.confirmations.take(resolution.confirmationId, turn);
+    this.send({ type: 'agent.done', turn, interrupted: false });
+    if (taken.kind !== 'ok') return;
+    const target = taken.confirmation.args['sessionId'];
+    if (typeof target === 'string') this.setFocus({ kind: 'session', sessionId: target });
+  }
+
   private readPlanning(sessionId: string): { sessionName: string; prd: PrdStatus } | null {
     try {
       return this.deps.planning?.status(sessionId) ?? null;
@@ -1254,9 +1527,10 @@ export class VoiceCall {
    * directly (docs/voice-plan.md §9.4), with no model deciding what it meant.
    */
   private spokenResolution(text: string, focus: CallFocus): AgentInput['resolution'] {
-    if (focus.kind !== 'chief') return undefined;
     const pending = this.confirmations.pending;
     if (pending === null) return undefined;
+    // The call's own offer to switch over is also made while a session has the focus.
+    if (focus.kind !== 'chief' && pending.tool !== SWITCH_OVER_TOOL) return undefined;
     const intent = matchConfirmIntent(text);
     return intent === null ? undefined : { confirmationId: pending.id, accept: intent === 'yes' };
   }
@@ -1418,9 +1692,13 @@ export class VoiceCall {
    * whatever happens next. Chief speaks it only if `voice_event_verbosity`
    * allows the kind and, while a session agent has the focus, only if it is
    * about that session; then it waits in `state.queue` for a quiet moment.
+   * A finished draft (`planning.drafted`, US-008) is the exception: it is
+   * spoken whatever the focus, as a fixed line the call says itself.
    */
   postEvent(event: VoiceBusEvent): void {
     if (this.ended || !this.persisted) return;
+    // A PRD edited in the planning terminal changes a planning session too (US-013).
+    this.planningChanged();
     const settings = getVoiceSettings(this.deps.db);
     const text = describeEvent(event, settings.timezone);
     this.send({ type: 'ui', action: 'toast', text });
@@ -1431,7 +1709,12 @@ export class VoiceCall {
     const handOff = event.kind === 'session.setup' && event.sessionId === this.handOffOnSetup;
     if (handOff && !event.ok) this.handOffOnSetup = null;
     const announced = isAnnounced(event.kind, settings.eventVerbosity) || (planned && settings.eventVerbosity !== 'none');
-    const queued: VoiceEvent = { kind: event.kind, text, sessionId: eventSessionId(event) };
+    const queued: VoiceEvent = {
+      kind: event.kind,
+      text,
+      sessionId: eventSessionId(event),
+      ...(event.kind === 'planning.drafted' ? { line: draftedLine(settings.language, event) } : {}),
+    };
     if (!announced || !this.concerns(queued)) {
       // Nothing to wait for: the handoff happens now.
       if (handOff && event.ok) this.handOff(event.sessionId);
@@ -1441,10 +1724,10 @@ export class VoiceCall {
     this.scheduleDrain();
   }
 
-  /** Chief speaks about anything; a focused session agent's call only hears its own session. */
+  /** Chief speaks about anything; a focused session agent's call only hears its own session, and every finished draft. */
   private concerns(event: VoiceEvent): boolean {
     const focus = this.state.focus;
-    return focus.kind === 'chief' || event.sessionId === focus.sessionId;
+    return focus.kind === 'chief' || event.kind === 'planning.drafted' || event.sessionId === focus.sessionId;
   }
 
   private markActivity(): void {
@@ -1488,13 +1771,29 @@ export class VoiceCall {
       return;
     }
     // The focus may have moved since the events were queued.
-    const events = this.state.queue.splice(0).filter((event) => this.concerns(event));
+    const queued = this.state.queue.splice(0).filter((event) => this.concerns(event));
+    // A finished draft already says what a `prd.valid` for its session would.
+    const drafted = new Set(queued.flatMap((event) => (event.kind === 'planning.drafted' ? [event.sessionId] : [])));
+    const events = queued.filter((event) => !(event.kind === 'prd.valid' && drafted.has(event.sessionId)));
     if (events.length === 0) return;
-    const text = events.map((event) => `[event] ${event.text}`).join('\n');
+    const lines = events.filter((event) => event.line !== undefined);
+    const rest = events.filter((event) => event.line === undefined);
+    const asEvents = (list: VoiceEvent[]): string => list.map((event) => `[event] ${event.text}`).join('\n');
     const handOff = this.handOffOnSetup;
     const ready = handOff !== null && events.some((event) => event.kind === 'session.setup' && event.sessionId === handOff);
+    // One piece of work: a second `enqueue` would supersede the first.
     void this.enqueue(async (controller) => {
-      await this.runTurn(text, controller, {}, undefined, 'event');
+      if (lines.length > 0) {
+        const line = lines.map((event) => event.line).join(' ');
+        await this.runTurn(asEvents(lines), controller, {}, undefined, 'event', line);
+        // Stamped with the turn that asked, so only the operator's next words can answer it.
+        const offer = lines.findLast((event) => event.offer !== undefined)?.offer;
+        if (offer !== undefined && !controller.signal.aborted) {
+          const prompt = getVoiceSettings(this.deps.db).language === 'nl' ? `Doorverbinden met ${offer.name}?` : `Switch over to ${offer.name}?`;
+          this.confirmations.request({ tool: SWITCH_OVER_TOOL, args: { sessionId: offer.sessionId, name: offer.name }, prompt }, this.state.turn);
+        }
+      }
+      if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, undefined, 'event');
       // Chief has said the session is ready; the session's agent speaks next. An
       // operator who talked over the announcement is answered by chief instead.
       if (!ready) return;
@@ -1592,6 +1891,9 @@ export class VoiceCall {
       resumed,
     });
     this.sendState();
+    // A new socket has heard nothing yet.
+    this.planningSent = null;
+    this.planningChanged();
     this.sendEarconAudio();
   }
 

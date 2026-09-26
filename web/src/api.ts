@@ -250,7 +250,7 @@ export interface VoiceCallSummary {
 export interface VoiceTurn {
   id: number;
   turn: number;
-  speaker: 'user' | 'chief' | 'session' | 'event';
+  speaker: 'user' | 'chief' | 'session' | 'event' | 'agent';
   sessionId: string | null;
   sessionName: string | null;
   text: string;
@@ -793,6 +793,8 @@ export interface PrdStatus {
   /** True only when the file exists and has no parse errors. */
   parses: boolean;
   storyCount: number;
+  /** Unanswered bullets under `## Open Questions`. */
+  openQuestions: number;
   errors: PrdParseError[];
   updatedAt: string | null;
   bytes: number;

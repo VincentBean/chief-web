@@ -22,6 +22,7 @@ import {
   type CallPhase,
   type ClientMessage,
   type ConfirmationOutcome,
+  type PlanningSessionView,
   type SavedLoginView,
   type ServerMessage,
   type SttMode,
@@ -134,6 +135,8 @@ export interface CallState {
   readonly debug: boolean;
   /** Each recent turn's timing, by turn number, from the server's `latency` messages. */
   readonly latency: Readonly<Record<number, TurnTimes>>;
+  /** Every planning session as the call last described it (US-011, US-013), for the focus chip and its menu. */
+  readonly planning: readonly PlanningSessionView[];
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
   readonly panelOpen: boolean;
@@ -371,6 +374,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [usage, setUsage] = useState<CallUsage | null>(null);
   const [debug, setDebugState] = useState(readDebug);
   const [latency, setLatency] = useState<Readonly<Record<number, TurnTimes>>>({});
+  const [planning, setPlanning] = useState<readonly PlanningSessionView[]>([]);
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [pageView, setPageView] = useState<{ readonly sessionId: string } | null>(null);
@@ -459,6 +463,9 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           return;
         case 'latency':
           setLatency((current) => ({ ...current, [message.turn]: message.times }));
+          return;
+        case 'planning':
+          setPlanning(message.sessions);
           return;
         case 'ui':
           if (message.action === 'navigate') navigate(message.path);
@@ -570,6 +577,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       setTranscript([]);
       setUsage(null);
       setLatency({});
+      setPlanning([]);
       setCaption('');
       sttMode.current = 'openrouter';
       setStartedAt(null);
@@ -766,6 +774,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       usage,
       debug,
       latency,
+      planning,
       problem,
       panelOpen,
       pageView,
@@ -806,6 +815,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       usage,
       debug,
       latency,
+      planning,
       problem,
       panelOpen,
       pageView,

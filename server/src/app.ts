@@ -67,6 +67,7 @@ import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index.js';
+import { PlanningStates } from './voice/session-agent/planning-state.js';
 import { SessionAgentRegistry } from './voice/session-agent/registry.js';
 import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
 import { createBrowserViewRoute } from './voice/browser-view.js';
@@ -528,6 +529,10 @@ export function createApp(
       recurringTasks: recurringRuns,
       planning,
       sessionAgents,
+      planningStates: new PlanningStates({ db, config, registry: sessionAgents }),
+      // Chief relaying an answer to a planning session (voice multi-planning
+      // US-012); `voice` is assigned by the time a call runs a tool.
+      detachedTurns: { start: (sessionId, message) => voice.service.runDetachedTurn(sessionId, message, { updated: true }) },
     },
     events,
     sessionAgents,

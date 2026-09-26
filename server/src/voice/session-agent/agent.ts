@@ -7,13 +7,12 @@ import { getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
 import type { CallFocus } from '../protocol.js';
 import type { SessionAgentEvent } from './events.js';
-import { interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
+import { INTERRUPT_GRACE_MS, interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
 import { voiceUtterance } from './prompt.js';
 import { redactCredentials } from './redact.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
-/** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
-export const INTERRUPT_GRACE_MS = 5_000;
+export { INTERRUPT_GRACE_MS } from './process.js';
 
 /** Said before the one restart of a call (docs/voice-plan.md §10.4). */
 export const RESTARTING: Readonly<Record<string, string>> = {
@@ -76,6 +75,14 @@ export class SessionVoiceAgent implements VoiceAgent {
     const utterance = voiceUtterance(input.text, this.interruptedAfter);
     this.interruptedAfter = null;
 
+    // A detached turn owns the process until it ends (it reads the same
+    // output); "one sec" covers the wait, and the utterance goes after it.
+    if (this.deps.registry.detachedState(this.deps.sessionId).running) {
+      yield { type: 'earcon', name: 'one_sec' };
+      await this.deps.registry.detachedTurnEnded(this.deps.sessionId, signal);
+      if (signal.aborted) return;
+    }
+
     for (;;) {
       if (this.process?.crashed === true) {
         this.process = null;
@@ -108,13 +115,16 @@ export class SessionVoiceAgent implements VoiceAgent {
       if (signal.aborted) return;
 
       // A greeting (the switch to this session, US-019) is only for a fresh
-      // conversation; one that is already going waits for the operator.
-      if (input.text === '' && agent.opened) return;
+      // conversation; one that is already going waits for the operator,
+      // unless it is a planning session waiting for them (US-011).
+      if (input.text === '' && agent.opened && input.resume === undefined) return;
       agent.discardPending();
       if (agent.opened) {
-        agent.write(userMessageLine(utterance));
+        const resumed = input.resume === undefined ? null : input.text === '' ? input.resume : `${input.resume}\n\n${utterance}`;
+        agent.write(userMessageLine(resumed ?? utterance));
       } else {
-        agent.write(userMessageLine(this.deps.registry.openingPrompt(this.deps.sessionId, input.text === '' ? null : utterance)));
+        const opening = this.deps.registry.openingPrompt(this.deps.sessionId, input.text === '' ? null : utterance);
+        agent.write(userMessageLine(input.resume === undefined ? opening : `${opening}\n\n${input.resume}`));
         agent.opened = true;
       }
 

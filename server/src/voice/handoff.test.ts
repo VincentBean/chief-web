@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { loadConfig } from '../config.js';
-import { IN_MEMORY, listVoiceTurns, openDatabase } from '../db/index.js';
+import { IN_MEMORY, listVoiceTurns, openDatabase, setSetting } from '../db/index.js';
 import type { PrdStatus } from '../prd/index.js';
 import {
   type AgentEvent,
@@ -12,11 +12,16 @@ import {
   type CallPlanning,
   type CallTransport,
   type CallTts,
+  EVENT_QUIET_MS,
   HANGUP_GOODBYE,
+  SWITCH_OVER_TOOL,
   type VoiceAgent,
   VoiceCall,
 } from './call.js';
 import type { AgentKind, CallFocus, ServerMessage } from './protocol.js';
+import type { PlanningState } from './session-agent/planning-state.js';
+import { resumePrompt } from './session-agent/prompt.js';
+import { waitingSummary } from './speakable.js';
 import type { SpeakCallbacks, SpeakResult } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
 
@@ -68,6 +73,7 @@ const prd = (over: Partial<PrdStatus>): PrdStatus => ({
   exists: true,
   parses: false,
   storyCount: 0,
+  openQuestions: 0,
   errors: [],
   updatedAt: null,
   bytes: 10,
@@ -79,12 +85,50 @@ async function until(check: () => boolean): Promise<void> {
   assert.ok(check(), 'condition not reached');
 }
 
-function setup(focus: CallFocus = { kind: 'chief' }) {
+/** A planning session as `PlanningStates` reports it. */
+const planningSession = (over: Partial<PlanningState> & Pick<PlanningState, 'sessionId' | 'sessionName'>): PlanningState => ({
+  repositoryName: 'shop-api',
+  state: 'waiting',
+  openQuestions: [],
+  stories: 0,
+  updatedAt: '2026-09-25T10:00:00.000Z',
+  ...over,
+});
+const questions = (n: number): string[] => Array.from({ length: n }, (_, i) => `Question ${String(i + 1)}?`);
+
+/** A clock the test moves by hand, and runs the timers of. */
+function manualClock() {
+  let now = Date.parse('2026-09-25T10:00:00.000Z');
+  let seq = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const clock: CallClock = {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      timers.set(++seq, { at: now + ms, fn });
+      return seq;
+    },
+    clearTimeout: (id) => {
+      timers.delete(id as number);
+    },
+  };
+  const advance = (ms: number): void => {
+    now += ms;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at > now) continue;
+      timers.delete(id);
+      timer.fn();
+    }
+  };
+  return { clock, advance };
+}
+
+function setup(focus: CallFocus = { kind: 'chief' }, options: { clock?: CallClock } = {}) {
   const db = openDatabase(IN_MEMORY);
   const sent: ServerMessage[] = [];
   let closed: number | null = null;
   const agents = new Map<string, Agent>();
   const planningPolls: string[] = [];
+  const focused: string[] = [];
   const planning: CallPlanning & { onPoll: ((id: string) => void) | null } = {
     onPoll: null,
     status: (sessionId) => {
@@ -94,6 +138,8 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
     },
   };
   const tts = new Tts();
+  /** What `PlanningStates` reports; tests edit it in place. */
+  const states: PlanningState[] = [];
   const call = new VoiceCall('call-1', focus, {
     db,
     config: loadConfig({ CHIEF_WEB_PASSWORD: 'pw' }),
@@ -105,8 +151,13 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
       agents.set(key, agent);
       return agent;
     },
-    clock,
+    clock: options.clock ?? clock,
     planning,
+    planningStates: {
+      planningState: (sessionId) => states.find((state) => state.sessionId === sessionId) ?? null,
+      listPlanningSessions: () => states,
+    },
+    onSessionFocused: (sessionId) => focused.push(sessionId),
   });
   const transport: CallTransport = {
     send: (message) => sent.push(message),
@@ -118,7 +169,7 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
   call.attach(transport);
   const of = <T extends ServerMessage['type']>(type: T) =>
     sent.filter((m): m is Extract<ServerMessage, { type: T }> => m.type === type);
-  return { db, call, sent, of, agents, tts, planning, planningPolls, closed: () => closed };
+  return { db, call, sent, of, agents, tts, planning, planningPolls, focused, states, closed: () => closed };
 }
 
 const say = (call: VoiceCall, text: string): void => call.handleMessage({ type: 'text', text });
@@ -132,6 +183,8 @@ describe('focus, handoff and control intents (voice US-019)', () => {
     await until(() => t.call.state.activeTurn === null);
 
     assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's1' });
+    // The registry forgets the last detached outcome of a session the operator returns to.
+    assert.deepEqual(t.focused, ['s1']);
     assert.ok(t.of('state').some((m) => m.focus.kind === 'session'));
     assert.ok(t.of('ui').some((m) => m.action === 'navigate' && m.path === '/sessions/s1'));
     // The opening: no words of the operator's, and no user transcript.
@@ -277,5 +330,269 @@ describe('focus, handoff and control intents (voice US-019)', () => {
     t.call.postEvent({ kind: 'prd.valid', sessionId: 'other', name: 'other', stories: 2 });
     assert.equal(t.of('ui').filter((m) => m.action === 'highlight').length, 0);
     assert.equal(t.call.state.queue.length, 0);
+  });
+});
+
+describe('reminding of the other planning sessions (US-009)', () => {
+  const csv = (status: Partial<PrdStatus>) => ({ sessionName: 'csv-export', prd: prd(status) });
+  const billing = { sessionName: 'billing-export', repositoryName: 'shop-api', state: 'waiting', openQuestions: 4 } as const;
+  const search = { sessionName: 'search', repositoryName: 'webshop', state: 'done', openQuestions: 0 } as const;
+  const importer = { sessionName: 'importer', repositoryName: 'erp', state: 'drafting', openQuestions: 0 } as const;
+
+  it('says nothing more with no other planning session', () => {
+    assert.equal(backWithMe('en', csv({ openQuestions: 2 }), []), 'Back with me. csv-export has a draft PRD with 2 open questions.');
+    assert.equal(backWithMe('nl', csv({ openQuestions: 2 }), []), 'Je bent weer bij mij. csv-export heeft een concept-PRD met 2 open vragen.');
+    assert.equal(backWithMe('en', csv({ openQuestions: 1 })), 'Back with me. csv-export has a draft PRD with 1 open question.');
+    assert.equal(backWithMe('nl', csv({ openQuestions: 1 })), 'Je bent weer bij mij. csv-export heeft een concept-PRD met 1 open vraag.');
+    assert.equal(
+      backWithMe('en', csv({ parses: true, storyCount: 3, openQuestions: 2 })),
+      'Back with me. csv-export has a PRD with 3 stories and 2 open questions.',
+    );
+    assert.equal(
+      backWithMe('nl', csv({ parses: true, storyCount: 3, openQuestions: 2 })),
+      'Je bent weer bij mij. De PRD van csv-export heeft 3 stories en 2 open vragen.',
+    );
+    assert.equal(waitingSummary('en', []), '');
+  });
+
+  it('names one other session', () => {
+    assert.equal(
+      backWithMe('en', csv({ openQuestions: 2 }), [billing]),
+      'Back with me. csv-export has a draft PRD with 2 open questions. billing-export on shop-api is waiting with 4 open questions.',
+    );
+    assert.equal(
+      backWithMe('nl', csv({ openQuestions: 2 }), [billing]),
+      'Je bent weer bij mij. csv-export heeft een concept-PRD met 2 open vragen. billing-export op shop-api wacht met 4 open vragen.',
+    );
+    assert.equal(backWithMe('en', null, [search]), 'Back with me. search on webshop is done.');
+    assert.equal(backWithMe('nl', null, [search]), 'Je bent weer bij mij. search op webshop is klaar.');
+  });
+
+  it('names two other sessions in one sentence', () => {
+    assert.equal(
+      backWithMe('en', csv({}), [billing, search]),
+      'Back with me. csv-export has a draft PRD. billing-export on shop-api is waiting with 4 open questions, and search on webshop is done.',
+    );
+    assert.equal(
+      backWithMe('nl', csv({}), [billing, search]),
+      'Je bent weer bij mij. csv-export heeft een concept-PRD. billing-export op shop-api wacht met 4 open vragen en search op webshop is klaar.',
+    );
+  });
+
+  it('mentions a drafting session only when nothing waits', () => {
+    assert.equal(
+      backWithMe('en', csv({}), [importer]),
+      'Back with me. csv-export has a draft PRD. importer on erp is still drafting.',
+    );
+    assert.equal(
+      backWithMe('nl', csv({}), [importer]),
+      'Je bent weer bij mij. csv-export heeft een concept-PRD. importer op erp is nog aan het schrijven.',
+    );
+    assert.equal(
+      backWithMe('en', csv({}), [importer, billing]),
+      'Back with me. csv-export has a draft PRD. billing-export on shop-api is waiting with 4 open questions.',
+    );
+    assert.equal(
+      backWithMe('nl', csv({}), [importer, billing]),
+      'Je bent weer bij mij. csv-export heeft een concept-PRD. billing-export op shop-api wacht met 4 open vragen.',
+    );
+    assert.equal(
+      waitingSummary('en', [importer, { ...importer, sessionName: 'reports', state: 'briefing' }]),
+      'importer on erp and reports on erp are still drafting.',
+    );
+  });
+
+  it('never speaks a count of 0, and names a failed session', () => {
+    const quiet = { ...billing, openQuestions: 0 };
+    const failed = { ...search, sessionName: 'sync', state: 'failed' } as const;
+    assert.equal(waitingSummary('en', [quiet, failed]), 'billing-export on shop-api is waiting, and sync on webshop has failed.');
+    assert.equal(waitingSummary('nl', [quiet, failed]), 'billing-export op shop-api wacht op je en sync op webshop is vastgelopen.');
+    assert.equal(
+      waitingSummary('en', [billing, search, failed]),
+      'billing-export on shop-api is waiting with 4 open questions, search on webshop is done, and sync on webshop has failed.',
+    );
+  });
+
+  it('names the other planning sessions on "back to chief", through the pronunciation map', async () => {
+    const t = setup({ kind: 'session', sessionId: 's1' });
+    t.states.push(
+      planningSession({ sessionId: 's1', sessionName: 'csv-export-invoices' }),
+      planningSession({ sessionId: 's2', sessionName: 'billing-export', openQuestions: questions(4) }),
+    );
+    await t.call.start('openrouter');
+    say(t.call, 'Terug naar chief.');
+    await until(() => t.of('agent.done').length === 1);
+    assert.equal(
+      t.of('agent.delta')[0]?.text,
+      'Je bent weer bij mij. csv-export-invoices heeft een concept-PRD. billing-export op shop-api wacht met 4 open vragen.',
+    );
+    assert.deepEqual(t.tts.spoken, [
+      'Je bent weer bij mij. csv-export-invoices heeft een concept-P R D. billing-export op shop-api wacht met 4 open vragen.',
+    ]);
+  });
+
+  it('reminds of the others when the focused session is done, and a "yes" switches over', async () => {
+    const { clock, advance } = manualClock();
+    const t = setup({ kind: 'session', sessionId: 's1' }, { clock });
+    setSetting(t.db, 'voice_language', 'en');
+    t.states.push(
+      planningSession({ sessionId: 's1', sessionName: 'csv-export', openQuestions: questions(1) }),
+      planningSession({ sessionId: 's2', sessionName: 'billing-export', openQuestions: questions(4) }),
+      planningSession({ sessionId: 's3', sessionName: 'search', repositoryName: 'webshop', state: 'done', stories: 3 }),
+    );
+    await t.call.start('openrouter');
+    // The operator answers the last open question; the agent writes the PRD out.
+    t.planning.onPoll = () => {
+      (t.states[0] as { state: string }).state = 'done';
+    };
+    say(t.call, 'Only admins can export.');
+    await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 1);
+    const line =
+      'billing-export on shop-api is waiting with 4 open questions, and search on webshop is done. Shall I switch you over?';
+    assert.deepEqual(t.call.state.queue.map((event) => event.line), [line]);
+
+    advance(EVENT_QUIET_MS);
+    await until(() => t.of('agent.done').length === 2 && t.call.state.activeTurn === null);
+    assert.equal(t.tts.spoken.at(-1), line);
+    assert.equal(t.call.state.pendingConfirmation?.tool, SWITCH_OVER_TOOL);
+    assert.ok(t.of('confirm').some((m) => m.prompt === 'Switch over to billing-export?'));
+
+    say(t.call, 'yes');
+    await until(() => t.call.focus.kind === 'session' && t.call.focus.sessionId === 's2');
+    assert.equal(t.call.state.pendingConfirmation, null);
+    // The yes went to no agent: the call answered it itself, and the new session opens.
+    assert.equal(t.agents.get('s1')?.inputs.length, 1);
+    await until(() => t.agents.get('s2')?.inputs.length === 1);
+    assert.equal(t.agents.get('s2')?.inputs[0]?.text, '');
+  });
+
+  it('asks nothing with two sessions waiting, and says nothing for a session that was done already', async () => {
+    const t = setup({ kind: 'session', sessionId: 's1' });
+    setSetting(t.db, 'voice_language', 'en');
+    t.states.push(
+      planningSession({ sessionId: 's1', sessionName: 'csv-export', openQuestions: questions(1) }),
+      planningSession({ sessionId: 's2', sessionName: 'billing-export', openQuestions: questions(4) }),
+      planningSession({ sessionId: 's3', sessionName: 'search', repositoryName: 'webshop', openQuestions: questions(2) }),
+    );
+    await t.call.start('openrouter');
+    t.planning.onPoll = () => {
+      (t.states[0] as { state: string }).state = 'done';
+    };
+    say(t.call, 'Only admins can export.');
+    await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 1);
+    assert.deepEqual(t.call.state.queue.map((event) => event.line), [
+      'billing-export on shop-api is waiting with 4 open questions, and search on webshop is waiting with 2 open questions.',
+    ]);
+    t.call.state.queue.length = 0;
+
+    say(t.call, 'Anything else?');
+    await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 2);
+    assert.equal(t.call.state.queue.length, 0);
+  });
+});
+
+describe('returning to a waiting planning session (US-011)', () => {
+  const focusOn = async (t: ReturnType<typeof setup>, sessionId: string): Promise<void> => {
+    await t.call.start('openrouter');
+    t.call.handleMessage({ type: 'focus', target: { sessionId } });
+    await until(() => t.agents.get(sessionId)?.inputs.length === 1 && t.call.state.activeTurn === null);
+  };
+
+  it('opens a waiting session with its questions instead of the greeting, once', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', openQuestions: questions(2) }));
+    await focusOn(t, 's1');
+    const agent = t.agents.get('s1');
+    assert.equal(agent?.inputs[0]?.text, '');
+    assert.equal(agent.inputs[0]?.resume, resumePrompt(questions(2), { state: 'waiting' }));
+    assert.deepEqual(
+      t.of('planning').map(({ sessions }) => sessions.map(({ sessionId, state, openQuestions }) => [sessionId, state, openQuestions])),
+      [[['s1', 'waiting', 2]]],
+    );
+
+    // The operator answers; the count drops and the panel hears it once.
+    t.planning.onPoll = () => {
+      (t.states[0] as { openQuestions: string[] }).openQuestions = questions(1);
+    };
+    say(t.call, 'Only admins.');
+    await until(() => agent.inputs.length === 2 && t.call.state.activeTurn === null);
+    assert.equal(agent.inputs[1]?.resume, undefined);
+    assert.deepEqual(
+      t.of('planning').map(({ sessions }) => sessions.map(({ state, openQuestions }) => [state, openQuestions])),
+      [[['waiting', 2]], [['waiting', 1]]],
+    );
+  });
+
+  it('sends the operator\'s first words with the resume when they speak first', async () => {
+    const t = setup({ kind: 'session', sessionId: 's2' });
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'done', stories: 3 }));
+    await t.call.start('openrouter');
+    // The operator speaks before the greeting has gone out: one turn, the resume and their words.
+    t.call.handleMessage({ type: 'focus', target: { sessionId: 's1' } });
+    say(t.call, 'Is it finished?');
+    await until(() => (t.agents.get('s1')?.inputs.some((input) => input.text === 'Is it finished?') ?? false) && t.call.state.activeTurn === null);
+    const input = t.agents.get('s1')?.inputs.find((i) => i.text === 'Is it finished?');
+    assert.equal(input?.resume, resumePrompt([], { state: 'done' }));
+    assert.equal(t.agents.get('s1')?.inputs.length, 1);
+  });
+
+  it('quotes why a failed session stopped', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'failed', failure: 'timeout', openQuestions: questions(1) }));
+    await focusOn(t, 's1');
+    const resume = t.agents.get('s1')?.inputs[0]?.resume ?? '';
+    assert.equal(resume, resumePrompt(questions(1), { state: 'failed', failure: 'it ran out of time before the PRD was finished' }));
+    assert.match(resume, /did not finish: it ran out of time/);
+  });
+
+  it('greets a session that is still being briefed as before', async () => {
+    const t = setup();
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'csv-export', state: 'briefing' }));
+    await focusOn(t, 's1');
+    assert.equal(t.agents.get('s1')?.inputs[0]?.resume, undefined);
+  });
+});
+
+describe('the call panel hears every planning session (US-013)', () => {
+  it('sends the whole list right after ready, then only when it changed', async () => {
+    const t = setup();
+    t.states.push(
+      planningSession({ sessionId: 's1', sessionName: 'billing-export', openQuestions: questions(4), stories: 3 }),
+      planningSession({ sessionId: 's2', sessionName: 'search', repositoryName: 'webshop', state: 'drafting' }),
+    );
+    await t.call.start('openrouter');
+    const types = t.sent.map((message) => message.type);
+    assert.equal(types.indexOf('planning'), types.indexOf('ready') + 2, 'after ready and state');
+    assert.deepEqual(t.of('planning'), [
+      {
+        type: 'planning',
+        sessions: [
+          { sessionId: 's1', name: 'billing-export', repository: 'shop-api', state: 'waiting', openQuestions: 4, stories: 3 },
+          { sessionId: 's2', name: 'search', repository: 'webshop', state: 'drafting', openQuestions: 0, stories: 0 },
+        ],
+      },
+    ]);
+
+    t.call.planningChanged();
+    assert.equal(t.of('planning').length, 1, 'nothing changed');
+
+    (t.states[1] as { state: string }).state = 'failed';
+    t.call.planningChanged();
+    assert.deepEqual(
+      t.of('planning').at(-1)?.sessions.map(({ sessionId, state }) => [sessionId, state]),
+      [
+        ['s1', 'waiting'],
+        ['s2', 'failed'],
+      ],
+    );
+  });
+
+  it('tells the panel of a PRD changed outside a turn when its event comes in', async () => {
+    const t = setup();
+    await t.call.start('openrouter');
+    assert.deepEqual(t.of('planning'), [{ type: 'planning', sessions: [] }]);
+    t.states.push(planningSession({ sessionId: 's1', sessionName: 'billing-export', state: 'done', stories: 2 }));
+    t.call.postEvent({ kind: 'prd.valid', sessionId: 's1', name: 'billing-export', stories: 2 });
+    assert.deepEqual(t.of('planning').at(-1)?.sessions.map(({ state, stories }) => [state, stories]), [['done', 2]]);
   });
 });

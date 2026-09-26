@@ -197,7 +197,7 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
     ok,
     started: false,
     session: view(id),
-    prd: { path: '.chief/prd.md', exists: true, parses: ok, storyCount: ok ? 3 : 0, errors: ok ? [] : state.prdErrors, updatedAt: null, bytes: 0 },
+    prd: { path: '.chief/prd.md', exists: true, parses: ok, storyCount: ok ? 3 : 0, openQuestions: 0, errors: ok ? [] : state.prdErrors, updatedAt: null, bytes: 0 },
     stories: listStories(db, id),
   });
   const setStatus = (id: string, status: Session['status']): BuildView => {
@@ -402,7 +402,7 @@ function buildView(db: Database, sessionId: string, pool: BuildPoolView): BuildV
     currentStoryId: current?.storyId ?? null,
     attempts: 0,
     stories,
-    prd: { path: '.chief/prd.md', exists: stories.length > 0, parses: stories.length > 0, storyCount: stories.length, errors: [], updatedAt: null, bytes: 0 },
+    prd: { path: '.chief/prd.md', exists: stories.length > 0, parses: stories.length > 0, storyCount: stories.length, openQuestions: 0, errors: [], updatedAt: null, bytes: 0 },
     lastError: session.lastError,
     failureStage: session.failureStage,
     agentTimeoutMs: 1_800_000,

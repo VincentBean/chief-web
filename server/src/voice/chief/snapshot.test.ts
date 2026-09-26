@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 
-import { createSession, setSetting } from '../../db/index.js';
+import { loadConfig } from '../../config.js';
+import { createSession, getSession, setSetting, upsertVoiceSessionAgent } from '../../db/index.js';
+import { sessionPrdFile } from '../../sessions/index.js';
+import { type PlanningState, type PlanningStateName, PlanningStates } from '../session-agent/planning-state.js';
 import { chiefWorld, NOW } from './__fixtures__/world.js';
 import { chiefSystemPrompt, DEFAULT_OPERATOR_NAME, languageName } from './prompt.js';
 import { buildSnapshot, formatLocal, SNAPSHOT_MAX_SESSIONS } from './snapshot.js';
+import type { ChiefServices } from './tools.js';
 
 describe('chief state snapshot (voice US-008)', () => {
   it('writes the STATE block of docs/voice-plan.md §9.3 from the seeded database', () => {
@@ -85,5 +92,118 @@ describe('chief system prompt (voice US-008)', () => {
     assert.match(chiefSystemPrompt({ language: 'en', snapshot: '' }), new RegExp(`with the operator, ${DEFAULT_OPERATOR_NAME}\\.`));
     assert.equal(languageName('en'), 'English');
     assert.equal(languageName('nl'), 'Dutch');
+  });
+});
+
+describe('planning sessions in the snapshot (voice multi-planning US-010)', () => {
+  const planning = (name: string, state: PlanningStateName, openQuestions: number, repositoryName = 'chief-web'): PlanningState => ({
+    sessionId: `id-${name}`,
+    sessionName: name,
+    repositoryName,
+    state,
+    openQuestions: Array.from({ length: openQuestions }, (_, i) => `Question ${String(i + 1)}?`),
+    stories: 3,
+    updatedAt: '2026-09-25T12:00:00.000Z',
+  });
+  const withStates = (w: ReturnType<typeof chiefWorld>, states: PlanningState[]): ChiefServices => ({
+    ...w.services,
+    planningStates: { listPlanningSessions: () => states, planningState: (id) => states.find((s) => s.sessionId === id) ?? null },
+  });
+  const block = (snapshot: string): string[] => {
+    const lines = snapshot.split('\n');
+    const start = lines.findIndex((line) => line.startsWith('PLANNING SESSIONS'));
+    if (start === -1) return [];
+    const end = lines.findIndex((line, i) => i > start && !line.startsWith('- '));
+    return lines.slice(start, end);
+  };
+
+  it('lists each planning session with its repository, state and open-question count, in the order given', () => {
+    const w = chiefWorld();
+    const services = withStates(w, [
+      planning('csv-export', 'waiting', 3, 'shop-api'),
+      planning('onboarding-copy', 'drafting', 0),
+      planning('dark-mode', 'waiting', 1),
+      planning('search', 'done', 0, 'shop-api'),
+      planning('billing', 'failed', 2, 'shop-api'),
+    ]);
+    const snapshot = buildSnapshot(services, { focus: { kind: 'chief' }, now: NOW });
+    assert.deepEqual(block(snapshot), [
+      `PLANNING SESSIONS (latest first, max ${SNAPSHOT_MAX_SESSIONS}):`,
+      '- csv-export [shop-api] waiting, 3 open questions',
+      '- onboarding-copy [chief-web] drafting, 0 open questions',
+      '- dark-mode [chief-web] waiting, 1 open question',
+      '- search [shop-api] done, 0 open questions',
+      '- billing [shop-api] failed, 2 open questions',
+    ]);
+    const lines = snapshot.split('\n');
+    assert.ok(lines.indexOf(block(snapshot)[0] ?? '') < lines.findIndex((line) => line.startsWith('QUEUE:')), 'right after the sessions');
+    assert.doesNotMatch(snapshot, /Question 1\?/, 'the questions themselves stay out of the prompt');
+  });
+
+  it(`says none when there are none, keeps to ${SNAPSHOT_MAX_SESSIONS} and counts the rest, and is absent without planning states`, () => {
+    const w = chiefWorld();
+    assert.doesNotMatch(buildSnapshot(w.services, { focus: { kind: 'chief' }, now: NOW }), /PLANNING SESSIONS/);
+    assert.match(buildSnapshot(withStates(w, []), { focus: { kind: 'chief' }, now: NOW }), /^PLANNING SESSIONS: none$/m);
+
+    const many = Array.from({ length: SNAPSHOT_MAX_SESSIONS + 4 }, (_, i) => planning(`plan-${String(i)}`, 'waiting', 1));
+    const lines = block(buildSnapshot(withStates(w, many), { focus: { kind: 'chief' }, now: NOW }));
+    assert.equal(lines.length, 1 + SNAPSHOT_MAX_SESSIONS + 1);
+    assert.equal(lines[1], '- plan-0 [chief-web] waiting, 1 open question');
+    assert.equal(lines.at(-1), '- and 4 older');
+  });
+
+  it('already holds a session left waiting before the previous call ended, read off disk and the registry', () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-snapshot-planning-'));
+    try {
+      const w = chiefWorld();
+      const config = loadConfig({ DATA_DIR: dataDir });
+      const onboarding = getSession(w.db, w.ids['onboarding'] ?? '');
+      assert.ok(onboarding !== null);
+      upsertVoiceSessionAgent(w.db, { sessionId: onboarding.id, claudeSessionId: 'claude-onboarding', mode: 'plan' });
+      const file = sessionPrdFile(config, onboarding);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(
+        file,
+        [
+          '# PRD: Onboarding copy',
+          '',
+          '## User Stories',
+          '',
+          '### US-001: Welcome text',
+          '**Status:** todo',
+          '**Priority:** 1',
+          '**Description:** As a user, I want a welcome.',
+          '',
+          '**Acceptance Criteria:**',
+          '- [ ] It is shown',
+          '',
+          '## Open Questions',
+          '',
+          '- Formal or informal tone?',
+          '- Which screens?',
+          '',
+        ].join('\n'),
+      );
+      // A fresh registry: no call is running and no detached turn is remembered.
+      const registry = { detachedState: () => ({ running: false, lastOutcome: null }) };
+      const services: ChiefServices = { ...w.services, planningStates: new PlanningStates({ db: w.db, config, registry }) };
+      const snapshot = buildSnapshot(services, { focus: { kind: 'chief' }, now: NOW });
+      assert.deepEqual(block(snapshot), [
+        `PLANNING SESSIONS (latest first, max ${SNAPSHOT_MAX_SESSIONS}):`,
+        '- onboarding-copy [chief-web] waiting, 2 open questions',
+      ]);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('chief system prompt on planning sessions (voice multi-planning US-010)', () => {
+  it('answers from the PLANNING SESSIONS block with names and counts, and reads questions only when asked', () => {
+    const prompt = chiefSystemPrompt({ language: 'en', snapshot: '' }).replace(/\s+/g, ' ');
+    assert.match(prompt, /PLANNING SESSIONS in the STATE block says where each planning session stands/);
+    assert.match(prompt, /name the sessions and their counts, and do not read the questions themselves unless asked/);
+    assert.match(prompt, /"anything for me\?"/);
+    assert.match(prompt, /get_session returns its open questions/);
   });
 });
