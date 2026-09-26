@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { detachPrompt, resumePrompt, voiceModeOverrides } from './prompt.js';
+import { answerPrompt, detachPrompt, resumePrompt, voiceModeOverrides } from './prompt.js';
 
 const PRD = '/workspace/repo/.chief/prds/demo/prd.md';
 
@@ -27,6 +27,28 @@ describe('detachPrompt', () => {
       detachPrompt(PRD),
       `[detached] The operator has left the call. Nobody is listening and nobody will answer, so do not ask anything. Continue alone: finish your research, then write the draft PRD in the exact story format to ${PRD} before this reply ends, with every question you would have asked under a \`## Open Questions\` heading as a plain bullet list, most important first. End your reply with one sentence stating the number of stories and the number of open questions.`,
     );
+  });
+});
+
+describe('answerPrompt', () => {
+  it('quotes one answered question and the answer', () => {
+    assert.equal(
+      answerPrompt(PRD, ['CSV or Excel?'], 'CSV only'),
+      `[detached] The operator is not on the call with you, but answered your open question through chief. Nobody is listening, so do not ask anything.
+
+"CSV or Excel?"
+
+Answer: "CSV only"
+
+Update the PRD at ${PRD} with this answer, and remove that question from the \`## Open Questions\` list; keep any question the answer does not settle. End your reply with one sentence stating the number of stories and the number of open questions.`,
+    );
+  });
+
+  it('numbers several questions', () => {
+    const text = answerPrompt(PRD, ['CSV or Excel?', 'Which columns?'], 'CSV, all columns');
+    assert.ok(text.includes('answered your open questions through chief'));
+    assert.ok(text.includes('1. "CSV or Excel?"\n2. "Which columns?"'));
+    assert.ok(text.includes('remove the questions it settles from'));
   });
 });
 

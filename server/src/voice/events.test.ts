@@ -353,6 +353,22 @@ describe('finished drafts (US-008)', () => {
     assert.equal(describeEvent(drafted()), draftedLine('en', drafted()));
   });
 
+  it('says the PRD was updated after an answer relayed by chief (US-012)', () => {
+    const updated = drafted({ openQuestions: 3, updated: true });
+    assert.equal(draftedLine('en', updated), 'Your session csv-export on shop-api updated its PRD; 3 open questions left.');
+    assert.equal(draftedLine('en', drafted({ openQuestions: 1, updated: true })), 'Your session csv-export on shop-api updated its PRD; 1 open question left.');
+    assert.equal(
+      draftedLine('en', drafted({ openQuestions: 0, updated: true })),
+      'Your session csv-export on shop-api updated its PRD: 6 stories and no open questions left.',
+    );
+    assert.equal(draftedLine('en', drafted({ ok: false, reason: 'error', updated: true })), 'Your session csv-export on shop-api stopped before finishing its draft.');
+    assert.equal(draftedLine('nl', updated), 'Je sessie csv-export op shop-api heeft de PRD bijgewerkt; nog 3 open vragen.');
+    assert.equal(
+      draftedLine('nl', drafted({ openQuestions: 0, updated: true })),
+      'Je sessie csv-export op shop-api heeft de PRD bijgewerkt: 6 stories en geen open vragen meer.',
+    );
+  });
+
   it('is spoken as a fixed line under chief focus, not through the model', async () => {
     const t = await liveCall();
     setSetting(t.w.db, 'voice_language', 'en');

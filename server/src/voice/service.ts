@@ -327,22 +327,33 @@ export class VoiceService {
       if (state === null || state.state === 'done' || state.state === 'drafting') return;
       const session = getSession(this.db, sessionId);
       if (session === null) return;
-      registry.runDetached(sessionId, detachPrompt(prdPathFor(session.name))).then(
-        (result) => {
-          this.drafted(sessionId, result.reason);
-        },
-        (cause: unknown) => {
-          logger.warn('detached session agent turn failed', { session: sessionId, error: String(cause) });
-          this.drafted(sessionId, 'error');
-        },
-      );
+      this.runDetachedTurn(sessionId, detachPrompt(prdPathFor(session.name)));
     } catch (cause) {
       logger.warn('could not detach the session agent', { session: sessionId, error: String(cause) });
     }
   }
 
+  /**
+   * Runs one detached turn of the session agent with `message` and publishes
+   * its end as `planning.drafted` (US-008). Fire and forget: the leave of
+   * US-005 and chief's `answer_planning_question` (US-012) both start here.
+   */
+  runDetachedTurn(sessionId: string, message: string, options: { readonly updated?: boolean } = {}): void {
+    const registry = this.deps.sessionAgents;
+    if (registry === undefined) return;
+    registry.runDetached(sessionId, message).then(
+      (result) => {
+        this.drafted(sessionId, result.reason, options.updated === true);
+      },
+      (cause: unknown) => {
+        logger.warn('detached session agent turn failed', { session: sessionId, error: String(cause) });
+        this.drafted(sessionId, 'error', options.updated === true);
+      },
+    );
+  }
+
   /** A detached turn ended: `planning.drafted` with what `prd.md` holds now. */
-  private drafted(sessionId: string, reason: DetachedTurnOutcome): void {
+  private drafted(sessionId: string, reason: DetachedTurnOutcome, updated: boolean): void {
     const registry = this.deps.sessionAgents;
     const events = this.deps.events;
     if (registry === undefined || events === undefined) return;
@@ -359,6 +370,7 @@ export class VoiceService {
         openQuestions: state?.openQuestions.length ?? 0,
         ok: reason === 'ok',
         reason,
+        ...(updated ? { updated } : {}),
       });
     } catch (cause) {
       logger.warn('could not announce the drafted session', { session: sessionId, error: String(cause) });

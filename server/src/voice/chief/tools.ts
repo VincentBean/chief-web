@@ -25,6 +25,7 @@ import type { CallFocus, UiAction } from '../protocol.js';
 import { type ConfirmationGate, confirmTool } from './confirm.js';
 import { sessionActionTools } from './actions.js';
 import { pullRequestTools, type VoiceReviewGateway } from './pull-requests.js';
+import { answerPlanningQuestionTool } from './answer.js';
 import { focusSessionTool } from './focus.js';
 import { recurringTaskTools } from './recurring-tasks.js';
 import type { ChatTool } from './openrouter-client.js';
@@ -87,6 +88,11 @@ export interface ChiefServices {
   readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown>; isAlive?(sessionId: string): boolean };
   /** Where each planning session stands (voice multi-planning US-010); without it chief knows none. */
   readonly planningStates?: Pick<PlanningStates, 'planningState' | 'listPlanningSessions'>;
+  /**
+   * Starts a detached turn of a session agent and announces its end as
+   * `planning.drafted` (US-012); without it `answer_planning_question` refuses.
+   */
+  readonly detachedTurns?: { start(sessionId: string, message: string): void };
 }
 
 /** What a handler knows about the call it runs in. */
@@ -518,6 +524,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       },
     ),
     focusSessionTool(services),
+    answerPlanningQuestionTool(services),
     ...sessionActionTools(services),
     ...pullRequestTools(services),
     ...recurringTaskTools(services),

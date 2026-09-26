@@ -55,6 +55,27 @@ export function detachPrompt(prdPath: string): string {
   return `[detached] The operator has left the call. Nobody is listening and nobody will answer, so do not ask anything. Continue alone: finish your research, then write the draft PRD in the exact story format to ${prdPath} before this reply ends, with every question you would have asked under a \`## Open Questions\` heading as a plain bullet list, most important first. End your reply with one sentence stating the number of stories and the number of open questions.`;
 }
 
+/**
+ * The [detached] message that carries an operator's answer relayed by chief
+ * (US-012): the quoted question(s) and answer, and the request to fold the
+ * answer into the PRD and drop the answered question(s) from Open Questions.
+ */
+export function answerPrompt(prdPath: string, questions: readonly string[], answer: string): string {
+  const quoted =
+    questions.length === 1
+      ? `"${questions[0] ?? ''}"`
+      : questions.map((question, index) => `${index + 1}. "${question}"`).join('\n');
+  const asked = questions.length === 1 ? 'your open question' : 'your open questions';
+  const them = questions.length === 1 ? 'that question' : 'the questions it settles';
+  return `[detached] The operator is not on the call with you, but answered ${asked} through chief. Nobody is listening, so do not ask anything.
+
+${quoted}
+
+Answer: "${answer}"
+
+Update the PRD at ${prdPath} with this answer, and remove ${them} from the \`## Open Questions\` list; keep any question the answer does not settle. End your reply with one sentence stating the number of stories and the number of open questions.`;
+}
+
 /** How a planning session the operator returns to stands (US-011). */
 export interface ResumeOptions {
   /** `done` by default when there are no open questions, else `waiting`. */

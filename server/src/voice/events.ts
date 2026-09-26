@@ -50,6 +50,8 @@ export type VoiceBusEvent =
       /** False when the turn ended in `error`, `timeout` or `stopped`. */
       readonly ok: boolean;
       readonly reason: 'ok' | 'error' | 'timeout' | 'stopped';
+      /** The turn folded in an answer relayed by chief (US-012), rather than drafting after a leave. */
+      readonly updated?: boolean;
     }
   | { readonly kind: 'limits.hold'; readonly until: string }
   | {
@@ -179,6 +181,16 @@ export function draftedLine(language: string, event: Extract<VoiceBusEvent, { ki
     return nl
       ? `Je sessie ${name} op ${repository} is gestopt voordat het concept af was.`
       : `Your session ${name} on ${repository} stopped before finishing its draft.`;
+  }
+  if (event.updated === true) {
+    if (questions > 0) {
+      return nl
+        ? `Je sessie ${name} op ${repository} heeft de PRD bijgewerkt; nog ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}.`
+        : `Your session ${name} on ${repository} updated its PRD; ${String(questions)} open ${questions === 1 ? 'question' : 'questions'} left.`;
+    }
+    return nl
+      ? `Je sessie ${name} op ${repository} heeft de PRD bijgewerkt: ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en geen open vragen meer.`
+      : `Your session ${name} on ${repository} updated its PRD: ${String(stories)} ${stories === 1 ? 'story' : 'stories'} and no open questions left.`;
   }
   if (questions > 0) {
     return nl

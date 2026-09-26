@@ -507,6 +507,9 @@ export function createApp(
       planning,
       sessionAgents,
       planningStates: new PlanningStates({ db, config, registry: sessionAgents }),
+      // Chief relaying an answer to a planning session (voice multi-planning
+      // US-012); `voice` is assigned by the time a call runs a tool.
+      detachedTurns: { start: (sessionId, message) => voice.service.runDetachedTurn(sessionId, message, { updated: true }) },
     },
     events,
     sessionAgents,

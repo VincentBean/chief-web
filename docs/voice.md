@@ -210,6 +210,7 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 | `build_status` | the current story and a summary of the latest build log | – |
 | `show` | opens a page: Overview, Sessions, Pull requests, Recurring tasks, Repositories, Sentry, Settings | – |
 | `focus_session` | hands the call to a session's agent | – |
+| `answer_planning_question` | passes an answer to one open question (by number) or all of a planning session's open questions; the session updates its PRD alone and its end is announced like a finished draft ("csv-export updated its PRD; 3 open questions left"). Refused for a session that is not planning, is drafting or has no open questions, and during the usage-limit hold or with the planning terminal open | – (read back) |
 | `create_session` | creates a session; the clone continues in the background | yes |
 | `start_build` | starts (or queues) a ready session | yes |
 | `stop_build` | stops a build, or takes a session out of the queue | yes |
