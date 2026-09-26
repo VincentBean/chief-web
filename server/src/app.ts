@@ -253,6 +253,8 @@ export function createApp(
   api.post('/pull-requests/:repositoryId/:number/run', guard);
   // So is reviewing one by hand.
   api.post('/pull-requests/:repositoryId/:number/review', guard);
+  // And so is fixing its merge conflicts from the page’s button.
+  api.post('/pull-requests/:repositoryId/:number/conflict-fix', guard);
 
   // The client is cheap to construct — nothing is dialled until the first
   // request — so one instance serves both the orchestrator and the setup

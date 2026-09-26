@@ -118,6 +118,26 @@ reached the deletion is refused with `502 session_container_unavailable` and
 nothing changes, because an orphaned container next to a deleted workspace is
 worse than a session that is still there.
 
+## Pull requests
+
+`/pull-requests` lists the open pull requests of every registered repository,
+grouped by repository, with the runs chief-web has on each. Each row has its
+buttons on the right:
+
+- **Feedback** expands the unresolved review comments;
+- **Review** starts a [code review](code-review.md#reviewing-an-open-pull-request-by-hand)
+  of that pull request (with **Leave queue** / **Stop review** while one is
+  queued or running);
+- **Address feedback** starts a run that works through the unresolved comments
+  (with **Leave queue** / **Stop** while it is queued or running);
+- **Fix conflicts** starts the [merge conflict fixer](merge-conflicts.md#fixing-one-pull-request-by-hand)
+  on that one pull request now, without waiting for the next scan. It shows
+  only on rows the fixer may touch — a `chief/` branch, not a fork, no other
+  run on it — and says so in a toast when GitHub reports no conflicts.
+
+Badges on the row show the runs on it, including a conflict fix's live phase
+or how it ended.
+
 ## Repositories
 
 `/repositories` lists the registered repositories and edits them; see

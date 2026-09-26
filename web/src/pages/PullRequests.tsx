@@ -20,6 +20,7 @@ import {
   type RepositoryPullRequests,
   type ReviewThread,
   sessionPath,
+  startPrConflictFix,
   startPrReview,
   startPrRun,
   stopPrReview,
@@ -71,6 +72,7 @@ export function PullRequests() {
   const [confirmingReview, setConfirmingReview] = useState<{ group: RepositoryPullRequests; pull: PullRequest } | null>(null);
   const [startingReview, setStartingReview] = useState(false);
   const [preparing, setPreparing] = useState<string | null>(null);
+  const [fixing, setFixing] = useState<ReadonlySet<string>>(new Set());
   const loadedAt = useRef(0);
   const feedbackRef = useRef(feedback);
   feedbackRef.current = feedback;
@@ -213,6 +215,26 @@ export function PullRequests() {
       .finally(() => {
         setConfirmingReview(null);
         setStartingReview(false);
+      });
+  };
+
+  const onFixConflicts = (group: RepositoryPullRequests, pull: PullRequest): void => {
+    const key = pullRequestKey(group.repositoryId, pull.number);
+    setFixing((current) => new Set(current).add(key));
+    startPrConflictFix(group.repositoryId, pull.number)
+      .then((started) => {
+        toast.ok(`Fixing merge conflicts on #${String(started.prNumber)} (${started.headBranch} ← ${started.baseBranch}).`);
+        // Fix rows are read past the listing cache, so a plain load shows the
+        // badge without spending a GitHub call.
+        load();
+      })
+      .catch((error: unknown) => toast.error(describeError(error)))
+      .finally(() => {
+        setFixing((current) => {
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
       });
   };
 
@@ -370,11 +392,13 @@ export function PullRequests() {
                   run={runs[pullRequestKey(group.repositoryId, pull.number)]}
                   review={reviews[pullRequestKey(group.repositoryId, pull.number)]}
                   preparing={preparing === pullRequestKey(group.repositoryId, pull.number)}
+                  fixing={fixing.has(pullRequestKey(group.repositoryId, pull.number))}
                   onToggle={() => onToggle(group, pull)}
                   onProcess={() => onProcess(group, pull)}
                   onStop={(run) => onStop(group, pull, run)}
                   onReview={() => setConfirmingReview({ group, pull })}
                   onStopReview={(review) => onStopReview(group, pull, review)}
+                  onFixConflicts={() => onFixConflicts(group, pull)}
                 />
               ))}
             </ul>
@@ -442,11 +466,13 @@ function PullRequestRow({
   run,
   review,
   preparing,
+  fixing,
   onToggle,
   onProcess,
   onStop,
   onReview,
   onStopReview,
+  onFixConflicts,
 }: {
   readonly group: RepositoryPullRequests;
   readonly pull: PullRequest;
@@ -455,17 +481,30 @@ function PullRequestRow({
   readonly run: PrRun | undefined;
   readonly review: PrReview | undefined;
   readonly preparing: boolean;
+  readonly fixing: boolean;
   readonly onToggle: () => void;
   readonly onProcess: () => void;
   readonly onStop: (run: PrRun) => void;
   readonly onReview: () => void;
   readonly onStopReview: (review: PrReview) => void;
+  readonly onFixConflicts: () => void;
 }) {
   const panelId = `pr-panel-${group.repositoryId}-${String(pull.number)}`;
   const unresolved =
     feedback?.value === undefined || feedback.value === null
       ? null
       : feedback.value.threads.filter((thread) => !thread.isResolved).length + feedback.value.reviews.length;
+  // Only chief/ branches are the fixer's to push to, and a fix must not race
+  // another agent working on the same branch.
+  const canFixConflicts =
+    !pull.fromFork &&
+    pull.headRef.startsWith('chief/') &&
+    review?.running !== true &&
+    review?.queued !== true &&
+    run?.running !== true &&
+    run?.queued !== true &&
+    run?.status !== 'pending' &&
+    pull.conflictFix?.status !== 'running';
 
   return (
     <li className="row row--stacked pr__row">
@@ -512,6 +551,12 @@ function PullRequestRow({
               <Icon name="search" />
               Review
               <span className="visually-hidden"> pull request {pull.number}</span>
+            </button>
+          )}
+          {canFixConflicts && (
+            <button type="button" className="button button--small" disabled={fixing} onClick={onFixConflicts}>
+              {fixing ? 'Starting…' : 'Fix conflicts'}
+              <span className="visually-hidden"> on pull request {pull.number}</span>
             </button>
           )}
           {review?.queued === true && (

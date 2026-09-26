@@ -222,7 +222,7 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 | `address_pr_feedback` | starts a run that works through the unresolved review comments | yes |
 | `request_pr_change` | posts your instruction as a review comment, then starts a run that implements it | yes |
 | `stop_pr_run` | stops the feedback run on a pull request | yes |
-| `fix_pr_conflicts` | checks a pull request for conflicts and starts the fix | yes |
+| `fix_pr_conflicts` | checks a pull request for conflicts and starts the fix — the same entry point as the **Fix conflicts** button ([merge conflicts](merge-conflicts.md#fixing-one-pull-request-by-hand)) | yes |
 | `list_recurring_tasks` | recurring tasks with schedule, next run and last outcome | – |
 | `get_recurring_task` | one task with its prompt and last five runs | – |
 | `create_recurring_task` | creates a task; the schedule is read back in words | yes |

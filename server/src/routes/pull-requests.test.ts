@@ -3,6 +3,8 @@ import type http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
+import express from 'express';
+
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
 import { type Config, loadConfig } from '../config.js';
@@ -21,7 +23,10 @@ import {
 import { GithubApiError } from '../lib/github.js';
 import type { PullRequestFeedback, RepositoryPullRequests } from '../lib/github-review.js';
 import type { ConflictScan, FixNowResult } from '../prconflicts/index.js';
+import type { PrFeedbackService } from '../prfeedback/index.js';
+import type { PrReviewService } from '../prreview/index.js';
 import { createPullRequestService, type PullRequestGateway } from '../pullrequests/index.js';
+import { createPullRequestsRouter } from './pull-requests.js';
 
 const PASSWORD = 'correct horse battery staple';
 
@@ -46,10 +51,13 @@ class StubGateway implements PullRequestGateway {
   }
 }
 
-/** A conflict scan that counts its passes; nothing reaches GitHub. */
+/** A conflict scan that counts its passes and scripts its fixes; nothing reaches GitHub. */
 class StubScan implements ConflictScan {
   ticks = 0;
   failure: unknown = null;
+  fixNowResult: FixNowResult = { ok: false, code: 'no_fixer', reason: 'stub' };
+  fixNowFailure: unknown = null;
+  fixNowCalls: [string, number][] = [];
 
   start(): void {}
   stop(): void {}
@@ -58,8 +66,10 @@ class StubScan implements ConflictScan {
     if (this.failure !== null) return Promise.reject(this.failure);
     return Promise.resolve(0);
   }
-  fixNow(): Promise<FixNowResult> {
-    return Promise.resolve({ ok: false, code: 'no_fixer', reason: 'stub' });
+  fixNow(repositoryId: string, prNumber: number): Promise<FixNowResult> {
+    this.fixNowCalls.push([repositoryId, prNumber]);
+    if (this.fixNowFailure !== null) return Promise.reject(this.fixNowFailure);
+    return Promise.resolve(this.fixNowResult);
   }
   conflicted(): boolean | null {
     return null;
@@ -107,6 +117,14 @@ describe('pull requests api', () => {
     const app = createApp(config, createAuthService(config, db), db, {
       pullRequests: createPullRequestService(config, db, gateway),
       prConflicts: scan,
+      // Starting a fix is behind the Claude guard, whose probe this answers.
+      runCommand: () =>
+        Promise.resolve({
+          code: 0,
+          stdout: '{"loggedIn": true, "authMethod": "claude.ai"}',
+          stderr: '',
+          timedOut: false,
+        }),
     });
     server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
@@ -132,11 +150,16 @@ describe('pull requests api', () => {
     gateway.listCalls = 0;
     scan.ticks = 0;
     scan.failure = null;
+    scan.fixNowResult = { ok: false, code: 'no_fixer', reason: 'stub' };
+    scan.fixNowFailure = null;
+    scan.fixNowCalls = [];
     setSetting(db, 'github_token', 'ghp_token');
   });
 
   const get = (path: string): Promise<Response> =>
     fetch(`${baseUrl}${path}`, { headers: { cookie } });
+  const post = (path: string): Promise<Response> =>
+    fetch(`${baseUrl}${path}`, { method: 'POST', headers: { cookie } });
 
   it('requires the session cookie', async () => {
     const response = await fetch(`${baseUrl}/api/pull-requests`);
@@ -335,5 +358,114 @@ describe('pull requests api', () => {
 
     assert.notEqual(response.status, 409);
     assert.equal(response.status, 200);
+  });
+
+  describe('starting a conflict fix', () => {
+    const path = (): string => `/api/pull-requests/${repositoryId}/61/conflict-fix`;
+
+    const refusal = async (
+      code: string,
+    ): Promise<{ status: number; body: { error: string; message: string } }> => {
+      scan.fixNowResult = { ok: false, code, reason: `Refused: ${code}.` };
+      const response = await post(path());
+      return {
+        status: response.status,
+        body: (await response.json()) as { error: string; message: string },
+      };
+    };
+
+    it('requires the session cookie', async () => {
+      const response = await fetch(`${baseUrl}${path()}`, { method: 'POST' });
+
+      assert.equal(response.status, 401);
+      assert.equal(scan.fixNowCalls.length, 0);
+    });
+
+    it('starts the fix for that one pull request', async () => {
+      scan.fixNowResult = {
+        ok: true,
+        prNumber: 61,
+        headBranch: 'chief/feature',
+        baseBranch: 'develop',
+      };
+
+      const response = await post(path());
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        ok: true,
+        prNumber: 61,
+        headBranch: 'chief/feature',
+        baseBranch: 'develop',
+      });
+      assert.deepEqual(scan.fixNowCalls, [[repositoryId, 61]]);
+    });
+
+    it('answers a refusal with the service’s own code and sentence', async () => {
+      assert.deepEqual(await refusal('no_conflicts'), {
+        status: 400,
+        body: { error: 'no_conflicts', message: 'Refused: no_conflicts.' },
+      });
+    });
+
+    it('maps each refusal to its status', async () => {
+      assert.equal((await refusal('fix_already_active')).status, 409);
+      assert.equal((await refusal('fix_already_active')).body.error, 'fix_already_active');
+      assert.equal((await refusal('run_already_active')).status, 409);
+      assert.equal((await refusal('pull_request_not_open')).status, 404);
+      assert.equal((await refusal('repository_not_found')).status, 404);
+      assert.equal((await refusal('github_unreachable')).status, 502);
+      assert.equal((await refusal('mergeability_unknown')).status, 400);
+      assert.equal((await refusal('usage_limit_hold')).status, 400);
+    });
+
+    it('rejects a pull request number that is not one', async () => {
+      const response = await post(`/api/pull-requests/${repositoryId}/0/conflict-fix`);
+
+      assert.equal(response.status, 400);
+      assert.equal(
+        ((await response.json()) as { error: string }).error,
+        'invalid_pull_request_number',
+      );
+      assert.equal(scan.fixNowCalls.length, 0);
+    });
+
+    it('answers an exception from the scan rather than throwing', async () => {
+      scan.fixNowFailure = new GithubApiError('github_unreachable', 'Could not reach GitHub.');
+
+      assert.equal((await post(path())).status, 502);
+    });
+
+    it('answers 503 when no scan is wired', async () => {
+      const app = express();
+      app.use(
+        '/api',
+        createPullRequestsRouter(
+          createPullRequestService(config, db, gateway),
+          // Never reached: the route answers before touching either.
+          {} as PrFeedbackService,
+          {} as PrReviewService,
+          { find: () => null },
+          null,
+        ),
+      );
+      const bare = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => bare.once('listening', resolve));
+      try {
+        const port = (bare.address() as AddressInfo).port;
+        const response = await fetch(
+          `http://127.0.0.1:${String(port)}/api/pull-requests/${repositoryId}/61/conflict-fix`,
+          { method: 'POST' },
+        );
+
+        assert.equal(response.status, 503);
+        assert.deepEqual(await response.json(), {
+          error: 'no_fixer',
+          message: 'The conflict fixer is not available on this server.',
+        });
+      } finally {
+        await new Promise((resolve) => bare.close(resolve));
+      }
+    });
   });
 });

@@ -1772,8 +1772,8 @@ export type PrConflictFixFailureStage =
  * Mirrors the server's `PrConflictFixView`: what the merge conflict fixer has
  * made of one pull request (US-006).
  *
- * Nobody starts one of these from the page — the scan does, on its own timer —
- * so this is read-only, and `failed` is the state the operator has to act on:
+ * The scan starts these on its own timer; the page can also ask for one now
+ * with `startPrConflictFix`. `failed` is the state the operator has to act on:
  * three attempts were spent and the conflicts are still there.
  */
 export interface PrConflictFix {
@@ -1798,6 +1798,17 @@ export interface PrConflictFix {
   mergeSha: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+/**
+ * Mirrors the server's `FixNowResult` when it went ahead: the fix was started
+ * and runs in the background; the row's `conflictFix` shows its progress.
+ */
+export interface PrConflictFixStarted {
+  ok: true;
+  prNumber: number;
+  headBranch: string;
+  baseBranch: string;
 }
 
 export function prConflictFixPhaseLabel(phase: PrConflictFixPhase): string {
@@ -1832,6 +1843,21 @@ export function prConflictFixFailureStageLabel(stage: PrConflictFixFailureStage)
     case 'container_lost':
       return 'the container';
   }
+}
+
+/**
+ * "Fix conflicts": starts the merge conflict fixer on one pull request now
+ * instead of waiting for the next scan. A refusal (not conflicted, a fix
+ * already running, ...) rejects with the server's sentence as the message.
+ */
+export async function startPrConflictFix(
+  repositoryId: string,
+  number: number,
+): Promise<PrConflictFixStarted> {
+  return api<PrConflictFixStarted>(
+    `/api/pull-requests/${encodeURIComponent(repositoryId)}/${String(number)}/conflict-fix`,
+    { method: 'POST' },
+  );
 }
 
 /* ------------------------------------------------------------------ sentry */
