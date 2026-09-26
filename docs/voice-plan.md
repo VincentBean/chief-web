@@ -633,6 +633,19 @@ On barge-in:
 
 The existing planning poller (`readPrdStatus`) already detects `prd.md` changes. `VoiceEventBus` subscribes. When `prd.md` parses with ≥ 1 story and no errors after a voice turn, the server sends `ui.highlight('prd')` and queues a chief event: *"The PRD for csv-export-invoices has 6 stories and parses cleanly."* The session agent itself is told in its prompt to say so and suggest going back to chief to mark it ready and build.
 
+### 10.7 Detached turns: planning several sessions at once
+
+Added later by the PRD *Voice planning of several sessions at once* (`.chief/prds/voice-multi-planning-workflow/prd.md`, stories US-001 to US-015). Originally a planning agent only worked while it had a spoken turn; now leaving a session hands it one more turn to run alone.
+
+- **Detached turn** (US-003): `SessionAgentRegistry.runDetached(sessionId, message)` sends one stream-json user message and reads the reply to its `result`, never speaking or streaming it. The text and tool summaries are stored as one `voice_turns` row (`speaker: 'agent'`, text `[detached] …`). It is interrupted after `VOICE_DETACHED_TURN_TIMEOUT_MS`. A process has one event queue, so a spoken turn for that session waits (with the "one sec" earcon) until the detached turn ends.
+- **Prompts** (US-004): the planning prompt explains the `[detached]` convention. `detachPrompt` says nobody is listening and asks for the draft PRD with every operator question under `## Open Questions`. `resumePrompt` walks through those questions when the operator comes back (US-011), and `answerPrompt` carries an answer relayed by chief (US-012).
+- **Planning state** (US-001, US-002): the parser returns `openQuestions`, which never make a PRD invalid. `PlanningStates` derives `briefing | drafting | waiting | done | failed` for every pending plan-mode session from the registry and the PRD on disk.
+- **Triggers** (US-005, US-006): `VoiceCall.setFocus` leaving a briefed session calls `onSessionLeft` → `VoiceService.detach`, and so does the `carry_on` intent. Sessions that are `done` or already `drafting` are skipped.
+- **Capacity** (US-007): eviction skips a drafting agent, and `acquire` refuses with `session_agents_busy`, naming the sessions, when every slot is drafting.
+- **Chief** (US-008 to US-010, US-012): a finished turn publishes `planning.drafted` (important tier, spoken under any focus, a fixed line and no model call, and a same-batch `prd.valid` is dropped). "Back to chief" and a session becoming `done` name the other planning sessions and may offer a switch. The snapshot lists `PLANNING SESSIONS`, and `answer_planning_question` starts a detached turn with the answer.
+- **Panel** (US-013): a `planning` server message carries every planning session's state, shown as badges in the focus chip's menu.
+- **Tests** (US-014): scripted end-to-end runs in `call.test.ts` plan two sessions on two repositories in one call and exercise the cap.
+
 ---
 
 ## 11. Focus, handoff and intents
