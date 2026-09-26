@@ -10,6 +10,7 @@ that the stdin builders in `../process.ts` reproduce what was sent.
 | `tool-use` | a `Read` `tool_use`, its `tool_result` as a `user` line, then the answer |
 | `multi-turn` | two user messages on one process: stdin keeps being read after the first `result`; `init` repeats per turn; two `Write` tool calls whose `tool_result` arrives in the middle of the next block's stream |
 | `interrupt` | a `control_request` interrupt sent after the first text delta: `control_response`, the partial `assistant` text, a `[Request interrupted by user]` text line, `result` `error_during_execution` / `aborted_streaming`; then a next turn on the same process |
+| `mcp-config` | the browser's MCP servers (voice feedback US-006): `--mcp-config` with `mcpConfig()`'s two stdio servers, in `sessionAgentCommand`'s flag order; `init` lists `playwright` `connected` (nothing on port 9222: it only connects on a browser tool call) and its tools as `mcp__playwright__browser_*`, and `chief` `failed` (the image's `chief-mcp.js` is not on the recording host) |
 | `no-partials` | the same without `--include-partial-messages`: text only in the complete `assistant` message |
 
 Each `<name>.jsonl` is the CLI's stdout, one JSON per line, unedited.
@@ -39,6 +40,10 @@ cd server
 node --import tsx src/voice/session-agent/__fixtures__/record.ts            # all scenarios
 node --import tsx src/voice/session-agent/__fixtures__/record.ts interrupt  # one
 ```
+
+`mcp-config` was recorded on 2026-09-26 with the same CLI, `@playwright/mcp`
+0.0.82 installed under `/tmp` and `RECORD_PLAYWRIGHT_MCP` pointing at its
+`playwright-mcp` binary (default: `playwright-mcp` on the PATH, as in the image).
 
 `RECORD_MODEL=sonnet` records with another model. The script creates its
 directory under the system temp dir; Claude Code keeps the transcripts under

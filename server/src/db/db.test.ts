@@ -62,6 +62,9 @@ const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 /** The migration under test in 'adds `review_context`'. */
 const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
 
+/** The migration under test in 'adds `feedback` to existing sessions'. */
+const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -480,6 +483,51 @@ describe('migrations', () => {
   });
 });
 
+describe('session feedback migration', () => {
+  it('adds `feedback` to existing sessions as NULL', () => {
+    // A plain ADD COLUMN, so what the walk proves is that a session written
+    // before the column exists still reads back through `mapSession`.
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === SESSION_FEEDBACK_MIGRATION);
+    assert.ok(index > 0, `${SESSION_FEEDBACK_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-26T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'ready', 'develop', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(SESSION_FEEDBACK_MIGRATION));
+
+    const migrated = getSession(db, id);
+    assert.equal(migrated?.name, 'add-login');
+    assert.equal(migrated?.status, 'ready');
+    assert.equal(migrated?.feedback, null);
+
+    // The column takes a value afterwards, and a partial update leaves it be.
+    const feedback = 'The save button is grey.';
+    assert.equal(updateSession(db, id, { feedback })?.feedback, feedback);
+    assert.equal(updateSession(db, id, { status: 'pending' })?.feedback, feedback);
+    assert.equal(updateSession(db, id, { feedback: null })?.feedback, null);
+
+    closeDatabase(db);
+  });
+});
+
 describe('persistence across restarts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-db-'));
   const file = path.join(dir, 'nested', 'chief-web.db');
@@ -581,6 +629,29 @@ describe('sessions', () => {
     assert.equal(session.prUrl, null);
     assert.equal(session.lastError, null);
     assert.equal(session.codeReview, false);
+  });
+
+  it('stores the feedback a session was started from, and null without one', () => {
+    const feedback = 'The dashboard should show the queue position.';
+    const plain = createSession(db, {
+      repositoryId: repository.id,
+      name: 'no-feedback',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+    });
+    const fromFeedback = createSession(db, {
+      repositoryId: repository.id,
+      name: 'from-feedback',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+      feedback,
+    });
+
+    assert.equal(plain.feedback, null);
+    assert.equal(getSession(db, plain.id)?.feedback, null);
+    assert.equal(fromFeedback.feedback, feedback);
+    assert.equal(getSession(db, fromFeedback.id)?.feedback, feedback);
+    assert.equal(listSessions(db).find((s) => s.id === fromFeedback.id)?.feedback, feedback);
   });
 
   it('round-trips the code review flag', () => {

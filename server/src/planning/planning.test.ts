@@ -268,6 +268,17 @@ describe('planning service', () => {
     assert.equal(view.terminalId, 'terminal-1');
   });
 
+  it('plans from the session’s feedback, as the voice agent does', async () => {
+    clone();
+    updateSession(db, session.id, { feedback: 'The login form forgets my email.' });
+
+    await planning.start(session.id);
+
+    const prompt = terminals.created[0]?.command?.[1] ?? '';
+    assert.match(prompt, /<feedback>\nThe login form forgets my email\.\n<\/feedback>/);
+    assert.equal(prompt.includes(DEFAULT_CONTEXT), false);
+  });
+
   it('rejects a context longer than the prompt should carry', async () => {
     clone();
 

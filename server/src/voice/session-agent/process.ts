@@ -16,6 +16,7 @@
 import { pidFileSignalSpec, wrapWithPidFile } from '../../build/agent.js';
 import type { AttachedExec, ExecOutput, ExecSpec } from '../../docker/index.js';
 import { logger } from '../../lib/logger.js';
+import { screenshotsDirFor } from '../../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../../sessions/index.js';
 import { type SessionAgentEvent, SessionAgentEventParser } from './events.js';
 
@@ -54,6 +55,80 @@ const SIGNAL_TIMEOUT_MS = 10_000;
 /** How long {@link SessionAgentProcess.stop} waits for the exit before dropping the connection. */
 const STOP_GRACE_MS = 5_000;
 
+/**
+ * The session agent's MCP servers (voice feedback US-006), written into the
+ * container by {@link SessionAgentProcess.start} before every start, in both
+ * modes. The CLI spawns them as it boots, but neither touches Chromium then:
+ * `playwright` only connects to the DevTools port on its first browser tool
+ * call, and the Chromium behind that port is started by `chief`'s
+ * `open_browser_with_operator` (US-007). A call that never asks for the
+ * browser never runs one.
+ */
+export const MCP_CONFIG_FILE = `${VOICE_PID_DIR}/mcp.json`;
+
+/** Where the runner image ships the `chief` MCP server (US-007). */
+export const CHIEF_MCP_SCRIPT = '/usr/local/lib/chief-web/chief-mcp.js';
+
+/** The DevTools endpoint of the session's Chromium (US-005), on the container's loopback. */
+export const CDP_ENDPOINT = 'http://127.0.0.1:9222';
+
+export interface McpServerCommands {
+  /** `@playwright/mcp`'s binary; the image installs it globally, so `playwright-mcp` on the PATH. */
+  readonly playwright: readonly string[];
+  readonly chief: readonly string[];
+}
+
+const IMAGE_MCP_COMMANDS: McpServerCommands = {
+  playwright: ['playwright-mcp'],
+  chief: ['node', CHIEF_MCP_SCRIPT],
+};
+
+/**
+ * The `--mcp-config` file: two stdio servers. `--caps core,vision` adds the
+ * coordinate tools (`browser_mouse_click_xy`, …) to the core set; with
+ * `--cdp-endpoint` Playwright attaches to that browser and never downloads one.
+ * `--output-dir` is {@link screenshotsOutputDir}: an unnamed screenshot lands next to the
+ * session's PRD (voice feedback US-011). A named one is resolved against the
+ * agent's working directory instead, which is why the planning prompt hands the
+ * agent that directory's absolute path to name its screenshots into.
+ * `commands` is only swapped by `__fixtures__/record.ts`, which runs on a host.
+ */
+export function mcpConfig(sessionName: string, commands: McpServerCommands = IMAGE_MCP_COMMANDS): string {
+  const stdio = (argv: readonly string[]): { type: 'stdio'; command: string; args: string[] } => ({
+    type: 'stdio',
+    command: argv[0] as string,
+    args: argv.slice(1),
+  });
+  return JSON.stringify({
+    mcpServers: {
+      playwright: stdio([...commands.playwright, '--cdp-endpoint', CDP_ENDPOINT, '--caps', 'core,vision', '--output-dir', screenshotsOutputDir(sessionName)]),
+      chief: stdio(commands.chief),
+    },
+  });
+}
+
+/**
+ * The absolute `.chief/prds/<session>/screenshots` inside the container: Playwright
+ * creates it on the first screenshot, so nothing has to make it beforehand.
+ */
+export function screenshotsOutputDir(sessionName: string): string {
+  return `${CONTAINER_REPO_DIR}/${screenshotsDirFor(sessionName)}`;
+}
+
+/** Writes {@link mcpConfig} to {@link MCP_CONFIG_FILE} as uid 1000; the JSON goes in as an argument, never through the shell. */
+export function mcpConfigWriteSpec(sessionName: string): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `mkdir -p ${VOICE_PID_DIR} && printf '%s' "$1" > ${MCP_CONFIG_FILE}`,
+      'chief-voice-mcp',
+      mcpConfig(sessionName),
+    ],
+    user: SESSION_AGENT_USER,
+  };
+}
+
 /** One pid file per session: a session has at most one voice agent. */
 export function voicePidFile(sessionId: string): string {
   return `${VOICE_PID_DIR}/${sessionId}.pid`;
@@ -77,7 +152,7 @@ export interface SessionAgentCommandOptions {
  */
 export const QA_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
-/** `claude` with the flags of docs/voice-plan.md §10.1. */
+/** `claude` with the flags of docs/voice-plan.md §10.1, plus the browser's MCP servers. */
 export function sessionAgentCommand(options: SessionAgentCommandOptions): string[] {
   return [
     'claude',
@@ -90,6 +165,9 @@ export function sessionAgentCommand(options: SessionAgentCommandOptions): string
     'stream-json',
     '--verbose',
     '--include-partial-messages',
+    // Variadic (`<configs...>`) too: always followed by another flag.
+    '--mcp-config',
+    MCP_CONFIG_FILE,
     ...(options.resumeId === null ? [] : ['--resume', options.resumeId]),
     // Variadic (`<tools...>`): one comma-joined value, and always followed by another flag.
     ...(options.disallowedTools === undefined || options.disallowedTools.length === 0
@@ -122,6 +200,8 @@ export interface SessionAgentDocker {
 
 export interface StartSessionAgentInput {
   readonly sessionId: string;
+  /** Names the directory the browser's screenshots are saved in (voice feedback US-011). */
+  readonly sessionName: string;
   readonly containerId: string;
   readonly command: SessionAgentCommandOptions;
   /** Told about every `init`, so the conversation id can be persisted. */
@@ -159,6 +239,11 @@ export class SessionAgentProcess {
   }
 
   static async start(docker: SessionAgentDocker, input: StartSessionAgentInput): Promise<SessionAgentProcess> {
+    // Without the file `claude` exits at boot, so a failed write is the start failing.
+    const written = await docker.runExec(input.containerId, mcpConfigWriteSpec(input.sessionName), SIGNAL_TIMEOUT_MS);
+    if (written.exitCode !== 0) {
+      throw new Error(`could not write ${MCP_CONFIG_FILE}: ${written.stderr.trim() || `exit ${String(written.exitCode)}`}`);
+    }
     const attached = await docker.attachExec(input.containerId, sessionAgentExecSpec(input.sessionId, input.command));
     return new SessionAgentProcess(docker, input.sessionId, input.containerId, attached, input);
   }

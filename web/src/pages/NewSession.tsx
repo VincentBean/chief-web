@@ -4,6 +4,7 @@ import {
   createSession,
   featureBranchFor,
   fetchSettings,
+  MAX_FEEDBACK_LENGTH,
   type PrTargetBranch,
   type SessionInput,
   sessionPath,
@@ -35,6 +36,7 @@ export function NewSession() {
   const [schedule, setSchedule] = useState(false);
   const [day, setDay] = useState('');
   const [time, setTime] = useState('');
+  const [feedback, setFeedback] = useState('');
   /** null until the global default has loaded, so an early create can omit it. */
   const [codeReview, setCodeReview] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +61,8 @@ export function NewSession() {
   const selected = usable.find((r) => r.id === repositoryId) ?? usable[0] ?? null;
   const effectiveBase = baseBranch === '' ? (selected?.defaultBaseBranch ?? 'main') : baseBranch;
   const trimmedName = name.trim();
+  const trimmedFeedback = feedback.trim();
+  const feedbackTooLong = trimmedFeedback.length > MAX_FEEDBACK_LENGTH;
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
@@ -80,6 +84,11 @@ export function NewSession() {
     // Still loading: say nothing and let the server apply the global default.
     if (codeReview !== null) input.codeReview = codeReview;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
+    if (feedbackTooLong) {
+      setError(`Feedback can be at most ${MAX_FEEDBACK_LENGTH.toLocaleString()} characters.`);
+      return;
+    }
+    if (trimmedFeedback !== '') input.feedback = trimmedFeedback;
     if (schedule) {
       const at = fromLocalParts(day, time);
       if (at === null) {
@@ -219,6 +228,26 @@ export function NewSession() {
                 </div>
 
                 <div className="field">
+                  <label className="field__label" htmlFor="session-feedback">
+                    Feedback
+                  </label>
+                  <textarea
+                    id="session-feedback"
+                    className="field__input field__textarea"
+                    value={feedback}
+                    onChange={(event) => setFeedback(event.target.value)}
+                    rows={4}
+                    placeholder="The invoice total on /invoices/12 ignores the discount…"
+                    aria-describedby="session-feedback-hint"
+                    aria-invalid={feedbackTooLong}
+                  />
+                  <p className={feedbackTooLong ? 'field__error' : 'field__hint'} id="session-feedback-hint">
+                    Optional. What a user reported, word for word; planning then opens on it instead of asking what to
+                    build. {trimmedFeedback.length.toLocaleString()}/{MAX_FEEDBACK_LENGTH.toLocaleString()} characters.
+                  </p>
+                </div>
+
+                <div className="field">
                   <label className="checkbox">
                     <input type="checkbox" checked={schedule} onChange={(event) => setSchedule(event.target.checked)} />
                     Start the build at a set time
@@ -274,7 +303,7 @@ export function NewSession() {
                 {stderr !== null && <pre className="output">{stderr}</pre>}
 
                 <div className="field__actions">
-                  <button type="submit" className="button button--primary" disabled={busy || blocked || trimmedName === ''}>
+                  <button type="submit" className="button button--primary" disabled={busy || blocked || trimmedName === '' || feedbackTooLong}>
                     <Icon name="plus" />
                     {busy ? 'Creating and cloning…' : 'Create session'}
                   </button>

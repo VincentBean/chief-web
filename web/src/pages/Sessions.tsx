@@ -19,6 +19,7 @@ import { since, startsIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
 import {
   EmptyState,
+  FeedbackBadge,
   Kbd,
   PageHeader,
   Progress,
@@ -365,6 +366,7 @@ function SessionRow({
               {session.name}
             </Link>
             <StatusBadge session={session} />
+            <FeedbackBadge session={session} />
             {session.queuePosition !== null && <span className="badge badge--wait">queued #{session.queuePosition}</span>}
           </span>
           <span className="cell-stack__meta">

@@ -1073,6 +1073,37 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE voice_calls ADD COLUMN scribe_seconds REAL NOT NULL DEFAULT 0;
     `,
   },
+  {
+    id: '0018_session_feedback',
+    sql: `
+      -- The feedback a session was started from (voice feedback US-001), read
+      -- by planning, a resume in the terminal and the session page. NULL for
+      -- every session from before the feature and every session not started
+      -- from feedback.
+      --
+      -- NOTE for whoever next rebuilds \`sessions\` to widen a CHECK the way
+      -- 0005/0007/0008/0010/0011 did: this column has to be carried across.
+      ALTER TABLE sessions ADD COLUMN feedback TEXT;
+    `,
+  },
+  {
+    id: '0019_repository_logins',
+    sql: `
+      -- Saved logins per repository (voice feedback US-010), offered by the
+      -- "watch with me" card. The password is stored in plain text like the
+      -- GitHub token; the API never returns it.
+      CREATE TABLE repository_logins (
+        id            TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+        label         TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        username      TEXT NOT NULL,
+        password      TEXT NOT NULL,
+        created_at    TEXT NOT NULL
+      );
+      CREATE INDEX idx_repository_logins_repository ON repository_logins (repository_id);
+    `,
+  },
 ];
 
 /**

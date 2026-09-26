@@ -473,4 +473,93 @@ describe('repositories api', () => {
     assert.equal(((await response.json()) as { error: string }).error, 'repository_key_missing');
     assert.equal(lastCommand, null);
   });
+
+  describe('saved logins (voice feedback US-010)', () => {
+    const LOGIN_PASSWORD = 'pa55-w0rd-that-never-leaves';
+
+    const addLogin = async (repositoryId: string, body: Record<string, unknown>): Promise<{ status: number; raw: string }> => {
+      const response = await call('POST', `/api/repositories/${repositoryId}/logins`, body);
+      return { status: response.status, raw: await response.text() };
+    };
+
+    it('creates, lists and deletes a login and never returns the password', async () => {
+      const { body: repository } = await create();
+
+      const created = await addLogin(repository.id, {
+        url: 'https://staging.example.com:8443/login?next=/admin',
+        username: 'admin',
+        password: LOGIN_PASSWORD,
+      });
+      assert.equal(created.status, 201);
+      assert.ok(!created.raw.includes(LOGIN_PASSWORD));
+      const login = JSON.parse(created.raw) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(login).sort(), ['created_at', 'id', 'label', 'url', 'username']);
+      assert.equal(login.label, 'staging.example.com:8443 (admin)', 'the label defaults to the host plus the username');
+      assert.equal(login.url, 'https://staging.example.com:8443/login?next=/admin');
+
+      const labelled = await addLogin(repository.id, {
+        label: '  Local shop  ',
+        url: 'http://host.docker.internal:3000/',
+        username: '',
+        password: LOGIN_PASSWORD,
+      });
+      assert.equal((JSON.parse(labelled.raw) as { label: string }).label, 'Local shop');
+
+      const listed = await call('GET', `/api/repositories/${repository.id}/logins`);
+      const raw = await listed.text();
+      assert.equal(listed.status, 200);
+      assert.ok(!raw.includes(LOGIN_PASSWORD), 'the list never carries the password');
+      const { logins } = JSON.parse(raw) as { logins: { id: string; label: string }[] };
+      assert.deepEqual(logins.map((l) => l.label), ['staging.example.com:8443 (admin)', 'Local shop']);
+
+      assert.equal((await call('DELETE', `/api/repositories/${repository.id}/logins/${String(login.id)}`)).status, 204);
+      const after = (await (await call('GET', `/api/repositories/${repository.id}/logins`)).json()) as { logins: unknown[] };
+      assert.equal(after.logins.length, 1);
+      assert.equal((await call('DELETE', `/api/repositories/${repository.id}/logins/${String(login.id)}`)).status, 404);
+    });
+
+    it('rejects a bad login', async () => {
+      const { body: repository } = await create();
+      const cases: [Record<string, unknown>, string][] = [
+        [{ url: 'ftp://example.com/', username: 'a', password: 'b' }, 'invalid_url'],
+        [{ url: 'javascript:alert(1)', username: 'a', password: 'b' }, 'invalid_url'],
+        [{ url: 'example.com', username: 'a', password: 'b' }, 'invalid_url'],
+        [{ username: 'a', password: 'b' }, 'invalid_url'],
+        [{ url: 'https://example.com/', username: 'a' }, 'invalid_password'],
+        [{ url: 'https://example.com/', username: 'a', password: '' }, 'invalid_password'],
+        [{ url: 'https://example.com/', username: 7, password: 'b' }, 'invalid_username'],
+        [{ url: 'https://example.com/', username: 'a'.repeat(501), password: 'b' }, 'invalid_username'],
+        [{ url: 'https://example.com/', username: 'a', password: 'b', label: 'x'.repeat(101) }, 'invalid_label'],
+      ];
+      for (const [body, error] of cases) {
+        const response = await addLogin(repository.id, body);
+        assert.equal(response.status, 400, JSON.stringify(body));
+        assert.equal((JSON.parse(response.raw) as { error: string }).error, error, JSON.stringify(body));
+      }
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM repository_logins').get()?.n, 0);
+    });
+
+    it('04s for an unknown repository or a login of another one', async () => {
+      const { body: first } = await create();
+      const { body: second } = await create({ name: 'other' });
+      const created = await addLogin(first.id, { url: 'https://example.com/', username: 'a', password: 'b' });
+      const { id } = JSON.parse(created.raw) as { id: string };
+
+      assert.equal((await call('GET', '/api/repositories/missing/logins')).status, 404);
+      assert.equal((await addLogin('missing', { url: 'https://example.com/', username: 'a', password: 'b' })).status, 404);
+      assert.equal((await call('DELETE', `/api/repositories/${second.id}/logins/${id}`)).status, 404);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM repository_logins').get()?.n, 1);
+    });
+
+    it('deletes the saved logins with their repository', async () => {
+      const { body: repository } = await create();
+      const { body: other } = await create({ name: 'other' });
+      await addLogin(repository.id, { url: 'https://example.com/', username: 'a', password: 'b' });
+      await addLogin(other.id, { url: 'https://example.com/', username: 'a', password: 'b' });
+
+      assert.equal((await call('DELETE', `/api/repositories/${repository.id}`)).status, 204);
+      const rows = db.prepare('SELECT repository_id FROM repository_logins').all();
+      assert.deepEqual(rows.map((row) => row.repository_id), [other.id]);
+    });
+  });
 });

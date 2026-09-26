@@ -83,6 +83,7 @@ export interface SessionContainerView {
  */
 export class SessionOrchestrator {
   private readonly hostPaths: HostPaths;
+  private readonly stoppingListeners: ((sessionId: string) => Promise<void>)[] = [];
 
   constructor(
     private readonly config: Config,
@@ -147,6 +148,15 @@ export class SessionOrchestrator {
     return { id: containerId, name, running: true, state: 'running' };
   }
 
+  /**
+   * Runs `listener` before a session's container is stopped or removed, while
+   * an exec can still reach it (voice feedback US-012: its browser stops
+   * first). A listener that fails is logged and does not hold the stop up.
+   */
+  onStopping(listener: (sessionId: string) => Promise<void>): void {
+    this.stoppingListeners.push(listener);
+  }
+
   /** The session's container as the daemon sees it, or `null` if it has none. */
   async inspect(sessionId: string): Promise<SessionContainerView | null> {
     let containers: ContainerSummary[];
@@ -164,6 +174,7 @@ export class SessionOrchestrator {
    * stopped session can be started again on the very same clone.
    */
   async stop(sessionId: string): Promise<void> {
+    await this.notifyStopping(sessionId);
     const containers = await this.containersFor(sessionId);
     for (const container of containers) {
       if (container.state !== 'running') continue;
@@ -182,6 +193,7 @@ export class SessionOrchestrator {
    * them is only ever the session-deletion path (US-012).
    */
   async remove(sessionId: string): Promise<void> {
+    await this.notifyStopping(sessionId);
     const containers = await this.containersFor(sessionId);
     for (const container of containers) await this.discard(container.id, true);
     removeSessionKey(this.config, sessionId);
@@ -191,6 +203,14 @@ export class SessionOrchestrator {
       removed: containers.length,
       workspace: sessionWorkspaceDir(this.config, sessionId),
     });
+  }
+
+  private async notifyStopping(sessionId: string): Promise<void> {
+    for (const listener of this.stoppingListeners) {
+      await listener(sessionId).catch((cause: unknown) => {
+        logger.warn('a container stop listener failed', { session: sessionId, error: String(cause) });
+      });
+    }
   }
 
   /**

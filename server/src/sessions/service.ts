@@ -154,6 +154,11 @@ export interface SessionView {
    */
   readonly codeReview: boolean;
   /**
+   * The feedback the session was started from (voice feedback US-001), or
+   * `null` for a session that was not started from feedback.
+   */
+  readonly feedback: string | null;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -210,7 +215,12 @@ export interface CreateSessionRequest {
    * run of anything.
    */
   readonly recurringTaskId?: string | null;
+  /** The feedback the session is started from; already trimmed and bounded. */
+  readonly feedback?: string | null;
 }
+
+/** The longest feedback a session is started from (voice feedback US-001), after trimming. */
+export const MAX_FEEDBACK_LENGTH = 4000;
 
 /**
  * The statuses the code review flag is frozen in, and why (US-007).
@@ -304,6 +314,7 @@ export class SessionService {
         scheduledStartAt: request.scheduledStartAt ?? null,
         codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
         recurringTaskId: request.recurringTaskId ?? null,
+        feedback: request.feedback ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -703,6 +714,7 @@ export class SessionService {
       failureStage: session.failureStage,
       waitingUntil: session.waitingUntil,
       codeReview: session.codeReview,
+      feedback: session.feedback,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

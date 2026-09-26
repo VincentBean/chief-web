@@ -352,6 +352,35 @@
     gap: 0.25rem;
   }
 
+  /* The "watch with me" card (voice feedback US-007): the confirmation pill's colours, room for a form. */
+  .call-browser {
+    background: --alpha(var(--color-status-wait) / 10%);
+    border: 1px solid --alpha(var(--color-status-wait) / 35%);
+    border-radius: 0.75rem;
+    font-size: var(--text-sm);
+    padding: 0.625rem 0.75rem;
+  }
+
+  .call-browser__form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .call-browser__form .field {
+    margin: 0;
+  }
+
+  .call-browser__hint {
+    align-items: center;
+    display: flex;
+    gap: 0.375rem;
+  }
+
+  .call-browser__form .call-confirm__actions {
+    justify-content: flex-end;
+  }
+
   .call-confirm__done {
     color: var(--color-fg-muted);
     font-size: var(--text-xs);
@@ -442,5 +471,89 @@
     color: var(--color-fg-subtle);
     font-size: var(--text-xs);
     white-space: nowrap;
+  }
+  /*
+   * The live page view (voice feedback US-008): the session browser at the
+   * panel's width. Expanded, it is fixed over the main content area, from the
+   * sidebar to the docked panel, so the transcript stays beside it.
+   */
+  .call-page {
+    background: var(--color-surface-raised);
+    border-bottom: 1px solid var(--color-line-subtle);
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .call-page--expanded {
+    border: 1px solid var(--color-line-default);
+    border-radius: var(--radius-lg);
+    bottom: calc(70vh + 1rem);
+    box-shadow: var(--inset-shadow-hairline), var(--shadow-e4);
+    left: 1rem;
+    position: fixed;
+    right: 1rem;
+    top: 1rem;
+
+    @variant lg {
+      bottom: 1rem;
+      left: calc(15rem + 1rem);
+      right: calc(24rem + 2rem);
+    }
+  }
+
+  .call-page__bar {
+    align-items: center;
+    color: var(--color-fg-muted);
+    display: flex;
+    font-size: var(--text-xs);
+    gap: 0.375rem;
+    padding: 0.375rem 0.5rem 0.375rem 0.75rem;
+  }
+
+  .call-page__url {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .call-page__close {
+    white-space: nowrap;
+  }
+
+  .call-page__body {
+    background: var(--color-surface-sunken);
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* No scrollbar here: one would shrink the area, resize the page, and loop. */
+  .call-page--expanded .call-page__body {
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .call-page__canvas {
+    cursor: default;
+    display: block;
+    height: auto;
+    width: 100%;
+  }
+
+  .call-page__canvas:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  .call-page__closed {
+    color: var(--color-fg-muted);
+    font-size: var(--text-sm);
+    margin: 0;
+    padding: 1.5rem 0.75rem;
+    text-align: center;
   }
 }

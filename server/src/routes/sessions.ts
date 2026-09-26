@@ -3,6 +3,7 @@ import { type Response, Router } from 'express';
 import { PR_TARGET_BRANCHES, type PrTargetBranch, SESSION_NAME_PATTERN } from '../db/index.js';
 import {
   type CreateSessionRequest,
+  MAX_FEEDBACK_LENGTH,
   SessionError,
   type SessionService,
 } from '../sessions/index.js';
@@ -313,6 +314,17 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const codeReview = optionalBoolean(input, 'codeReview');
   if (typeof codeReview === 'object') return codeReview;
 
+  // Trimmed, and blank counts as none: a session either was started from
+  // feedback or it was not.
+  const feedback = optionalString(input, 'feedback', 'invalid_feedback');
+  if (typeof feedback === 'object') return feedback;
+  if (feedback !== undefined && feedback.length > MAX_FEEDBACK_LENGTH) {
+    return {
+      error: 'invalid_feedback',
+      message: `The feedback must be at most ${MAX_FEEDBACK_LENGTH} characters.`,
+    };
+  }
+
   return {
     repositoryId,
     name,
@@ -322,6 +334,7 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     // default, so an API-created session honours it too.
     ...(codeReview === undefined ? {} : { codeReview }),
     ...(baseBranch === undefined ? {} : { baseBranch }),
+    ...(feedback === undefined ? {} : { feedback }),
   };
 }
 

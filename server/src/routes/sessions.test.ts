@@ -201,6 +201,54 @@ describe('sessions api', () => {
     assert.equal(((await fetched.json()) as SessionView).codeReview, false);
   });
 
+  it('stores trimmed feedback on create and returns it from get and list', async () => {
+    const { status, body } = await create({ feedback: '  The save button is grey.\n' });
+
+    assert.equal(status, 201);
+    assert.equal(body.session.feedback, 'The save button is grey.');
+
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).feedback, 'The save button is grey.');
+
+    const listed = (await (await call('GET', '/api/sessions')).json()) as {
+      sessions: SessionView[];
+    };
+    assert.equal(listed.sessions[0]?.feedback, 'The save button is grey.');
+  });
+
+  it('creates a session without feedback as null, blank included', async () => {
+    const without = await create();
+    assert.equal(without.status, 201);
+    assert.equal(without.body.session.feedback, null);
+
+    const blank = await create({ name: 'blank-feedback', feedback: '   ' });
+    assert.equal(blank.status, 201);
+    assert.equal(blank.body.session.feedback, null);
+  });
+
+  it('accepts feedback of up to 4000 characters and rejects longer', async () => {
+    const atLimit = await create({ name: 'at-limit', feedback: 'x'.repeat(4000) });
+    assert.equal(atLimit.status, 201);
+    assert.equal(atLimit.body.session.feedback?.length, 4000);
+
+    // The limit is on the trimmed text: surrounding whitespace does not count.
+    const padded = await create({ name: 'padded', feedback: ` ${'x'.repeat(4000)} ` });
+    assert.equal(padded.status, 201);
+
+    const tooLong = await create({ name: 'too-long', feedback: 'x'.repeat(4001) });
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.error, 'invalid_feedback');
+    // Rejected before anything was written or started.
+    assert.equal(started.length, 2);
+  });
+
+  it('rejects feedback that is not a string', async () => {
+    const { status, body } = await create({ feedback: 42 });
+
+    assert.equal(status, 400);
+    assert.equal(body.error, 'invalid_feedback');
+  });
+
   it('applies the global default when the create request does not say (US-004)', async () => {
     setSetting(db, 'code_review_default', '1');
     try {

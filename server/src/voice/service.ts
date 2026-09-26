@@ -29,6 +29,7 @@ import { BasicChiefAgent } from './chief/basic-agent.js';
 import type { ChiefServices } from './chief/tools.js';
 import { EarconCache, earconVoice, providerRenderer } from './earcons.js';
 import type { VoiceEventBus } from './events.js';
+import type { BrowserAskDeps } from './browser-ask.js';
 import { SessionVoiceAgent } from './session-agent/agent.js';
 import type { SessionAgentRegistry } from './session-agent/registry.js';
 import {
@@ -76,6 +77,11 @@ export interface VoiceServiceDeps {
    * ElevenLabs and OpenRouter; a test that fakes `tts` gets none.
    */
   readonly usage?: CallUsageSources;
+  /**
+   * The session browsers and the "watch with me" card (voice feedback
+   * US-007); without them a session agent's browser request is never shown.
+   */
+  readonly browser?: BrowserAskDeps & { readonly stopAll?: () => Promise<void> };
 }
 
 export type VoiceReadiness =
@@ -279,6 +285,7 @@ export class VoiceService {
     this.clearResumeTimer();
     await this.active?.end('error');
     await this.deps.sessionAgents?.stopAll();
+    await this.deps.browser?.stopAll?.();
   }
 
   private newCall(focus: CallFocus): VoiceCall {
@@ -294,6 +301,7 @@ export class VoiceService {
       ...(this.deps.planning === undefined ? {} : { planning: this.deps.planning }),
       ...(this.earcons === null ? {} : { earcons: this.earcons }),
       ...(this.usageSources === null ? {} : { usage: this.usageSources }),
+      ...(this.deps.browser === undefined ? {} : { browser: this.deps.browser }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;
@@ -310,7 +318,13 @@ export class VoiceService {
       db: this.db,
       sessionId: focus.sessionId,
       registry,
-      call: { setFocus: (next) => call.setFocus(next), spokenSoFar: () => call.state.spokenSoFar },
+      call: {
+        setFocus: (next) => call.setFocus(next),
+        spokenSoFar: () => call.state.spokenSoFar,
+        askBrowser: (sessionId) => call.askBrowser(sessionId),
+        browserToolDone: (sessionId) => call.browserToolDone(sessionId),
+        browserActivity: (sessionId) => call.browserActivity(sessionId),
+      },
     });
   }
 

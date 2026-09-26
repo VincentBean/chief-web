@@ -1,5 +1,5 @@
 import type { ParsedPrd, PrdStory } from '../prd/index.js';
-import { prdDirFor, progressPathFor } from '../prd/index.js';
+import { prdDirFor, progressPathFor, screenshotsDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import { AGENT_PROMPT_TEMPLATE } from './templates.js';
 
@@ -121,10 +121,12 @@ export function agentCommand(
  * Go after each iteration; chief-web reads that file as the agent leaves it —
  * the parser in `prd/` is the only thing that says whether a story is done — so
  * the agent is told to keep it up to date. The PRD context and `progress.md`
- * follow, because the container is fresh every time.
+ * follow, because the container is fresh every time. A feedback session's
+ * screenshots (voice feedback US-011) are named so no story's cleanup takes them.
  */
 function addendum(input: AgentPromptInput): string {
   const prdPath = `${CONTAINER_REPO_DIR}/${prdDirFor(input.sessionName)}/prd.md`;
+  const screenshotsPath = `${CONTAINER_REPO_DIR}/${screenshotsDirFor(input.sessionName)}`;
   const sections = [
     `
 
@@ -146,6 +148,12 @@ only evidence it has that anything happened. Before you finish, all four of thes
 If you cannot honestly complete the story, leave its \`**Status:**\` at \`in-progress\`, commit
 whatever partial work is worth keeping, and write down in \`progress.md\` what is blocking it —
 the next iteration continues from there.
+
+When \`prd.md\` has a \`## Feedback\` section, read it: it says what was wrong and how to reproduce it,
+and the screenshots it links are in \`${screenshotsPath}/\`. Leave that directory as it is — never
+delete, move or commit it, and never run \`git clean\`, \`git stash -u\` or anything else that
+sweeps untracked files in this clone: the screenshots stay there for the stories after yours and
+for the review.
 
 ### You are on a clock
 

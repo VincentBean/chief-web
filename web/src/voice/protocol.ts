@@ -55,6 +55,20 @@ export type ClientMessage =
   | { readonly type: 'hangup' }
   /** The pill's Confirm / Cancel button (voice US-011). */
   | { readonly type: 'confirm.resolve'; readonly id: string; readonly accept: boolean }
+  /**
+   * The "watch with me" card's **Open** (voice feedback US-007): the URL the
+   * session agent's browser opens, and the login to use, typed or saved.
+   */
+  | {
+      readonly type: 'browser.answer';
+      readonly id: string;
+      readonly url: string;
+      readonly credentials?: BrowserCredentials;
+      /** "Save this login for <repository>" (US-010). */
+      readonly save?: boolean;
+    }
+  /** The card's **Cancel**. */
+  | { readonly type: 'browser.cancel'; readonly id: string }
   | { readonly type: 'metrics'; readonly turn: number; readonly firstAudioPlayedAt: string }
   /**
    * Scribe realtime (US-022): the browser gave up on Scribe (quota, auth, the
@@ -88,6 +102,43 @@ export interface ConfirmationView {
   readonly id: string;
   readonly prompt: string;
   readonly expiresAt: string;
+}
+
+/** A login typed into the "watch with me" card, or a saved one by id. */
+export type BrowserCredentials =
+  | { readonly username: string; readonly password: string }
+  | { readonly savedLoginId: string };
+
+/** A repository's saved login as the card lists it; never its password. */
+export interface SavedLoginView {
+  readonly id: string;
+  readonly label: string;
+  readonly url: string;
+}
+
+/** How a "watch with me" card stopped being pending. */
+export type BrowserAskOutcome = 'opened' | 'cancelled' | 'expired';
+
+/** Longest URL the card accepts, in characters. */
+export const MAX_BROWSER_URL_CHARS = 2000;
+/** Longest username or password the card accepts, in characters. */
+export const MAX_CREDENTIAL_CHARS = 500;
+
+/**
+ * The card's URL, normalised, or null unless it is an absolute `http:` or
+ * `https:` URL.
+ */
+export function parseBrowserUrl(raw: string): string | null {
+  const text = raw.trim();
+  if (text === '' || text.length > MAX_BROWSER_URL_CHARS) return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  return url.href;
 }
 
 /** An earcon of `ready`: its audio arrives under `segmentId`, PCM16 at `sampleRate`. */
@@ -161,6 +212,20 @@ export type ServerMessage =
   | ({ readonly type: 'confirm' } & ConfirmationView)
   | { readonly type: 'confirm.resolved'; readonly id: string; readonly outcome: ConfirmationOutcome }
   | ({ readonly type: 'ui' } & UiAction)
+  /**
+   * The session agent asked to look at a page with the operator (voice
+   * feedback US-007): the call panel shows the "watch with me" card until
+   * `browser.resolved`. `hint` is what the agent wants to look at.
+   */
+  | {
+      readonly type: 'browser.ask';
+      readonly id: string;
+      readonly sessionId: string;
+      readonly hint: string;
+      readonly savedLogins: readonly SavedLoginView[];
+      readonly expiresAt: string;
+    }
+  | { readonly type: 'browser.resolved'; readonly id: string; readonly outcome: BrowserAskOutcome }
   /**
    * The meter (US-023): this call's ElevenLabs credits and OpenRouter
    * dollars; the balance and monthly limit once ElevenLabs was asked, the

@@ -125,11 +125,15 @@ export function agentSignalSpec(
   return pidFileSignalSpec(agentPidGlob(sessionId), signal, options);
 }
 
-/** {@link agentSignalSpec} over any pid-file glob; see there. */
+/**
+ * {@link agentSignalSpec} over any pid-file glob; see there. `match` is what
+ * `/proc/<pid>/cmdline` must contain for the pid to still count as ours
+ * (`claude` unless said otherwise).
+ */
 export function pidFileSignalSpec(
   glob: string,
   signal: string,
-  options: { readonly remove?: boolean } = {},
+  options: { readonly remove?: boolean; readonly match?: string } = {},
 ): ExecSpec {
   return {
     cmd: [
@@ -138,7 +142,7 @@ export function pidFileSignalSpec(
       `for file in ${glob}; do ` +
         `[ -f "$file" ] || continue; ` +
         `pid=$(cat "$file" 2>/dev/null); ` +
-        `if [ -n "$pid" ] && grep -qa claude /proc/"$pid"/cmdline 2>/dev/null; then ` +
+        `if [ -n "$pid" ] && grep -qa ${options.match ?? 'claude'} /proc/"$pid"/cmdline 2>/dev/null; then ` +
         `kill -${signal} -"$pid" 2>/dev/null; ` +
         `kill -${signal} "$pid" 2>/dev/null; ` +
         `pkill -${signal} -P "$pid" 2>/dev/null; ` +

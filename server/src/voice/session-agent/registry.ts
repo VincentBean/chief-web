@@ -58,6 +58,11 @@ export interface SessionAgentRegistryDeps {
    * service is built after the registry (it asks the registry the reverse).
    */
   readonly planning?: () => { isTerminalRunning(sessionId: string): boolean } | null;
+  /**
+   * The session browsers (voice feedback US-012): an agent that is stopped or
+   * reaped takes its session's browser with it. A thunk for the same reason.
+   */
+  readonly browsers?: () => { stop(sessionId: string): Promise<void> } | null;
   readonly now?: () => number;
 }
 
@@ -146,15 +151,23 @@ export class SessionAgentRegistry {
       featureBranch: session.featureBranch,
       repositoryName: getRepository(this.deps.db, session.repositoryId)?.name ?? session.repositoryId,
       firstWords,
+      feedback: session.feedback,
     });
   }
 
-  /** Stops the session's agent, if it has one; it is out of the registry at once. */
+  /** Stops the session's agent, if it has one, and its browser; it is out of the registry at once. */
   async stop(sessionId: string, signal = 'TERM'): Promise<void> {
     const agent = this.agents.get(sessionId);
     this.agents.delete(sessionId);
     this.modes.delete(sessionId);
+    const browser = this.deps
+      .browsers?.()
+      ?.stop(sessionId)
+      .catch((cause: unknown) => {
+        logger.warn('could not stop the session browser', { session: sessionId, error: String(cause) });
+      });
     await agent?.stop(signal);
+    await browser;
   }
 
   async stopAll(): Promise<void> {
@@ -197,6 +210,7 @@ export class SessionAgentRegistry {
     const resumeId = stored !== null && stored.mode === mode ? stored.claudeSessionId : null;
     const agent = await SessionAgentProcess.start(this.deps.docker, {
       sessionId,
+      sessionName: session.name,
       containerId,
       command: {
         model: settings.sessionModel,

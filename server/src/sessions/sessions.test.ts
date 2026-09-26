@@ -23,6 +23,7 @@ import {
   sessionRepoDir,
   sessionWorkspaceDir,
 } from '../orchestrator/index.js';
+import { parsePrd, prdPathFor, readPrdStatus } from '../prd/index.js';
 import { updateAppSettings } from '../settings/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import {
@@ -404,7 +405,99 @@ function writePrd(f: Fixture, sessionId: string, name: string, content: string):
   fs.writeFileSync(file, content);
 }
 
+/**
+ * A feedback session's PRD as the voice feedback planning prompt asks for it
+ * (US-011): a `## Feedback` section with paths, numbered steps, expected and
+ * observed, and screenshots linked relative to the PRD.
+ */
+const FEEDBACK_PRD = `# PRD: Keep the billing total when switching plans
+
+## Introduction
+
+Switching from the monthly to the yearly plan shows a total of €0,00 until the page is reloaded.
+
+## Feedback
+
+> The billing page shows €0,00 after I change the plan. See "Invoices" too.
+
+**Pages visited:**
+- /settings/billing
+- /settings/billing/invoices
+
+**Reproduction steps:**
+1. Log in and open /settings/billing
+2. Click **Change plan** and pick **Yearly**
+3. Confirm the dialog
+
+**Expected:** the total reads €120,00 per year.
+
+**Observed:** the total reads €0,00 until the page is reloaded; the invoices list is unaffected.
+
+![The billing page after switching to yearly, total €0,00](screenshots/billing-total-zero-after-yearly.png)
+![The same page after a reload](screenshots/billing-total-after-reload.png)
+
+See [the plan dialog](screenshots/change-plan-dialog.png) for the confirmation step.
+
+## User Stories
+
+### US-001: Recalculate the total when the plan changes
+**Status:** todo
+**Priority:** 1
+**Description:** As a customer, I want the total to follow the plan I pick so that I know what I pay.
+
+**Acceptance Criteria:**
+- [ ] Switching to yearly shows the yearly total without a reload
+- [ ] Typecheck passes
+
+### US-002: Cover the switch with a test
+**Status:** todo
+**Priority:** 2
+**Description:** As a developer, I want a regression test for the plan switch.
+
+**Acceptance Criteria:**
+- [ ] A test switches plans and asserts the total
+`;
+
 describe('session readiness', () => {
+  it('parses a feedback PRD with reproduction steps and screenshot links (voice feedback US-011)', async () => {
+    const f = await fixture();
+    const created = createSessionRow(f);
+    writePrd(f, created, 'add-login', FEEDBACK_PRD);
+    const prdFile = sessionPrdFile(f.config, { id: created, name: 'add-login' });
+    const screenshot = path.join(path.dirname(prdFile), 'screenshots', 'billing-total-zero-after-yearly.png');
+    fs.mkdirSync(path.dirname(screenshot), { recursive: true });
+    fs.writeFileSync(screenshot, 'png');
+
+    // The PRD indicator: what the planning panel and the voice agent read.
+    const status = readPrdStatus(prdFile, prdPathFor('add-login'));
+    assert.equal(status.exists, true);
+    assert.equal(status.parses, true);
+    assert.equal(status.storyCount, 2);
+    assert.deepEqual(status.errors, []);
+
+    // mark_ready (the button and the voice tool both call this).
+    const result = await f.service.markReady(created);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.session.status, 'ready');
+    assert.deepEqual(
+      result.stories.map((story) => [story.storyId, story.title, story.priority, story.status]),
+      [
+        ['US-001', 'Recalculate the total when the plan changes', 1, 'todo'],
+        ['US-002', 'Cover the switch with a test', 2, 'todo'],
+      ],
+    );
+    // Nothing from the Feedback section — steps, links, images — became a criterion.
+    assert.deepEqual(
+      parsePrd(FEEDBACK_PRD).stories.map((story) => story.acceptanceCriteria.map((criterion) => criterion.text)),
+      [
+        ['Switching to yearly shows the yearly total without a reload', 'Typecheck passes'],
+        ['A test switches plans and asserts the total'],
+      ],
+    );
+    assert.equal(fs.existsSync(screenshot), true);
+  });
+
   it('marks a pending session ready and syncs its stories', async () => {
     const f = await fixture();
     const created = createSessionRow(f);

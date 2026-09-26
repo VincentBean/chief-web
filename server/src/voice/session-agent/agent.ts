@@ -9,6 +9,7 @@ import type { CallFocus } from '../protocol.js';
 import type { SessionAgentEvent } from './events.js';
 import { interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
 import { voiceUtterance } from './prompt.js';
+import { redactCredentials } from './redact.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
 /** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
@@ -30,6 +31,20 @@ export interface SessionAgentCallControls {
   setFocus(focus: CallFocus): void;
   /** What the operator heard of the current turn, for the next `[interrupted after: …]`. */
   spokenSoFar(): string;
+  /** The agent called {@link OPEN_BROWSER_TOOL}: show the "watch with me" card (voice feedback US-007). */
+  askBrowser?(sessionId: string): void;
+  /** That tool call ended, answered or not. */
+  browserToolDone?(sessionId: string): void;
+  /** Any browser tool call (US-012): the session browser is in use, so it does not idle out. */
+  browserActivity?(sessionId: string): void;
+}
+
+/** The `chief` MCP server's tool, as the CLI names it on the stream (`runner/chief-mcp.js`). */
+export const OPEN_BROWSER_TOOL = 'mcp__chief__open_browser_with_operator';
+
+/** A tool call that uses the session browser: the card's tool, or Playwright MCP driving it over CDP unseen. */
+export function isBrowserTool(name: string): boolean {
+  return name === OPEN_BROWSER_TOOL || name.startsWith(BROWSER_TOOL_PREFIX);
 }
 
 export interface SessionVoiceAgentDeps {
@@ -105,6 +120,8 @@ export class SessionVoiceAgent implements VoiceAgent {
 
       let ended = false;
       const tools = new Map<string, { name: string; summary: string }>();
+      // The open_browser_with_operator call of this turn whose result has not come yet.
+      let browserCall: string | null = null;
       try {
         for (;;) {
           const event = await agent.next(signal);
@@ -116,10 +133,21 @@ export class SessionVoiceAgent implements VoiceAgent {
             break;
           }
           const out = toAgentEvent(event, tools);
+          if (out?.type === 'tool' && isBrowserTool(out.name)) this.deps.call.browserActivity?.(this.deps.sessionId);
+          if (out?.type === 'tool' && out.name === OPEN_BROWSER_TOOL) {
+            if (out.status === 'running' && browserCall === null) {
+              browserCall = out.id;
+              this.deps.call.askBrowser?.(this.deps.sessionId);
+            } else if (out.status !== 'running' && out.id === browserCall) {
+              browserCall = null;
+              this.deps.call.browserToolDone?.(this.deps.sessionId);
+            }
+          }
           if (out !== null) yield out;
         }
       } finally {
         if (signal.aborted && !ended && !agent.exited) await this.interrupt(agent);
+        if (browserCall !== null) this.deps.call.browserToolDone?.(this.deps.sessionId);
       }
       // A process that died mid-turn is restarted once and hears the same utterance again.
       if (ended || signal.aborted || !agent.crashed) return;
@@ -159,7 +187,8 @@ function toAgentEvent(event: SessionAgentEvent, tools: Map<string, { name: strin
       return { type: 'delta', text: event.text };
     case 'tool': {
       const id = event.toolUseId ?? randomUUID();
-      const summary = toolCardSummary(event.name, event.input);
+      // A login never reaches a card, the socket or voice_turns (US-009).
+      const summary = toolCardSummary(event.name, redactCredentials(event.input));
       tools.set(id, { name: event.name, summary });
       return { type: 'tool', id, name: event.name, status: 'running', summary };
     }
@@ -181,6 +210,8 @@ export function toolCardSummary(name: string, input: unknown): string {
     const value = args[key];
     return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
   };
+  if (name.startsWith(BROWSER_TOOL_PREFIX)) return browserToolSummary(name.slice(BROWSER_TOOL_PREFIX.length), text);
+  if (name.startsWith(CHIEF_TOOL_PREFIX)) return chiefToolSummary(name.slice(CHIEF_TOOL_PREFIX.length));
   const path = relative(text('file_path') ?? text('notebook_path') ?? text('path'));
   switch (name) {
     case 'Read':
@@ -218,6 +249,81 @@ export function toolCardSummary(name: string, input: unknown): string {
     }
     default:
       return `Using ${name}`;
+  }
+}
+
+/** The session agent's MCP servers (`process.ts` `mcpConfig`), as the CLI prefixes their tools. */
+const BROWSER_TOOL_PREFIX = 'mcp__playwright__';
+const CHIEF_TOOL_PREFIX = 'mcp__chief__';
+
+/**
+ * `@playwright/mcp`'s tools: "Navigating to /checkout", "Clicking Apply coupon".
+ * Only a URL's path is shown (a query string can carry a token), and typed text
+ * never is (it can be a password).
+ */
+function browserToolSummary(tool: string, text: (key: string) => string | null): string {
+  const element = text('element');
+  switch (tool) {
+    case 'browser_navigate': {
+      const url = text('url');
+      return url === null ? 'Navigating' : `Navigating to ${urlPath(url)}`;
+    }
+    case 'browser_navigate_back':
+      return 'Going back';
+    case 'browser_click':
+      return element === null ? 'Clicking on the page' : `Clicking ${clip(element, 60)}`;
+    case 'browser_mouse_click_xy':
+      return 'Clicking on the page';
+    case 'browser_type':
+      return element === null ? 'Typing' : `Typing into ${clip(element, 60)}`;
+    case 'browser_fill_form':
+      return 'Filling in a form';
+    case 'browser_select_option':
+      return element === null ? 'Choosing an option' : `Choosing in ${clip(element, 60)}`;
+    case 'browser_hover':
+    case 'browser_mouse_move_xy':
+      return element === null ? 'Pointing at the page' : `Pointing at ${clip(element, 60)}`;
+    case 'browser_press_key': {
+      const key = text('key');
+      return key === null ? 'Pressing a key' : `Pressing ${clip(key, 20)}`;
+    }
+    case 'browser_snapshot':
+    case 'browser_find':
+      return 'Reading the page';
+    case 'browser_take_screenshot':
+      return 'Taking a screenshot';
+    case 'browser_wait_for':
+      return 'Waiting for the page';
+    case 'browser_console_messages':
+      return 'Reading the console';
+    case 'browser_network_requests':
+    case 'browser_network_request':
+      return 'Looking at the network requests';
+    case 'browser_mouse_wheel':
+      return 'Scrolling';
+    case 'browser_close':
+      return 'Closing the page';
+    default:
+      return 'Using the browser';
+  }
+}
+
+/** The `chief` MCP server's tools (US-007). */
+function chiefToolSummary(tool: string): string {
+  switch (tool) {
+    case 'open_browser_with_operator':
+      return 'Opening the browser';
+    default:
+      return `Using ${tool}`;
+  }
+}
+
+/** "/checkout" for "http://host.docker.internal:3000/checkout?token=…". */
+function urlPath(url: string): string {
+  try {
+    return clip(new URL(url).pathname, 60);
+  } catch {
+    return clip(url.replace(/[?#].*$/, ''), 60);
   }
 }
 

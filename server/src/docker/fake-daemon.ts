@@ -643,3 +643,149 @@ function pidFileOwner(cmd: readonly string[]): string | null {
 function stripVersion(pathname: string): string {
   return pathname.replace(/^\/v\d+\.\d+/, '');
 }
+
+/* ------------------------------------------------ a session browser (US-005) */
+
+/** What {@link FakeBrowser} answers one CDP command with. */
+export type FakeCdpReply = { readonly result: Record<string, unknown> } | { readonly error: string };
+
+/** The relay script's path in the runner image, which is how its exec is recognised. */
+const FAKE_RELAY_SCRIPT = '/usr/local/lib/chief-web/cdp-relay.js';
+/** Chromium's pid files and profile live here, which is how its execs are recognised. */
+const FAKE_BROWSER_DIR = '/tmp/.chief-browser/';
+
+/**
+ * A session's headless Chromium and its `cdp-relay.js` on the fake daemon
+ * (voice feedback US-005), so the browser service runs without Docker.
+ *
+ * - The Chromium exec (the pid-file wrapper around `chromium … --user-data-dir=
+ *   /tmp/.chief-browser/profile`) runs until a signal exec naming its pid file
+ *   arrives, or until {@link crash}; like the real one it ignores its stdin.
+ * - The relay exec prints `{"relay":"ready",…}` when a Chromium runs in its
+ *   container (else it fails on stderr and exits 1), answers every CDP line
+ *   from {@link replies}, and exits 1 when its Chromium goes, as the real relay
+ *   does when the DevTools socket closes.
+ *
+ * It takes over {@link FakeDockerDaemon.onExec} and hands every other exec to
+ * the handler that was there before.
+ */
+export class FakeBrowser {
+  targetId = 'page-1';
+  /** Per-method answers; a method not listed gets `{ result: {} }`. */
+  readonly replies = new Map<string, (params: Record<string, unknown>) => FakeCdpReply>();
+  /** Every CDP command a relay received, in order. */
+  readonly commands: { execId: string; id: number; method: string; params: Record<string, unknown> }[] = [];
+  /** Signals delivered through a pid file, in order. */
+  readonly signals: string[] = [];
+  /** Receive commands but never answer them, to hold a send in flight. */
+  silent = false;
+  /** Chromium exits at once with this (a missing binary is 127 and `chromium: not found`). */
+  startFailure: { readonly exitCode: number; readonly stderr: string } | null = null;
+
+  constructor(private readonly daemon: FakeDockerDaemon) {
+    const previous = daemon.onExec;
+    daemon.onExec = (exec) => {
+      const command = exec.cmd.join(' ');
+      if (command.includes(FAKE_RELAY_SCRIPT)) return this.relay(exec);
+      if (command.includes(FAKE_BROWSER_DIR) && /kill -[A-Z]+/.test(command)) return this.signal(exec);
+      if (command.includes(FAKE_BROWSER_DIR) && exec.attachStdin) return this.chromium(exec);
+      return previous?.(exec) ?? {};
+    };
+  }
+
+  chromiumExecs(): FakeExec[] {
+    return this.daemon.execs().filter((exec) => isChromium(exec));
+  }
+
+  relayExecs(): FakeExec[] {
+    return this.daemon.execs().filter((exec) => exec.cmd.join(' ').includes(FAKE_RELAY_SCRIPT));
+  }
+
+  /** A CDP event on every live relay, as the page would send it. */
+  emitEvent(method: string, params: Record<string, unknown> = {}): void {
+    for (const relay of this.relayExecs().filter((exec) => exec.running)) {
+      this.daemon.emitFramed(relay.id, `${JSON.stringify({ method, params })}\n`);
+    }
+  }
+
+  /**
+   * Every Chromium (only `containerId`'s, when given) exits on its own, a crash,
+   * and takes its relay with it; `stderr` is its last words.
+   */
+  crash(exitCode = 139, stderr?: string, containerId?: string): void {
+    for (const exec of this.chromiumExecs().filter((entry) => entry.running && (containerId === undefined || entry.containerId === containerId))) {
+      if (stderr !== undefined) this.daemon.emitFramed(exec.id, stderr, 'stderr');
+      this.chromiumGone(exec, exitCode);
+    }
+  }
+
+  /** Every relay dies while its Chromium keeps running. */
+  killRelays(): void {
+    for (const exec of this.relayExecs().filter((entry) => entry.running)) {
+      this.daemon.emitFramed(exec.id, 'cdp-relay: killed\n', 'stderr');
+      this.daemon.finish(exec.id, 1);
+    }
+  }
+
+  private chromium(exec: FakeExec): ExecScript {
+    const failure = this.startFailure;
+    if (failure !== null) {
+      setImmediate(() => this.daemon.finish(exec.id, failure.exitCode));
+      return { stderr: failure.stderr };
+    }
+    return {
+      stderr: 'DevTools listening on ws://127.0.0.1:9222/devtools/browser/fake\n',
+      // Chromium does not read stdin; only a signal or a crash ends it.
+      onStdinEnd: () => {},
+    };
+  }
+
+  private relay(exec: FakeExec): ExecScript {
+    const browser = this.chromiumExecs().find((entry) => entry.running && entry.containerId === exec.containerId);
+    if (browser === undefined) {
+      setImmediate(() => this.daemon.finish(exec.id, 1));
+      return { stderr: "cdp-relay: Chromium's DevTools endpoint did not answer: ECONNREFUSED\n" };
+    }
+    return {
+      stdout: `${JSON.stringify({ relay: 'ready', targetId: this.targetId, url: 'about:blank' })}\n`,
+      onLine: (line) => {
+        if (line.trim() === '') return;
+        const command = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> };
+        const params = command.params ?? {};
+        this.commands.push({ execId: exec.id, id: command.id, method: command.method, params });
+        if (this.silent) return;
+        const reply = this.replies.get(command.method)?.(params) ?? { result: {} };
+        const message = 'error' in reply ? { id: command.id, error: { code: -32000, message: reply.error } } : { id: command.id, result: reply.result };
+        this.daemon.emitFramed(exec.id, `${JSON.stringify(message)}\n`);
+      },
+    };
+  }
+
+  /** `browserSignalSpec`: the pid file names the session's Chromium, which the signal ends. */
+  private signal(exec: FakeExec): ExecScript {
+    const command = exec.cmd.join(' ');
+    const signal = /kill -([A-Z]+)/.exec(command)?.[1] ?? 'TERM';
+    const pidFile = /\/tmp\/\.chief-browser\/[^ ;]+\.pid/.exec(command)?.[0];
+    const target = this.chromiumExecs().find(
+      (entry) =>
+        entry.running && entry.containerId === exec.containerId && pidFile !== undefined && entry.cmd.join(' ').includes(pidFile),
+    );
+    if (target === undefined) return { stdout: '' };
+    this.signals.push(signal);
+    this.chromiumGone(target, SIGNAL_EXIT[signal] ?? 143);
+    return { stdout: 'chief-signalled\n' };
+  }
+
+  private chromiumGone(exec: FakeExec, exitCode: number): void {
+    this.daemon.finish(exec.id, exitCode);
+    for (const relay of this.relayExecs().filter((entry) => entry.running && entry.containerId === exec.containerId)) {
+      this.daemon.emitFramed(relay.id, 'cdp-relay: the DevTools connection closed\n', 'stderr');
+      this.daemon.finish(relay.id, 1);
+    }
+  }
+}
+
+function isChromium(exec: FakeExec): boolean {
+  const command = exec.cmd.join(' ');
+  return exec.attachStdin && command.includes(FAKE_BROWSER_DIR) && command.includes('chromium') && !/kill -[A-Z]+/.test(command);
+}

@@ -491,6 +491,45 @@ export async function deleteRepository(id: string): Promise<void> {
   await api<void>(`/api/repositories/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/** Mirrors the server's `RepositoryLoginView`: the password is never returned. */
+export interface RepositoryLogin {
+  id: string;
+  label: string;
+  url: string;
+  username: string;
+  created_at: string;
+}
+
+export interface RepositoryLoginInput {
+  /** Omit or leave blank for the URL's host plus the username. */
+  label?: string;
+  url: string;
+  username: string;
+  password: string;
+}
+
+export async function fetchRepositoryLogins(repositoryId: string, signal?: AbortSignal): Promise<RepositoryLogin[]> {
+  const body = await api<{ logins: RepositoryLogin[] }>(
+    `/api/repositories/${encodeURIComponent(repositoryId)}/logins`,
+    signal ? { signal } : {},
+  );
+  return body.logins;
+}
+
+export async function createRepositoryLogin(repositoryId: string, input: RepositoryLoginInput): Promise<RepositoryLogin> {
+  return api<RepositoryLogin>(`/api/repositories/${encodeURIComponent(repositoryId)}/logins`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteRepositoryLogin(repositoryId: string, loginId: string): Promise<void> {
+  await api<void>(
+    `/api/repositories/${encodeURIComponent(repositoryId)}/logins/${encodeURIComponent(loginId)}`,
+    { method: 'DELETE' },
+  );
+}
+
 /** Runs `git ls-remote` in a runner container; a failed remote still resolves. */
 export async function testRepositoryConnection(id: string): Promise<ConnectionTestResult> {
   return api<ConnectionTestResult>(
@@ -565,6 +604,8 @@ export interface Session {
   cloned: boolean;
   /** Whether the pull request this session opens is reviewed automatically. */
   codeReview: boolean;
+  /** The feedback the session was started from; null when it was not. */
+  feedback: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -621,7 +662,15 @@ export interface SessionInput {
   scheduledStartAt?: string | null;
   /** Omit to fall back to the global "code review by default" setting. */
   codeReview?: boolean;
+  /**
+   * What a user reported; planning then opens on it. At most
+   * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
+   */
+  feedback?: string;
 }
+
+/** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */
+export const MAX_FEEDBACK_LENGTH = 4000;
 
 /** The clone's outcome; `ok: false` is an answer, not a failed request. */
 export interface SessionSetup {

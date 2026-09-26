@@ -12,6 +12,7 @@ import {
 import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
 import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
+import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
@@ -165,6 +166,8 @@ export interface VoiceCallDeps {
   readonly earcons?: CallEarcons;
   /** The providers' own usage numbers (US-023); without them the meter is local only. */
   readonly usage?: CallUsageSources;
+  /** The "watch with me" card (voice feedback US-007); without it the card never shows. */
+  readonly browser?: BrowserAskDeps;
 }
 
 /** Where a call reads what the providers say it spent (US-023). */
@@ -275,6 +278,8 @@ export class VoiceCall {
   readonly state: VoiceCallState;
   /** The one pending server-enforced confirmation (US-011), kept in `state`. */
   readonly confirmations: ConfirmationGate;
+  /** The session agent's "watch with me" cards (voice feedback US-007). */
+  private readonly browserAsks: BrowserAsks | null;
   private transport: CallTransport | null = null;
   private tts: CallTts | null = null;
   private sttMode: SttMode = 'openrouter';
@@ -296,6 +301,8 @@ export class VoiceCall {
   private hangUpAfter = false;
   /** A session focus whose agent still has to be started and heard (docs/voice-plan.md §11 step 4–5). */
   private greetPending: string | null = null;
+  /** A session chief created from feedback: the call goes to its agent once its setup is announced (voice feedback US-003). */
+  private handOffOnSetup: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
@@ -340,6 +347,27 @@ export class VoiceCall {
       send: (message) => this.send(message),
       newId: () => randomUUID(),
     });
+    this.browserAsks =
+      deps.browser === undefined ? null : new BrowserAsks(deps.browser, { clock: deps.clock, send: (message) => this.send(message) });
+  }
+
+  /**
+   * The session agent called `open_browser_with_operator` (voice feedback
+   * US-007): its browser starts and the panel shows the card.
+   */
+  askBrowser(sessionId: string): void {
+    if (this.ended) return;
+    void this.browserAsks?.ask(sessionId);
+  }
+
+  /** That tool call is over on the agent's side; a card it still had goes away. */
+  browserToolDone(sessionId: string): void {
+    this.browserAsks?.toolDone(sessionId);
+  }
+
+  /** The session agent called a browser tool (US-012): the browser is in use, its idle clock starts over. */
+  browserActivity(sessionId: string): void {
+    this.deps.browser?.browsers.touch?.(sessionId);
   }
 
   get id(): string {
@@ -377,6 +405,8 @@ export class VoiceCall {
       this.sendState();
       return;
     }
+    // The call moved elsewhere: the feedback session no longer takes it over.
+    this.handOffOnSetup = null;
     this.state.focus = focus;
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     if (this.persisted) {
@@ -388,6 +418,24 @@ export class VoiceCall {
     this.send({ type: 'ui', action: 'navigate', path: `/sessions/${encodeURIComponent(sessionId)}` });
     this.greetPending = sessionId;
     if (this.state.activeTurn === null) void this.enqueue((controller) => this.greet(controller));
+  }
+
+  /**
+   * Once `sessionId`'s setup succeeds, and chief has announced it, the call
+   * moves to the session's agent, which opens on the session's feedback. The
+   * call ending, the focus moving or the setup failing first drops it.
+   */
+  handOffWhenReady(sessionId: string): void {
+    if (this.ended) return;
+    this.handOffOnSetup = sessionId;
+  }
+
+  /** Makes the handoff {@link handOffWhenReady} promised, if it still stands. */
+  private handOff(sessionId: string): void {
+    if (this.handOffOnSetup !== sessionId) return;
+    this.handOffOnSetup = null;
+    if (this.ended || this.state.focus.kind !== 'chief') return;
+    this.setFocus({ kind: 'session', sessionId });
   }
 
   /**
@@ -565,6 +613,14 @@ export class VoiceCall {
       case 'confirm.resolve':
         this.submitResolution(message.id, message.accept);
         return;
+      case 'browser.answer':
+        this.touch();
+        void this.browserAsks?.answer(message);
+        return;
+      case 'browser.cancel':
+        this.touch();
+        void this.browserAsks?.cancel(message.id);
+        return;
       case 'metrics': {
         // Only the first report counts; a turn the call no longer tracks is ignored.
         if (this.turnTimes.get(message.turn)?.firstAudioPlayed !== null) return;
@@ -600,6 +656,12 @@ export class VoiceCall {
     this.clearAck();
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
+    // An open "watch with me" card is answered `cancelled`, so the tool stops waiting.
+    const browserAsks = this.browserAsks?.cancelAll();
+    // Nobody is left to look at the session browsers (US-012): they stop with the call.
+    const browsersStopped = this.deps.browser?.browsers.stopAll?.().catch((cause: unknown) => {
+      logger.warn('could not stop the session browsers', { call: this.id, error: String(cause) });
+    });
     this.state.activeTurn?.abort(new Error('call ended'));
     this.dropSpeculation();
     this.state.phase = 'ended';
@@ -613,6 +675,8 @@ export class VoiceCall {
     this.deps.onEnded?.(this);
     if (this.persisted) this.settling = this.settle();
     await this.running.catch(() => undefined);
+    await browserAsks;
+    await browsersStopped;
     await this.tts?.close();
   }
 
@@ -1364,9 +1428,15 @@ export class VoiceCall {
     // points at it, and chief says so even below `all` verbosity.
     const planned = event.kind === 'prd.valid' && this.agents.has(`session:${event.sessionId}`);
     if (planned) this.send({ type: 'ui', action: 'highlight', target: 'prd' });
-    if (!isAnnounced(event.kind, settings.eventVerbosity) && !(planned && settings.eventVerbosity !== 'none')) return;
+    const handOff = event.kind === 'session.setup' && event.sessionId === this.handOffOnSetup;
+    if (handOff && !event.ok) this.handOffOnSetup = null;
+    const announced = isAnnounced(event.kind, settings.eventVerbosity) || (planned && settings.eventVerbosity !== 'none');
     const queued: VoiceEvent = { kind: event.kind, text, sessionId: eventSessionId(event) };
-    if (!this.concerns(queued)) return;
+    if (!announced || !this.concerns(queued)) {
+      // Nothing to wait for: the handoff happens now.
+      if (handOff && event.ok) this.handOff(event.sessionId);
+      return;
+    }
     this.state.queue.push(queued);
     this.scheduleDrain();
   }
@@ -1421,7 +1491,16 @@ export class VoiceCall {
     const events = this.state.queue.splice(0).filter((event) => this.concerns(event));
     if (events.length === 0) return;
     const text = events.map((event) => `[event] ${event.text}`).join('\n');
-    void this.enqueue((controller) => this.runTurn(text, controller, {}, undefined, 'event'));
+    const handOff = this.handOffOnSetup;
+    const ready = handOff !== null && events.some((event) => event.kind === 'session.setup' && event.sessionId === handOff);
+    void this.enqueue(async (controller) => {
+      await this.runTurn(text, controller, {}, undefined, 'event');
+      // Chief has said the session is ready; the session's agent speaks next. An
+      // operator who talked over the announcement is answered by chief instead.
+      if (!ready) return;
+      if (controller.signal.aborted) this.handOffOnSetup = null;
+      else this.handOff(handOff);
+    });
   }
 
   /* ---------------------------------------------------------------- idle */

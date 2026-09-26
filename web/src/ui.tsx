@@ -92,6 +92,16 @@ export function Badge({
   );
 }
 
+/** Marks a session started from feedback; the same badge on the list and the session page. */
+export function FeedbackBadge({ session }: { readonly session: Pick<Session, 'feedback'> }) {
+  if (session.feedback === null) return null;
+  return (
+    <Badge tone="review" title="Started from feedback">
+      Feedback
+    </Badge>
+  );
+}
+
 export function StatusBadge({ session }: { readonly session: Pick<Session, 'status' | 'prUrl'> }) {
   // Once a session is about its pull request, the badge is also the way to it:
   // the state and the thing in that state are the same click.
