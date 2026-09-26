@@ -161,6 +161,13 @@ export interface Session {
    */
   readonly openPullRequest: boolean;
   /**
+   * Whether the last delivery ended by pushing the feature branch without
+   * opening a pull request, because {@link openPullRequest} was off. Stored as
+   * 0/1. It is what tells that ending apart from a recurring-task run that
+   * committed nothing: both finish with no pull request.
+   */
+  readonly pushedOnly: boolean;
+  /**
    * The recurring task this session is a run of (US-001), and null for every
    * session a human started. Nulled if that task is deleted; the run itself is
    * an ordinary session and outlives it.
@@ -219,6 +226,7 @@ export interface UpdateSessionInput {
   readonly waitingUntil?: string | null;
   readonly codeReview?: boolean;
   readonly openPullRequest?: boolean;
+  readonly pushedOnly?: boolean;
   readonly recurringTaskId?: string | null;
   readonly prDescription?: string | null;
   readonly feedback?: string | null;
@@ -243,6 +251,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   waitingUntil: 'waiting_until',
   codeReview: 'code_review',
   openPullRequest: 'open_pull_request',
+  pushedOnly: 'pushed_only',
   recurringTaskId: 'recurring_task_id',
   prDescription: 'pr_description',
   feedback: 'feedback',
@@ -295,6 +304,7 @@ export function mapSession(row: Row): Session {
     waitingUntil: nullableText(row, 'waiting_until'),
     codeReview: integer(row, 'code_review') === 1,
     openPullRequest: integer(row, 'open_pull_request') !== 0,
+    pushedOnly: integer(row, 'pushed_only') === 1,
     recurringTaskId: nullableText(row, 'recurring_task_id'),
     prDescription: nullableText(row, 'pr_description'),
     feedback: nullableText(row, 'feedback'),
@@ -323,6 +333,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     waitingUntil: null,
     codeReview: input.codeReview ?? false,
     openPullRequest: input.openPullRequest ?? true,
+    pushedOnly: false,
     recurringTaskId: input.recurringTaskId ?? null,
     prDescription: null,
     feedback: input.feedback ?? null,

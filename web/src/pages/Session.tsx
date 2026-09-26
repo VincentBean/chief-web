@@ -329,7 +329,7 @@ export function Session() {
   const cleanRun = isCleanRun(session);
   // Pull request turned off: the branch was pushed and that is the delivery.
   // There is deliberately no way to open a pull request afterwards.
-  const pushedOnly = status === 'finished' && session.prUrl === null && !session.openPullRequest && !cleanRun;
+  const pushedOnly = status === 'finished' && session.prUrl === null && session.pushedOnly;
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -710,9 +710,9 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
               : status === 'finished'
                 ? isCleanRun(session)
                   ? 'nothing to deliver'
-                  : session.openPullRequest
-                    ? 'no pull request'
-                    : 'branch pushed, pull request off'
+                  : session.pushedOnly
+                    ? 'branch pushed, pull request off'
+                    : 'no pull request'
                 : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };

@@ -609,6 +609,8 @@ export interface Session {
   codeReview: boolean;
   /** Whether delivery opens a pull request, or only pushes the branch. */
   openPullRequest: boolean;
+  /** Whether the delivery pushed the branch and stopped, pull request off. */
+  pushedOnly: boolean;
   /** The feedback the session was started from; null when it was not. */
   feedback: string | null;
   createdAt: string;
@@ -1237,6 +1239,7 @@ export const RECURRING_TASK_OUTCOMES = [
   'skipped',
   'fire-failed',
   'pr-opened',
+  'pushed',
   'clean',
   'failed',
 ] as const;

@@ -408,7 +408,7 @@ export class DeliveryService implements BuildCompletion {
     // The URL goes on the session as soon as the pull request exists, before
     // any review work: it exists from here on, whatever comes next, and a
     // session left `failed` further down the chain still has to link to it.
-    updateSession(this.db, session.id, { prUrl: opened.pullRequest.url });
+    updateSession(this.db, session.id, { prUrl: opened.pullRequest.url, pushedOnly: false });
     this.events?.publish({
       kind: 'pr.opened',
       sessionId: session.id,
@@ -521,6 +521,7 @@ export class DeliveryService implements BuildCompletion {
       status: 'finished',
       lastError: null,
       failureStage: null,
+      pushedOnly: false,
     });
 
     return {
@@ -547,6 +548,7 @@ export class DeliveryService implements BuildCompletion {
       status: 'finished',
       lastError: null,
       failureStage: null,
+      pushedOnly: true,
     });
 
     return {

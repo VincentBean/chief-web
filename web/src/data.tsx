@@ -186,11 +186,19 @@ export function isEnded(session: Pick<Session, 'status'>): boolean {
  * no branch and opened no pull request — the point of a nightly check that
  * finds nothing. That makes it the one ended session with no pull request that
  * is not missing one, so it says so on screen and is offered no retry.
+ *
+ * A run with pull request turned off also finishes with none, having pushed
+ * its commits; `pushedOnly` is what keeps that one out.
  */
 export function isCleanRun(
-  session: Pick<Session, 'status' | 'prUrl' | 'recurringTaskId'>,
+  session: Pick<Session, 'status' | 'prUrl' | 'recurringTaskId' | 'pushedOnly'>,
 ): boolean {
-  return session.status === 'finished' && session.prUrl === null && session.recurringTaskId !== null;
+  return (
+    session.status === 'finished' &&
+    session.prUrl === null &&
+    session.recurringTaskId !== null &&
+    !session.pushedOnly
+  );
 }
 
 /**

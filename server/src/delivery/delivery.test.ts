@@ -858,6 +858,7 @@ describe('retrying a delivery', () => {
     assert.equal(result.code, 'pushed');
     assert.equal(result.prUrl, null);
     assert.equal(opener.calls.length, 1, 'only the first, failed attempt asked GitHub');
+    assert.equal(world.reload().pushedOnly, true);
     const delivered = world.reload();
     assert.equal(delivered.status, 'finished');
     assert.equal(delivered.prUrl, null);
@@ -2155,6 +2156,7 @@ describe('delivering a scheduled run that changed nothing (US-006)', () => {
     assert.equal(result.status, 'finished');
     assert.equal(result.prUrl, null);
     assert.match(result.message, /committed nothing on "chief\/add-login"/);
+    assert.equal(world.reload().pushedOnly, false, 'a clean run pushed nothing');
   });
 
   it('does not publish the branch after a story either', async () => {
@@ -2483,6 +2485,7 @@ describe('delivering a session with pull request turned off', () => {
     assert.equal(finished.status, 'finished');
     assert.equal(finished.lastError, null);
     assert.equal(finished.failureStage, null);
+    assert.equal(finished.pushedOnly, true);
   });
 
   it('still fails the session when the push is rejected', async () => {

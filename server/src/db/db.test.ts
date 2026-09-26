@@ -68,6 +68,9 @@ const OPEN_PULL_REQUEST_DEFAULT_MIGRATION = '0020_repository_open_pull_request_d
 /** The migration under test in 'adds `open_pull_request` to existing sessions'. */
 const SESSION_OPEN_PULL_REQUEST_MIGRATION = '0021_session_open_pull_request';
 
+/** The migration under test in 'keeps every task, occurrence and run link'. */
+const RECURRING_OUTCOME_PUSHED_MIGRATION = '0023_recurring_task_outcome_pushed';
+
 /** The migration under test in 'adds `feedback` to existing sessions'. */
 const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 
@@ -641,6 +644,66 @@ describe('session open pull request migration', () => {
     const off = createSession(db, { ...base, name: 'no-pr', openPullRequest: false });
     assert.equal(off.openPullRequest, false);
     assert.equal(getSession(db, off.id)?.openPullRequest, false);
+
+    closeDatabase(db);
+  });
+});
+
+describe('recurring task `pushed` outcome migration', () => {
+  it('keeps every task, occurrence and run link, and accepts `pushed`', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === RECURRING_OUTCOME_PUSHED_MIGRATION);
+    assert.ok(index > 0, `${RECURRING_OUTCOME_PUSHED_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-26T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO recurring_tasks
+         (id, repository_id, name, prompt, cron_expression, base_branch, pr_target,
+          last_outcome, created_at, updated_at)
+       VALUES ('task-1', ?, 'rector', 'Run rector.', '0 3 * * *', 'develop', 'develop', 'clean', ?, ?)`,
+    ).run(repository.id, at, at);
+    const sessionId = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          recurring_task_id, created_at, updated_at)
+       VALUES (?, ?, 'rector-1', 'finished', 'develop', 'chief/rector-1', 'develop', 'task-1', ?, ?)`,
+    ).run(sessionId, repository.id, at, at);
+    db.prepare(
+      `INSERT INTO recurring_task_occurrences
+         (recurring_task_id, occurred_at, outcome, detail, session_id, created_at, updated_at)
+       VALUES ('task-1', ?, 'clean', 'nothing', ?, ?, ?)`,
+    ).run(at, sessionId, at, at);
+
+    assert.ok(runMigrations(db).includes(RECURRING_OUTCOME_PUSHED_MIGRATION));
+
+    // Dropping the old tables neither nulled the run's link nor took the history.
+    assert.equal(getSession(db, sessionId)?.recurringTaskId, 'task-1');
+    assert.equal(getSession(db, sessionId)?.pushedOnly, false);
+    const occurrences = db
+      .prepare('SELECT outcome, session_id FROM recurring_task_occurrences WHERE recurring_task_id = ?')
+      .all('task-1')
+      .map((row) => ({ ...row }));
+    assert.deepEqual(occurrences, [{ outcome: 'clean', session_id: sessionId }]);
+
+    db.prepare(`UPDATE recurring_tasks SET last_outcome = 'pushed' WHERE id = 'task-1'`).run();
+    db.prepare(`UPDATE recurring_task_occurrences SET outcome = 'pushed'`).run();
+    assert.throws(() => db.prepare(`UPDATE recurring_task_occurrences SET outcome = 'nope'`).run());
+    const leftovers = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_backup'")
+      .all();
+    assert.deepEqual(leftovers, []);
 
     closeDatabase(db);
   });

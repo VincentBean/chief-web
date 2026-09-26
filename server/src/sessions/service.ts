@@ -159,6 +159,11 @@ export interface SessionView {
    */
   readonly openPullRequest: boolean;
   /**
+   * Whether the last delivery pushed the feature branch and stopped there,
+   * pull request turned off — as opposed to a clean run, which pushed nothing.
+   */
+  readonly pushedOnly: boolean;
+  /**
    * The feedback the session was started from (voice feedback US-001), or
    * `null` for a session that was not started from feedback.
    */
@@ -766,6 +771,7 @@ export class SessionService {
       waitingUntil: session.waitingUntil,
       codeReview: session.codeReview,
       openPullRequest: session.openPullRequest,
+      pushedOnly: session.pushedOnly,
       feedback: session.feedback,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),

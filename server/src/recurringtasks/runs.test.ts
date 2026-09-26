@@ -523,6 +523,24 @@ describe('settling a recurring task run', () => {
     assert.equal(settlementOf(null)?.outcome, 'failed');
   });
 
+  it('tells a push-only run apart from one that committed nothing', async () => {
+    const f = await fixture();
+    const task = f.task();
+    await f.runner.fireDue();
+    const run = listSessions(f.db, {})[0];
+    assert.ok(run);
+
+    updateSession(f.db, run.id, { status: 'finished', openPullRequest: false, pushedOnly: true });
+    assert.equal(f.runner.settle(), 1);
+
+    const occurrence = latestRecurringTaskOccurrence(f.db, task.id);
+    assert.equal(occurrence?.outcome, 'pushed');
+    assert.equal(occurrence?.detail, `Pushed "${run.featureBranch}"; pull request is turned off for this run.`);
+    assert.equal(getRecurringTask(f.db, task.id)?.lastOutcome, 'pushed');
+    // Pull request off but nothing pushed is still a clean run.
+    assert.equal(settlementOf(session({ status: 'finished', openPullRequest: false }))?.outcome, 'clean');
+  });
+
   it('updates the started row, and the task, when the run opens a pull request', async () => {
     const f = await fixture();
     const task = f.task();
@@ -598,6 +616,7 @@ function session(overrides: Partial<Session>): Session {
     waitingUntil: null,
     codeReview: false,
     openPullRequest: true,
+    pushedOnly: false,
     recurringTaskId: 'task-1',
     prDescription: null,
     feedback: null,
