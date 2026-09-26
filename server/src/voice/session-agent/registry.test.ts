@@ -271,6 +271,14 @@ describe('session voice agents', () => {
       });
     }
 
+    it('opens a feedback session on the feedback, not on what to build', () => {
+      const session = newSession('feedback-greet');
+      updateSession(db, session.id, { feedback: 'The save button does nothing.' });
+      const opening = registry.openingPrompt(session.id, null);
+      assert.match(opening, /<feedback>\nThe save button does nothing\.\n<\/feedback>/);
+      assert.match(opening, /asking one question about the feedback quoted above; do not ask what they want to build\.$/);
+    });
+
     it('greets with a question when a Q&A conversation starts without words', () => {
       const session = newSession('qa-greet', 'ready');
       assert.match(registry.openingPrompt(session.id, null), /asking what they want to know\.$/);

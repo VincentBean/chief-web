@@ -1,6 +1,8 @@
 export {
   DEFAULT_CONTEXT,
   editPlanningPrompt,
+  FEEDBACK_BLOCK_HEADING,
+  FEEDBACK_CONTEXT,
   initPlanningPrompt,
   MAX_CONTEXT_LENGTH,
   containerPrdDir,

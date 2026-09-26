@@ -272,6 +272,7 @@ export class PlanningService {
             featureBranch: session.featureBranch,
             repositoryName: repository?.name ?? session.repositoryId,
             context: input.context,
+            feedback: session.feedback,
           });
 
     let terminal: TerminalView;

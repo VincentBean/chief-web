@@ -35,7 +35,20 @@ export interface PlanningPromptInput {
   readonly repositoryName: string;
   /** Free text from the operator describing what should be built. */
   readonly context?: string | undefined;
+  /**
+   * The session's feedback (voice feedback sessions US-001): when present the
+   * conversation plans a fix for it rather than asking what to build.
+   */
+  readonly feedback?: string | null | undefined;
 }
+
+/** What a feedback session's context slot says instead of chief's default sentence. */
+export const FEEDBACK_CONTEXT =
+  'This is a feedback session: the operator reported a problem, quoted in the section ' +
+  '"chief-web: this session starts from feedback" below. Plan a fix for it.';
+
+/** The heading of the block {@link feedbackBlock} appends; present at most once in a prompt. */
+export const FEEDBACK_BLOCK_HEADING = '## chief-web: this session starts from feedback';
 
 /**
  * chief's init prompt with the PRD directory and context substituted.
@@ -102,8 +115,59 @@ Rules chief-web enforces when it reads the file:
 - Write only the PRD. Do not create, edit or delete any other file in the repository.`;
 }
 
+/**
+ * The planning prompt for `mode`, plus {@link feedbackBlock} when the session
+ * has feedback — in both modes, so a conversation resumed once a PRD exists
+ * still knows what it is fixing.
+ */
 export function planningPrompt(mode: PlanningMode, input: PlanningPromptInput): string {
-  return mode === 'edit' ? editPlanningPrompt(input.sessionName) : initPlanningPrompt(input);
+  const body = mode === 'edit' ? editPlanningPrompt(input.sessionName) : initPlanningPrompt(input);
+  const feedback = sessionFeedback(input);
+  return feedback === null ? body : body + feedbackBlock(feedback);
+}
+
+/** The feedback as the prompt quotes it: trimmed, cut at {@link MAX_CONTEXT_LENGTH}, null when blank. */
+function sessionFeedback(input: PlanningPromptInput): string | null {
+  const feedback = (input.feedback ?? '').trim().slice(0, MAX_CONTEXT_LENGTH);
+  return feedback === '' ? null : feedback;
+}
+
+/**
+ * The feedback variant's instructions: the feedback verbatim between tags (a
+ * fence could be closed by the feedback itself), then where to look, when to
+ * reproduce, and the `## Feedback` section the PRD has to open with.
+ */
+function feedbackBlock(feedback: string): string {
+  return `
+
+---
+
+${FEEDBACK_BLOCK_HEADING}
+
+The operator gave this feedback, quoted verbatim between the tags:
+
+<feedback>
+${feedback}
+</feedback>
+
+Plan a fix for this feedback; do not ask the operator what they want to build.
+
+1. Find where the feedback lives in the code: the pages, components and server code involved.
+2. When a browser is available to you, reproduce the problem before writing any story: visit the
+   pages involved and note exactly what you did and what you saw. Without a browser, say so and
+   work from the code.
+3. Ask the operator only what the feedback and the code leave open.
+
+The PRD must contain a \`## Feedback\` section after the introduction and before the first story,
+with:
+
+- the feedback above, verbatim;
+- the pages visited, as paths only (\`/settings/billing\`, never a full URL with a host, a token or
+  a password — never write credentials into the PRD);
+- the reproduction steps;
+- what was observed.
+
+The stories then fix what that section describes.`;
 }
 
 /**
@@ -136,6 +200,6 @@ function planningContext(input: PlanningPromptInput): string {
     `You are planning the chief-web session "${input.sessionName}" in the repository ` +
       `"${input.repositoryName}". The work will be built on the branch ${input.featureBranch}.`,
     '',
-    supplied === '' ? DEFAULT_CONTEXT : supplied,
+    supplied !== '' ? supplied : sessionFeedback(input) === null ? DEFAULT_CONTEXT : FEEDBACK_CONTEXT,
   ].join('\n');
 }

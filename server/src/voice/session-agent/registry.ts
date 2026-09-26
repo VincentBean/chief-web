@@ -146,6 +146,7 @@ export class SessionAgentRegistry {
       featureBranch: session.featureBranch,
       repositoryName: getRepository(this.deps.db, session.repositoryId)?.name ?? session.repositoryId,
       firstWords,
+      feedback: session.feedback,
     });
   }
 

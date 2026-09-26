@@ -22,10 +22,22 @@ export function voiceRulesPrompt(language: string): string {
 - Speak ${languageName(language)} unless the operator switches language.`;
 }
 
-/** docs/voice-plan.md Appendix A.2 part 2: the block appended to chief's planning prompt. */
-export function voiceModeOverrides(mode: PlanningMode, prdPath: string, context: string | null): string {
+/**
+ * docs/voice-plan.md Appendix A.2 part 2: the block appended to chief's planning prompt.
+ * A feedback session opens on the feedback quoted above rather than on what to build.
+ */
+export function voiceModeOverrides(
+  mode: PlanningMode,
+  prdPath: string,
+  context: string | null,
+  hasFeedback = false,
+): string {
   const said = context === null || context.trim() === '' ? '' : ` (they said: "${context.trim()}")`;
-  const ask = mode === 'edit' ? 'what they want to change in the PRD' : 'what they want to build';
+  const ask = hasFeedback
+    ? 'one question about the feedback quoted above; do not ask what they want to build'
+    : mode === 'edit'
+      ? 'what they want to change in the PRD'
+      : 'what they want to build';
   return `
 
 ---
@@ -57,8 +69,10 @@ export function voicePlanningPrompt(mode: PlanningMode, input: VoicePlanningProm
     featureBranch: input.featureBranch,
     repositoryName: input.repositoryName,
     context: firstWords === null ? undefined : `The operator opened the conversation by voice: "${firstWords}"`,
+    feedback: input.feedback,
   });
-  return body + voiceModeOverrides(mode, `${containerPrdDir(input.sessionName)}/prd.md`, firstWords);
+  const hasFeedback = (input.feedback ?? '').trim() !== '';
+  return body + voiceModeOverrides(mode, `${containerPrdDir(input.sessionName)}/prd.md`, firstWords, hasFeedback);
 }
 
 export interface VoiceQaPromptInput {
