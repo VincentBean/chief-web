@@ -66,6 +66,8 @@ export interface VadSink {
   speechCancel(): void;
   /** One utterance, 16 kHz mono PCM16 WAV. */
   utterance(wav: ArrayBuffer): void;
+  /** The same speech goes on after a forced split: the next {@link utterance} continues it. */
+  speechContinue?(): void;
 }
 
 export interface Vad {
@@ -140,7 +142,10 @@ export async function startVad(opts: {
       speechFrames = 0;
       const continuation = splitAt !== null && performance.now() - splitAt < SPLIT_CONTINUATION_MS;
       splitAt = null;
-      if (continuation) return;
+      if (continuation) {
+        opts.sink.speechContinue?.();
+        return;
+      }
       const mode = opts.playing() ? opts.bargeIn() : 'on';
       gate = mode === 'on' ? 'open' : mode === 'careful' ? 'waiting' : 'ignored';
       confidentFrames = 0;
