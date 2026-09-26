@@ -106,3 +106,10 @@ export function editedRecurringTaskIdFromPath(pathname: string): string | null {
   if (match === null) return null;
   return decodeURIComponent(match[1] ?? '');
 }
+
+/** `/calls/<id>` → the call id, or null for any other path (voice US-024). */
+export function callIdFromPath(pathname: string): string | null {
+  const match = /^\/calls\/([^/]+)\/?$/.exec(pathname);
+  if (match === null) return null;
+  return decodeURIComponent(match[1] ?? '');
+}

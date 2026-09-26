@@ -2,7 +2,9 @@ import type { Config } from '../config.js';
 import {
   type Database,
   getQueuedBuild,
+  getRecurringTask,
   getSession,
+  latestRecurringTaskOccurrence,
   latestRecurringTaskRunSession,
   listDueRecurringTasks,
   listUnsettledRecurringTaskOccurrences,
@@ -24,6 +26,8 @@ import { prdPathFor } from '../prd/index.js';
 import { hasOpenPullRequest, pullRequestNumberOf } from '../prsync/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView } from '../sessions/index.js';
 import { generatedPrd, runSessionName } from './prd.js';
+import { RecurringTaskError } from './service.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * Firing a recurring task into a session (US-004).
@@ -67,6 +71,13 @@ export interface RecurringTaskFiring {
   settle(): number;
 }
 
+/** What {@link RecurringTaskRunner.fireNow} did: whether a run started, and the occurrence it recorded. */
+export interface FireNowResult {
+  readonly fired: boolean;
+  /** The history row this firing wrote; `null` only if it could not be written. */
+  readonly occurrence: RecurringTaskOccurrence | null;
+}
+
 export class RecurringTaskRunner implements RecurringTaskFiring {
   constructor(
     private readonly config: Config,
@@ -79,6 +90,8 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
      */
     private readonly sessions: () => RecurringTaskSessions | null,
     private readonly builds: RecurringTaskBuilds,
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   async fireDue(now: string = nowIso()): Promise<number> {
@@ -105,6 +118,29 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
       if (await this.fire(task, sessions, now)) fired += 1;
     }
     return fired;
+  }
+
+  /**
+   * Fires one occurrence of the task right now, by hand (voice US-014).
+   *
+   * Outside the schedule: `next_run_at` is left exactly where the expression
+   * put it, so the scheduled occurrence still fires as planned. Everything
+   * else is the scheduled path — the same skip rules (a run still going or a
+   * pull request still open passes this one as `skipped`), the same session,
+   * the same history row. A paused task may still be run by hand: pausing
+   * stops the schedule, not the operator.
+   */
+  async fireNow(taskId: string, now: string = nowIso()): Promise<FireNowResult> {
+    const task = getRecurringTask(this.db, taskId);
+    if (task === null) {
+      throw new RecurringTaskError(404, 'recurring_task_not_found', 'No such recurring task.');
+    }
+    const sessions = this.sessions();
+    if (sessions === null) {
+      throw new RecurringTaskError(503, 'sessions_unavailable', 'The session service is not ready yet.');
+    }
+    const fired = await this.launch(task, sessions, now);
+    return { fired, occurrence: latestRecurringTaskOccurrence(this.db, task.id) };
   }
 
   /**
@@ -169,11 +205,19 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
     sessions: RecurringTaskSessions,
     now: string,
   ): Promise<boolean> {
-    const firedAt = new Date(now);
-    if (!this.reschedule(task, firedAt)) return false;
-
+    if (!this.reschedule(task, new Date(now))) return false;
     // Asked after the reschedule, so a skipped occurrence costs the task the
     // same one slot a fired one does and the next one is already booked.
+    return this.launch(task, sessions, now);
+  }
+
+  /** One occurrence, whether the schedule or the operator asked for it. */
+  private async launch(
+    task: RecurringTask,
+    sessions: RecurringTaskSessions,
+    now: string,
+  ): Promise<boolean> {
+    const firedAt = new Date(now);
     const skip = this.skipReason(task);
     if (skip !== null) return this.skipped(task, now, skip);
 
@@ -243,6 +287,7 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
     }
 
     logger.info('recurring task fired', { task: task.id, session: run.id, run: run.name });
+    this.events?.publish({ kind: 'task.fired', sessionId: run.id, task: task.name, name: run.name });
     return true;
   }
 
@@ -495,8 +540,9 @@ export function createRecurringTaskRunner(
   db: Database,
   sessions: () => RecurringTaskSessions | null,
   builds: RecurringTaskBuilds,
+  events: VoiceEventSink | null = null,
 ): RecurringTaskRunner {
-  return new RecurringTaskRunner(config, db, sessions, builds);
+  return new RecurringTaskRunner(config, db, sessions, builds, events);
 }
 
 function describe(cause: unknown): string {

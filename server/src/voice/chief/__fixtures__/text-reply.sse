@@ -1,0 +1,18 @@
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":"Er draaien "},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":"twee builds. "},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":"Één wacht op review – zal ik hem openen?"},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"stop","native_finish_reason":"stop","logprobs":null}]}
+
+data: {"id":"gen-1758812345-a1","provider":"InclusionAI","model":"inclusionai/ling-3.0-flash","object":"chat.completion.chunk","created":1758812345,"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null,"native_finish_reason":null,"logprobs":null}],"usage":{"prompt_tokens":1834,"completion_tokens":21,"total_tokens":1855,"cost":0.0000398,"is_byok":false,"prompt_tokens_details":{"cached_tokens":1536},"cost_details":{"upstream_inference_cost":null},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+

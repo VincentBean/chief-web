@@ -35,6 +35,7 @@ import type { DescriptionStep } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
 import { type PushResult, runPush } from './push.js';
 import type { ReviewStep, SolverOutcome } from './review-step.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * Delivering a finished session: push, pull request, then — for a session with
@@ -201,6 +202,8 @@ export class DeliveryService implements BuildCompletion {
      * the same one: hold agent work and park the session rather than fail it.
      */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   /**
@@ -396,6 +399,13 @@ export class DeliveryService implements BuildCompletion {
     // any review work: it exists from here on, whatever comes next, and a
     // session left `failed` further down the chain still has to link to it.
     updateSession(this.db, session.id, { prUrl: opened.pullRequest.url });
+    this.events?.publish({
+      kind: 'pr.opened',
+      sessionId: session.id,
+      name: session.name,
+      number: opened.pullRequest.number,
+      adopted: opened.adopted,
+    });
 
     if (session.codeReview && this.review !== null) {
       // The pull request is a draft and stays one while the review runs, so
@@ -1004,8 +1014,10 @@ export function createDeliveryService(
   pullRequests: PullRequestOpener = new GithubPullRequests(config),
   review: ReviewStep | null = null,
   description: DescriptionStep | null = null,
+  hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): DeliveryService {
-  return new DeliveryService(config, db, containers, exec, pullRequests, review, description);
+  return new DeliveryService(config, db, containers, exec, pullRequests, review, description, hold, events);
 }
 
 function describe(cause: unknown): string {

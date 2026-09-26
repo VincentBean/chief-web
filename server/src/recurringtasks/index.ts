@@ -9,6 +9,7 @@ export {
 export {
   createRecurringTaskRunner,
   type RecurringTaskBuilds,
+  type FireNowResult,
   type RecurringTaskFiring,
   RecurringTaskRunner,
   type RecurringTaskSessions,

@@ -10,6 +10,7 @@ import {
   type AgentModel,
   type AppSettingsUpdate,
   getGithubToken,
+  type VoiceSettingsUpdate,
   isAdvisorModel,
   isAgentModel,
   isValidGitAuthorEmail,
@@ -32,6 +33,7 @@ import {
   MIN_SENTRY_PLANS_PER_TICK,
   MIN_SENTRY_POLL_INTERVAL_MINUTES,
   normalizePlanningQuestions,
+  parseVoiceSettingsUpdate,
   readAppSettings,
   updateAppSettings,
 } from '../settings/index.js';
@@ -158,6 +160,9 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     planningQuestions?: string[] | null;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
+    openrouterApiKey?: string | null;
+    elevenlabsApiKey?: string | null;
+    voice?: VoiceSettingsUpdate;
   } = {};
 
   if ('githubToken' in input && input['githubToken'] !== undefined) {
@@ -387,7 +392,42 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   if ('error' in email) return email;
   if (email.present) update.gitAuthorEmail = email.value;
 
+  // The two voice provider keys follow the GitHub token exactly (voice US-001).
+  const openrouter = parseSecretField(input, 'openrouterApiKey', 'invalid_openrouter_api_key');
+  if ('error' in openrouter) return openrouter;
+  if (openrouter.present) update.openrouterApiKey = openrouter.value;
+
+  const elevenlabs = parseSecretField(input, 'elevenlabsApiKey', 'invalid_elevenlabs_api_key');
+  if ('error' in elevenlabs) return elevenlabs;
+  if (elevenlabs.present) update.elevenlabsApiKey = elevenlabs.value;
+
+  if ('voice' in input && input['voice'] !== undefined) {
+    const voice = parseVoiceSettingsUpdate(input['voice']);
+    if ('error' in voice) return voice;
+    update.voice = voice;
+  }
+
   return update;
+}
+
+/**
+ * A write-only key: omitted keeps the stored one, `null` removes it, and an
+ * empty string is a mistake rather than a removal.
+ */
+function parseSecretField(
+  input: Record<string, unknown>,
+  key: 'openrouterApiKey' | 'elevenlabsApiKey',
+  error: string,
+): IdentityField | Invalid {
+  if (!(key in input) || input[key] === undefined) return ABSENT;
+  const raw = input[key];
+  if (raw === null) return { present: true, value: null };
+  if (typeof raw !== 'string') return { error, message: 'The key must be a string.' };
+  const value = raw.trim();
+  if (value === '') {
+    return { error, message: 'The key must not be empty. Send null to remove the stored key.' };
+  }
+  return { present: true, value };
 }
 
 /** An absent model field is not the same as one explicitly set to `null`. */

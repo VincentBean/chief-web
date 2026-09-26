@@ -9,6 +9,7 @@ import {
   setSetting,
 } from '../db/index.js';
 import { type AgentRunOutcome, isUsageLimitRefusal, USAGE_LIMIT_PATTERNS } from './detect.js';
+import type { VoiceBusEvent } from '../voice/events.js';
 import { USAGE_LIMIT_HOLD_MS, UsageLimitHold } from './hold.js';
 
 /** A refused run: non-zero exit, no timeout, whatever the CLI printed. */
@@ -142,6 +143,19 @@ describe('the global usage-limit hold', () => {
     assert.equal(hold.until(start), expiry);
     assert.equal(hold.active(start), true);
     assert.equal(hold.active(at(59)), true);
+  });
+
+  it('tells the voice bus when a hold begins, not when it is extended (voice US-015)', () => {
+    const seen: VoiceBusEvent[] = [];
+    const hold = new UsageLimitHold(db, { publish: (event) => seen.push(event) });
+
+    const expiry = hold.arm(start);
+    hold.arm(at(10));
+    assert.deepEqual(seen, [{ kind: 'limits.hold', until: expiry }]);
+
+    // The extension ran to minute 70; after that a new hold begins.
+    hold.arm(at(71));
+    assert.equal(seen.length, 2);
   });
 
   it('reads as no hold once the expiry has passed', () => {

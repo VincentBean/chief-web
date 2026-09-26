@@ -11,10 +11,12 @@ import {
   createSession,
   type Database,
   featureBranchFor,
+  getVoiceSessionAgent,
   IN_MEMORY,
   openDatabase,
   type Session,
   updateSession,
+  upsertVoiceSessionAgent,
 } from '../db/index.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
 import { prdPathFor } from '../prd/index.js';
@@ -28,7 +30,9 @@ import {
   type PlanningTerminals,
   PlanningService,
   planningCommand,
+  VOICE_HANDOVER_PROMPT,
 } from './index.js';
+import type { VoiceBusEvent } from '../voice/events.js';
 
 const PROMPT_INPUT = {
   sessionName: 'add-login',
@@ -127,6 +131,12 @@ describe('planning prompts', () => {
     assert.deepEqual(planningCommand('go', 'haiku'), ['claude', '--model', 'haiku', 'go']);
     assert.deepEqual(planningCommand('go', null), ['claude', 'go']);
     assert.deepEqual(planningCommand('go'), ['claude', 'go']);
+  });
+
+  it('puts --resume and its id before the prompt (voice US-025)', () => {
+    assert.deepEqual(planningCommand('go', 'haiku', 'abc'), ['claude', '--model', 'haiku', '--resume', 'abc', 'go']);
+    assert.deepEqual(planningCommand('go', null, 'abc'), ['claude', '--resume', 'abc', 'go']);
+    assert.deepEqual(planningCommand('go', null, null), ['claude', 'go']);
   });
 
   it('targets .chief/prds/<session name>/prd.md', () => {
@@ -299,6 +309,32 @@ describe('planning service', () => {
     assert.deepEqual(terminals.removed, [first.terminalId]);
   });
 
+  it('reports a PRD that has just become valid to the voice bus, once per change (voice US-015)', () => {
+    const seen: VoiceBusEvent[] = [];
+    planning = new PlanningService(config, db, terminals, containers, { publish: (event) => seen.push(event) });
+    clone();
+    writePrd('# PRD: Login\n\nNothing but prose.\n');
+    planning.status(session.id);
+    planning.status(session.id);
+    assert.deepEqual(seen, []);
+
+    writePrd('# PRD: Login\n\n### US-001: Add the form\n**Status:** todo\n\n- [ ] Ships\n');
+    const file = path.join(sessionRepoDir(config, session.id), prdPathFor(session.name));
+    fs.utimesSync(file, new Date(), new Date(Date.now() + 5_000));
+    planning.status(session.id);
+    planning.status(session.id);
+    assert.deepEqual(seen, [{ kind: 'prd.valid', sessionId: session.id, name: 'add-login', stories: 1 }]);
+  });
+
+  it('only takes note of a PRD that was already valid at the first poll', () => {
+    const seen: VoiceBusEvent[] = [];
+    planning = new PlanningService(config, db, terminals, containers, { publish: (event) => seen.push(event) });
+    clone();
+    writePrd('# PRD: Login\n\n### US-001: Add the form\n**Status:** todo\n\n- [ ] Ships\n');
+    planning.status(session.id);
+    assert.deepEqual(seen, []);
+  });
+
   it('shows a PRD that exists but does not parse', () => {
     clone();
     writePrd('# PRD: Login\n\nNothing but prose.\n');
@@ -320,6 +356,59 @@ describe('planning service', () => {
     assert.deepEqual(terminals.removed, [opened.terminalId]);
     assert.equal(view.terminalId, null);
     assert.equal(view.running, false);
+  });
+
+  describe('handover from a voice call (voice US-025)', () => {
+    const voiceId = (): string | null => getVoiceSessionAgent(db, session.id)?.claudeSessionId ?? null;
+
+    it('resumes the voice planning conversation and keeps its id when the terminal ends in it', async () => {
+      clone();
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'voice-conv', mode: 'plan' });
+
+      const view = await planning.start(session.id, { context: 'ignored' });
+
+      assert.deepEqual(terminals.created[0]?.command, ['claude', '--resume', 'voice-conv', VOICE_HANDOVER_PROMPT]);
+      terminals.exit(view.terminalId ?? '', 0);
+      planning.status(session.id);
+      assert.equal(voiceId(), 'voice-conv');
+      await planning.stop(session.id);
+      assert.equal(voiceId(), 'voice-conv');
+    });
+
+    it('starts afresh over a Q&A conversation, and drops it when the terminal ends in its own', async () => {
+      clone();
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'qa-conv', mode: 'qa' });
+
+      const view = await planning.start(session.id);
+
+      const command = terminals.created[0]?.command ?? [];
+      assert.equal(command.includes('--resume'), false);
+      assert.match(command[1] ?? '', /Chief PRD Generator/);
+      assert.equal(voiceId(), 'qa-conv');
+      terminals.exit(view.terminalId ?? '', 0);
+      planning.status(session.id);
+      assert.equal(voiceId(), null);
+    });
+
+    it('drops the id when the resumed conversation could not be opened', async () => {
+      clone();
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'lost-conv', mode: 'plan' });
+      const view = await planning.start(session.id);
+      terminals.exit(view.terminalId ?? '', 1);
+      planning.status(session.id);
+      assert.equal(voiceId(), null);
+
+      await planning.start(session.id);
+      assert.equal(terminals.created[1]?.command?.includes('--resume'), false);
+    });
+
+    it('drops an id that changed while the terminal was closed by hand', async () => {
+      clone();
+      await planning.start(session.id);
+      upsertVoiceSessionAgent(db, { sessionId: session.id, claudeSessionId: 'later-conv', mode: 'plan' });
+      await planning.stop(session.id);
+      assert.equal(voiceId(), null);
+    });
   });
 
   it('forgets a terminal the manager no longer has', async () => {

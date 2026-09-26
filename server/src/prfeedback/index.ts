@@ -18,6 +18,8 @@ export {
 export {
   type BuildSlots,
   createPrFeedbackService,
+  forkRefusalMessage,
+  isVoiceRequest,
   PrFeedbackError,
   type PrFeedbackGateway,
   PrFeedbackService,
@@ -25,4 +27,5 @@ export {
   type PrRunPhase,
   type PrRunView,
   type PrThreadView,
+  VOICE_REQUEST_PREFIX,
 } from './service.js';

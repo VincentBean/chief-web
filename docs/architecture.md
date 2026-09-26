@@ -229,3 +229,86 @@ body is never rewritten. A successful description is stored on the session row,
 so a retry after a GitHub failure reuses it rather than paying for a second pass.
 See [Pull request descriptions](pr-descriptions.md) and
 [Push and pull request](build-loop.md#push-and-pull-request).
+
+## Voice
+
+[Voice calls](voice.md) live in two trees. The browser captures the microphone
+and plays audio; everything else, including every provider key, stays on the
+server. The two talk over one WebSocket, `/api/voice/stream`, whose messages
+are defined twice (`protocol.ts` on each side, kept in step by hand). The design
+is in [voice-plan.md](voice-plan.md). Tests sit next to each module as
+`*.test.ts`.
+
+```
+server/src/voice/
+├── index.ts               createVoice(): the routes, the call socket and the service, wired in app.ts
+├── service.ts             VoiceService: owns the one live call, resume and take-over, the agents it gets
+├── socket.ts              the /api/voice/stream socket on the shared gateway, with the Origin check
+├── protocol.ts            every message and close code of the call socket (server copy)
+├── call.ts                VoiceCall: one call's state machine between STT, the agent, TTS and the database
+├── intents.ts             short phrases the call handles itself: yes/no, back to chief, stop, repeat, mute, hang up
+├── speakable.ts           markdown to speakable text, cut into sentences for TTS
+├── cut-off.ts             the "you were interrupted after saying …" note for the next turn
+├── earcons.ts             "mm-hm", "one sec" and friends, rendered once per voice into <DATA_DIR>/voice-cache
+├── events.ts              VoiceEventBus: builds, pull requests and PRDs chief mentions during a call
+├── usage.ts               CallUsage: ElevenLabs characters, Scribe seconds and OpenRouter dollars of a call
+├── providers.ts           OpenRouter and ElevenLabs REST calls for Settings (key checks, catalog, voices)
+├── routes.ts              /api/voice REST routes: key checks, voices, test STT/TTS, Scribe tokens
+├── history.ts             /api/voice/calls: past calls, their transcripts, and deleting one
+├── stt/
+│   ├── index.ts           SttService: one transcript per utterance from the configured provider
+│   ├── openrouter.ts      OpenRouter speech-to-text, one request per utterance
+│   ├── wav.ts             the 16 kHz mono WAV an utterance arrives in
+│   ├── hallucinations.ts  what STT models "hear" in silence, dropped on short clips
+│   ├── elevenlabs-token.ts  single-use Scribe tokens and their hourly limit
+│   └── __fixtures__/      a recorded token response
+├── tts/
+│   ├── index.ts           TtsService: ElevenLabs first, the OpenRouter backup voice when it fails
+│   ├── types.ts           the provider contract
+│   ├── elevenlabs.ts      ElevenLabs over one multi-context WebSocket per call
+│   ├── openrouter.ts      OpenRouter /audio/speech, the backup voice
+│   └── __fixtures__/      a recorded ElevenLabs socket conversation
+├── chief/
+│   ├── agent.ts           ChiefAgent: the streaming tool-calling loop on OpenRouter
+│   ├── basic-agent.ts     chief without tools, used only when no services are wired
+│   ├── openrouter-client.ts  streamChat(): OpenRouter chat completions over SSE
+│   ├── prompt.ts          chief's system prompt
+│   ├── snapshot.ts        the STATE block: sessions, queue and pull requests in every request
+│   ├── speculation.ts     speculative chief: a first model step started on a stable partial transcript
+│   ├── tools.ts           the tool registry, the read-only tools and spoken-name resolution
+│   ├── confirm.ts         server-enforced confirmation and the confirm tool
+│   ├── actions.ts         session tools: create, build, stop, mark ready, schedule, retry
+│   ├── pull-requests.ts   pull request tools: list, review, feedback, change, conflicts
+│   ├── recurring-tasks.ts recurring task tools: list, create, update, pause, resume, run now
+│   ├── focus.ts           focus_session: hands the call to a session agent
+│   ├── time.ts            spoken times ("tonight at 2") in the operator's time zone
+│   └── __fixtures__/      a seeded install and a scripted OpenRouter for tests
+└── session-agent/
+    ├── registry.ts        SessionAgentRegistry: at most one agent per session, a global cap, the planning lock
+    ├── process.ts         the claude command line and the stdin lines written to it
+    ├── events.ts          stream-json from Claude Code parsed into agent events
+    ├── agent.ts           SessionVoiceAgent: the call's agent while a session has the focus
+    ├── prompt.ts          the voice rules and the planning and Q&A prompts
+    └── __fixtures__/      recorded Claude Code runs, the recorder, and a fake claude for tests
+
+web/src/voice/
+├── CallProvider.tsx       useCall(): the socket, call state, transcript and UI actions (navigate, highlight, toast)
+├── CallPanel.tsx          the call panel: transcript, tool cards, focus chip, controls, latency strip
+├── protocol.ts            every message of the call socket (browser copy)
+├── call-audio.ts          CallAudio: microphone, VAD or push-to-talk, Scribe and playback for one call
+├── mic.ts                 microphone capture through the 16 kHz PCM worklet in web/public/voice
+├── vad.ts                 hands-free turn taking and barge-in on Silero VAD
+├── ptt.ts                 push-to-talk on the button and the Space key
+├── wav.ts                 an utterance's samples as a WAV
+├── scribe.ts              ElevenLabs Scribe realtime straight from the browser
+├── captions.ts            the browser's Web Speech API, for live captions and development STT
+├── player.ts              AudioPlayer: the agents' voice, segment by segment, with a jitter buffer
+├── pcm.ts                 plays a PCM clip for the Settings test voice
+└── latency.ts             the latency strip's arithmetic
+```
+
+Call data lives in three tables of the ordinary database: `voice_calls` (one
+row per call, with its usage), `voice_turns` (the transcript, with each turn's
+timestamps) and `voice_session_agents` (the Claude conversation each session
+agent resumes). The scheduler tick deletes calls older than the retention
+setting. No audio is written anywhere.

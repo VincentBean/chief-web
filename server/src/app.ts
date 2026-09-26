@@ -64,6 +64,9 @@ import { createRetryRouter } from './routes/retry.js';
 import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
+import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index.js';
+import { SessionAgentRegistry } from './voice/session-agent/registry.js';
+import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -75,6 +78,7 @@ import {
 } from './sessions/index.js';
 import type { CommandRunner } from './ssh/index.js';
 import { createTerminalManager, type TerminalManager } from './terminal/index.js';
+import type { WebSocketGateway } from './ws/gateway.js';
 
 /** Injected collaborators that tests replace; all optional in production. */
 export interface AppDependencies {
@@ -174,6 +178,14 @@ export interface AppDependencies {
    * stubs, because the real one clones the repository.
    */
   readonly sentryFixer?: SentryFixer;
+  /**
+   * The WebSocket gateway `index.ts` attaches to the HTTP server. Features
+   * built here register their socket routes on it (voice US-007: the call
+   * socket); without one, only their REST routes exist.
+   */
+  readonly gateway?: WebSocketGateway;
+  /** The voice call's collaborators (voice US-007); tests pass fakes. */
+  readonly voice?: VoiceServiceDeps;
 }
 
 /**
@@ -250,7 +262,31 @@ export function createApp(
   const sessionOrchestrator = createSessionOrchestrator(config, db, docker);
   const orchestrator = deps.orchestrator ?? sessionOrchestrator;
   const exec = deps.exec ?? docker;
-  const planning = deps.planning ?? createPlanningService(config, db, terminals, orchestrator);
+  // Background events for the voice call (voice US-015): every service below
+  // reports on this one bus, and the voice service speaks what it hears.
+  const events = new VoiceEventBus();
+  // Claude's usage-limit hold (US-002). The hold is a row on the database, so
+  // every instance reads the same one; sharing this one also means a hold that
+  // begins is reported on the bus once, whoever armed it.
+  const hold = new UsageLimitHold(db, events);
+  // Session voice agents (voice US-018) and the planning terminal lock each
+  // other out; the thunk lets the registry ask the service built after it.
+  const sessionAgents: SessionAgentRegistry = new SessionAgentRegistry({
+    config,
+    db,
+    docker,
+    containers: orchestrator,
+    hold,
+    planning: (): PlanningService => planning,
+  });
+  const planning: PlanningService =
+    deps.planning ??
+    createPlanningService(config, db, terminals, orchestrator, events, {
+      isAlive: (sessionId) => sessionAgents.isAlive(sessionId),
+      // Starting the terminal after the operator's yes (voice US-025). `voice`
+      // is built further down; nothing starts a terminal before it exists.
+      stop: (sessionId) => voice.service.handOverToTerminal(sessionId),
+    });
   // Assigned further down: the review chains into this solver (US-011), and the
   // solver needs the build loop's slot cap, which in turn needs the delivery.
   // The thunk below is what breaks that circle — nothing reads it until a
@@ -278,18 +314,20 @@ export function createApp(
       undefined,
       new ReviewStep(reviewer, new GithubReviewPublisher(config), () => prFeedback),
       new DescriptionStep(describer, db),
+      hold,
+      events,
     );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
   const builds =
     deps.builds ??
-    createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs);
+    createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs, hold, events);
   // Recurring tasks (US-004): the scheduler's other due-query. It fires each
   // task into an ordinary session, which means it needs the session service —
   // built further down, because *that* needs the scheduler. The thunk is what
   // breaks the circle; nothing reads it before the first tick, by which point
   // both exist.
   let sessions: SessionService | null = null;
-  const recurringRuns = createRecurringTaskRunner(config, db, () => sessions, builds);
+  const recurringRuns = createRecurringTaskRunner(config, db, () => sessions, builds, events);
   // Scheduled starts (US-017). The schedules live in the database, so starting
   // it here — before the first request — is also the catch-up on everything
   // that came due while the stack was down, recurring tasks included.
@@ -322,6 +360,8 @@ export function createApp(
     exec,
     createAgentRunner(exec),
     builds,
+    hold,
+    events,
   );
   const prConflicts = deps.prConflicts ?? createPrConflictScan(config, db, prConflictFixes);
   prConflicts.start();
@@ -350,11 +390,18 @@ export function createApp(
   // Deleting a session (US-015) has to unwind whatever is running in its
   // container first, which is why it takes the orchestrator and the executor
   // along with the three services.
-  sessions = createSessionService(config, db, orchestrator, exec, {
-    builds,
-    planning,
-    scheduler,
-  });
+  sessions = createSessionService(
+    config,
+    db,
+    orchestrator,
+    exec,
+    {
+      builds,
+      planning,
+      scheduler,
+    },
+    events,
+  );
   // And how it ends (US-008): a merged pull request marks its issue fixed and
   // resolves it in Sentry, while a session that failed or whose pull request
   // was closed unmerged closes the issue with what happened written on it.
@@ -373,7 +420,17 @@ export function createApp(
   // or a review that just found something handed it over.
   prFeedback =
     deps.prFeedback ??
-    createPrFeedbackService(config, db, sessionOrchestrator, exec, createAgentRunner(exec), builds);
+    createPrFeedbackService(
+      config,
+      db,
+      sessionOrchestrator,
+      exec,
+      createAgentRunner(exec),
+      builds,
+      undefined,
+      hold,
+      events,
+    );
   builds.registerStart('pr-feedback', prFeedback.starter());
   // A code review started by hand on an open pull request: the same pass the
   // delivery runs, in a feedback-run container, handing its findings to the
@@ -389,13 +446,19 @@ export function createApp(
       reviewer,
       builds,
       () => prFeedback,
+      undefined,
+      undefined,
+      hold,
+      events,
     );
   // A review asked for while every slot is taken waits in the unified queue
   // instead of being refused (US-003); this is how the pump starts it again.
   builds.registerStart('pr-review', prReviews.starter());
+  // One instance, so voice chief's snapshot reads the list this router cached.
+  const pullRequests = deps.pullRequests ?? createPullRequestService(config, db);
   api.use(
     createPullRequestsRouter(
-      deps.pullRequests ?? createPullRequestService(config, db),
+      pullRequests,
       prFeedback,
       prReviews,
       prConflictFixes,
@@ -414,15 +477,42 @@ export function createApp(
   api.use(createDeliveryRouter(delivery));
   api.use(createBuildRouter(builds));
   // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early
-  // (US-008). The hold is a row on the database, so a second instance reads the
-  // same one the build loop and the scheduler arm.
-  const hold = new UsageLimitHold(db);
+  // (US-008), on the shared hold built above.
   api.use(createLimitsRouter(hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
   api.use(createStatsRouter(db, hold, builds));
+  // Voice (voice US-001): the provider checks and the voice picker's proxy;
+  // since US-007 also the call socket, on the gateway's cookie check. Built
+  // this late because chief (US-008) reads the build pool, the build logs,
+  // the pull request list and the usage-limit hold.
   // "Retry" on a failed session (US-019): one endpoint over both recoveries,
-  // dispatching on the stage the session failed at.
+  // dispatching on the stage the session failed at. Built ahead of voice,
+  // whose chief can retry a session too (voice US-012).
   const retries = createRetryService(db, builds, delivery);
+  const voice = createVoice(config, db, {
+    chief: {
+      db,
+      builds,
+      buildLogs,
+      pullRequests,
+      hold,
+      sessions,
+      retries,
+      prReviews,
+      prFeedback,
+      prConflicts,
+      github: new GithubVoiceReviews(config, db),
+      recurringTasks: recurringRuns,
+      planning,
+      sessionAgents,
+    },
+    events,
+    sessionAgents,
+    planning,
+    ...deps.voice,
+  });
+  api.use(voice.router);
+  deps.gateway?.register(voice.socketRoute);
   // Only the half of it that runs an agent needs Claude Code. A session whose
   // *push* or *pull request* failed has nothing left to build, so blocking its
   // retry on credentials it does not use would strand finished work.

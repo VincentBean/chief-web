@@ -20,7 +20,7 @@ import {
 } from '../db/index.js';
 import { GithubApiError } from '../lib/github.js';
 import type { PullRequestFeedback, RepositoryPullRequests } from '../lib/github-review.js';
-import type { ConflictScan } from '../prconflicts/index.js';
+import type { ConflictScan, FixNowResult } from '../prconflicts/index.js';
 import { createPullRequestService, type PullRequestGateway } from '../pullrequests/index.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -57,6 +57,12 @@ class StubScan implements ConflictScan {
     this.ticks += 1;
     if (this.failure !== null) return Promise.reject(this.failure);
     return Promise.resolve(0);
+  }
+  fixNow(): Promise<FixNowResult> {
+    return Promise.resolve({ ok: false, code: 'no_fixer', reason: 'stub' });
+  }
+  conflicted(): boolean | null {
+    return null;
   }
 }
 

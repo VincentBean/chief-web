@@ -6,15 +6,21 @@ import {
   closeDatabase,
   createRepository,
   createSession,
+  createVoiceCall,
   type Database,
   getSession,
+  getVoiceCall,
+  insertVoiceTurn,
+  listVoiceTurns,
   IN_MEMORY,
   listDueWaitingSessions,
   isScheduleMissed,
   openDatabase,
   type Session,
   type SessionStatus,
+  setSetting,
   updateSession,
+  updateVoiceCall,
 } from '../db/index.js';
 import { UsageLimitHold } from '../limits/index.js';
 import {
@@ -330,5 +336,53 @@ describe('the session scheduler', () => {
       () => loadConfig({ SCHEDULER_INTERVAL_MS: '60000' }),
       /between 1000 and 30000/,
     );
+  });
+});
+
+describe('voice transcript retention', () => {
+  const NOW = '2026-09-25T12:00:00.000Z';
+  const daysBefore = (days: number, extraMs = 0) =>
+    new Date(Date.parse(NOW) - days * 24 * 60 * 60 * 1000 - extraMs).toISOString();
+
+  const call = (w: World, startedAt: string, endedAt: string | null = null) => {
+    const created = createVoiceCall(w.db, {
+      sttProvider: 'openrouter',
+      ttsProvider: 'elevenlabs',
+      startedAt,
+    });
+    if (endedAt !== null) updateVoiceCall(w.db, created.id, { endedAt, endReason: 'hangup' });
+    return created.id;
+  };
+
+  it('deletes calls past the default 30 days on the tick, turns and all', async () => {
+    const w = world();
+    const expired = call(w, daysBefore(31), daysBefore(30, 1));
+    const endedJustInside = call(w, daysBefore(31), daysBefore(29));
+    const neverClosedExpired = call(w, daysBefore(30, 1));
+    const neverClosedRecent = call(w, daysBefore(1));
+    insertVoiceTurn(w.db, { callId: expired, turn: 1, speaker: 'user', text: 'hello' });
+
+    await w.scheduler.tick(NOW);
+
+    assert.equal(getVoiceCall(w.db, expired), null);
+    assert.deepEqual(listVoiceTurns(w.db, expired), []);
+    assert.notEqual(getVoiceCall(w.db, endedJustInside), null);
+    assert.equal(getVoiceCall(w.db, neverClosedExpired), null);
+    assert.notEqual(getVoiceCall(w.db, neverClosedRecent), null);
+  });
+
+  it('follows voice_transcript_retention_days, and the clock the tick is given', async () => {
+    const w = world();
+    setSetting(w.db, 'voice_transcript_retention_days', '7');
+    const tenDaysOld = call(w, daysBefore(10), daysBefore(10));
+    const threeDaysOld = call(w, daysBefore(3), daysBefore(3));
+
+    await w.scheduler.tick(NOW);
+    assert.equal(getVoiceCall(w.db, tenDaysOld), null);
+    assert.notEqual(getVoiceCall(w.db, threeDaysOld), null);
+
+    // Five days on, the three-day-old call is eight days old: past the week.
+    await w.scheduler.tick(new Date(Date.parse(NOW) + 5 * 24 * 60 * 60 * 1000).toISOString());
+    assert.equal(getVoiceCall(w.db, threeDaysOld), null);
   });
 });

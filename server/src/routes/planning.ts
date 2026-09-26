@@ -77,14 +77,27 @@ function respondWithFailure(res: Response, cause: unknown): void {
   res.status(500).json({ error: 'planning_request_failed', message: String(cause) });
 }
 
-/** The body is optional: `{}` starts planning with chief's default context. */
-function parseStart(body: unknown): { context?: string } | Invalid {
+/**
+ * The body is optional: `{}` starts planning with chief's default context.
+ * `stopVoiceAgent: true` is the operator's yes to closing the session's
+ * voice agent first (voice US-025).
+ */
+function parseStart(body: unknown): { context?: string; stopVoiceAgent?: boolean } | Invalid {
   if (body === undefined || body === null) return {};
   if (typeof body !== 'object' || Array.isArray(body)) {
     return { error: 'invalid_body', message: 'Expected a JSON object.' };
   }
 
-  const raw = (body as Record<string, unknown>)['context'];
+  const stop = (body as Record<string, unknown>)['stopVoiceAgent'];
+  if (stop !== undefined && typeof stop !== 'boolean') {
+    return { error: 'invalid_stop_voice_agent', message: 'stopVoiceAgent must be a boolean.' };
+  }
+  const context = parseContext((body as Record<string, unknown>)['context']);
+  if ('error' in context) return context;
+  return stop === true ? { ...context, stopVoiceAgent: true } : context;
+}
+
+function parseContext(raw: unknown): { context?: string } | Invalid {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'string') {
     return { error: 'invalid_context', message: 'context must be a string.' };

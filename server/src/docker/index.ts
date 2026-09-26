@@ -1,4 +1,5 @@
 export {
+  type AttachedExec,
   chooseApiVersion,
   type ContainerDetails,
   type ContainerSpec,

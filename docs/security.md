@@ -87,3 +87,48 @@ repository wrote.
   the same containers, the same deploy keys and the same branch namespace as
   every other session. If that trade is more than you want, leave the Sentry
   token unset — the integration does nothing at all without one.
+
+## Voice calls
+
+[Voice calls](voice.md) put three outside providers and a spoken command channel
+next to everything above. Voice is off until you switch it on in Settings.
+
+- **Keys stay on the server.** The OpenRouter and ElevenLabs keys are stored in
+  the database in plain text, like the GitHub token, and the API only ever
+  returns whether one is set and its last four characters. Every provider call
+  is made by the server, including the ElevenLabs voice list the Settings page
+  shows.
+- **The one credential a browser gets is a single-use Scribe token.** In
+  ElevenLabs Scribe mode the browser streams your speech to ElevenLabs directly.
+  For that, `POST /api/voice/scribe-token` (behind the password like every
+  other route) mints a single-use token: good for one realtime socket, expiring
+  after 15 minutes, and at most 10 are minted per hour (`429` after that). It
+  cannot be used for anything else on the account.
+- **Nothing changes without a confirmation the server enforces.** A misheard
+  sentence must not start a build. Every chief tool that changes something (a
+  session, a build, a pull request run or review, a recurring task) does nothing
+  on its first call except park the exact action and read it back. It runs only
+  on a *later* turn, from a new "yes", the panel's **Confirm** button, or chief
+  confirming after you spoke, and then with the arguments the server stored,
+  not whatever the model sends. The model cannot confirm in the turn it asked,
+  and a confirmation expires after 60 seconds. Nothing is deletable by voice at
+  all, and settings, terminals, merging and the Claude login are not reachable.
+- **Session agents have no management tools.** A session agent is `claude`
+  with `--dangerously-skip-permissions` in the session's own container, exactly
+  as privileged as a build agent there and no more. It has no chief-web tools
+  and no path to the server, so repository content it reads (a prompt injection
+  in a README, say) cannot create, build or change anything. Chief, which has
+  the tools, sees session, repository and pull request names and statuses but
+  no repository content, and the call's own phrases ("yes", "switch to …") are
+  matched only on your transcript, never on agent output. In Q&A mode (any
+  session that is not being planned) the agent is also started with the edit
+  tools disallowed.
+- **The call socket** uses the same cookie check as every other WebSocket, and
+  when `PUBLIC_URL` is set it also refuses a browser whose `Origin` is not that
+  address (`4403`).
+- **The microphone** is only open during a call; the panel shows a red dot and
+  the browser its own indicator. Browsers only allow it over HTTPS or on
+  `localhost`, so a remote chief-web needs the reverse proxy mentioned above.
+- **Audio is never stored.** Transcripts are, in SQLite, until the retention in
+  Settings removes them or you delete a call. What the providers keep is up to
+  them; see [Privacy](voice.md#privacy).

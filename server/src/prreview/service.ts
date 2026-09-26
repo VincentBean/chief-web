@@ -34,6 +34,7 @@ import type {
 import { GithubReviewPublisher } from '../review/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import { getGithubToken } from '../settings/index.js';
+import { pullRequestOutcome, type VoiceEventSink } from '../voice/events.js';
 
 /**
  * A code review started by hand on an open pull request.
@@ -160,6 +161,8 @@ export class PrReviewService {
      */
     private readonly solver: () => PrReviewSolver | null = () => null,
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   status(reviewId: string): PrReviewView {
@@ -315,6 +318,9 @@ export class PrReviewService {
         this.fail(review.id, 'agent', String(cause));
       })
       .finally(() => {
+        const ended = getPrReview(this.db, review.id);
+        const event = ended === null ? null : pullRequestOutcome(this.db, 'pr.review_finished', ended, 'finished');
+        if (event !== null) this.events?.publish(event);
         this.live.delete(review.id);
         void this.containers.removePrRun(review.id);
         // Whatever was waiting for a build slot can have this one back.
@@ -746,6 +752,7 @@ export function createPrReviewService(
   publisher: ReviewPublisher = new GithubReviewPublisher(config),
   github: PrReviewGateway = new GithubPrReviewGateway(config),
   hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): PrReviewService {
   return new PrReviewService(
     config,
@@ -760,6 +767,7 @@ export function createPrReviewService(
     () => getGithubToken(db),
     solver,
     hold,
+    events,
   );
 }
 

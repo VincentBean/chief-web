@@ -105,6 +105,50 @@ export interface Settings {
   /** Commit identity used by agents inside session containers (US-006). */
   gitAuthorName: string;
   gitAuthorEmail: string;
+  /** Voice provider keys, masked like the GitHub token (voice US-001). */
+  openrouterApiKey: { configured: boolean; last4: string | null };
+  elevenlabsApiKey: { configured: boolean; last4: string | null };
+  voice: VoiceSettings;
+  /** Scribe's credits per minute, measured after a Scribe call (voice US-023); null before one. */
+  voiceScribeCreditsPerMin: number | null;
+}
+
+/** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
+export const VOICE_STT_PROVIDERS = ['openrouter', 'elevenlabs-realtime', 'browser'] as const;
+export const VOICE_TTS_MODELS = ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'] as const;
+export const VOICE_BARGE_IN_MODES = ['on', 'careful', 'off'] as const;
+export const VOICE_EVENT_VERBOSITIES = ['important', 'all', 'none'] as const;
+export const VOICE_LIVE_CAPTIONS = ['off', 'browser'] as const;
+
+/** Mirrors the server's `VoiceSettings` (docs/voice-plan.md §14.1). */
+export interface VoiceSettings {
+  enabled: boolean;
+  sttProvider: (typeof VOICE_STT_PROVIDERS)[number];
+  /** OpenRouter speech-to-text slug. */
+  orSttModel: string;
+  /** ISO 639-1. */
+  language: string;
+  /** ISO 639-1, or `null` for none. */
+  secondaryLanguage: string | null;
+  keytermsEnabled: boolean;
+  ttsModel: (typeof VOICE_TTS_MODELS)[number];
+  /** ElevenLabs voice every agent speaks with; `null` until one is picked. */
+  voiceId: string | null;
+  orTtsModel: string;
+  orTtsVoice: string;
+  orTtsSampleRate: number;
+  chiefModel: string;
+  sessionModel: AgentModel;
+  vadSilenceMs: number;
+  bargeIn: (typeof VOICE_BARGE_IN_MODES)[number];
+  eventVerbosity: (typeof VOICE_EVENT_VERBOSITIES)[number];
+  /** IANA. */
+  timezone: string;
+  pronunciations: Record<string, string>;
+  transcriptRetentionDays: number;
+  pttGlobal: boolean;
+  liveCaptions: (typeof VOICE_LIVE_CAPTIONS)[number];
+  speculativeChief: boolean;
 }
 
 export interface SettingsUpdate {
@@ -135,6 +179,10 @@ export interface SettingsUpdate {
   /** `null` restores the built-in default (`chief-web`/`chief-web@localhost`). */
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
+  /** Omit to leave the stored key untouched; `null` removes it. */
+  openrouterApiKey?: string | null;
+  elevenlabsApiKey?: string | null;
+  voice?: Partial<VoiceSettings>;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {
@@ -154,6 +202,182 @@ export async function validateGithubToken(token?: string): Promise<{ login: stri
     method: 'POST',
     body: JSON.stringify(token === undefined ? {} : { token }),
   });
+}
+
+/** One voice of the operator's ElevenLabs library (voice US-001). */
+export interface ElevenLabsVoice {
+  voiceId: string;
+  name: string;
+  category: string | null;
+  previewUrl: string | null;
+  labels: Record<string, string>;
+}
+
+/** Mirrors the server's `VoiceStatus` (`GET /api/voice/status`, voice US-007). */
+export interface VoiceStatus {
+  configured: boolean;
+  /** `voice_disabled`, `openrouter_key_missing`, … while not configured. */
+  reason: string | null;
+  providers: {
+    stt: string;
+    tts: 'elevenlabs' | 'openrouter';
+    chiefModel: string;
+    openrouter: boolean;
+    elevenlabs: boolean;
+  };
+  elBalance: { remaining: number; limit: number; resetsAt: string | null } | null;
+  activeCallId: string | null;
+}
+
+export async function fetchVoiceStatus(signal?: AbortSignal): Promise<VoiceStatus> {
+  return api<VoiceStatus>('/api/voice/status', signal ? { signal } : {});
+}
+
+/** A past call in the history (voice US-024; `GET /api/voice/calls`). */
+export interface VoiceCallSummary {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number;
+  endReason: 'hangup' | 'idle' | 'error' | 'taken_over' | null;
+  /** The call running right now; the server refuses to delete it. */
+  active: boolean;
+  providers: { stt: string; tts: string };
+  cost: { elChars: number; sttSeconds: number; scribeSeconds: number; orCostUsd: number; claudeTurns: number };
+}
+
+/** One stored transcript row (`GET /api/voice/calls/:id`). */
+export interface VoiceTurn {
+  id: number;
+  turn: number;
+  speaker: 'user' | 'chief' | 'session' | 'event';
+  sessionId: string | null;
+  sessionName: string | null;
+  text: string;
+  interrupted: boolean;
+  tools: { name: string; status: string; summary: string }[];
+  latency: {
+    speechEnd: string | null;
+    transcript: string | null;
+    firstToken: string | null;
+    firstChunk: string | null;
+    firstAudioSent: string | null;
+    firstAudioPlayed: string | null;
+  };
+  createdAt: string;
+}
+
+export async function fetchVoiceCalls(limit = 100, signal?: AbortSignal): Promise<VoiceCallSummary[]> {
+  const { calls } = await api<{ calls: VoiceCallSummary[] }>(
+    `/api/voice/calls?limit=${String(limit)}`,
+    signal ? { signal } : {},
+  );
+  return calls;
+}
+
+export async function fetchVoiceCall(
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ call: VoiceCallSummary; turns: VoiceTurn[] }> {
+  return api(`/api/voice/calls/${encodeURIComponent(id)}`, signal ? { signal } : {});
+}
+
+export async function deleteVoiceCall(id: string): Promise<void> {
+  await api<void>(`/api/voice/calls/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** The ElevenLabs voice list, fetched by the server with the stored key. */
+export async function fetchVoiceVoices(signal?: AbortSignal): Promise<ElevenLabsVoice[]> {
+  const { voices } = await api<{ voices: ElevenLabsVoice[] }>('/api/voice/voices', signal ? { signal } : {});
+  return voices;
+}
+
+/** The four OpenRouter names Settings → Voice holds. */
+export interface OpenRouterSlugs {
+  orSttModel: string;
+  chiefModel: string;
+  orTtsModel: string;
+  orTtsVoice: string;
+}
+
+export interface OpenRouterKeyCheck {
+  /** `null` when only the models were checked. */
+  key: {
+    label: string | null;
+    usage: number | null;
+    limit: number | null;
+    limitRemaining: number | null;
+    isFreeTier: boolean;
+  } | null;
+  models: { field: keyof OpenRouterSlugs; value: string; ok: boolean; problem: string | null }[];
+}
+
+/**
+ * Checks an OpenRouter key and validates the slugs against the catalog. Pass
+ * a typed key and typed slugs to check them before saving; omitted ones fall
+ * back to what is stored.
+ */
+export async function checkOpenRouterKey(input: { key?: string; models?: Partial<OpenRouterSlugs>; modelsOnly?: boolean }): Promise<OpenRouterKeyCheck> {
+  return api<OpenRouterKeyCheck>('/api/voice/test/openrouter-key', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export interface ElevenLabsKeyCheck {
+  tier: string | null;
+  characterCount: number;
+  characterLimit: number;
+  remaining: number;
+  resetsAt: string | null;
+}
+
+export async function checkElevenLabsKey(key?: string): Promise<ElevenLabsKeyCheck> {
+  return api<ElevenLabsKeyCheck>('/api/voice/test/elevenlabs-key', {
+    method: 'POST',
+    body: JSON.stringify(key === undefined ? {} : { key }),
+  });
+}
+
+export interface SttTestResult {
+  /** What OpenRouter heard; empty when it was silence or a known hallucination. */
+  text: string;
+  /** Server-side round trip of the transcription, in milliseconds. */
+  ms: number;
+}
+
+/** Settings → "Test microphone" (voice US-004): a 16 kHz WAV through the server's STT. */
+export async function testSpeechToText(wav: ArrayBuffer): Promise<SttTestResult> {
+  return api<SttTestResult>('/api/voice/test/stt', {
+    method: 'POST',
+    body: wav,
+    headers: { 'content-type': 'audio/wav' },
+  });
+}
+
+export interface TtsTestAudio {
+  /** Raw PCM16 LE mono. */
+  pcm: ArrayBuffer;
+  sampleRate: number;
+}
+
+/** Settings → "Play test voice" (voice US-006): one sentence through one provider. */
+export async function testTextToSpeech(text: string, provider: 'elevenlabs' | 'openrouter'): Promise<TtsTestAudio> {
+  const response = await fetch('/api/voice/test/tts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, provider }),
+  });
+  if (!response.ok) {
+    let code = `http_${response.status}`;
+    let detail: string | null = null;
+    try {
+      const body = (await response.json()) as { error?: unknown; message?: unknown };
+      if (typeof body.error === 'string') code = body.error;
+      if (typeof body.message === 'string') detail = body.message;
+    } catch {
+      // Non-JSON error body; keep the status-derived code.
+    }
+    throw new ApiError(response.status, code, detail);
+  }
+  return { pcm: await response.arrayBuffer(), sampleRate: Number(response.headers.get('x-sample-rate') ?? '24000') || 24000 };
 }
 
 /** Mirrors the server's `ClaudeAuthStatus` (US-008). */
@@ -560,10 +784,14 @@ export async function fetchPlanning(id: string, signal?: AbortSignal): Promise<P
  * `{{CONTEXT}}` slot and is only used when no `prd.md` exists yet — otherwise
  * the server starts chief's edit prompt instead.
  */
-export async function startPlanning(id: string, context?: string): Promise<Planning> {
+export async function startPlanning(id: string, context?: string, options: { stopVoiceAgent?: boolean } = {}): Promise<Planning> {
   return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, {
     method: 'POST',
-    body: JSON.stringify(context === undefined || context === '' ? {} : { context }),
+    body: JSON.stringify({
+      ...(context === undefined || context === '' ? {} : { context }),
+      // The operator's yes to closing the session's voice agent first (voice US-025).
+      ...(options.stopVoiceAgent === true ? { stopVoiceAgent: true } : {}),
+    }),
   });
 }
 
@@ -804,6 +1032,8 @@ export interface Stats {
    * no earlier sample to measure against. Memory is in bytes.
    */
   host: { cpu: number | null; cores: number; memory: { used: number; total: number } };
+  /** Voice calls this calendar month (UTC); ElevenLabs credits include Scribe once its rate was measured. */
+  voice: { enabled: boolean; calls: number; minutes: number; elCredits: number; orCostUsd: number };
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];

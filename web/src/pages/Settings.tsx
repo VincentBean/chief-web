@@ -1,4 +1,4 @@
-import { type FormEvent, lazy, Suspense, useEffect, useState } from 'react';
+import { type FormEvent, lazy, Suspense, useCallback, useEffect, useState } from 'react';
 
 import {
   ADVISOR_MODELS,
@@ -6,19 +6,35 @@ import {
   AGENT_MODELS,
   type AgentModel,
   ApiError,
+  checkElevenLabsKey,
+  checkOpenRouterKey,
+  type ElevenLabsVoice,
   fetchClaudeState,
   fetchSettings,
+  fetchVoiceVoices,
+  type OpenRouterSlugs,
   saveSettings,
   type Settings as SettingsData,
   type SettingsUpdate,
   startClaudeLogin,
   stopClaudeLogin,
+  testSpeechToText,
+  testTextToSpeech,
   validateGithubToken,
+  VOICE_BARGE_IN_MODES,
+  VOICE_EVENT_VERBOSITIES,
+  VOICE_LIVE_CAPTIONS,
+  VOICE_STT_PROVIDERS,
+  VOICE_TTS_MODELS,
+  type VoiceSettings,
 } from '../api.ts';
 import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
+import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { playPcm16 } from '../voice/pcm.ts';
+import { recordWav } from '../voice/wav.ts';
 
 /**
  * What each model is worth choosing for. The `<select>` uses `''` for "no
@@ -86,7 +102,12 @@ export function Settings() {
   const [sentryModel, setSentryModel] = useState<AgentModel>('haiku');
   const [sentryPlans, setSentryPlans] = useState('2');
   const [sentryBaseUrl, setSentryBaseUrl] = useState('');
-  const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | null>(null);
+  const [voiceForm, setVoiceForm] = useState<VoiceForm | null>(null);
+  const [openrouterKey, setOpenrouterKey] = useState('');
+  const [elevenlabsKey, setElevenlabsKey] = useState('');
+  /** OpenRouter's verdict on each model name, shown under its field. */
+  const [slugProblems, setSlugProblems] = useState<Partial<Record<keyof OpenRouterSlugs, string>>>({});
+  const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | 'remove-voice-key' | null>(null);
   const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
@@ -143,6 +164,7 @@ export function Settings() {
     setSentryModel(loaded.sentryModel);
     setSentryPlans(String(loaded.sentryPlansPerTick));
     setSentryBaseUrl(loaded.sentryBaseUrl);
+    setVoiceForm(toVoiceForm(loaded.voice));
   }
 
   // An action resolving to `null` has already said what went wrong on the page itself.
@@ -205,6 +227,11 @@ export function Settings() {
       toast.error('The Sentry base URL must start with http:// or https://.');
       return;
     }
+    const voice = voiceForm === null ? null : fromVoiceForm(voiceForm);
+    if (voice !== null && 'error' in voice) {
+      toast.error(voice.error);
+      return;
+    }
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
@@ -229,9 +256,31 @@ export function Settings() {
     // An untouched (empty) token field must not wipe the stored token.
     if (token.trim() !== '') update.githubToken = token.trim();
     if (sentryToken.trim() !== '') update.sentryToken = sentryToken.trim();
+    if (openrouterKey.trim() !== '') update.openrouterApiKey = openrouterKey.trim();
+    if (elevenlabsKey.trim() !== '') update.elevenlabsApiKey = elevenlabsKey.trim();
+    if (voice !== null) update.voice = voice.voice;
     setAdvisorError(null);
     setQuestionsError(null);
     run('save', async () => {
+      // The OpenRouter names are free text, so a changed one is checked against
+      // OpenRouter's catalog before it is saved. Only a clear "no such model"
+      // blocks the save: OpenRouter being unreachable is not the operator's
+      // mistake, and the Check button can be pressed again later.
+      if (voice !== null && settings !== null) {
+        const typed = slugsOf(voice.voice);
+        const saved = slugsOf(settings.voice);
+        if ((Object.keys(typed) as (keyof OpenRouterSlugs)[]).some((field) => typed[field] !== saved[field])) {
+          const result = await checkOpenRouterKey({ modelsOnly: true, models: typed }).catch(() => null);
+          if (result !== null) {
+            const problems: Partial<Record<keyof OpenRouterSlugs, string>> = {};
+            for (const check of result.models) if (check.problem !== null) problems[check.field] = check.problem;
+            setSlugProblems(problems);
+            if (Object.keys(problems).length > 0) {
+              throw new Error('A voice model name is not usable on OpenRouter; see the Voice section.');
+            }
+          }
+        }
+      }
       // One rejection names a single field rather than the save as a whole, so
       // it is caught here and re-thrown: the toast still fires, and the message
       // also stays put under the field the operator has to change. Refused
@@ -252,6 +301,8 @@ export function Settings() {
       applyLoaded(saved);
       setToken('');
       setSentryToken('');
+      setOpenrouterKey('');
+      setElevenlabsKey('');
       return 'Settings saved.';
     });
   };
@@ -277,6 +328,19 @@ export function Settings() {
       applyLoaded(await saveSettings({ sentryToken: null }));
       setSentryToken('');
       return 'Sentry token removed.';
+    });
+  };
+
+  const onRemoveVoiceKey = (provider: 'openrouter' | 'elevenlabs'): void => {
+    run('remove-voice-key', async () => {
+      if (provider === 'openrouter') {
+        applyLoaded(await saveSettings({ openrouterApiKey: null }));
+        setOpenrouterKey('');
+        return 'OpenRouter key removed.';
+      }
+      applyLoaded(await saveSettings({ elevenlabsApiKey: null }));
+      setElevenlabsKey('');
+      return 'ElevenLabs key removed.';
     });
   };
 
@@ -333,7 +397,7 @@ export function Settings() {
     );
   }
 
-  if (settings === null) {
+  if (settings === null || voiceForm === null) {
     return (
       <div className="page page--narrow">
         <PageHeader title="Settings" />
@@ -367,7 +431,10 @@ export function Settings() {
     sentryInterval !== String(settings.sentryPollIntervalMinutes) ||
     sentryModel !== settings.sentryModel ||
     sentryPlans !== String(settings.sentryPlansPerTick) ||
-    sentryBaseUrl !== settings.sentryBaseUrl;
+    sentryBaseUrl !== settings.sentryBaseUrl ||
+    openrouterKey.trim() !== '' ||
+    elevenlabsKey.trim() !== '' ||
+    JSON.stringify(voiceForm) !== JSON.stringify(toVoiceForm(settings.voice));
   const claudeStatus = claude?.status ?? null;
 
   return (
@@ -713,6 +780,20 @@ export function Settings() {
           </div>
         </Panel>
 
+        <VoicePanel
+          settings={settings}
+          form={voiceForm}
+          setForm={(change) => setVoiceForm((current) => (current === null ? current : change(current)))}
+          openrouterKey={openrouterKey}
+          setOpenrouterKey={setOpenrouterKey}
+          elevenlabsKey={elevenlabsKey}
+          setElevenlabsKey={setElevenlabsKey}
+          slugProblems={slugProblems}
+          setSlugProblems={setSlugProblems}
+          busy={busy !== null}
+          onRemoveKey={onRemoveVoiceKey}
+        />
+
         <Panel title="Commit identity" icon="git-branch" id="identity">
           <div className="field__row">
             <div className="field">
@@ -733,7 +814,7 @@ export function Settings() {
 
         <div className={`savebar${dirty ? ' savebar--visible' : ''}`} aria-hidden={!dirty}>
           <span className="savebar__text">{dirty ? 'You have unsaved changes.' : 'Everything is saved.'}</span>
-          <button type="button" className="button button--quiet" onClick={() => applyLoaded(settings)} disabled={busy !== null || !dirty} tabIndex={dirty ? 0 : -1}>
+          <button type="button" className="button button--quiet" onClick={() => { applyLoaded(settings); setOpenrouterKey(''); setElevenlabsKey(''); setSlugProblems({}); }} disabled={busy !== null || !dirty} tabIndex={dirty ? 0 : -1}>
             Discard
           </button>
           <button type="submit" className="button button--primary" disabled={busy !== null || !dirty} tabIndex={dirty ? 0 : -1}>
@@ -743,5 +824,623 @@ export function Settings() {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * Settings → Voice as the form edits it (voice US-001): numbers as the text
+ * the inputs hold, "none" as the empty string, and the pronunciation map as
+ * the JSON the operator types.
+ */
+export interface VoiceForm {
+  enabled: boolean;
+  sttProvider: VoiceSettings['sttProvider'];
+  orSttModel: string;
+  language: string;
+  secondaryLanguage: string;
+  keytermsEnabled: boolean;
+  ttsModel: VoiceSettings['ttsModel'];
+  voiceId: string;
+  orTtsModel: string;
+  orTtsVoice: string;
+  orTtsSampleRate: string;
+  chiefModel: string;
+  sessionModel: AgentModel;
+  vadSilenceMs: string;
+  bargeIn: VoiceSettings['bargeIn'];
+  eventVerbosity: VoiceSettings['eventVerbosity'];
+  timezone: string;
+  pronunciations: string;
+  transcriptRetentionDays: string;
+  pttGlobal: boolean;
+  liveCaptions: VoiceSettings['liveCaptions'];
+  speculativeChief: boolean;
+}
+
+export function toVoiceForm(voice: VoiceSettings): VoiceForm {
+  return {
+    ...voice,
+    secondaryLanguage: voice.secondaryLanguage ?? '',
+    voiceId: voice.voiceId ?? '',
+    orTtsSampleRate: String(voice.orTtsSampleRate),
+    vadSilenceMs: String(voice.vadSilenceMs),
+    pronunciations: JSON.stringify(voice.pronunciations, null, 2),
+    transcriptRetentionDays: String(voice.transcriptRetentionDays),
+  };
+}
+
+/** The whole-number fields, with the bounds the server enforces. */
+const VOICE_NUMBERS = [
+  { field: 'vadSilenceMs', label: 'End of speech after', min: 400, max: 2000 },
+  { field: 'transcriptRetentionDays', label: 'Keep transcripts for', min: 1, max: 365 },
+  { field: 'orTtsSampleRate', label: 'Backup voice sample rate', min: 8000, max: 48000 },
+] as const;
+
+/**
+ * The form turned back into a settings update, or the first reason it cannot
+ * be. The server validates all of it again; this only catches what would
+ * otherwise cost a round trip to say.
+ */
+export function fromVoiceForm(form: VoiceForm): { voice: VoiceSettings } | { error: string } {
+  const numbers: Partial<Record<(typeof VOICE_NUMBERS)[number]['field'], number>> = {};
+  for (const { field, label, min, max } of VOICE_NUMBERS) {
+    const value = Number(form[field]);
+    if (form[field].trim() === '' || !Number.isInteger(value) || value < min || value > max) {
+      return { error: `${label} must be a whole number between ${min} and ${max}.` };
+    }
+    numbers[field] = value;
+  }
+  let pronunciations: unknown;
+  try {
+    pronunciations = form.pronunciations.trim() === '' ? {} : JSON.parse(form.pronunciations);
+  } catch {
+    return { error: 'Pronunciations must be valid JSON, for example {"PRD": "P R D"}.' };
+  }
+  if (
+    typeof pronunciations !== 'object' ||
+    pronunciations === null ||
+    Array.isArray(pronunciations) ||
+    Object.values(pronunciations).some((value) => typeof value !== 'string')
+  ) {
+    return { error: 'Pronunciations must be a JSON object of strings, for example {"PRD": "P R D"}.' };
+  }
+  return {
+    voice: {
+      ...form,
+      orSttModel: form.orSttModel.trim(),
+      chiefModel: form.chiefModel.trim(),
+      orTtsModel: form.orTtsModel.trim(),
+      orTtsVoice: form.orTtsVoice.trim(),
+      language: form.language.trim(),
+      secondaryLanguage: form.secondaryLanguage.trim() === '' ? null : form.secondaryLanguage.trim(),
+      timezone: form.timezone.trim(),
+      voiceId: form.voiceId === '' ? null : form.voiceId,
+      orTtsSampleRate: numbers.orTtsSampleRate ?? 24000,
+      vadSilenceMs: numbers.vadSilenceMs ?? 800,
+      transcriptRetentionDays: numbers.transcriptRetentionDays ?? 30,
+      pronunciations: pronunciations as Record<string, string>,
+    },
+  };
+}
+
+/** The four OpenRouter names, as they would be saved. */
+export function slugsOf(voice: Pick<VoiceSettings, keyof OpenRouterSlugs>): OpenRouterSlugs {
+  return { orSttModel: voice.orSttModel, chiefModel: voice.chiefModel, orTtsModel: voice.orTtsModel, orTtsVoice: voice.orTtsVoice };
+}
+
+const STT_PROVIDER_LABELS: Record<VoiceSettings['sttProvider'], string> = {
+  openrouter: 'OpenRouter, one request per utterance',
+  'elevenlabs-realtime': 'ElevenLabs Scribe realtime (live captions, uses credits)',
+  browser: 'Browser speech recognition (development only)',
+};
+
+const TTS_MODEL_LABELS: Record<VoiceSettings['ttsModel'], string> = {
+  eleven_flash_v2_5: 'Flash v2.5: fastest, half the credits',
+  eleven_turbo_v2_5: 'Turbo v2.5: a little slower, a little richer',
+  eleven_multilingual_v2: 'Multilingual v2: best quality, slowest',
+};
+
+const BARGE_IN_LABELS: Record<VoiceSettings['bargeIn'], string> = {
+  on: 'On: any speech interrupts',
+  careful: 'Careful: only clear speech interrupts',
+  off: 'Off: wait for the agent to finish',
+};
+
+const VERBOSITY_LABELS: Record<VoiceSettings['eventVerbosity'], string> = {
+  important: 'Important: finished builds, failures, questions',
+  all: 'All events',
+  none: 'None',
+};
+
+const CAPTION_LABELS: Record<VoiceSettings['liveCaptions'], string> = {
+  off: 'Off',
+  browser: 'Browser speech recognition, captions only',
+};
+
+/** A check button's outcome, shown under the key it checked. */
+interface CheckResult {
+  readonly ok: boolean;
+  readonly text: string;
+}
+
+const credits = new Intl.NumberFormat();
+
+const MIC_TEST_MS = 3_000;
+/** "Play test voice": one Dutch and one English sentence, as a call mixes them. */
+const TTS_TEST_SENTENCES = ['Hallo, ik ben chief. Zo klink ik in een gesprek.', 'And this is how I sound when we switch to English.'];
+
+function VoicePanel({
+  settings,
+  form,
+  setForm,
+  openrouterKey,
+  setOpenrouterKey,
+  elevenlabsKey,
+  setElevenlabsKey,
+  slugProblems,
+  setSlugProblems,
+  busy,
+  onRemoveKey,
+}: {
+  readonly settings: SettingsData;
+  readonly form: VoiceForm;
+  readonly setForm: (update: (form: VoiceForm) => VoiceForm) => void;
+  readonly openrouterKey: string;
+  readonly setOpenrouterKey: (value: string) => void;
+  readonly elevenlabsKey: string;
+  readonly setElevenlabsKey: (value: string) => void;
+  readonly slugProblems: Partial<Record<keyof OpenRouterSlugs, string>>;
+  readonly setSlugProblems: (problems: Partial<Record<keyof OpenRouterSlugs, string>>) => void;
+  readonly busy: boolean;
+  readonly onRemoveKey: (provider: 'openrouter' | 'elevenlabs') => void;
+}) {
+  const storedOpenrouter = settings.openrouterApiKey;
+  const storedElevenlabs = settings.elevenlabsApiKey;
+  const [checking, setChecking] = useState<'openrouter' | 'elevenlabs' | null>(null);
+  const [openrouterCheck, setOpenrouterCheck] = useState<CheckResult | null>(null);
+  const [elevenlabsCheck, setElevenlabsCheck] = useState<CheckResult | null>(null);
+  const [micTest, setMicTest] = useState<'recording' | 'transcribing' | null>(null);
+  const [micCheck, setMicCheck] = useState<CheckResult | null>(null);
+  const [voiceTest, setVoiceTest] = useState<'elevenlabs' | 'openrouter' | null>(null);
+  const [voiceCheck, setVoiceCheck] = useState<CheckResult | null>(null);
+  const [voices, setVoices] = useState<ElevenLabsVoice[] | null>(null);
+  const [voicesError, setVoicesError] = useState<string | null>(null);
+  const [voicesLoading, setVoicesLoading] = useState(false);
+
+  const set = <K extends keyof VoiceForm>(field: K, value: VoiceForm[K]): void => {
+    setForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const setSlug = (field: keyof OpenRouterSlugs, value: string): void => {
+    set(field, value);
+    if (slugProblems[field] !== undefined) setSlugProblems({ ...slugProblems, [field]: undefined });
+  };
+
+  // The picker's options come from the server, which asks ElevenLabs with the
+  // stored key; a key typed but not saved yet cannot list anything.
+  const loadVoices = useCallback((signal?: AbortSignal): void => {
+    setVoicesLoading(true);
+    fetchVoiceVoices(signal)
+      .then((list) => {
+        setVoices(list);
+        setVoicesError(null);
+      })
+      .catch((error: unknown) => {
+        if (signal?.aborted === true) return;
+        if (redirectIfUnauthorised(error)) return;
+        setVoicesError(describeError(error));
+      })
+      .finally(() => {
+        if (signal?.aborted !== true) setVoicesLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!storedElevenlabs.configured) {
+      setVoices(null);
+      setVoicesError(null);
+      return;
+    }
+    const controller = new AbortController();
+    loadVoices(controller.signal);
+    return () => controller.abort();
+  }, [storedElevenlabs.configured, storedElevenlabs.last4, loadVoices]);
+
+  const onCheckOpenrouter = (): void => {
+    setChecking('openrouter');
+    setOpenrouterCheck(null);
+    const key = openrouterKey.trim();
+    checkOpenRouterKey({ ...(key === '' ? {} : { key }), models: slugsOf(form) })
+      .then((result) => {
+        const problems: Partial<Record<keyof OpenRouterSlugs, string>> = {};
+        for (const check of result.models) if (check.problem !== null) problems[check.field] = check.problem;
+        setSlugProblems(problems);
+        const bad = Object.keys(problems).length;
+        const info = result.key;
+        const balance =
+          info === null
+            ? ''
+            : info.limitRemaining !== null
+              ? ` $${info.limitRemaining.toFixed(2)} of its $${(info.limit ?? 0).toFixed(2)} limit left.`
+              : info.usage !== null
+                ? ` $${info.usage.toFixed(2)} spent so far, no limit set.`
+                : '';
+        setOpenrouterCheck({
+          ok: bad === 0,
+          text:
+            `Key works${info?.label != null ? ` (${info.label})` : ''}.${balance} ` +
+            (bad === 0 ? 'All four model names are usable.' : `${bad} model ${bad === 1 ? 'name is' : 'names are'} not usable; see below.`),
+        });
+      })
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setOpenrouterCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setChecking(null));
+  };
+
+  const onCheckElevenlabs = (): void => {
+    setChecking('elevenlabs');
+    setElevenlabsCheck(null);
+    const key = elevenlabsKey.trim();
+    checkElevenLabsKey(key === '' ? undefined : key)
+      .then((result) => {
+        const reset = result.resetsAt === null ? '' : `, resets ${new Date(result.resetsAt).toLocaleDateString()}`;
+        setElevenlabsCheck({
+          ok: true,
+          text: `Key works${result.tier === null ? '' : ` (${result.tier})`}: ${credits.format(result.remaining)} of ${credits.format(result.characterLimit)} credits left${reset}.`,
+        });
+      })
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setElevenlabsCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setChecking(null));
+  };
+
+  // Three seconds from the microphone, transcribed with the saved key and
+  // model exactly as a call's utterance would be.
+  const onTestMicrophone = (): void => {
+    setMicTest('recording');
+    setMicCheck(null);
+    recordWav(MIC_TEST_MS)
+      .then((wav) => {
+        setMicTest('transcribing');
+        return testSpeechToText(wav);
+      })
+      .then((result) => {
+        setMicCheck({
+          ok: true,
+          text: result.text === '' ? `Heard nothing (${String(result.ms)} ms).` : `“${result.text}” (${String(result.ms)} ms)`,
+        });
+      })
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setMicCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setMicTest(null));
+  };
+
+  // The saved voice settings, sentence by sentence: a fetch, then playback.
+  const onPlayTestVoice = (provider: 'elevenlabs' | 'openrouter'): void => {
+    setVoiceTest(provider);
+    setVoiceCheck(null);
+    const play = async (): Promise<void> => {
+      for (const sentence of TTS_TEST_SENTENCES) {
+        const audio = await testTextToSpeech(sentence, provider);
+        await playPcm16(audio.pcm, audio.sampleRate);
+      }
+    };
+    play()
+      .then(() => setVoiceCheck({ ok: true, text: provider === 'elevenlabs' ? 'Played the ElevenLabs voice.' : 'Played the backup voice.' }))
+      .catch((error: unknown) => {
+        if (redirectIfUnauthorised(error)) return;
+        setVoiceCheck({ ok: false, text: describeError(error) });
+      })
+      .finally(() => setVoiceTest(null));
+  };
+
+  const pickedMissing = form.voiceId !== '' && voices !== null && !voices.some((voice) => voice.voiceId === form.voiceId);
+
+  const slugField = (field: keyof OpenRouterSlugs, id: string, label: string, hint: string) => (
+    <div className="field">
+      <label className="field__label" htmlFor={id}>
+        {label}
+      </label>
+      <input id={id} name={id} type="text" autoComplete="off" spellCheck={false} value={form[field]} onChange={(event) => setSlug(field, event.target.value)} className="field__input mono" />
+      {slugProblems[field] !== undefined && <p className="field__error">{slugProblems[field]}</p>}
+      <p className="field__hint">{hint}</p>
+    </div>
+  );
+
+  const checkLine = (result: CheckResult | null) =>
+    result === null ? null : <p className={result.ok ? 'field__hint' : 'field__error'}>{result.text}</p>;
+
+  return (
+    <Panel
+      title="Voice"
+      icon="comment"
+      id="voice"
+      meta={form.enabled ? <Badge tone="done">on</Badge> : <Badge>off</Badge>}
+    >
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={form.enabled} onChange={(event) => set('enabled', event.target.checked)} />
+          Enable voice calls with chief
+        </label>
+        <p className="field__hint">Needs an OpenRouter key; the ElevenLabs key is optional, without it the backup voice below speaks.</p>
+      </div>
+
+      <div className="field">
+        <label className="field__label" htmlFor="openrouter-key">
+          OpenRouter API key {storedOpenrouter.configured && <span className="muted mono">····{storedOpenrouter.last4 ?? ''}</span>}
+        </label>
+        <div className="field__pair">
+          <input id="openrouter-key" name="openrouter-key" type="password" autoComplete="off" spellCheck={false} placeholder={storedOpenrouter.configured ? 'Leave blank to keep the current key' : 'sk-or-v1-…'} value={openrouterKey} onChange={(event) => setOpenrouterKey(event.target.value)} className="field__input mono" />
+          <button type="button" className="button" onClick={onCheckOpenrouter} disabled={busy || checking !== null || (openrouterKey.trim() === '' && !storedOpenrouter.configured)}>
+            {checking === 'openrouter' ? 'Checking…' : 'Check OpenRouter key'}
+          </button>
+          {storedOpenrouter.configured && (
+            <button type="button" className="button button--quiet button--danger" onClick={() => onRemoveKey('openrouter')} disabled={busy}>
+              Remove
+            </button>
+          )}
+        </div>
+        {checkLine(openrouterCheck)}
+        <p className="field__hint">Speech-to-text, chief's brain and the backup voice. Stored write-only; the check also validates the four model names below against OpenRouter's catalog.</p>
+      </div>
+
+      <div className="field">
+        <label className="field__label" htmlFor="elevenlabs-key">
+          ElevenLabs API key {storedElevenlabs.configured && <span className="muted mono">····{storedElevenlabs.last4 ?? ''}</span>}
+        </label>
+        <div className="field__pair">
+          <input id="elevenlabs-key" name="elevenlabs-key" type="password" autoComplete="off" spellCheck={false} placeholder={storedElevenlabs.configured ? 'Leave blank to keep the current key' : 'sk_…'} value={elevenlabsKey} onChange={(event) => setElevenlabsKey(event.target.value)} className="field__input mono" />
+          <button type="button" className="button" onClick={onCheckElevenlabs} disabled={busy || checking !== null || (elevenlabsKey.trim() === '' && !storedElevenlabs.configured)}>
+            {checking === 'elevenlabs' ? 'Checking…' : 'Check ElevenLabs key'}
+          </button>
+          {storedElevenlabs.configured && (
+            <button type="button" className="button button--quiet button--danger" onClick={() => onRemoveKey('elevenlabs')} disabled={busy}>
+              Remove
+            </button>
+          )}
+        </div>
+        {checkLine(elevenlabsCheck)}
+        <p className="field__hint">The agents' voice. Stored write-only; the key never reaches this browser, the voice list below is fetched by the server.</p>
+      </div>
+
+      <div className="field__row">
+        <div className="field">
+          <label className="field__label" htmlFor="voice-id">
+            Voice
+          </label>
+          <div className="field__pair">
+            <select id="voice-id" name="voice-id" value={form.voiceId} onChange={(event) => set('voiceId', event.target.value)} className="field__input" disabled={voices === null && form.voiceId === ''}>
+              <option value="">{storedElevenlabs.configured ? 'Not chosen' : 'Save an ElevenLabs key first'}</option>
+              {pickedMissing && <option value={form.voiceId}>{form.voiceId} (not in your library)</option>}
+              {voices === null && form.voiceId !== '' && <option value={form.voiceId}>{form.voiceId}</option>}
+              {(voices ?? []).map((voice) => (
+                <option key={voice.voiceId} value={voice.voiceId}>
+                  {voice.name}
+                  {voice.labels['accent'] === undefined ? '' : ` — ${voice.labels['accent']}`}
+                  {voice.category === null ? '' : ` (${voice.category})`}
+                </option>
+              ))}
+            </select>
+            {storedElevenlabs.configured && (
+              <button type="button" className="button button--quiet" onClick={() => loadVoices()} disabled={voicesLoading}>
+                <Icon name="sync" />
+                {voicesLoading ? 'Loading…' : 'Reload'}
+              </button>
+            )}
+          </div>
+          {voicesError !== null && <p className="field__error">{voicesError}</p>}
+          <p className="field__hint">One voice for chief and every session agent.</p>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-tts-model">
+            ElevenLabs model
+          </label>
+          <select id="voice-tts-model" name="voice-tts-model" value={form.ttsModel} onChange={(event) => set('ttsModel', event.target.value as VoiceSettings['ttsModel'])} className="field__input">
+            {VOICE_TTS_MODELS.map((model) => (
+              <option key={model} value={model}>
+                {TTS_MODEL_LABELS[model]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="field__row">
+        <div className="field">
+          <label className="field__label" htmlFor="voice-language">
+            Language
+          </label>
+          <input id="voice-language" name="voice-language" type="text" maxLength={2} autoComplete="off" spellCheck={false} placeholder="nl" value={form.language} onChange={(event) => set('language', event.target.value.toLowerCase())} className="field__input field__input--narrow mono" />
+          <p className="field__hint">Two-letter ISO 639-1 code, e.g. nl.</p>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-secondary-language">
+            Second language
+          </label>
+          <input id="voice-secondary-language" name="voice-secondary-language" type="text" maxLength={2} autoComplete="off" spellCheck={false} placeholder="none" value={form.secondaryLanguage} onChange={(event) => set('secondaryLanguage', event.target.value.toLowerCase())} className="field__input field__input--narrow mono" />
+          <p className="field__hint">Blank for none.</p>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-timezone">
+            Time zone
+          </label>
+          <input id="voice-timezone" name="voice-timezone" type="text" autoComplete="off" spellCheck={false} placeholder="Europe/Amsterdam" value={form.timezone} onChange={(event) => set('timezone', event.target.value)} className="field__input mono" />
+          <p className="field__hint">IANA name; what "tonight" and "tomorrow at 9" mean.</p>
+        </div>
+      </div>
+
+      <div className="field__row">
+        <div className="field">
+          <label className="field__label" htmlFor="voice-stt-provider">
+            Speech to text
+          </label>
+          <select id="voice-stt-provider" name="voice-stt-provider" value={form.sttProvider} onChange={(event) => set('sttProvider', event.target.value as VoiceSettings['sttProvider'])} className="field__input">
+            {VOICE_STT_PROVIDERS.map((provider) => (
+              <option key={provider} value={provider}>
+                {STT_PROVIDER_LABELS[provider]}
+              </option>
+            ))}
+          </select>
+          {settings.voiceScribeCreditsPerMin !== null && (
+            <p className="field__hint">
+              Scribe cost ≈ {Math.round(settings.voiceScribeCreditsPerMin).toLocaleString()} credits/min on your plan
+              (measured from your ElevenLabs balance after the last Scribe call).
+            </p>
+          )}
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-live-captions">
+            Live captions
+          </label>
+          <select id="voice-live-captions" name="voice-live-captions" value={form.liveCaptions} onChange={(event) => set('liveCaptions', event.target.value as VoiceSettings['liveCaptions'])} className="field__input">
+            {VOICE_LIVE_CAPTIONS.map((mode) => (
+              <option key={mode} value={mode}>
+                {CAPTION_LABELS[mode]}
+              </option>
+            ))}
+          </select>
+          <p className="field__hint">OpenRouter has no partial transcripts; this shows rough captions while you speak. The OpenRouter transcript still counts.</p>
+        </div>
+      </div>
+
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={form.keytermsEnabled} onChange={(event) => set('keytermsEnabled', event.target.checked)} />
+          Send key terms to Scribe
+        </label>
+        <p className="field__hint">Scribe realtime only: session and repository names are recognised better, for about 20% more credits.</p>
+      </div>
+
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={form.speculativeChief} onChange={(event) => set('speculativeChief', event.target.checked)} />
+          Speculative chief
+        </label>
+        <p className="field__hint">Scribe realtime only: chief starts thinking when your words have not changed for 300 ms, and drops that answer if you keep talking. Faster replies, a few more OpenRouter tokens.</p>
+      </div>
+
+      <div className="field__row">
+        {slugField('orSttModel', 'voice-or-stt-model', 'OpenRouter speech-to-text model', 'Any OpenRouter transcription model slug.')}
+        {slugField('chiefModel', 'voice-chief-model', 'Chief model', 'Any OpenRouter chat model that supports tool calling.')}
+      </div>
+
+      <div className="field">
+        <div className="field__pair">
+          <button type="button" className="button" onClick={onTestMicrophone} disabled={busy || micTest !== null || !storedOpenrouter.configured}>
+            {micTest === 'recording' ? 'Listening for 3 s…' : micTest === 'transcribing' ? 'Transcribing…' : 'Test microphone'}
+          </button>
+        </div>
+        {checkLine(micCheck)}
+        <p className="field__hint">Records three seconds and transcribes them with the saved OpenRouter key and speech-to-text model; shows what was heard and how long it took.</p>
+      </div>
+
+      <div className="field__row">
+        {slugField('orTtsModel', 'voice-or-tts-model', 'Backup voice model', 'OpenRouter text-to-speech, used when ElevenLabs is out of credits or unreachable.')}
+        {slugField('orTtsVoice', 'voice-or-tts-voice', 'Backup voice', "One of the backup model's voices.")}
+        <div className="field">
+          <label className="field__label" htmlFor="voice-or-tts-sample-rate">
+            Backup voice sample rate (Hz)
+          </label>
+          <input id="voice-or-tts-sample-rate" name="voice-or-tts-sample-rate" type="number" min={8000} max={48000} step={1} value={form.orTtsSampleRate} onChange={(event) => set('orTtsSampleRate', event.target.value)} className="field__input field__input--narrow" />
+        </div>
+      </div>
+
+      <div className="field">
+        <div className="field__pair">
+          <button type="button" className="button" onClick={() => onPlayTestVoice('elevenlabs')} disabled={busy || voiceTest !== null || !storedElevenlabs.configured}>
+            {voiceTest === 'elevenlabs' ? 'Playing…' : 'Play test voice'}
+          </button>
+          <button type="button" className="button" onClick={() => onPlayTestVoice('openrouter')} disabled={busy || voiceTest !== null || !storedOpenrouter.configured}>
+            {voiceTest === 'openrouter' ? 'Playing…' : 'Play backup voice'}
+          </button>
+        </div>
+        {checkLine(voiceCheck)}
+        <p className="field__hint">Speaks one Dutch and one English sentence with the saved voice settings. If the backup voice sounds too fast or too slow, fix its sample rate.</p>
+      </div>
+
+      <div className="field__row">
+        <div className="field">
+          <label className="field__label" htmlFor="voice-session-model">
+            Session agent model
+          </label>
+          <select id="voice-session-model" name="voice-session-model" value={form.sessionModel} onChange={(event) => set('sessionModel', event.target.value as AgentModel)} className="field__input">
+            {AGENT_MODELS.map((model) => (
+              <option key={model} value={model}>
+                {MODEL_LABELS[model]}
+              </option>
+            ))}
+          </select>
+          <p className="field__hint">The Claude Code agent chief hands a call to for planning inside a session.</p>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-vad-silence">
+            End of speech after (ms)
+          </label>
+          <input id="voice-vad-silence" name="voice-vad-silence" type="number" min={400} max={2000} step={50} value={form.vadSilenceMs} onChange={(event) => set('vadSilenceMs', event.target.value)} className="field__input field__input--narrow" />
+          <p className="field__hint">How long a pause ends what you are saying. Shorter answers faster; longer lets you think mid-sentence.</p>
+        </div>
+      </div>
+
+      <div className="field__row">
+        <div className="field">
+          <label className="field__label" htmlFor="voice-barge-in">
+            Interrupting the agent
+          </label>
+          <select id="voice-barge-in" name="voice-barge-in" value={form.bargeIn} onChange={(event) => set('bargeIn', event.target.value as VoiceSettings['bargeIn'])} className="field__input">
+            {VOICE_BARGE_IN_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {BARGE_IN_LABELS[mode]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-event-verbosity">
+            Events chief mentions during a call
+          </label>
+          <select id="voice-event-verbosity" name="voice-event-verbosity" value={form.eventVerbosity} onChange={(event) => set('eventVerbosity', event.target.value as VoiceSettings['eventVerbosity'])} className="field__input">
+            {VOICE_EVENT_VERBOSITIES.map((level) => (
+              <option key={level} value={level}>
+                {VERBOSITY_LABELS[level]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-retention">
+            Keep transcripts for (days)
+          </label>
+          <input id="voice-retention" name="voice-retention" type="number" min={1} max={365} step={1} value={form.transcriptRetentionDays} onChange={(event) => set('transcriptRetentionDays', event.target.value)} className="field__input field__input--narrow" />
+          <p className="field__hint">
+            Audio is never stored: only the transcript text, timings and usage are kept, and calls older than this are deleted.{' '}
+            <Link className="link" href="/calls">
+              Call history
+            </Link>
+          </p>
+        </div>
+      </div>
+
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={form.pttGlobal} onChange={(event) => set('pttGlobal', event.target.checked)} />
+          Push-to-talk works on every page
+        </label>
+        <p className="field__hint">Off: the push-to-talk key only works while the call panel has focus.</p>
+      </div>
+
+      <div className="field">
+        <label className="field__label" htmlFor="voice-pronunciations">
+          Pronunciations
+        </label>
+        <textarea id="voice-pronunciations" name="voice-pronunciations" rows={7} spellCheck={false} value={form.pronunciations} onChange={(event) => set('pronunciations', event.target.value)} className="field__input mono" />
+        <p className="field__hint">A JSON object of term → how to say it, applied to everything the agents speak. Empty it to turn it off.</p>
+      </div>
+    </Panel>
   );
 }

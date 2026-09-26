@@ -33,6 +33,13 @@ export default tseslint.config(
     },
   },
   {
+    // AudioWorklet modules served as-is (voice capture).
+    files: ['web/public/**/*worklet*.js'],
+    languageOptions: {
+      globals: { ...globals.audioWorklet },
+    },
+  },
+  {
     files: ['**/*.config.{js,ts}', 'eslint.config.js'],
     languageOptions: {
       globals: { ...globals.node },

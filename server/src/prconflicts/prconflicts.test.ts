@@ -643,3 +643,85 @@ describe('the configurable scan interval and on/off switch (US-004)', () => {
     assert.equal(github.listCalls.length, 5);
   });
 });
+
+describe('fixing one pull request on request (voice US-013)', () => {
+  it('scans the one pull request and starts its fix when GitHub says it conflicts', async () => {
+    const { db, github, scan, starter, repositoryId } = world();
+    // Switched off and a queue waiting: both only govern the automatic scan.
+    setSetting(db, 'conflict_fix_enabled', '0');
+    enqueueBuild(db, { kind: 'session', refId: 'someone-else' });
+    github.open('acme/demo', [{ number: 213, headRef: 'chief/csv', title: 'CSV export' }]);
+    github.says('acme/demo', 213, { mergeable: 'conflicted', baseRef: 'develop', headRef: 'chief/csv' });
+
+    assert.equal(scan.conflicted(repositoryId, 213), null);
+    assert.deepEqual(await scan.fixNow(repositoryId, 213), {
+      ok: true,
+      prNumber: 213,
+      headBranch: 'chief/csv',
+      baseBranch: 'develop',
+    });
+    assert.equal(starter.started.length, 1);
+    assert.equal(starter.started[0]?.prTitle, 'CSV export');
+    assert.deepEqual(github.mergeabilityCalls, [{ slug: 'acme/demo', number: 213 }]);
+    assert.equal(scan.conflicted(repositoryId, 213), true);
+    removeQueuedBuild(db, 'session', 'someone-else');
+  });
+
+  it('refuses a clean, an unknown, a missing and a fork pull request with a reason', async () => {
+    const { github, scan, starter, repositoryId } = world();
+    github.open('acme/demo', [
+      { number: 1 },
+      { number: 2 },
+      { number: 3, fromFork: true, headRef: 'patch-1' },
+      { number: 4, headRef: 'feature/by-hand' },
+    ]);
+    github.says('acme/demo', 2, { mergeable: 'unknown' });
+
+    const clean = await scan.fixNow(repositoryId, 1);
+    assert.deepEqual(clean, { ok: false, code: 'no_conflicts', reason: '#1 has no merge conflicts.' });
+    assert.equal(scan.conflicted(repositoryId, 1), false);
+    assert.equal((await scan.fixNow(repositoryId, 2)).ok, false);
+    assert.match(JSON.stringify(await scan.fixNow(repositoryId, 2)), /has not worked out yet/);
+    assert.match(JSON.stringify(await scan.fixNow(repositoryId, 9)), /not an open pull request/);
+    const fork = await scan.fixNow(repositoryId, 3);
+    assert.equal(fork.ok, false);
+    assert.equal(!fork.ok && fork.code, 'pull_request_from_fork');
+    assert.match(!fork.ok ? fork.reason : '', /lives on another repository/);
+    assert.match(JSON.stringify(await scan.fixNow(repositoryId, 4)), /not_a_chief_branch/);
+    assert.equal(starter.started.length, 0);
+  });
+
+  it('refuses when a fix is already running, without asking GitHub', async () => {
+    const { db, github, scan, starter, repositoryId } = world();
+    const fix = createPrConflictFix(db, {
+      repositoryId,
+      prNumber: 5,
+      prUrl: 'https://github.com/acme/demo/pull/5',
+      prTitle: 'x',
+      headBranch: 'chief/x',
+      baseBranch: 'main',
+      headSha: 'h',
+      baseSha: 'b',
+    });
+    updatePrConflictFix(db, fix.id, { status: 'running' });
+
+    const result = await scan.fixNow(repositoryId, 5);
+    assert.deepEqual(result, { ok: false, code: 'fix_already_active', reason: 'A conflict fix is already running on #5.' });
+    assert.deepEqual(github.listCalls, []);
+    assert.equal(starter.started.length, 0);
+    assert.equal(scan.conflicted(repositoryId, 5), true);
+  });
+
+  it('turns a refused start into a spoken reason', async () => {
+    const { github, scan, starter, repositoryId } = world();
+    github.open('acme/demo', [{ number: 6 }]);
+    github.says('acme/demo', 6, { mergeable: 'conflicted' });
+    starter.failure = new Error('Every build slot is in use.');
+
+    assert.deepEqual(await scan.fixNow(repositoryId, 6), {
+      ok: false,
+      code: 'failed',
+      reason: 'Every build slot is in use.',
+    });
+  });
+});

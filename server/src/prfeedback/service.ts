@@ -29,6 +29,7 @@ import { runPush } from '../delivery/index.js';
 import { isValidGithubSlug } from '../lib/git-url.js';
 import { GithubApiError } from '../lib/github.js';
 import {
+  commentOnPullRequest,
   fetchPullRequestFeedback,
   type PullRequestFeedback,
   replyToReviewThread,
@@ -44,6 +45,7 @@ import { getAgentTimeoutMs, getBuildModel, getGithubToken } from '../settings/in
 import { runPrCheckout } from './checkout.js';
 import { parseOutcome } from './outcome.js';
 import { CONTAINER_OUTCOME_PATH, type FeedbackItem, prFeedbackPrompt } from './prompts.js';
+import { pullRequestOutcome, type VoiceEventSink } from '../voice/events.js';
 
 /**
  * One pass over a pull request's review feedback (US-021).
@@ -56,6 +58,30 @@ import { CONTAINER_OUTCOME_PATH, type FeedbackItem, prFeedbackPrompt } from './p
  * because a reply saying "fixed in abc1234" when `abc1234` is not on the remote
  * is a lie this codebase would rather not tell.
  */
+
+/**
+ * How a change the operator asked for by voice starts on GitHub (voice
+ * US-013): a `COMMENT` review whose body is this prefix and the instruction.
+ * The pass treats it as any other review summary, except that it answers it —
+ * once, with a comment — and never feeds an answered one to the agent again.
+ */
+export const VOICE_REQUEST_PREFIX = 'Requested by voice: ';
+
+export function isVoiceRequest(body: string): boolean {
+  return body.startsWith(VOICE_REQUEST_PREFIX);
+}
+
+/**
+ * Why nothing is pushed to a pull request from a fork: the sentence the
+ * feedback route answers with, shared with the voice tools and the conflict
+ * fixer so the refusal reads the same wherever it comes from.
+ */
+export function forkRefusalMessage(headRef: string, prNumber: number, repositoryName: string): string {
+  return (
+    `The head branch "${headRef}" of #${String(prNumber)} lives on another repository. ` +
+    `chief-web pushes with ${repositoryName}'s deploy key, which cannot write there.`
+  );
+}
 
 /** Where a live run is; meaningless once it is over, so it is not persisted. */
 export type PrRunPhase =
@@ -141,6 +167,8 @@ export interface PrFeedbackGateway {
     body: string,
   ): Promise<{ id: number; url: string }>;
   resolve(token: string, threadId: string): Promise<{ isResolved: boolean }>;
+  /** A comment on the pull request itself: how a voice request is answered. */
+  comment(token: string, slug: string, number: number, body: string): Promise<{ id: number; url: string }>;
 }
 
 export interface PrThreadView {
@@ -210,6 +238,8 @@ export class PrFeedbackService {
      * and a build refused there keeps this run from starting into the wall.
      */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   status(runId: string): PrRunView {
@@ -326,12 +356,11 @@ export class PrFeedbackService {
       throw new PrFeedbackError(
         409,
         'pull_request_from_fork',
-        `The head branch "${feedback.headRef}" of #${String(prNumber)} lives on another repository. ` +
-          `chief-web pushes with ${repository.name}'s deploy key, which cannot write there.`,
+        forkRefusalMessage(feedback.headRef, prNumber, repository.name),
       );
     }
 
-    const items = this.itemsOf(feedback);
+    const items = this.itemsOf(feedback, this.answeredVoiceRequests(repositoryId, prNumber));
     if (items.length === 0) {
       throw new PrFeedbackError(
         409,
@@ -380,6 +409,9 @@ export class PrFeedbackService {
         this.fail(run.id, 'agent', String(cause));
       })
       .finally(() => {
+        const ended = getPrRun(this.db, run.id);
+        const event = ended === null ? null : pullRequestOutcome(this.db, 'pr.run_finished', ended, 'finished');
+        if (event !== null) this.events?.publish(event);
         this.live.delete(run.id);
         this.starting.delete(run.id);
         void this.containers.removePrRun(run.id);
@@ -689,7 +721,7 @@ export class PrFeedbackService {
       // a change. Nothing to push, but the reasons are still worth posting.
       updatePrRun(this.db, run.id, { status: 'finished', finishedAt: new Date().toISOString() });
       state.phase = 'replying';
-      await this.answer(run.id, token, slug, null);
+      await this.answer(run.id, token, slug, null, voiceRequestsOf(feedback));
       return;
     }
 
@@ -713,7 +745,7 @@ export class PrFeedbackService {
     });
 
     state.phase = 'replying';
-    await this.answer(run.id, token, slug, delivered);
+    await this.answer(run.id, token, slug, delivered, voiceRequestsOf(feedback));
   }
 
   /**
@@ -729,6 +761,7 @@ export class PrFeedbackService {
     token: string,
     slug: string,
     headSha: string | null,
+    voiceRequests: ReadonlyMap<string, string>,
   ): Promise<void> {
     const run = getPrRun(this.db, runId);
     if (run === null) return;
@@ -737,9 +770,18 @@ export class PrFeedbackService {
 
     for (const thread of listThreads(this.db, runId)) {
       if (thread.outcome === null) continue;
-      // A review summary has no thread and no comment id, so GitHub gives
-      // nothing to reply to. It is input to the agent only.
-      if (thread.kind === 'review' || thread.firstCommentId === null) continue;
+      if (thread.kind === 'review') {
+        const request = voiceRequests.get(thread.threadId);
+        // A review summary cannot be resolved, so it comes back on every pass:
+        // answered once means answered, whatever commit the next pass is on.
+        if (request === undefined || thread.repliedAt !== null) continue;
+        const failure = await this.answerVoiceRequest(thread, token, slug, headSha, run, request);
+        if (failure !== null) firstFailure ??= { stage: 'reply', message: failure };
+        continue;
+      }
+      // A thread whose first comment has no id has nothing to reply to;
+      // review summaries were handled above.
+      if (thread.firstCommentId === null) continue;
       // The same sentence about the same commit, twice, is noise.
       if (thread.repliedAt !== null && thread.repliedHeadSha === headSha) continue;
 
@@ -798,6 +840,50 @@ export class PrFeedbackService {
     }
   }
 
+  /**
+   * Answers a voice request (a review summary) with a comment on the pull
+   * request, quoting the request. Returns the failure worth surfacing, if any.
+   */
+  private async answerVoiceRequest(
+    thread: PrFeedbackThread,
+    token: string,
+    slug: string,
+    headSha: string | null,
+    run: PrRun,
+    request: string,
+  ): Promise<string | null> {
+    const quoted = request
+      .split(/\r?\n/)
+      .map((line) => `> ${line}`)
+      .join('\n');
+    const body = `${quoted}\n\n${this.replyBody(thread, headSha, run)}`;
+    try {
+      const posted = await this.github.comment(token, slug, run.prNumber, body);
+      updateThread(this.db, thread.id, {
+        repliedAt: new Date().toISOString(),
+        replyUrl: posted.url,
+        repliedHeadSha: headSha,
+        error: null,
+      });
+      return null;
+    } catch (cause) {
+      const message = cause instanceof GithubApiError ? cause.message : String(cause);
+      updateThread(this.db, thread.id, { error: `The reply was refused: ${message}` });
+      return cause instanceof GithubApiError && cause.code === 'github_forbidden' ? null : message;
+    }
+  }
+
+  /** Voice requests on this pull request an earlier pass already answered. */
+  private answeredVoiceRequests(repositoryId: string, prNumber: number): Set<string> {
+    const run = findPrRun(this.db, repositoryId, prNumber);
+    if (run === null) return new Set();
+    return new Set(
+      listThreads(this.db, run.id)
+        .filter((thread) => thread.kind === 'review' && thread.repliedAt !== null)
+        .map((thread) => thread.threadId),
+    );
+  }
+
   private replyBody(thread: PrFeedbackThread, headSha: string | null, run: PrRun): string {
     const lines: string[] = [];
     if (thread.outcome === 'addressed' && headSha !== null) {
@@ -831,7 +917,7 @@ export class PrFeedbackService {
   }
 
   /** Unresolved threads first, then review bodies, keyed T1… and R1…. */
-  private itemsOf(feedback: PullRequestFeedback): FeedbackItem[] {
+  private itemsOf(feedback: PullRequestFeedback, answered: ReadonlySet<string>): FeedbackItem[] {
     const items: FeedbackItem[] = [];
     let threadIndex = 0;
     for (const thread of feedback.threads) {
@@ -850,9 +936,14 @@ export class PrFeedbackService {
         outdated: thread.isOutdated,
       });
     }
-    feedback.reviews.forEach((review, index) => {
+    let reviewIndex = 0;
+    for (const review of feedback.reviews) {
+      // An answered voice request is done; handing it over again would have
+      // the agent make the same change twice.
+      if (answered.has(review.id)) continue;
+      reviewIndex += 1;
       items.push({
-        key: `R${String(index + 1)}`,
+        key: `R${String(reviewIndex)}`,
         kind: 'review',
         path: null,
         line: null,
@@ -861,7 +952,7 @@ export class PrFeedbackService {
         url: review.url,
         outdated: false,
       });
-    });
+    }
     return items;
   }
 
@@ -997,6 +1088,15 @@ function heldRunMessage(until: string): string {
   );
 }
 
+/** The voice requests among a pass's review summaries: review id → the instruction. */
+function voiceRequestsOf(feedback: PullRequestFeedback): Map<string, string> {
+  return new Map(
+    feedback.reviews
+      .filter((review) => isVoiceRequest(review.body))
+      .map((review) => [review.id, review.body.slice(VOICE_REQUEST_PREFIX.length)]),
+  );
+}
+
 /** Resolves when `promise` settles, or after `timeoutMs`, whichever is first. */
 async function settle(promise: Promise<void>, timeoutMs: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
@@ -1024,6 +1124,7 @@ export function createPrFeedbackService(
   slots: BuildSlots,
   github: PrFeedbackGateway = new GithubPrFeedback(config),
   hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): PrFeedbackService {
   return new PrFeedbackService(
     config,
@@ -1035,6 +1136,7 @@ export function createPrFeedbackService(
     slots,
     () => getGithubToken(db),
     hold,
+    events,
   );
 }
 
@@ -1057,5 +1159,9 @@ class GithubPrFeedback implements PrFeedbackGateway {
 
   resolve(token: string, threadId: string): Promise<{ isResolved: boolean }> {
     return resolveReviewThread(token, this.config.githubGraphqlUrl, threadId);
+  }
+
+  comment(token: string, slug: string, number: number, body: string): Promise<{ id: number; url: string }> {
+    return commentOnPullRequest(token, this.config.githubApiUrl, slug, number, body);
   }
 }

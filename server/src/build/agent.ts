@@ -70,14 +70,15 @@ export function wrapAgentCommand(
   iteration: number,
   command: readonly string[],
 ): string[] {
-  const file = agentPidFile(sessionId, iteration);
-  return [
-    '/bin/sh',
-    '-c',
-    `mkdir -p ${AGENT_PID_DIR} 2>/dev/null; echo $$ > ${file}; exec "$@"`,
-    'chief-build',
-    ...command,
-  ];
+  return wrapWithPidFile(AGENT_PID_DIR, agentPidFile(sessionId, iteration), 'chief-build', command);
+}
+
+/**
+ * The pid-file trick itself, for any directory: `label` is `$0` of the
+ * wrapper shell. Session voice agents use it under `/tmp/.chief-voice`.
+ */
+export function wrapWithPidFile(dir: string, file: string, label: string, command: readonly string[]): string[] {
+  return ['/bin/sh', '-c', `mkdir -p ${dir} 2>/dev/null; echo $$ > ${file}; exec "$@"`, label, ...command];
 }
 
 /** One headless `claude -p` iteration, in the clone. */
@@ -121,7 +122,15 @@ export function agentSignalSpec(
   signal: string,
   options: { readonly remove?: boolean } = {},
 ): ExecSpec {
-  const glob = agentPidGlob(sessionId);
+  return pidFileSignalSpec(agentPidGlob(sessionId), signal, options);
+}
+
+/** {@link agentSignalSpec} over any pid-file glob; see there. */
+export function pidFileSignalSpec(
+  glob: string,
+  signal: string,
+  options: { readonly remove?: boolean } = {},
+): ExecSpec {
   return {
     cmd: [
       '/bin/sh',

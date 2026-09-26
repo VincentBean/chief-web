@@ -25,6 +25,7 @@ import { getAgentTimeoutMs, getBuildModel } from '../settings/index.js';
 import { abortMerge, isNonFastForward, runBaseMerge, verifyResolution } from './merge.js';
 import { conflictResolutionPrompt } from './prompts.js';
 import type { ConflictedPullRequest, ConflictFixStarter } from './service.js';
+import { pullRequestOutcome, type VoiceEventSink } from '../voice/events.js';
 
 /**
  * Resolving one conflicted pull request and pushing the result (US-005).
@@ -164,6 +165,8 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
     private readonly slots: BuildSlots,
     /** The global usage-limit hold, honoured exactly as `prreview` does. */
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
+    /** Voice background events (voice US-015); `null` where nothing listens. */
+    private readonly events: VoiceEventSink | null = null,
   ) {}
 
   /**
@@ -265,6 +268,9 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
         this.fail(fix.id, 'agent', describe(cause));
       })
       .finally(() => {
+        const ended = getPrConflictFix(this.db, fix.id);
+        const event = ended === null ? null : pullRequestOutcome(this.db, 'pr.conflict_fixed', ended, 'succeeded');
+        if (event !== null) this.events?.publish(event);
         this.live.delete(fix.id);
         void this.containers.removePrRun(fix.id);
         // Whatever was waiting for a build slot can have this one back.
@@ -639,8 +645,9 @@ export function createPrConflictFixService(
   runner: AgentRunner,
   slots: BuildSlots,
   hold: UsageLimitHold = new UsageLimitHold(db),
+  events: VoiceEventSink | null = null,
 ): PrConflictFixService {
-  return new PrConflictFixService(config, db, containers, exec, runner, slots, hold);
+  return new PrConflictFixService(config, db, containers, exec, runner, slots, hold, events);
 }
 
 function describe(cause: unknown): string {

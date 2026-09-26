@@ -92,6 +92,44 @@ export const SETTING_KEYS = [
    */
   'claude_limit_until',
   /**
+   * Voice calls (voice US-001). Both provider keys are write-only over the
+   * API, exactly like `github_token`; every `voice_*` row is read through
+   * `VOICE_FIELDS` in `settings/service.ts`, where an absent or unreadable
+   * row means that field's default.
+   */
+  'openrouter_api_key',
+  'elevenlabs_api_key',
+  'voice_enabled',
+  'voice_stt_provider',
+  'voice_or_stt_model',
+  'voice_language',
+  'voice_secondary_language',
+  'voice_keyterms_enabled',
+  'voice_tts_model',
+  'voice_voice_id',
+  'voice_or_tts_model',
+  'voice_or_tts_voice',
+  'voice_or_tts_sample_rate',
+  'voice_chief_model',
+  'voice_session_model',
+  'voice_vad_silence_ms',
+  'voice_barge_in',
+  'voice_event_verbosity',
+  'voice_timezone',
+  'voice_pronunciations',
+  'voice_transcript_retention_days',
+  'voice_ptt_global',
+  'voice_live_captions',
+  'voice_speculative_chief',
+  /**
+   * ISO timestamp until which calls start on the OpenRouter fallback voice,
+   * because ElevenLabs said its credits ran out (docs/voice-plan.md §8.6). Internal: never
+   * part of the settings view and never accepted by `PUT /api/settings`.
+   */
+  'voice_el_exhausted_until',
+  /** Scribe's measured credits per minute (US-023). Internal like the one above. */
+  'voice_scribe_credits_per_min',
+  /**
    * The standard questions offered in the planning terminal, as a JSON-encoded
    * array of strings. An absent row, or one that does not decode to such an
    * array, means `DEFAULT_PLANNING_QUESTIONS`.

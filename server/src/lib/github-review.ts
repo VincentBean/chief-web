@@ -540,6 +540,37 @@ export async function replyToReviewThread(
   };
 }
 
+/**
+ * `POST /repos/{slug}/issues/{number}/comments` — a plain comment on the pull
+ * request's conversation.
+ *
+ * How a review *summary* is answered: it has no thread and no comment id, so
+ * there is nothing to reply to in place. A comment rather than another review,
+ * because a review would come back in the next pass's feedback and be answered
+ * in turn.
+ */
+export async function commentOnPullRequest(
+  token: string,
+  baseUrl: string,
+  slug: string,
+  number: number,
+  body: string,
+): Promise<{ id: number; url: string }> {
+  const response = await githubFetch(
+    token,
+    url(baseUrl, `/repos/${slug}/issues/${String(number)}/comments`),
+    { method: 'POST', body: JSON.stringify({ body }) },
+  );
+  if (response.status !== 201) throw await failureOf(response);
+
+  const created = asRecord(await response.json().catch(() => null));
+  const id = created === null ? null : created['id'];
+  return {
+    id: typeof id === 'number' ? id : 0,
+    url: (created === null ? null : readString(created, 'html_url')) ?? '',
+  };
+}
+
 /** The mutation, exported so a test can assert it still sends what it must. */
 export const RESOLVE_THREAD_MUTATION = `
 mutation($threadId: ID!) {

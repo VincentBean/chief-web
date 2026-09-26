@@ -414,4 +414,15 @@
     height: 1.25em;
     width: 1.25em;
   }
+
+  /* ------------------------------------------------------- voice highlight
+   * Set for a moment by the call (`ui.highlight`, voice US-010) on whatever
+   * chief is talking about. An outline, not a border, so nothing reflows; it
+   * pulses twice and the attribute is removed after it.
+   */
+  [data-voice-highlight] {
+    animation: var(--animate-voice-highlight);
+    outline: 2px solid var(--color-accent-fg);
+    outline-offset: 3px;
+  }
 }

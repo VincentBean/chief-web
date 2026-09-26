@@ -49,6 +49,8 @@ COPY --from=deps /app/server/node_modules server/node_modules
 COPY package.json ./
 COPY server/package.json server/
 COPY --from=build /app/server/dist server/dist
+# web/dist includes voice/ (the capture worklet, and the VAD model, worklet
+# bundle and onnxruntime wasm that vite.config.ts copies into voice/vad/).
 COPY --from=build /app/web/dist web/dist
 
 # The server runs as root because it drives the host Docker socket, whose group

@@ -23,6 +23,7 @@ import {
   getMaxConcurrentSessions,
   getPrConflictIntervalMs,
   getPrSyncIntervalMs,
+  getVoiceSettings,
 } from '../settings/index.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -265,6 +266,7 @@ describe('settings api', () => {
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
+      ...voiceDefaults(db),
     });
   });
 
@@ -292,6 +294,7 @@ describe('settings api', () => {
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
+      ...voiceDefaults(db),
     });
   });
 
@@ -336,6 +339,7 @@ describe('settings api', () => {
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
+      ...voiceDefaults(db),
     });
   });
 
@@ -364,6 +368,7 @@ describe('settings api', () => {
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
+      ...voiceDefaults(db),
     });
   });
 
@@ -889,3 +894,13 @@ describe('settings api', () => {
     assert.equal(current['sentryPlansPerTick'], 5);
   });
 });
+
+/** What a settings answer carries for voice while nothing voice is stored. */
+function voiceDefaults(db: Database): Record<string, unknown> {
+  return {
+    openrouterApiKey: { configured: false, last4: null },
+    elevenlabsApiKey: { configured: false, last4: null },
+    voice: getVoiceSettings(db),
+    voiceScribeCreditsPerMin: null,
+  };
+}

@@ -1,5 +1,6 @@
 import { deleteSetting, getSetting, setSetting } from '../db/index.js';
 import type { Database } from '../db/index.js';
+import type { VoiceEventSink } from '../voice/events.js';
 
 /**
  * The global usage-limit hold (US-002).
@@ -34,7 +35,11 @@ export const USAGE_LIMIT_HOLD_MS = 60 * 60 * 1000;
  * ordinary callers just ask.
  */
 export class UsageLimitHold {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    /** Voice background events (voice US-015): told when a hold begins, not when one is extended. */
+    private readonly events: VoiceEventSink | null = null,
+  ) {}
 
   /**
    * Holds agent work for {@link USAGE_LIMIT_HOLD_MS} from `now` and returns the
@@ -50,6 +55,7 @@ export class UsageLimitHold {
     const expiry = current !== null && current > armed ? current : armed;
     const iso = expiry.toISOString();
     setSetting(this.db, 'claude_limit_until', iso);
+    if (current === null) this.events?.publish({ kind: 'limits.hold', until: iso });
     return iso;
   }
 

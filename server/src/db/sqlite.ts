@@ -54,6 +54,13 @@ export function integer(row: Row, column: string): number {
   return value;
 }
 
+/** A `REAL` column; SQLite hands back a whole-valued one as a plain number too. */
+export function real(row: Row, column: string): number {
+  const value = row[column];
+  if (typeof value !== 'number') throw unexpected(column, value);
+  return value;
+}
+
 /** Narrows a stored string to one of the allowed enum values. */
 export function enumeration<T extends string>(
   row: Row,
