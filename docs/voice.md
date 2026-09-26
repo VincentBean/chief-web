@@ -103,7 +103,7 @@ server with a message. They are listed in `.env.example` as well.
 | --- | --- | --- |
 | `VOICE_IDLE_TIMEOUT_MS` | `600000` | end a silent call after 10 minutes |
 | `VOICE_KEEP_AGENTS_MS` | `900000` | keep session agents alive this long after a call |
-| `VOICE_MAX_SESSION_AGENTS` | `3` | session agents running at once; the least recently used one is stopped |
+| `VOICE_MAX_SESSION_AGENTS` | `3` | session agents running at once; the least recently used idle one is stopped; one still drafting never is, and when all of them are drafting a new one is refused |
 | `VOICE_DETACHED_TURN_TIMEOUT_MS` | `600000` | a session agent's detached turn (one it runs while the call is elsewhere) is interrupted after this long (60000..3600000) |
 | `VOICE_STT_TIMEOUT_MS` | `8000` | cap on one speech-to-text request |
 | `VOICE_MAX_UTTERANCE_MS` | `60000` | longest utterance sent to speech-to-text |

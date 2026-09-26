@@ -28,8 +28,10 @@ import { voicePlanningPrompt, voiceQaPrompt, voiceRulesPrompt } from './prompt.j
 
 /**
  * The session voice agents that are alive (docs/voice-plan.md §10.4): at most one per
- * session and `VOICE_MAX_SESSION_AGENTS` in all, the least recently used
- * stopped (TERM through its pid file) to make room. They outlive a call by
+ * session and `VOICE_MAX_SESSION_AGENTS` in all, the least recently used idle
+ * one stopped (TERM through its pid file) to make room; one drafting (a
+ * detached turn running) is never stopped for room, and when every agent
+ * drafts a new one is refused (`session_agents_busy`). They outlive a call by
  * `VOICE_KEEP_AGENTS_MS`, so calling back a minute later finds the same
  * process; after that everything is stopped, and the next start continues
  * the conversation with `--resume`.
@@ -59,7 +61,7 @@ export class SessionAgentError extends Error {
 
 /**
  * How a detached turn (one nobody on the call is listening to) ended:
- * `stopped` when the process was stopped on purpose (eviction, shutdown).
+ * `stopped` when the process was stopped on purpose (the keep timer, shutdown).
  */
 export type DetachedTurnOutcome = 'ok' | 'error' | 'timeout' | 'stopped';
 
@@ -244,6 +246,8 @@ export class SessionAgentRegistry {
       live.lastUsedAt = this.now();
       return Promise.resolve(live);
     }
+    const busy = live === null ? this.allDrafting(sessionId) : null;
+    if (busy !== null) return Promise.reject(busy);
     const run = (live === null ? this.start(sessionId) : this.stop(sessionId).then(() => this.start(sessionId))).finally(() =>
       this.starting.delete(sessionId),
     );
@@ -418,6 +422,25 @@ export class SessionAgentRegistry {
     upsertVoiceSessionAgent(this.deps.db, { sessionId, claudeSessionId, mode });
   }
 
+  /**
+   * A drafting agent is never evicted (voice multi-planning US-007), so with
+   * the cap reached by agents that all run a detached turn there is no room:
+   * refused with the sessions named, for chief (or the session agent) to say.
+   * Agents still starting count, so two starts at once cannot pass the cap.
+   */
+  private allDrafting(sessionId: string): SessionAgentError | null {
+    const live = [...this.agents.values()].filter((agent) => !agent.exited).map((agent) => agent.sessionId);
+    const others = [...new Set([...live, ...this.starting.keys()])].filter((id) => id !== sessionId);
+    if (others.length < this.deps.config.voiceMaxSessionAgents) return null;
+    if (others.some((id) => !this.detachedState(id).running)) return null;
+    const names = others.map((id) => getSession(this.deps.db, id)?.name ?? id);
+    return new SessionAgentError(
+      409,
+      'session_agents_busy',
+      `${countWord(names.length)} sessions are still drafting: ${spokenList(names)}. Wait for one to finish, or talk to one of them instead.`,
+    );
+  }
+
   /** Stops the least recently used agents (never `keep`, nor one mid detached turn) until the cap holds. */
   private evict(keep: string): void {
     for (const [sessionId, agent] of this.agents) {
@@ -450,6 +473,18 @@ export class SessionAgentRegistry {
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
+}
+
+const COUNT_WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
+
+/** A count as a sentence opens with it: `Three`, or digits past ten. */
+function countWord(count: number): string {
+  return COUNT_WORDS[count] ?? String(count);
+}
+
+/** `a, b and c`. */
+function spokenList(items: readonly string[]): string {
+  return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1] ?? ''}`;
 }
 
 /** A tool a detached turn used, as `voice_turns.tools_json` stores it. */

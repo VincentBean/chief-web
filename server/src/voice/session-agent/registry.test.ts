@@ -72,6 +72,14 @@ async function collect(stream: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return events;
 }
 
+async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 const spoken = (events: readonly AgentEvent[]): string =>
   events.map((event) => (event.type === 'delta' ? event.text : '')).join('');
 
@@ -615,6 +623,75 @@ describe('session voice agents', () => {
       assert.equal((claude.stdin.get(exec.id) ?? []).filter((entry) => entry['type'] === 'control_request').length, 1);
       assert.equal(registry.isAlive(session.id), true);
       assert.deepEqual(registry.detachedState(session.id), { running: false, lastOutcome: 'timeout' });
+    });
+
+    it('never evicts a drafting agent: the least recently used idle one goes instead', async () => {
+      const [drafting, idle, next] = [newSession('evict-drafting'), newSession('evict-idle'), newSession('evict-next')];
+      const turn = registry.runDetached(drafting.id, '#hang drafting', { timeoutMs: 300 });
+      await waitFor(() => registry.isAlive(drafting.id));
+      const draftingAgent = await registry.acquire(drafting.id);
+      draftingAgent.lastUsedAt = 1;
+      const idleAgent = await registry.acquire(idle.id);
+      idleAgent.lastUsedAt = 2;
+      await registry.acquire(next.id);
+      await idleAgent.finished;
+
+      assert.deepEqual(registry.aliveSessions().sort(), [drafting.id, next.id].sort());
+      assert.equal(registry.detachedState(drafting.id).running, true);
+      await turn;
+    });
+
+    it('refuses a new agent with 409 session_agents_busy naming the sessions when every live agent is drafting', async () => {
+      const [a, b, c] = [newSession('busy-a'), newSession('busy-b'), newSession('busy-c')];
+      const turns: Promise<unknown>[] = [];
+      for (const session of [a, b]) {
+        turns.push(registry.runDetached(session.id, '#hang drafting', { timeoutMs: 300 }));
+        await waitFor(() => registry.aliveSessions().includes(session.id));
+      }
+      await assert.rejects(registry.acquire(c.id), (error: unknown) => {
+        assert.ok(error instanceof SessionAgentError);
+        assert.equal(error.status, 409);
+        assert.equal(error.code, 'session_agents_busy');
+        assert.equal(error.message, 'Two sessions are still drafting: busy-a and busy-b. Wait for one to finish, or talk to one of them instead.');
+        return true;
+      });
+      assert.equal(registry.isAlive(c.id), false);
+      assert.deepEqual(registry.aliveSessions().sort(), [a.id, b.id].sort());
+
+      // Chief's focus_session returns the refusal unchanged, for chief to say.
+      const focus: CallFocus[] = [];
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const result = await tool.handler({ session: c.name }, {
+        signal: new AbortController().signal,
+        turn: 1,
+        focus: { kind: 'chief' },
+        endCall: () => undefined,
+        confirmations: new ConfirmationGate({ holder: { pendingConfirmation: null }, now: () => Date.now(), send: () => undefined, newId: () => 'confirm-1' }),
+        setFocus: (next) => focus.push(next),
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.summary, 'Two sessions are still drafting: busy-a and busy-b. Wait for one to finish, or talk to one of them instead.');
+      assert.deepEqual(focus, []);
+      await Promise.all(turns);
+    });
+
+    it('lets a drafting agent run past hang-up until the keep timer stops it: reason stopped', async () => {
+      const registry = makeRegistry({ voiceKeepAgentsMs: 100 });
+      try {
+        const session = newSession('draft-at-hangup');
+        const turn = registry.runDetached(session.id, '#hang drafting', { timeoutMs: 5_000 });
+        await waitFor(() => registry.isAlive(session.id));
+        registry.callEnded();
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert.equal(registry.isAlive(session.id), true);
+        const result = await turn;
+        assert.equal(result.ok, false);
+        assert.equal(result.reason, 'stopped');
+        assert.equal(registry.isAlive(session.id), false);
+        assert.deepEqual(registry.detachedState(session.id), { running: false, lastOutcome: 'stopped' });
+      } finally {
+        await registry.stopAll();
+      }
     });
 
     it('reports a crash as error and does not retry it', async () => {
