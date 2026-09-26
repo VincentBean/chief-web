@@ -1,4 +1,5 @@
 
+import type { BuildView } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   createVoiceCall,
@@ -11,6 +12,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
+import type { ReadyResult } from '../sessions/index.js';
 import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
 import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
 import { sameUtterance } from './chief/speculation.js';
@@ -184,6 +186,14 @@ export interface VoiceCallDeps {
   readonly usage?: CallUsageSources;
   /** The "watch with me" card (voice feedback US-007); without it the card never shows. */
   readonly browser?: BrowserAskDeps;
+  /** What the `build` intent drives (US-007); without it "build it" is words for the agent. */
+  readonly builds?: CallBuilds;
+}
+
+/** The slices of `SessionService` and `BuildService` the `build` intent drives. */
+export interface CallBuilds {
+  markReady(sessionId: string): Promise<ReadyResult>;
+  start(sessionId: string): Promise<BuildView>;
 }
 
 /** Where a call reads what the providers say it spent (US-023). */
@@ -300,6 +310,29 @@ export function carryingOn(language: string, sessionName: string): string {
   return language === 'nl'
     ? `Oké, ${sessionName} gaat ermee aan de slag. Je bent weer bij mij.`
     : `Okay, ${sessionName} is working on it. Back with me.`;
+}
+
+/**
+ * What chief says when the `build` intent has marked a planning session ready
+ * and started its build (US-007), or queued it when every slot is busy.
+ */
+export function buildingNow(language: string, sessionName: string, queued: boolean): string {
+  if (language === 'nl') {
+    return queued
+      ? `Oké, ${sessionName} staat klaar en wacht op een vrije bouwplek. Ik ben er weer.`
+      : `Oké, ${sessionName} staat klaar en wordt gebouwd. Ik ben er weer.`;
+  }
+  return queued
+    ? `Okay, ${sessionName} is marked ready and queued, every build slot is busy. Back with me.`
+    : `Okay, ${sessionName} is marked ready and building. Back with me.`;
+}
+
+/** The `build` intent on a PRD that does not parse (US-007): the first error, read out. */
+export function prdDoesNotParse(language: string, errors: PrdStatus['errors']): string {
+  const first = errors[0];
+  const where = first === undefined || first.line <= 0 ? '' : language === 'nl' ? `regel ${String(first.line)}: ` : `line ${String(first.line)}: `;
+  const what = `${where}${(first?.message ?? '').replace(/[.\s]+$/, '')}`;
+  return language === 'nl' ? `De PRD klopt nog niet: ${what}.` : `The PRD does not parse yet: ${what}.`;
 }
 
 /** What the `mute` intent answers, as text: it is never spoken. */
@@ -1116,6 +1149,13 @@ export class VoiceCall {
         await this.sayLine(tts, turn, carryingOn(getVoiceSettings(this.deps.db).language, name), signal);
         return;
       }
+      case 'build': {
+        // Like `carry_on`: only a planning session is built; anywhere else it is words for the agent.
+        const builds = this.deps.builds;
+        if (focus.kind !== 'session' || !this.isPlanning(focus.sessionId) || builds === undefined) break;
+        await this.buildFromIntent(tts, turn, focus.sessionId, builds, signal);
+        return;
+      }
       case 'repeat':
         await this.replay(tts, turn, signal);
         return;
@@ -1242,6 +1282,33 @@ export class VoiceCall {
       this.planningChanged();
       if (!interrupted && stateBefore !== 'done' && after?.state === 'done') this.remindOfOthers(sessionId);
     }
+  }
+
+  /**
+   * The `build` intent (US-007): marks the focused planning session ready and
+   * starts its build, then the call goes back to chief. A PRD that does not
+   * parse, or a service that refuses, is read out and the focus stays, so the
+   * session agent can fix it.
+   */
+  private async buildFromIntent(tts: CallTts, turn: number, sessionId: string, builds: CallBuilds, signal: AbortSignal): Promise<void> {
+    const language = getVoiceSettings(this.deps.db).language;
+    let line: string;
+    let built = false;
+    try {
+      const ready = await builds.markReady(sessionId);
+      if (ready.ok) {
+        // A schedule missed while pending already started it (ReadyResult.started).
+        const build = ready.started ? null : await builds.start(sessionId);
+        line = buildingNow(language, ready.session.name, build?.queued === true);
+        built = true;
+      } else {
+        line = prdDoesNotParse(language, ready.prd.errors);
+      }
+    } catch (cause) {
+      line = cause instanceof Error ? cause.message : String(cause);
+    }
+    if (built && !signal.aborted && !this.ended) this.setFocus({ kind: 'chief' });
+    await this.sayLine(tts, turn, line, signal);
   }
 
   /** A fixed line the call says itself, as chief: an intent's answer, not a model's. */

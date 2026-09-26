@@ -1313,6 +1313,83 @@ describe('a scripted call end to end (US-027)', () => {
     await s.hangUp();
   });
 
+  /** A scripted call with the focus on the planning session onboarding-copy. */
+  const onPlanningSession = async (language: 'en' | 'nl'): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string }> => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', language) });
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    return { s, sessionId };
+  };
+  const lastSaid = (s: { client: Client }): string => said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0);
+
+  it('"bouw maar" to a planning session marks it ready, starts the build and chief takes the call (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('nl');
+    await s.say('add a download button');
+    const before = sessionStdin(sessionId).length;
+    const requests = openrouter.requests.length;
+    await s.say('Bouw maar.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Oké, onboarding-copy staat klaar en wordt gebouwd. Ik ben er weer.');
+    assert.deepEqual(s.chief.state.calls, [
+      { method: 'sessions.markReady', arg: sessionId },
+      { method: 'builds.start', arg: sessionId },
+    ]);
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    await flush();
+    assert.deepEqual(sessionStdin(sessionId).slice(before), [], 'the intent never reaches the agent, and a ready session is not detached');
+    await s.hangUp();
+  });
+
+  it('"build it" when every build slot is busy says the build is queued (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.pool = {
+      ...s.chief.state.pool,
+      queued: 2,
+      queue: [...s.chief.state.pool.queue, { kind: 'session', refId: sessionId, label: 'onboarding-copy', position: 2, queuedAt: '2026-09-25T12:00:00.000Z' }],
+    };
+    await s.say('Build it.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Okay, onboarding-copy is marked ready and queued, every build slot is busy. Back with me.');
+    await s.hangUp();
+  });
+
+  it('"build it" on a PRD that does not parse reads the first error and stays with the session (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.prdErrors = [
+      { line: 12, message: 'US-002 has no acceptance criteria' },
+      { line: 30, message: 'US-004 has no title' },
+    ];
+    await s.say('start the build');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The PRD does not parse yet: line 12: US-002 has no acceptance criteria.');
+    assert.deepEqual(s.chief.state.calls.map((call) => call.method), ['sessions.markReady'], 'no build is started');
+    await s.hangUp();
+  });
+
+  it('"build it" that the service refuses speaks its message and stays with the session (US-007)', async () => {
+    const { s, sessionId } = await onPlanningSession('en');
+    s.chief.state.failures.set('builds.start', Object.assign(new Error('Builds are on hold until 18:00.'), { status: 409, code: 'usage_hold' }));
+    await s.say('build it');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'Builds are on hold until 18:00.');
+    await s.hangUp();
+  });
+
+  it('"build it" under chief focus is an ordinary utterance (US-007)', async () => {
+    const s = await scriptedCall();
+    openrouter.replies.push(textReply(['Which session should I build?']));
+    await s.say('build it');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(lastSaid(s), 'Which session should I build?');
+    assert.deepEqual(s.chief.state.calls, []);
+    await s.hangUp();
+  });
+
   it('a detached turn that ends is announced at the next quiet moment, once, in the call language (US-008)', async () => {
     const s = await scriptedCall();
     const sessionId = s.chief.ids['onboarding'] ?? '';

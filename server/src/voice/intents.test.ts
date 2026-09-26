@@ -5,6 +5,7 @@ import { listSessions } from '../db/index.js';
 import { resolveName } from './chief/tools.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import {
+  BUILD,
   CARRY_ON,
   HANGUP,
   matchCallIntent,
@@ -109,7 +110,7 @@ describe('repeat and mute intents (voice US-021)', () => {
   });
 
   it('never lists one phrase under two intents (the later list would silently win)', () => {
-    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE, CARRY_ON };
+    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE, CARRY_ON, BUILD };
     const seen = new Map<string, string>();
     for (const [list, phrases] of Object.entries(lists)) {
       for (const phrase of phrases) {
@@ -135,6 +136,25 @@ describe('the carry on intent (US-006)', () => {
       'carry on with the export but skip the header row',
       'werk het uit in de PRD en stuur me de vragen',
       'go ahead and add a download button',
+    ]) {
+      assert.equal(matchCallIntent(text), null, text);
+    }
+  });
+});
+
+describe('the build intent (US-007)', () => {
+  it('matches every build phrase, in English and Dutch', () => {
+    for (const phrase of BUILD) assert.deepEqual(matchCallIntent(phrase), { kind: 'build' }, phrase);
+    for (const text of ['Build it.', 'Start the build!', 'Go build.', 'Bouw maar.', 'Bouw het maar!', 'Start de build.', 'Bouwen.']) {
+      assert.deepEqual(matchCallIntent(text), { kind: 'build' }, text);
+    }
+  });
+
+  it('leaves a longer sentence containing "build it" to the agent', () => {
+    for (const text of [
+      'build it once the header row is fixed',
+      'can you build it with a download button',
+      'bouw maar een extra knop in de PRD',
     ]) {
       assert.equal(matchCallIntent(text), null, text);
     }

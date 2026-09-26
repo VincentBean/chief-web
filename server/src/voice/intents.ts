@@ -6,7 +6,7 @@
  * words, so a normal sentence that happens to contain "stop" is never taken.
  *
  * The focus and control intents (voice US-019), repeat and mute (voice
- * US-021), and carry on (US-006). A bare "yes" or "no" is not an intent: it
+ * US-021), carry on (US-006) and build (US-007). A bare "yes" or "no" is not an intent: it
  * goes to the focused agent like any other utterance.
  */
 
@@ -34,7 +34,8 @@ export type CallIntent =
   | { readonly kind: 'repeat' }
   | { readonly kind: 'mute' }
   | { readonly kind: 'unmute' }
-  | { readonly kind: 'carry_on' };
+  | { readonly kind: 'carry_on' }
+  | { readonly kind: 'build' };
 
 export const TO_CHIEF: readonly string[] = [
   'chief',
@@ -160,6 +161,24 @@ export const CARRY_ON: readonly string[] = [
   'ga je gang',
 ];
 
+/**
+ * A planning session is marked ready and its build started (US-007). Like
+ * {@link CARRY_ON}, the call only takes it under a `plan` session focus.
+ */
+export const BUILD: readonly string[] = [
+  'build it',
+  'build',
+  'start the build',
+  'start building',
+  'go build',
+  'bouw maar',
+  'bouwen maar',
+  'ga maar bouwen',
+  'bouw het maar',
+  'start de build',
+  'bouwen',
+];
+
 /** What comes before a session name in "switch to csv export", "ga naar billing export". */
 export const TO_SESSION_PREFIXES: readonly string[] = [
   'switch to',
@@ -182,6 +201,7 @@ const CONTROL = new Map<string, CallIntent>([
   ...MUTE.map((phrase) => [normalizeUtterance(phrase), { kind: 'mute' }] as const),
   ...UNMUTE.map((phrase) => [normalizeUtterance(phrase), { kind: 'unmute' }] as const),
   ...CARRY_ON.map((phrase) => [normalizeUtterance(phrase), { kind: 'carry_on' }] as const),
+  ...BUILD.map((phrase) => [normalizeUtterance(phrase), { kind: 'build' }] as const),
 ]);
 
 /** Longest first, so "switch over to x" is not read as "switch" + "over to x". */
@@ -192,7 +212,7 @@ const PREFIXES = TO_SESSION_PREFIXES.map(normalizeUtterance).sort((a, b) => b.le
  * with the name as spoken (`billing export`; the shared resolver maps it onto
  * a session), "wacht" → `stop_talking`, "ophangen" → `hangup`, "wat zei je" →
  * `repeat`, "stil" → `mute`, "unmute" → `unmute`, "werk het uit" →
- * `carry_on`. Anything else,
+ * `carry_on`, "bouw maar" → `build`. Anything else,
  * or anything longer than {@link MAX_INTENT_WORDS} words, is null.
  */
 export function matchCallIntent(text: string): CallIntent | null {

@@ -293,6 +293,7 @@ export class VoiceService {
 
   private newCall(focus: CallFocus): VoiceCall {
     const { db, config } = this;
+    const chief = this.deps.chief;
     const call = new VoiceCall(this.deps.newCallId?.() ?? randomUUID(), focus, {
       db,
       config,
@@ -309,6 +310,7 @@ export class VoiceService {
       onSessionFocused: (sessionId) => this.deps.sessionAgents?.focused(sessionId),
       onSessionLeft: (sessionId) => this.detach(sessionId),
       ...(this.deps.browser === undefined ? {} : { browser: this.deps.browser }),
+      ...(chief === undefined ? {} : { builds: { markReady: (id) => chief.sessions.markReady(id), start: (id) => chief.builds.start(id) } }),
       onEnded: (ended) => {
         if (this.active !== ended) return;
         this.active = null;

@@ -423,6 +423,13 @@ own while you plan another session or talk to chief.
   uit" or "ga je gang" says it outright: the session carries on alone even if
   you only just got there, and chief takes over with one line ("Okay,
   csv-export is working on it. Back with me.").
+- **"Build it".** "Build it", "start the build", "bouw maar" or "start de
+  build" marks the planning session ready and starts its build straight away,
+  and chief takes over with one line ("Okay, csv-export is marked ready and
+  building. Back with me.", or that it is queued when every build slot is
+  busy). A PRD that does not parse yet is read out (its first error) and you
+  stay with the session, so its agent can fix it; a refusal such as a usage
+  hold is read out the same way.
 - **What the agent does alone.** It is told that nobody is listening, so it
   asks nothing. It finishes reading the code, writes the draft `prd.md` in the
   usual story format and stops. Anything it can find out from the code it looks
@@ -465,6 +472,7 @@ exactly the phrase, so a normal sentence is never taken.
 | --- | --- | --- |
 | back to chief | "chief", "back to chief", "terug naar chief" | focus returns to chief, who says one line |
 | carry on | "carry on", "work it out", "you take it from here", "werk het uit", "ga je gang" | only while you talk to a planning session: it drafts the PRD alone and the call goes back to chief, who says one line; anywhere else the words go to the agent |
+| build | "build it", "start the build", "go build", "bouw maar", "start de build" | only while you talk to a planning session: marks it ready and starts (or queues) its build, and the call goes back to chief; a PRD that does not parse is read out and you stay; anywhere else the words go to the agent |
 | switch to a session | "switch to billing export", "talk to …", "ga naar …", "praat met …" | the call moves to that session's agent |
 | stop talking | "stop", "wait", "hold on", "wacht" | cuts the current reply; no answer |
 | repeat | "say that again", "repeat", "wat zei je", "herhaal" | replays the last reply without a new provider call |
