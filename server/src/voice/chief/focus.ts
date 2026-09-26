@@ -1,3 +1,4 @@
+import { SessionAgentError } from '../session-agent/registry.js';
 import { guarded } from './actions.js';
 import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
 
@@ -12,6 +13,16 @@ import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg
  */
 
 const NAME = 'focus_session';
+const TERMINAL_OPEN = 'session_in_planning_terminal';
+
+/** The refusal for an open planning terminal: nothing is stopped and the focus stays. */
+function terminalOpen(name: string): ToolResult {
+  return {
+    ok: false,
+    data: { error: TERMINAL_OPEN },
+    summary: `The planning terminal is open for ${name}; close it in the browser first, then ask again.`,
+  };
+}
 
 export function focusSessionTool(services: ChiefServices): ChiefTool {
   return {
@@ -35,13 +46,7 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
             summary: `Claude is on a usage-limit hold until ${holdUntil}, so the session agent cannot start`,
           };
         }
-        if (services.planning?.isTerminalRunning(session.id) === true) {
-          return {
-            ok: false,
-            data: { error: 'session_in_planning_terminal' },
-            summary: `The planning terminal is open for ${session.name}; close it in the browser first, then ask again.`,
-          };
-        }
+        if (services.planning?.isTerminalRunning(session.id) === true) return terminalOpen(session.name);
         return switchTo(services, { id: session.id, name: session.name }, ctx);
       }),
   };
@@ -54,7 +59,13 @@ async function switchTo(services: ChiefServices, target: { id: string; name: str
     return { ok: false, data: { error: 'unavailable' }, summary: 'Session agents are not available here' };
   }
   if (agents.isAlive?.(target.id) === false) ctx.earcon?.('one_sec');
-  await agents.acquire(target.id);
+  try {
+    await agents.acquire(target.id);
+  } catch (cause) {
+    // The registry makes the same check; the terminal may have opened meanwhile.
+    if (cause instanceof SessionAgentError && cause.code === TERMINAL_OPEN) return terminalOpen(target.name);
+    throw cause;
+  }
   ctx.setFocus({ kind: 'session', sessionId: target.id });
   return {
     ok: true,

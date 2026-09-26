@@ -269,7 +269,8 @@ call and `VOICE_KEEP_AGENTS_MS` after it.
 - **Handing over to the keyboard.** **Resume planning** in the session's
   terminal continues the voice conversation where it left off. Starting the
   terminal while a voice agent runs for that session asks to stop the agent
-  first; handing a call to a session whose terminal is open asks to close it.
+  first. Chief does not hand a call to a session whose terminal is open: it
+  says so, and you close the terminal in the browser and ask again.
 
 A session agent refuses to start for a session without a clone yet, and while
 Claude's usage-limit hold is on. It has no chief-web management tools: it
@@ -674,7 +675,7 @@ request. **Check OpenRouter key** tells you whether the key, the credit or the
 there.
 
 **A session agent will not start.** It says why: the session has no clone yet,
-the planning terminal is open (it offers to close it), or Claude's usage limit
+the planning terminal is open (close it in the browser, then ask again), or Claude's usage limit
 is on hold until the time it gives. Claude Code must also be logged in, as for
 builds; see [Claude authentication](claude-auth.md).
 

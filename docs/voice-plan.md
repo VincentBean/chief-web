@@ -616,7 +616,7 @@ Don't speak text from `assistant` messages if you've already streamed it through
 ### 10.4 Lifecycle and registry
 
 - `SessionAgentRegistry` holds at most one agent per session, and `VOICE_MAX_SESSION_AGENTS` (default 3) alive at once. Least-recently-used agents are stopped (SIGTERM via the pid file, same approach as `agentSignalSpec`).
-- **Preconditions** to start: session exists, `isCloned`, the container can be started (`containers.start(session)`), and no PTY planning terminal is running (`409 session_in_planning_terminal`). The call offers: "The planning terminal is open for this session. Should I close it and continue by voice?" That uses the existing `PlanningService.stop` and requires confirmation.
+- **Preconditions** to start: session exists, `isCloned`, the container can be started (`containers.start(session)`), and no PTY planning terminal is running (`409 session_in_planning_terminal`). *(Superseded: the call no longer offers to close the terminal. `focus_session` refuses with "The planning terminal is open for <name>; close it in the browser first, then ask again.")*
 - The **reverse lock**: `PlanningService.start` refuses while a voice agent is alive for the session.
 - **Status**: voice planning is for `pending` sessions. For `ready`, `building` or `finished` sessions, start the agent with a *read-only Q&A* prompt variant: "you may read the code and the build log; do not edit files". The build loop owns the tree while building, so the prompt forbids writes, and the agent is started with `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` in that mode.
 - **Crash or exit** of the process: tell the user ("The session agent stopped, I'm restarting it") and restart once with `--resume`.

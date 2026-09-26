@@ -82,7 +82,7 @@ export interface ChiefServices {
   readonly recurringTasks: Pick<RecurringTaskRunner, 'fireNow'>;
   readonly hold: { until(): string | null };
   /** The planning terminal; `focus_session` refuses while it is open for the session. */
-  readonly planning?: { isTerminalRunning(sessionId: string): boolean; stop(sessionId: string): Promise<unknown> };
+  readonly planning?: { isTerminalRunning(sessionId: string): boolean };
   /** The session voice agents `focus_session` starts; without them it refuses. */
   readonly sessionAgents?: { acquire(sessionId: string): Promise<unknown>; isAlive?(sessionId: string): boolean };
   /** Where each planning session stands (voice multi-planning US-010); without it chief knows none. */

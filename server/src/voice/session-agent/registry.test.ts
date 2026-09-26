@@ -608,6 +608,22 @@ describe('session voice agents', () => {
       assert.deepEqual(focus, []);
       assert.equal(registry.isAlive(session.id), false);
     });
+
+    it('gives the same refusal when only the registry sees the open terminal', async () => {
+      const session = newSession('terminal-late');
+      terminalRunning.add(session.id);
+      const focus: CallFocus[] = [];
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const result = await tool.handler({ session: session.name }, context(focus));
+      assert.deepEqual(result, {
+        ok: false,
+        data: { error: 'session_in_planning_terminal' },
+        summary: 'The planning terminal is open for terminal-late; close it in the browser first, then ask again.',
+      });
+      assert.equal(terminalRunning.has(session.id), true);
+      assert.deepEqual(focus, []);
+      assert.equal(registry.isAlive(session.id), false);
+    });
   });
 
   it('keeps whether a detached turn runs and how the last one ended, until the session is focused', () => {
