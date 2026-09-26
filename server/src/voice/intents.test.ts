@@ -8,7 +8,6 @@ import {
   CARRY_ON,
   HANGUP,
   matchCallIntent,
-  matchConfirmIntent,
   MAX_INTENT_WORDS,
   MUTE,
   normalizeUtterance,
@@ -90,9 +89,8 @@ describe('focus and control intents (voice US-019)', () => {
     assert.equal(matchCallIntent('hang up the phone after this one'), null);
   });
 
-  it('keeps the confirm phrases separate', () => {
-    for (const phrase of [...TO_CHIEF, ...STOP_TALKING, ...HANGUP]) assert.equal(matchConfirmIntent(phrase), null, phrase);
-    assert.equal(matchCallIntent('yes'), null);
+  it('leaves a bare yes or no to the agent', () => {
+    for (const text of ['yes', 'ja', 'no', 'nee', 'ok']) assert.equal(matchCallIntent(text), null, text);
     assert.equal(matchCallIntent('go'), null);
   });
 });
@@ -140,10 +138,5 @@ describe('the carry on intent (US-006)', () => {
     ]) {
       assert.equal(matchCallIntent(text), null, text);
     }
-  });
-
-  it('is not a confirmation: "go ahead" still answers a pending one', () => {
-    assert.equal(matchConfirmIntent('go ahead'), 'yes');
-    assert.equal(matchConfirmIntent('carry on'), null);
   });
 });

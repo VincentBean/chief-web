@@ -696,9 +696,6 @@ export class VoiceCall {
       case 'focus':
         this.switchFocus(message.target === 'chief' ? { kind: 'chief' } : { kind: 'session', sessionId: message.target.sessionId });
         return;
-      case 'confirm.resolve':
-        // Nothing is ever pending any more (US-001); the message itself goes in US-002.
-        return;
       case 'browser.answer':
         this.touch();
         void this.browserAsks?.answer(message);

@@ -53,8 +53,6 @@ export type ClientMessage =
   /** The panel's mute-voice button (US-021): text only until unmuted, like the `mute` intent. */
   | { readonly type: 'voice.mute'; readonly muted: boolean }
   | { readonly type: 'hangup' }
-  /** The pill's Confirm / Cancel button (voice US-011). */
-  | { readonly type: 'confirm.resolve'; readonly id: string; readonly accept: boolean }
   /**
    * The "watch with me" card's **Open** (voice feedback US-007): the URL the
    * session agent's browser opens, and the login to use, typed or saved.
@@ -94,15 +92,6 @@ export type UiAction =
   | { readonly action: 'navigate'; readonly path: string }
   | { readonly action: 'highlight'; readonly target: string }
   | { readonly action: 'toast'; readonly text: string };
-
-/** How a confirmation stopped being pending. */
-export type ConfirmationOutcome = 'confirmed' | 'cancelled' | 'expired';
-
-export interface ConfirmationView {
-  readonly id: string;
-  readonly prompt: string;
-  readonly expiresAt: string;
-}
 
 /** A login typed into the "watch with me" card, or a saved one by id. */
 export type BrowserCredentials =
@@ -224,8 +213,6 @@ export type ServerMessage =
       readonly summary: string;
       readonly detail?: string;
     }
-  | ({ readonly type: 'confirm' } & ConfirmationView)
-  | { readonly type: 'confirm.resolved'; readonly id: string; readonly outcome: ConfirmationOutcome }
   | ({ readonly type: 'ui' } & UiAction)
   /**
    * The session agent asked to look at a page with the operator (voice

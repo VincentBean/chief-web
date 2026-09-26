@@ -16,7 +16,6 @@ import {
   type BrowserAskOutcome,
   type CallFocus,
   type CallPhase,
-  type ConfirmationOutcome,
   MAX_CREDENTIAL_CHARS,
   parseBrowserUrl,
   type PlanningSessionView,
@@ -29,7 +28,7 @@ import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, total
 /**
  * The call panel (voice US-010): docked bottom-right at `lg`, a bottom sheet
  * below it. The header says who is listening and what they are doing, the
- * body is the live transcript with tool cards and confirmation pills, and the
+ * body is the live transcript with tool cards, and the
  * footer holds every control. All of it reads {@link useCall}; closing the
  * panel only hides it, the call goes on.
  */
@@ -76,7 +75,6 @@ function toolIcon(name: string): IconName {
 }
 
 const TOOL_STATUS_LABEL: Record<ToolStatus, string> = { running: 'running', ok: 'done', error: 'failed' };
-const CONFIRM_OUTCOME_LABEL: Record<ConfirmationOutcome, string> = { confirmed: 'Confirmed', cancelled: 'Cancelled', expired: 'Expired' };
 const BROWSER_OUTCOME_LABEL: Record<BrowserAskOutcome, string> = { opened: 'Opened', cancelled: 'Cancelled', expired: 'Expired' };
 
 function focusValue(focus: CallFocus): string {
@@ -373,7 +371,6 @@ export function CallPanel() {
           <TranscriptLine
             key={entry.key}
             entry={entry}
-            onResolve={call.resolve}
             onBrowserAnswer={call.answerBrowser}
             onBrowserCancel={call.cancelBrowser}
             {...(call.debug && entry.kind === 'user' ? { stt: sttMs(call.latency[entry.turn]) } : {})}
@@ -480,13 +477,11 @@ export function CallPanel() {
  */
 export function TranscriptLine({
   entry,
-  onResolve,
   onBrowserAnswer,
   onBrowserCancel,
   stt,
 }: {
   readonly entry: TranscriptEntry;
-  readonly onResolve: (id: string, confirm: boolean) => void;
   /** The live panel's "watch with me" card; a stored call has none. */
   readonly onBrowserAnswer?: (answer: BrowserAnswer, sessionId: string) => void;
   readonly onBrowserCancel?: (id: string) => void;
@@ -533,24 +528,6 @@ export function TranscriptLine({
             )}
             <span className="visually-hidden">{TOOL_STATUS_LABEL[entry.status]}</span>
           </span>
-        </li>
-      );
-    case 'confirm':
-      return (
-        <li className="call-confirm">
-          <span className="call-confirm__prompt">{entry.prompt}</span>
-          {entry.resolution === null ? (
-            <span className="call-confirm__actions">
-              <button type="button" className="button button--small button--primary" onClick={() => onResolve(entry.id, true)}>
-                Confirm
-              </button>
-              <button type="button" className="button button--small" onClick={() => onResolve(entry.id, false)}>
-                Cancel
-              </button>
-            </span>
-          ) : (
-            <span className="call-confirm__done">{CONFIRM_OUTCOME_LABEL[entry.resolution]}</span>
-          )}
         </li>
       );
     case 'browser':

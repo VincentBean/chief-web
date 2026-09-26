@@ -454,8 +454,7 @@ describe('reminding of the other planning sessions (US-009)', () => {
     advance(EVENT_QUIET_MS);
     await until(() => t.of('agent.done').length === 2 && t.call.state.activeTurn === null);
     assert.equal(t.tts.spoken.at(-1), line);
-    // Nothing is asked and nothing is parked: the focus stays where it was.
-    assert.deepEqual(t.of('confirm'), []);
+    // Nothing is parked: the focus stays where it was.
     assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's1' });
     assert.equal(t.agents.get('s2'), undefined);
   });
