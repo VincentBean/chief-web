@@ -304,6 +304,16 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     assert.deepEqual(fs.readdirSync(dir), []);
   });
 
+  it('returns the reason chief-web had no browser as an error', async () => {
+    start();
+    const request = await call(12);
+    answer(String(request['id']), { cancelled: true, reason: 'no browser available right now' });
+    const reply = await client.reply(12);
+    assert.equal(textOf(reply), 'No browser: no browser available right now. Tell the operator why in one sentence, then move on without the browser.');
+    assert.equal((reply['result'] as { isError?: boolean }).isError, true);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
   it('gives up after the timeout', async () => {
     start(150);
     await call(6);

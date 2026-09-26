@@ -679,6 +679,8 @@ export class FakeBrowser {
   readonly signals: string[] = [];
   /** Receive commands but never answer them, to hold a send in flight. */
   silent = false;
+  /** Chromium exits at once with this (a missing binary is 127 and `chromium: not found`). */
+  startFailure: { readonly exitCode: number; readonly stderr: string } | null = null;
 
   constructor(private readonly daemon: FakeDockerDaemon) {
     const previous = daemon.onExec;
@@ -686,7 +688,7 @@ export class FakeBrowser {
       const command = exec.cmd.join(' ');
       if (command.includes(FAKE_RELAY_SCRIPT)) return this.relay(exec);
       if (command.includes(FAKE_BROWSER_DIR) && /kill -[A-Z]+/.test(command)) return this.signal(exec);
-      if (command.includes(FAKE_BROWSER_DIR) && exec.attachStdin) return this.chromium();
+      if (command.includes(FAKE_BROWSER_DIR) && exec.attachStdin) return this.chromium(exec);
       return previous?.(exec) ?? {};
     };
   }
@@ -706,9 +708,15 @@ export class FakeBrowser {
     }
   }
 
-  /** Every Chromium exits on its own (a crash), and takes its relay with it. */
-  crash(exitCode = 139): void {
-    for (const exec of this.chromiumExecs().filter((entry) => entry.running)) this.chromiumGone(exec, exitCode);
+  /**
+   * Every Chromium (only `containerId`'s, when given) exits on its own, a crash,
+   * and takes its relay with it; `stderr` is its last words.
+   */
+  crash(exitCode = 139, stderr?: string, containerId?: string): void {
+    for (const exec of this.chromiumExecs().filter((entry) => entry.running && (containerId === undefined || entry.containerId === containerId))) {
+      if (stderr !== undefined) this.daemon.emitFramed(exec.id, stderr, 'stderr');
+      this.chromiumGone(exec, exitCode);
+    }
   }
 
   /** Every relay dies while its Chromium keeps running. */
@@ -719,7 +727,12 @@ export class FakeBrowser {
     }
   }
 
-  private chromium(): ExecScript {
+  private chromium(exec: FakeExec): ExecScript {
+    const failure = this.startFailure;
+    if (failure !== null) {
+      setImmediate(() => this.daemon.finish(exec.id, failure.exitCode));
+      return { stderr: failure.stderr };
+    }
     return {
       stderr: 'DevTools listening on ws://127.0.0.1:9222/devtools/browser/fake\n',
       // Chromium does not read stdin; only a signal or a crash ends it.

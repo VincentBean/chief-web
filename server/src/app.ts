@@ -281,6 +281,8 @@ export function createApp(
     containers: orchestrator,
     hold,
     planning: (): PlanningService => planning,
+    // Stopping or reaping an agent stops its session's browser (voice feedback US-012).
+    browsers: (): BrowserService => browsers,
   });
   const planning: PlanningService =
     deps.planning ??
@@ -499,7 +501,15 @@ export function createApp(
     if (session === null) throw new Error('No such session.');
     return (await orchestrator.start(session)).id;
   };
-  const browsers = new BrowserService({ docker, container: sessionContainer });
+  // One per session, at most as many as session agents, stopped when idle (US-012).
+  const browsers: BrowserService = new BrowserService({
+    docker,
+    container: sessionContainer,
+    maxBrowsers: config.voiceMaxSessionAgents,
+    idleMs: config.voiceBrowserIdleMs,
+  });
+  // A session container that stops takes its browser down first (US-012).
+  sessionOrchestrator.onStopping((sessionId) => browsers.stop(sessionId));
   const voice = createVoice(config, db, {
     chief: {
       db,

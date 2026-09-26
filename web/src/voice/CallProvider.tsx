@@ -466,7 +466,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           else toastRef.current.info(message.text);
           return;
         case 'error':
-          if (message.fatal) toastRef.current.error(message.message);
+          // A browser that could not start (voice feedback US-012) has no card to show it on.
+          if (message.fatal || message.code === 'browser_unavailable') toastRef.current.error(message.message);
           setTranscript((entries) => applyToTranscript(entries, message));
           return;
         default:

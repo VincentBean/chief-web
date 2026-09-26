@@ -14,6 +14,7 @@ describe('voice config (voice US-001)', () => {
     assert.equal(config.voiceMaxUtteranceMs, 60_000);
     assert.equal(config.voiceChiefMaxToolHops, 6);
     assert.equal(config.voiceScribeIdleCloseMs, 20_000);
+    assert.equal(config.voiceBrowserIdleMs, 600_000);
     assert.equal(config.openrouterApiUrl, 'https://openrouter.ai/api/v1');
     assert.equal(config.elevenlabsApiUrl, 'https://api.elevenlabs.io');
   });
@@ -27,6 +28,7 @@ describe('voice config (voice US-001)', () => {
       VOICE_MAX_UTTERANCE_MS: '60000',
       VOICE_CHIEF_MAX_TOOL_HOPS: '1',
       VOICE_SCRIBE_IDLE_CLOSE_MS: '600000',
+      VOICE_BROWSER_IDLE_MS: '60000',
       OPENROUTER_API_URL: 'http://127.0.0.1:9/api/v1/',
     });
 
@@ -37,6 +39,7 @@ describe('voice config (voice US-001)', () => {
     assert.equal(config.voiceMaxUtteranceMs, 60_000);
     assert.equal(config.voiceChiefMaxToolHops, 1);
     assert.equal(config.voiceScribeIdleCloseMs, 600_000);
+    assert.equal(config.voiceBrowserIdleMs, 60_000);
     assert.equal(config.openrouterApiUrl, 'http://127.0.0.1:9/api/v1');
   });
 
@@ -49,6 +52,8 @@ describe('voice config (voice US-001)', () => {
     ['VOICE_MAX_UTTERANCE_MS', '60001'],
     ['VOICE_CHIEF_MAX_TOOL_HOPS', '0'],
     ['VOICE_SCRIBE_IDLE_CLOSE_MS', '600001'],
+    ['VOICE_BROWSER_IDLE_MS', '59999'],
+    ['VOICE_BROWSER_IDLE_MS', '86400001'],
   ] as const) {
     it(`rejects ${name}=${value}`, () => {
       assert.throws(() => loadConfig({ [name]: value }), new RegExp(`${name} must be between`));

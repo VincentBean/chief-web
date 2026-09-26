@@ -323,6 +323,7 @@ export class VoiceService {
         spokenSoFar: () => call.state.spokenSoFar,
         askBrowser: (sessionId) => call.askBrowser(sessionId),
         browserToolDone: (sessionId) => call.browserToolDone(sessionId),
+        browserActivity: (sessionId) => call.browserActivity(sessionId),
       },
     });
   }

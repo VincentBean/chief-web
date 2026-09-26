@@ -1,4 +1,4 @@
-import type { BrowserInfo } from '../browser/index.js';
+import type { BrowserInfo, BrowserListener } from '../browser/index.js';
 import type { AttachedExec, ExecOutput, ExecSpec, ExecState } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import type { CallClock } from './call.js';
@@ -94,8 +94,17 @@ export interface BrowserAskDeps {
   readonly docker: BrowserAskDocker;
   /** The session's running container id, started if need be. */
   readonly container: (sessionId: string) => Promise<string>;
-  /** `BrowserService.start`: the browser the answer's URL opens in. */
-  readonly browsers: { start(sessionId: string): Promise<BrowserInfo> };
+  /**
+   * `BrowserService`: `start` is the browser the answer's URL opens in; the
+   * rest (US-012) dismiss a card whose browser crashed, restart the idle clock
+   * on a tool call, and stop every browser when the call ends.
+   */
+  readonly browsers: {
+    start(sessionId: string): Promise<BrowserInfo>;
+    subscribe?(sessionId: string, listener: BrowserListener): (() => void) | null;
+    touch?(sessionId: string): void;
+    stopAll?(): Promise<void>;
+  };
   readonly savedLogins?: BrowserSavedLogins;
   readonly discoveryMs?: number;
   readonly pollMs?: number;
@@ -112,6 +121,8 @@ interface Ask {
   readonly sessionId: string;
   readonly containerId: string;
   timer: unknown;
+  /** Listening for the browser crashing while the card is up. */
+  unsubscribe?: (() => void) | null;
 }
 
 /** A tool call whose request file is still being looked for. */
@@ -244,12 +255,10 @@ export class BrowserAsks {
       return;
     }
     if (failure !== null) {
+      // No card: the operator gets a toast, the agent the cause as its tool's error.
       logger.warn('the session browser did not start', { session: sessionId, error: failure });
-      this.call.send({ type: 'error', code: 'browser_unavailable', message: `The browser could not start: ${failure}`, fatal: false });
-      await this.write(
-        { id: request.id, sessionId, containerId, timer: null },
-        { id: request.id, cancelled: true, reason: 'the browser could not start' },
-      );
+      this.toast(failure);
+      await this.write({ id: request.id, sessionId, containerId, timer: null }, { id: request.id, cancelled: true, reason: failure });
       return;
     }
     // The tool's own five minutes started when it wrote the request, before the
@@ -263,6 +272,13 @@ export class BrowserAsks {
       void this.resolveCancelled(ask, 'expired');
     }, Math.max(0, expiresAt - now));
     this.asks.set(ask.id, ask);
+    // A Chromium that crashes while the operator is still typing takes the card with it.
+    ask.unsubscribe =
+      this.deps.browsers.subscribe?.(sessionId, (event) => {
+        if (event.type !== 'closed' || !event.crashed) return;
+        this.toast(event.message);
+        void this.resolveCancelled(ask, 'cancelled', event.message);
+      }) ?? null;
     this.call.send({
       type: 'browser.ask',
       id: ask.id,
@@ -313,14 +329,22 @@ export class BrowserAsks {
     return requests;
   }
 
-  private async resolveCancelled(ask: Ask, outcome: Exclude<BrowserAskOutcome, 'opened'>): Promise<void> {
+  private async resolveCancelled(ask: Ask, outcome: Exclude<BrowserAskOutcome, 'opened'>, reason?: string): Promise<void> {
     if (this.asks.get(ask.id) !== ask) return;
     this.drop(ask);
     this.call.send({ type: 'browser.resolved', id: ask.id, outcome });
-    await this.write(ask, { id: ask.id, cancelled: true });
+    await this.write(ask, { id: ask.id, cancelled: true, ...(reason === undefined ? {} : { reason }) });
+  }
+
+  /** The panel shows `browser_unavailable` as a toast. */
+  private toast(cause: string): void {
+    const message = `No browser: ${cause}`;
+    this.call.send({ type: 'error', code: 'browser_unavailable', message, fatal: false });
   }
 
   private drop(ask: Ask): void {
+    ask.unsubscribe?.();
+    ask.unsubscribe = null;
     if (ask.timer !== null) this.call.clock.clearTimeout(ask.timer);
     ask.timer = null;
     this.asks.delete(ask.id);

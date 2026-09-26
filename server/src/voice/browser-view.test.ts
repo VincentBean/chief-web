@@ -99,7 +99,7 @@ describe('page view', () => {
     browser.replies.set('Page.getFrameTree', () => ({
       result: { frameTree: { frame: { id: 'main', url: 'http://host.docker.internal:3000/login' } } },
     }));
-    service = new BrowserService({ docker, container: (sessionId) => Promise.resolve(`c-${sessionId}`) });
+    service = new BrowserService({ docker, container: (sessionId) => Promise.resolve(`c-${sessionId}`), startupWindowMs: 0 });
   });
 
   it('enables the page, says the current URL and starts a JPEG screencast at quality 60, at most 1280×800', async () => {

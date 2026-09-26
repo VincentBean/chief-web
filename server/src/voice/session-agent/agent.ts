@@ -35,10 +35,17 @@ export interface SessionAgentCallControls {
   askBrowser?(sessionId: string): void;
   /** That tool call ended, answered or not. */
   browserToolDone?(sessionId: string): void;
+  /** Any browser tool call (US-012): the session browser is in use, so it does not idle out. */
+  browserActivity?(sessionId: string): void;
 }
 
 /** The `chief` MCP server's tool, as the CLI names it on the stream (`runner/chief-mcp.js`). */
 export const OPEN_BROWSER_TOOL = 'mcp__chief__open_browser_with_operator';
+
+/** A tool call that uses the session browser: the card's tool, or Playwright MCP driving it over CDP unseen. */
+export function isBrowserTool(name: string): boolean {
+  return name === OPEN_BROWSER_TOOL || name.startsWith(BROWSER_TOOL_PREFIX);
+}
 
 export interface SessionVoiceAgentDeps {
   readonly db: Database;
@@ -126,6 +133,7 @@ export class SessionVoiceAgent implements VoiceAgent {
             break;
           }
           const out = toAgentEvent(event, tools);
+          if (out?.type === 'tool' && isBrowserTool(out.name)) this.deps.call.browserActivity?.(this.deps.sessionId);
           if (out?.type === 'tool' && out.name === OPEN_BROWSER_TOOL) {
             if (out.status === 'running' && browserCall === null) {
               browserCall = out.id;

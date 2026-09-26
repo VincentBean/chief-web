@@ -8,6 +8,11 @@ import {
   type BrowserEvent,
   BrowserService,
   chromiumCommand,
+  chromiumStartFailure,
+  formatMemory,
+  idleClosedMessage,
+  NO_BROWSER_MESSAGE,
+  parseMemoryLimit,
 } from './index.js';
 
 const until = async (condition: () => boolean, timeoutMs = 2_000): Promise<void> => {
@@ -149,7 +154,9 @@ describe('session browser', () => {
     await service.stop(sessionId);
 
     assert.deepEqual(browser.signals, ['TERM']);
-    const signal = daemon.execs().find((exec) => exec.containerId === `c-${sessionId}` && !exec.attachStdin);
+    const signal = daemon
+      .execs()
+      .find((exec) => exec.containerId === `c-${sessionId}` && !exec.attachStdin && exec.cmd.join(' ').includes('kill -'));
     assert.ok(signal);
     assert.match(signal.cmd.join(' '), /\/tmp\/\.chief-browser\/[0-9a-f-]+\.pid/);
     assert.match(signal.cmd.join(' '), /grep -qa chief-browser \/proc/);
@@ -165,6 +172,8 @@ describe('session browser', () => {
   });
 
   it('reports a Chromium that dies as closed, failing what was in flight', async () => {
+    // Past the startup window, a crash is just "Browser closed".
+    service = new BrowserService({ docker, container: (id) => Promise.resolve(`c-${id}`), startupWindowMs: 0 });
     const sessionId = newSession();
     await service.start(sessionId);
     const events = closedEvents(sessionId);
@@ -238,6 +247,128 @@ describe('session browser', () => {
     await assert.rejects(failing.start(newSession()), {
       code: 'browser_unavailable',
       message: 'The session container could not be started: no such image',
+    });
+  });
+
+  describe('limits and failure modes (voice feedback US-012)', () => {
+    const logs: string[] = [];
+    const captureWarnings = (): (() => void) => {
+      const original = console.error;
+      console.error = (line: unknown) => logs.push(String(line));
+      return () => {
+        console.error = original;
+      };
+    };
+
+    it('runs at most maxBrowsers at once, answering the rest "no browser available right now"', async () => {
+      const capped = new BrowserService({ docker, container: (id) => Promise.resolve(`c-${id}`), maxBrowsers: 2 });
+      const [a, b, c] = [newSession(), newSession(), newSession()];
+      await Promise.all([capped.start(a), capped.start(b)]);
+
+      await assert.rejects(capped.start(c), { code: 'browser_limit', message: NO_BROWSER_MESSAGE });
+      assert.equal(NO_BROWSER_MESSAGE, 'no browser available right now');
+      assert.equal(browser.chromiumExecs().filter((exec) => exec.containerId === `c-${c}`).length, 0, 'nothing was started for it');
+      // A session that has one gets its own back, never a second.
+      assert.equal((await capped.start(a)).sessionId, a);
+      assert.equal(browser.chromiumExecs().filter((exec) => exec.containerId === `c-${a}`).length, 1);
+
+      await capped.stop(a);
+      await capped.start(c);
+      assert.equal(capped.isRunning(c), true);
+      await capped.stopAll();
+    });
+
+    it('stops a browser nothing used for idleMs, and says why', async () => {
+      const idle = new BrowserService({ docker, container: (id) => Promise.resolve(`c-${id}`), idleMs: 150 });
+      const sessionId = newSession();
+      await idle.start(sessionId);
+      const events: BrowserEvent[] = [];
+      idle.subscribe(sessionId, (event) => events.push(event));
+
+      // Tool calls and frame requests (every send) keep it alive.
+      for (let i = 0; i < 4; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (i % 2 === 0) idle.touch(sessionId);
+        else await idle.send(sessionId, 'Page.screencastFrameAck', { sessionId: 1 });
+      }
+      assert.equal(idle.isRunning(sessionId), true);
+      assert.deepEqual(events.filter((event) => event.type === 'closed'), []);
+
+      await until(() => events.some((event) => event.type === 'closed'));
+      assert.deepEqual(events.at(-1), { type: 'closed', crashed: false, message: 'Browser closed after 0 seconds without use' });
+      assert.equal(idle.isRunning(sessionId), false);
+      assert.ok(browser.signals.includes('TERM'), 'Chromium was stopped, not left behind');
+      assert.equal(idleClosedMessage(600_000), 'Browser closed after 10 minutes without use');
+      assert.equal(idleClosedMessage(60_000), 'Browser closed after 1 minute without use');
+    });
+
+    it('refuses to start Chromium in a container with less than 1 GB of memory', async () => {
+      daemon.onExec = (exec) =>
+        exec.cmd.join(' ').includes('/sys/fs/cgroup/memory.max') ? { stdout: `${String(512 * 1024 ** 2)}\n` } : {};
+      browser = new FakeBrowser(daemon);
+      const sessionId = newSession();
+
+      await assert.rejects(service.start(sessionId), {
+        code: 'browser_memory',
+        message:
+          'the session container has only 512 MB of memory and the browser needs at least 1 GB; raise CONTAINER_MEMORY_LIMIT_MB',
+      });
+      assert.equal(browser.chromiumExecs().filter((exec) => exec.containerId === `c-${sessionId}`).length, 0);
+
+      // cgroup v2 "max", or exactly 1 GB, is enough.
+      daemon.onExec = (exec) => (exec.cmd.join(' ').includes('/sys/fs/cgroup/memory.max') ? { stdout: 'max\n' } : {});
+      browser = new FakeBrowser(daemon);
+      await service.start(sessionId);
+      await service.stop(sessionId);
+    });
+
+    it('reads cgroup memory limits', () => {
+      assert.equal(parseMemoryLimit('max\n'), null);
+      assert.equal(parseMemoryLimit(''), null);
+      assert.equal(parseMemoryLimit('9223372036854771712\n'), null, 'cgroup v1 for no limit');
+      assert.equal(parseMemoryLimit('1073741824\n'), 1024 ** 3);
+      assert.equal(formatMemory(1536 * 1024 ** 2), '1.5 GB');
+    });
+
+    it('names a missing Chromium binary and logs its stderr', async () => {
+      browser.startFailure = { exitCode: 127, stderr: '/bin/sh: exec: line 1: chromium: not found\n' };
+      const sessionId = newSession();
+      const restore = captureWarnings();
+      try {
+        await assert.rejects(service.start(sessionId), {
+          code: 'browser_unavailable',
+          message: 'Chromium is not installed in the session container (/bin/sh: exec: line 1: chromium: not found)',
+        });
+      } finally {
+        restore();
+      }
+      assert.equal(service.isRunning(sessionId), false);
+      assert.equal(browser.relayExecs().some((exec) => exec.running), false);
+      const logged = logs.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line['session'] === sessionId && line['message'] === 'the session browser failed to start');
+      assert.ok(logged, 'the failure is logged');
+      assert.equal(logged['exitCode'], 127);
+      assert.match(String(logged['stderr']), /chromium: not found/);
+    });
+
+    it('reports a Chromium that crashes within 5 seconds of its start with its cause', async () => {
+      const sessionId = newSession();
+      await service.start(sessionId);
+      const events = closedEvents(sessionId);
+      const restore = captureWarnings();
+      try {
+        browser.crash(134, '[0926/124200.000:FATAL:zygote_host_impl_linux.cc(127)] No usable sandbox!\n');
+        await until(() => events.length === 1);
+      } finally {
+        restore();
+      }
+      assert.deepEqual(events, [
+        {
+          type: 'closed',
+          crashed: true,
+          message: 'Chromium crashed while starting with exit code 134: [0926/124200.000:FATAL:zygote_host_impl_linux.cc(127)] No usable sandbox!',
+        },
+      ]);
+      assert.equal(chromiumStartFailure(null, ''), 'Chromium crashed while starting');
     });
   });
 

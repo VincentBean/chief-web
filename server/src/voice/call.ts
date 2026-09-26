@@ -365,6 +365,11 @@ export class VoiceCall {
     this.browserAsks?.toolDone(sessionId);
   }
 
+  /** The session agent called a browser tool (US-012): the browser is in use, its idle clock starts over. */
+  browserActivity(sessionId: string): void {
+    this.deps.browser?.browsers.touch?.(sessionId);
+  }
+
   get id(): string {
     return this.state.id;
   }
@@ -653,6 +658,10 @@ export class VoiceCall {
     this.confirmations.cancel();
     // An open "watch with me" card is answered `cancelled`, so the tool stops waiting.
     const browserAsks = this.browserAsks?.cancelAll();
+    // Nobody is left to look at the session browsers (US-012): they stop with the call.
+    const browsersStopped = this.deps.browser?.browsers.stopAll?.().catch((cause: unknown) => {
+      logger.warn('could not stop the session browsers', { call: this.id, error: String(cause) });
+    });
     this.state.activeTurn?.abort(new Error('call ended'));
     this.dropSpeculation();
     this.state.phase = 'ended';
@@ -667,6 +676,7 @@ export class VoiceCall {
     if (this.persisted) this.settling = this.settle();
     await this.running.catch(() => undefined);
     await browserAsks;
+    await browsersStopped;
     await this.tts?.close();
   }
 

@@ -80,6 +80,8 @@ describe('session voice agents', () => {
   let config: Config;
   let db: Database;
   let registry: SessionAgentRegistry;
+  /** Sessions whose browser the registry stopped (voice feedback US-012). */
+  const browserStops: string[] = [];
   let holdActive: boolean;
   let terminalRunning: Set<string>;
   let seq = 0;
@@ -121,6 +123,12 @@ describe('session voice agents', () => {
       containers,
       hold: { active: () => holdActive, until: () => (holdActive ? '2026-09-25T20:00:00.000Z' : null) },
       planning: () => ({ isTerminalRunning: (id) => terminalRunning.has(id) }),
+      browsers: () => ({
+        stop: (sessionId) => {
+          browserStops.push(sessionId);
+          return Promise.resolve();
+        },
+      }),
     });
 
   const controls = (): { focus: CallFocus[]; heard: string; setFocus(focus: CallFocus): void; spokenSoFar(): string } => {
@@ -465,6 +473,17 @@ describe('session voice agents', () => {
     const signal = daemon.execs().find((exec) => !exec.attachStdin && exec.cmd.join(' ').includes(voicePidFile(a.id)));
     assert.ok(signal);
     assert.match(signal.cmd.join(' '), /kill -TERM/);
+    // The reaped agent took its session's browser with it (voice feedback US-012).
+    assert.ok(browserStops.includes(a.id));
+    assert.ok(!browserStops.includes(b.id) && !browserStops.includes(c.id));
+  });
+
+  it('stops the session browser when its agent is stopped (voice feedback US-012)', async () => {
+    const session = newSession('stop-browser');
+    await registry.acquire(session.id);
+    assert.ok(!browserStops.includes(session.id));
+    await registry.stop(session.id);
+    assert.ok(browserStops.includes(session.id));
   });
 
   it('keeps agents VOICE_KEEP_AGENTS_MS after a call ends, unless a call starts again', async () => {
@@ -478,6 +497,7 @@ describe('session voice agents', () => {
     registry.callEnded();
     await agent.finished;
     assert.equal(registry.isAlive(session.id), false);
+    assert.ok(browserStops.includes(session.id), 'the reaped agent took its browser with it');
   });
 
   it('refuses unready, held and terminal-locked sessions, but not a session past planning', async () => {

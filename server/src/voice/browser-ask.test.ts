@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
-import { BrowserService } from '../browser/index.js';
+import { BrowserService, NO_BROWSER_MESSAGE } from '../browser/index.js';
 import { loadConfig } from '../config.js';
 import { closeDatabase, createRepository, createSession, IN_MEMORY, openDatabase } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
@@ -111,6 +111,7 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
   let mcp: FakeMcpSide;
   let clock: FakeClock;
   let sent: ServerMessage[];
+  let fakeBrowser: FakeBrowser;
   let seq = 0;
 
   const newSession = (): { sessionId: string; containerId: string } => {
@@ -151,7 +152,7 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
     daemon.onExec = null;
     clock = new FakeClock();
     mcp = new FakeMcpSide(daemon, () => clock.now());
-    new FakeBrowser(daemon);
+    fakeBrowser = new FakeBrowser(daemon);
     sent = [];
   });
 
@@ -374,8 +375,76 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
     mcp.request(containerId);
     await relay({ browsers: { start: () => Promise.reject(new Error('no chromium')) } }).ask(sessionId);
     assert.deepEqual(asks(), []);
-    assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true, reason: 'the browser could not start' }]);
-    assert.ok(sent.some((m) => m.type === 'error' && m.code === 'browser_unavailable'));
+    assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true, reason: 'no chromium' }]);
+    assert.deepEqual(
+      sent.filter((m) => m.type === 'error'),
+      [{ type: 'error', code: 'browser_unavailable', message: 'No browser: no chromium', fatal: false }],
+    );
+  });
+
+  describe('limits and failure modes (voice feedback US-012)', () => {
+    it('shows no card beyond the browser cap and tells the agent "no browser available right now"', async () => {
+      const browsers = new BrowserService({ docker, container: (id) => Promise.resolve(`c-${id}`), maxBrowsers: 1 });
+      const other = newSession();
+      await browsers.start(other.sessionId);
+      const { sessionId, containerId } = newSession();
+      mcp.request(containerId);
+
+      await relay({ browsers }).ask(sessionId);
+
+      assert.deepEqual(asks(), []);
+      assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true, reason: NO_BROWSER_MESSAGE }]);
+      assert.ok(sent.some((m) => m.type === 'error' && m.code === 'browser_unavailable' && m.message === 'No browser: no browser available right now'));
+      await browsers.stopAll();
+    });
+
+    it('passes a memory refusal on to the agent, to say out loud', async () => {
+      const previous = daemon.onExec;
+      daemon.onExec = (exec) =>
+        exec.cmd.join(' ').includes('/sys/fs/cgroup/memory.max') ? { stdout: `${String(768 * 1024 ** 2)}\n` } : (previous?.(exec) ?? {});
+      const { sessionId, containerId } = newSession();
+      mcp.request(containerId);
+
+      await relay().ask(sessionId);
+
+      assert.deepEqual(asks(), []);
+      assert.deepEqual(mcp.answersFor(containerId), [
+        {
+          id: REQUEST_ID,
+          cancelled: true,
+          reason: 'the session container has only 768 MB of memory and the browser needs at least 1 GB; raise CONTAINER_MEMORY_LIMIT_MB',
+        },
+      ]);
+    });
+
+    it('names a missing Chromium to the agent and dismisses nothing it never showed', async () => {
+      fakeBrowser.startFailure = { exitCode: 127, stderr: 'sh: chromium: not found\n' };
+      const { sessionId, containerId } = newSession();
+      mcp.request(containerId);
+
+      await relay().ask(sessionId);
+
+      assert.deepEqual(asks(), []);
+      assert.deepEqual(mcp.answersFor(containerId), [
+        { id: REQUEST_ID, cancelled: true, reason: 'Chromium is not installed in the session container (sh: chromium: not found)' },
+      ]);
+      assert.ok(sent.some((m) => m.type === 'error' && m.code === 'browser_unavailable' && /Chromium is not installed/.test(m.message)));
+    });
+
+    it('dismisses an open card with a toast when Chromium crashes, and tells the agent why', async () => {
+      const { sessionId, containerId } = newSession();
+      mcp.request(containerId);
+      await relay().ask(sessionId);
+      assert.equal(asks().length, 1);
+
+      fakeBrowser.crash(139, 'Received signal 11 SEGV_MAPERR\n', containerId);
+
+      await until(() => mcp.answersFor(containerId).length === 1);
+      const reason = 'Chromium crashed while starting with exit code 139: Received signal 11 SEGV_MAPERR';
+      assert.deepEqual(resolved(), [{ type: 'browser.resolved', id: REQUEST_ID, outcome: 'cancelled' }]);
+      assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true, reason }]);
+      assert.ok(sent.some((m) => m.type === 'error' && m.code === 'browser_unavailable' && m.message === `No browser: ${reason}`));
+    });
   });
 
   describe('through the call socket', () => {
@@ -401,7 +470,7 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
       }
     }
 
-    const liveCall = async (): Promise<VoiceCall> => {
+    const liveCall = async (browsers?: BrowserAskDeps['browsers']): Promise<VoiceCall> => {
       const w = chiefWorld();
       const call = new VoiceCall('call-browser', { kind: 'chief' }, {
         db: w.db,
@@ -410,7 +479,7 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
         tts: () => new SilentTts(),
         agent: () => new QuietAgent(),
         clock,
-        browser: deps(),
+        browser: deps(browsers === undefined ? {} : { browsers }),
       });
       call.attach({ send: (message) => sent.push(message), sendAudio: () => undefined, close: () => undefined });
       await call.start('openrouter');
@@ -454,6 +523,29 @@ describe('the watch-with-me card relay (voice feedback US-007)', () => {
       assert.deepEqual(mcp.answersFor(containerId), []);
       await call.end('hangup');
       assert.deepEqual(mcp.answersFor(containerId), [{ id: REQUEST_ID, cancelled: true }], 'hanging up cancels the open card');
+    });
+
+    it('stops the session browsers when the call ends (voice feedback US-012)', async () => {
+      const browsers = new BrowserService({ docker, container: (id) => Promise.resolve(`c-${id}`) });
+      const call = await liveCall(browsers);
+      const { sessionId, containerId } = newSession();
+      mcp.request(containerId);
+      call.askBrowser(sessionId);
+      await until(() => asks().length === 1);
+      assert.equal(browsers.isRunning(sessionId), true);
+
+      await call.end('hangup');
+
+      assert.equal(browsers.isRunning(sessionId), false);
+      assert.equal(fakeBrowser.chromiumExecs().some((exec) => exec.containerId === containerId && exec.running), false);
+    });
+
+    it('restarts the idle clock on every browser tool call (voice feedback US-012)', async () => {
+      const touched: string[] = [];
+      const call = await liveCall({ start: () => Promise.reject(new Error('unused')), touch: (id) => touched.push(id) });
+      call.browserActivity('s-1');
+      assert.deepEqual(touched, ['s-1']);
+      await call.end('hangup');
     });
 
     it('browser.cancel writes cancelled: true', async () => {

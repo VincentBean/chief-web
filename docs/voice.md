@@ -108,6 +108,7 @@ server with a message. They are listed in `.env.example` as well.
 | `VOICE_MAX_UTTERANCE_MS` | `60000` | longest utterance sent to speech-to-text |
 | `VOICE_CHIEF_MAX_TOOL_HOPS` | `6` | tool round trips chief may make for one thing you say |
 | `VOICE_SCRIBE_IDLE_CLOSE_MS` | `20000` | close an idle Scribe socket after this long |
+| `VOICE_BROWSER_IDLE_MS` | `600000` | stop a session browser that had no frame request and no tool call for 10 minutes |
 | `OPENROUTER_API_URL` | `https://openrouter.ai/api/v1` | only for a proxy or a test stub |
 | `ELEVENLABS_API_URL` | `https://api.elevenlabs.io` | only for a proxy or a test stub |
 
@@ -257,6 +258,26 @@ A session agent refuses to start for a session without a clone yet, and while
 Claude's usage-limit hold is on. It has no chief-web tools at all: it cannot
 build, create or change anything outside its own container, so it asks you to
 say "back to chief".
+
+### The shared browser
+
+When a session agent wants to look at the app with you ("watch with me"), it
+starts a headless Chromium inside the session's container and the call panel
+shows it live. **The browser needs a session container with at least 1 GB of
+memory**; a container whose limit
+(`CONTAINER_MEMORY_LIMIT_MB`, default 8192) is below 1 GB gets no browser, and
+the agent tells you why. Raise the limit and recreate the container.
+
+- **One per session**, and at most `VOICE_MAX_SESSION_AGENTS` at once across all
+  sessions. Beyond that the agent hears "no browser available right now" and no
+  card is shown.
+- **It stops** when you click **Close browser**, when the call ends, when the
+  session agent is stopped or reaped, when the session container stops, and
+  after `VOICE_BROWSER_IDLE_MS` (10 minutes) without a frame request or a
+  browser tool call; the page view then says why.
+- **When Chromium does not start** (not installed, or it crashes within five
+  seconds), the card goes away with a toast, the agent hears the cause, and
+  Chromium's stderr is in the server log (`the session browser failed to start`).
 
 ## Intents
 

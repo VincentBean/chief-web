@@ -9,7 +9,8 @@
  * chief-web sees the tool call on the agent's stream, reads the request, and
  * shows the operator the "watch with me" card. Its answer comes back as
  * `<dir>/<requestId>.answer`, written atomically by chief-web (mode 600):
- * `{ id, cancelled: false, url, credentials? }` or `{ id, cancelled: true }`.
+ * `{ id, cancelled: false, url, credentials? }` or `{ id, cancelled: true, reason? }`
+ * (a reason when chief-web had no browser to give, which the tool returns as an error).
  * The tool waits for it for at most five minutes and deletes both files the
  * moment the answer has been read.
  *
@@ -115,10 +116,21 @@ function waitForAnswer(answerFile, requestFile, signal) {
   });
 }
 
-/** The tool result for an answer that opens nothing. */
+/**
+ * chief-web could not give the session a browser (voice feedback US-012): all
+ * slots taken, too little memory, Chromium failing to start. The reason is the
+ * tool's error, for the agent to say.
+ */
+class NoBrowser extends Error {}
+
+/** The tool result for an answer that opens nothing; a chief-web reason makes it an error. */
 function notOpened(answer) {
-  const reason = answer !== null && typeof answer.reason === 'string' ? ` (${answer.reason})` : '';
-  return `${NOT_OPENED}${reason}`;
+  if (answer !== null && typeof answer.reason === 'string' && answer.reason !== '') {
+    throw new NoBrowser(
+      `No browser: ${answer.reason}. Tell the operator why in one sentence, then move on without the browser.`,
+    );
+  }
+  return NOT_OPENED;
 }
 
 async function openBrowser(requestId, args) {
@@ -385,7 +397,8 @@ async function handle(message) {
         const text = await openBrowser(id, params.arguments ?? {});
         send({ id, result: { content: [{ type: 'text', text }] } });
       } catch (cause) {
-        const text = `${NOT_OPENED} (${cause instanceof Error ? cause.message : String(cause)})`;
+        const text =
+          cause instanceof NoBrowser ? cause.message : `${NOT_OPENED} (${cause instanceof Error ? cause.message : String(cause)})`;
         send({ id, result: { content: [{ type: 'text', text }], isError: true } });
       }
       return;
