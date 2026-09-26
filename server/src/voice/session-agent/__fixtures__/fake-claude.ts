@@ -13,8 +13,9 @@ const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
 /**
  * A stream-json `claude` on the fake daemon: one scripted turn per user line,
  * shaped like the recorded fixtures. Markers in the message steer it:
- * `#crash` exits, `#read` uses a tool first, `#secret` one whose input and result carry a login, `#long` opens with a sentence
- * long enough to be spoken on its own, `#hang` never ends the turn by itself
+ * `#crash` exits, `#read` uses a tool first, `#secret` uses one whose input
+ * and result carry a login, `#long` opens with a sentence long enough to be
+ * spoken on its own, `#hang` never ends the turn by itself
  * and `#deaf` also ignores the interrupt request (only a signal ends it).
  */
 export class FakeClaude {

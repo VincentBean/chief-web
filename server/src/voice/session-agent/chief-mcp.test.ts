@@ -101,7 +101,11 @@ class FakeCdp {
             if (this.login.found && this.login.submitted === true && this.navigates) event('Page.loadEventFired', { timestamp: 2 });
             break;
           case 'Input.dispatchKeyEvent':
-            if (command.params['type'] === 'keyUp' && this.navigates) event('Page.navigatedWithinDocument', { frameId: 'f', url: 'x' });
+            if (command.params['type'] === 'keyUp' && this.navigates) {
+              // An iframe's pushState first: it must not end the wait.
+              event('Page.navigatedWithinDocument', { frameId: 'iframe-1', url: 'y' });
+              event('Page.navigatedWithinDocument', { frameId: 'f', url: 'x' });
+            }
             break;
         }
         socket.send(JSON.stringify({ id: command.id, result }));
@@ -137,7 +141,7 @@ const textOf = (reply: Record<string, unknown>): string => {
   return result.content.map((c) => c.text).join('');
 };
 
-describe('runner/chief-mcp.js (voice feedback US-007)', () => {
+describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
   const dirs: string[] = [];
   let dir: string;
   let client: McpClient;

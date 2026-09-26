@@ -166,7 +166,9 @@ async function openPage(url, credentials, signal) {
     for (;;) {
       if (signal.aborted) throw new Error('cancelled');
       // Armed before the submit, so a fast navigation is not missed.
-      const navigated = cdp.waitFor(['Page.loadEventFired', 'Page.navigatedWithinDocument'], LOGIN_WAIT_MS, signal);
+      // An iframe's pushState is not the login's navigation: only the main frame counts.
+      const mainFrame = (params) => params.frameId === undefined || params.frameId === navigation.frameId;
+      const navigated = cdp.waitFor(['Page.loadEventFired', 'Page.navigatedWithinDocument'], LOGIN_WAIT_MS, signal, mainFrame);
       const login = await fillLogin(cdp, credentials);
       if (login.found) {
         if (!login.submitted) {
@@ -200,6 +202,13 @@ async function fillLogin(cdp, credentials) {
     returnByValue: true,
     userGesture: true,
   });
+  if (reply.exceptionDetails) {
+    // The page threw: say so on stderr (the description holds no arguments) and treat it as no form.
+    const details = reply.exceptionDetails;
+    const description = (details.exception && details.exception.description) || details.text || 'exception';
+    process.stderr.write(`chief-mcp: the login script failed: ${String(description).slice(0, 300)}\n`);
+    return { found: false };
+  }
   const value = reply.result && reply.result.value;
   return typeof value === 'object' && value !== null ? value : { found: false };
 }
@@ -296,10 +305,10 @@ class Cdp {
   }
 
   /**
-   * Resolves on the first of `methods`, after `ms`, or on `signal`;
-   * `cancel()` stops waiting.
+   * Resolves on the first of `methods` whose params pass `accept`, after
+   * `ms`, or on `signal`; `cancel()` stops waiting.
    */
-  waitFor(methods, ms, signal) {
+  waitFor(methods, ms, signal, accept = () => true) {
     let waiter;
     const promise = new Promise((resolve) => {
       const timer = setTimeout(() => waiter.done(), ms);
@@ -307,6 +316,7 @@ class Cdp {
       signal.addEventListener('abort', onAbort, { once: true });
       waiter = {
         methods,
+        accept,
         done: () => {
           clearTimeout(timer);
           signal.removeEventListener('abort', onAbort);
@@ -335,7 +345,9 @@ class Cdp {
       else call.resolve(message.result || {});
       return;
     }
-    for (const waiter of [...this.waiters]) if (waiter.methods.includes(message.method)) waiter.done();
+    for (const waiter of [...this.waiters]) {
+      if (waiter.methods.includes(message.method) && waiter.accept(message.params || {})) waiter.done();
+    }
   }
 
   close() {
