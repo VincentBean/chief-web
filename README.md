@@ -74,7 +74,10 @@ background, instead of babysitting one terminal per feature.
 - **Takes your calls.** Open a call from any page and talk to chief: ask what
   is building, create a session, start a build or review a pull request, with
   every change confirmed out loud first. Chief hands the call to a session's
-  own agent to plan a feature by conversation, and it writes the PRD.
+  own agent to plan a feature by conversation, and it writes the PRD. Tell
+  chief what is wrong in an app and it starts a feedback session, whose agent
+  can open the page and watch it with you in the call panel, then writes the
+  steps it saw into the PRD.
   [Voice calls](docs/voice.md)
 
 If Claude runs into its usage limit mid-build, the session waits for the limit

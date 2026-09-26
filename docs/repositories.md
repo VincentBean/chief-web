@@ -24,6 +24,20 @@ or git's own stderr, so a missing deploy key shows up as
 `Permission denied (publickey)` rather than a generic failure. It needs the
 runner image (`RUNNER_IMAGE`, built by the compose stack).
 
+## Saved logins
+
+A repository can keep logins for its application, so that the
+["watch with me"](voice.md#watch-with-me) card on a voice call can open a page
+logged in without you typing the password each time. **Saved logins** in the
+repository editor lists them (label, host, username), adds them and deletes
+them; the card's **Save this login** checkbox adds one too. A login has a URL
+(`http` or `https`), a username (may be empty), a password and a label, which
+defaults to the host plus the username. The API is
+`GET`/`POST /api/repositories/:id/logins` and
+`DELETE /api/repositories/:id/logins/:loginId`; no response contains a
+password. Passwords are stored in plain text; see
+[Security model](security.md#voice-calls). Use a test account.
+
 ## Code review context
 
 **Code review context** on the repository form is free-form text that is added

@@ -115,9 +115,12 @@ next to everything above. Voice is off until you switch it on in Settings.
   all, and settings, terminals, merging and the Claude login are not reachable.
 - **Session agents have no management tools.** A session agent is `claude`
   with `--dangerously-skip-permissions` in the session's own container, exactly
-  as privileged as a build agent there and no more. It has no chief-web tools
-  and no path to the server, so repository content it reads (a prompt injection
-  in a README, say) cannot create, build or change anything. Chief, which has
+  as privileged as a build agent there and no more. It has no chief-web
+  management tools, so repository content it reads (a prompt injection in a
+  README, say) cannot create, build or change anything. Its one path to the
+  server is `open_browser_with_operator`, which writes a request file the
+  server picks up to show you the "watch with me" card: the most it can do is
+  ask you for a page. Chief, which has
   the tools, sees session, repository and pull request names and statuses but
   no repository content, and the call's own phrases ("yes", "switch to …") are
   matched only on your transcript, never on agent output. In Q&A mode (any
@@ -134,9 +137,25 @@ next to everything above. Voice is off until you switch it on in Settings.
   written into the session container only for the duration of one browser
   open: over `docker exec` stdin (never a command line) into a `0600` answer
   file, which the MCP tool deletes the moment it reads it, before the page is
-  opened and the login typed in. Deleting a repository deletes its saved
-  logins. Use a test account, not a personal one: the session agent drives the
+  opened and the login typed in. The tool tells the agent only that a login
+  was supplied, never what it is, and any username or password that does show
+  up in an agent's tool call is redacted before it reaches a tool card, the
+  call socket or the stored transcript. A login is never spoken, by you or the
+  agent. Deleting a repository deletes its saved logins. Use a test account, not a personal one: the session agent drives the
   logged-in page.
+- **The shared browser runs inside the session container.** Chromium there
+  reaches what the container reaches, and the session agent drives it with the
+  privileges it already has there. A page it opens is content it reads, like a
+  README: a page that injects instructions can steer the agent inside the
+  logged-in application, but not past the container.
+- **Screencast frames are never stored.** The page view's picture is a stream
+  of JPEG frames from Chromium, relayed by the server to your browser, which
+  draws each one and drops it; nothing writes them to disk, the database or a
+  log. The page view socket (`/api/voice/browser/:sessionId`) has the same
+  cookie and `Origin` checks as the call socket. The only images kept are the
+  screenshots the agent takes on purpose, in
+  `.chief/prds/<session-name>/screenshots/` in the session's clone, which are
+  never committed.
 - **The call socket** uses the same cookie check as every other WebSocket, and
   when `PUBLIC_URL` is set it also refuses a browser whose `Origin` is not that
   address (`4403`).

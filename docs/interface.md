@@ -60,7 +60,9 @@ attention are marked at their left edge.
 Filters live in the URL, so a bookmark to `/sessions?filter=attention` is a
 to-do list: `filter` is one of `active`, `attention`, `planning`, `ready`,
 `finished`; `repository` narrows to one repository; `q` matches the name,
-repository or branch. The sidebar's counts link to the matching filter.
+repository or branch. A session created from
+[feedback](sessions.md#feedback-sessions) has a **Feedback** badge next to its
+status, here and in the header of its page. The sidebar's counts link to the matching filter.
 
 **The list is polled every 3 seconds, not pushed.** A session is moved along by
 the build loop, the planning terminal and the delivery step — all in other
@@ -71,8 +73,10 @@ overview and the list at once; a hidden tab polls nothing.
 
 **New session** (`/sessions/new`) is its own page: repository, name, base
 branch, pull request target, an optional scheduled start and a **Code review**
-checkbox (seeded from the [global default](#settings)), with what happens next
-explained beside it. A successful create lands on the session page; a
+checkbox (seeded from the [global default](#settings)), and an optional
+**Feedback** box, with what happens next explained beside it. Feedback makes it
+a [feedback session](sessions.md#feedback-sessions); the box counts characters
+up to the 4000 allowed and the form refuses to submit past them. A successful create lands on the session page; a
 failed clone keeps the form and shows git's output under it.
 
 ### The session page
@@ -87,7 +91,8 @@ attempt counters and the story list while building, the failure reason and what
 a retry will do when failed. The side column carries the facts (branches, pull
 request, timestamps), the PRD's parse state, the schedule, and the
 [code review](code-review.md) toggle, which stays changeable until the session
-is finished. The agent log runs full width underneath and follows live output
+is finished. A feedback session shows its feedback in a **Feedback** panel at
+the top of the main column, whatever its stage. The agent log runs full width underneath and follows live output
 while the loop runs.
 
 ### Deleting a session
@@ -112,6 +117,16 @@ Docker is asked before anything local is removed: if the daemon cannot be
 reached the deletion is refused with `502 session_container_unavailable` and
 nothing changes, because an orphaned container next to a deleted workspace is
 worse than a session that is still there.
+
+## Repositories
+
+`/repositories` lists the registered repositories and edits them; see
+[Repositories](repositories.md). Editing a repository also shows its **Saved
+logins**: the logins the voice call's ["watch with me"
+card](voice.md#watch-with-me) can type into a page for you. Each row shows the
+label, host and username, never the password, with a trash button that asks
+before deleting. Below the list, a URL, an optional label, a username and a
+password add one.
 
 ## Browser terminals
 
