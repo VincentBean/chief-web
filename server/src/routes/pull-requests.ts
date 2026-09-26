@@ -27,10 +27,12 @@ export function createPullRequestsRouter(
   prReviews: PrReviewService,
   conflictFixes: ConflictFixLookup,
   /**
-   * The merge conflict scan, re-run by the Refresh button. Optional: a caller
-   * that has no scan — a test, mostly — simply gets the listing on its own.
+   * The merge conflict scan, re-run by the Refresh button and asked for one
+   * pull request’s fix by the Fix conflicts button. Optional: a caller that
+   * has no scan — a test, mostly — simply gets the listing on its own, and a
+   * 503 from the button.
    */
-  conflictScan: Pick<ConflictScan, 'tick'> | null = null,
+  conflictScan: Pick<ConflictScan, 'tick' | 'fixNow'> | null = null,
 ): Router {
   const router = Router();
 
@@ -128,6 +130,42 @@ export function createPullRequestsRouter(
       });
   });
 
+  /**
+   * Starts the merge conflict fix for one pull request, the way the voice
+   * agent’s `fix_pr_conflicts` tool does: the scan checks the pull request,
+   * and when GitHub calls it conflicted, starts the same fix run a tick would.
+   * Works whether or not the automatic fixer is switched on.
+   */
+  router.post('/pull-requests/:repositoryId/:number/conflict-fix', (req, res) => {
+    const number = parseNumber(req.params.number);
+    if (number === null) {
+      respondWithInvalidNumber(res);
+      return;
+    }
+    if (conflictScan === null) {
+      res.status(503).json({
+        error: 'no_fixer',
+        message: 'The conflict fixer is not available on this server.',
+      });
+      return;
+    }
+
+    conflictScan
+      .fixNow(req.params.repositoryId, number)
+      .then((result) => {
+        if (result.ok) {
+          res.status(200).json(result);
+          return;
+        }
+        res
+          .status(fixNowRefusalStatus(result.code))
+          .json({ error: result.code, message: result.reason });
+      })
+      .catch((cause: unknown) => {
+        respondWithFailure(res, cause);
+      });
+  });
+
   router.get('/pull-requests/reviews/:reviewId', (req, res) => {
     try {
       res.status(200).json(prReviews.status(req.params.reviewId));
@@ -191,6 +229,25 @@ function rescanConflicts(scan: Pick<ConflictScan, 'tick'> | null): Promise<void>
         error: cause instanceof Error ? cause.message : String(cause),
       });
     });
+}
+
+/**
+ * The status a refused fix answers with. The codes are the service’s own; any
+ * code not named here is something the operator has to read, so a 400.
+ */
+function fixNowRefusalStatus(code: string): number {
+  switch (code) {
+    case 'repository_not_found':
+    case 'pull_request_not_open':
+      return 404;
+    case 'fix_already_active':
+    case 'run_already_active':
+      return 409;
+    case 'github_unreachable':
+      return 502;
+    default:
+      return 400;
+  }
 }
 
 function parseNumber(raw: string): number | null {
