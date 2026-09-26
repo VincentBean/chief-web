@@ -24,7 +24,7 @@ import {
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
-import type { ReadyResult, SessionView, SetupResult } from '../sessions/index.js';
+import type { ReadyResult, SessionPrdView, SessionView, SetupResult } from '../sessions/index.js';
 import { sessionPrdFile, setupScript } from '../sessions/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 
@@ -167,6 +167,7 @@ describe('sessions api', () => {
     const response = await fetch(`${baseUrl}/api/sessions`);
 
     assert.equal(response.status, 401);
+    assert.equal((await fetch(`${baseUrl}/api/sessions/any/prd`)).status, 401);
   });
 
   it('creates a pending session, starts its container and clones', async () => {
@@ -571,6 +572,79 @@ describe('sessions api', () => {
 
   it('answers 404 for the stories of an unknown session', async () => {
     const response = await call('GET', '/api/sessions/nope/stories');
+
+    assert.equal(response.status, 404);
+    assert.equal(((await response.json()) as ErrorBody).error, 'session_not_found');
+  });
+
+  it('answers with the parsed PRD of a session, without its markdown', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    const questions = '## Open Questions\n\n- Which OAuth providers?\n';
+    writePrd(id, 'add-login', `# PRD: Login\n\nLet people sign in.\n\n${PRD}\n${questions}`);
+
+    const response = await call('GET', `/api/sessions/${id}/prd`);
+    const prd = (await response.json()) as SessionPrdView & { content?: unknown };
+
+    assert.equal(response.status, 200);
+    assert.equal(prd.status.exists, true);
+    assert.equal(prd.status.parses, true);
+    assert.equal(prd.status.path, '.chief/prds/add-login/prd.md');
+    assert.equal(prd.project, 'Login');
+    assert.equal(prd.description, 'Let people sign in.');
+    assert.deepEqual(prd.openQuestions, ['Which OAuth providers?']);
+    assert.deepEqual(prd.stories, [
+      {
+        id: 'US-001',
+        title: 'Add the form',
+        description: '',
+        priority: 1,
+        status: 'todo',
+        acceptanceCriteria: [{ text: 'The form has an email and a password field', checked: false }],
+      },
+      {
+        id: 'US-002',
+        title: 'Rate limit it',
+        description: '',
+        priority: 2,
+        status: 'done',
+        acceptanceCriteria: [{ text: 'Five attempts per minute', checked: true }],
+      },
+    ]);
+    assert.equal('content' in prd, false);
+  });
+
+  it('answers 200 with exists false when the session has no PRD yet', async () => {
+    const { body } = await create();
+
+    const response = await call('GET', `/api/sessions/${body.session.id}/prd`);
+    const prd = (await response.json()) as SessionPrdView;
+
+    assert.equal(response.status, 200);
+    assert.equal(prd.status.exists, false);
+    assert.deepEqual(prd.stories, []);
+    assert.deepEqual(prd.openQuestions, []);
+  });
+
+  it('answers 200 with the parse errors and the stories found for a broken PRD', async () => {
+    const { body } = await create();
+    const id = body.session.id;
+    writePrd(id, 'add-login', `${PRD}\n### US-003: No criteria\n**Status:** someday\n`);
+
+    const response = await call('GET', `/api/sessions/${id}/prd`);
+    const prd = (await response.json()) as SessionPrdView;
+
+    assert.equal(response.status, 200);
+    assert.equal(prd.status.parses, false);
+    assert.notEqual(prd.status.errors.length, 0);
+    assert.deepEqual(
+      prd.stories.map((story) => story.id),
+      ['US-001', 'US-002', 'US-003'],
+    );
+  });
+
+  it('answers 404 for the PRD of an unknown session', async () => {
+    const response = await call('GET', '/api/sessions/nope/prd');
 
     assert.equal(response.status, 404);
     assert.equal(((await response.json()) as ErrorBody).error, 'session_not_found');

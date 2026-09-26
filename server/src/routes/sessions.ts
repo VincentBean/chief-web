@@ -79,6 +79,16 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // The parsed plan of any session, for the call screen (calling-interface
+  // US-001). A missing or unparsable PRD is described in `status`, not a 4xx.
+  router.get('/sessions/:id/prd', (req, res) => {
+    try {
+      res.status(200).json(sessions.prd(req.params.id));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   // "Mark ready". A PRD that does not parse answers 200 with `ok: false`; a
   // session whose schedule passed while it was pending is started here and
   // then, which is why this is the one transition that awaits (US-017).

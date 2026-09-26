@@ -7,6 +7,8 @@ export {
   type SessionContainers,
   SessionError,
   type SessionLifecycle,
+  type SessionPrdStoryView,
+  type SessionPrdView,
   SessionService,
   type SessionSetupView,
   type SessionView,

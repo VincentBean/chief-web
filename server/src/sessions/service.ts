@@ -193,6 +193,28 @@ export interface ReadyResult {
   readonly stories: readonly Story[];
 }
 
+/**
+ * The whole plan of a session as `prd.md` has it right now (calling-interface
+ * US-001): what the call screen shows while the plan is still being written.
+ * Never the raw markdown — the parse is the contract.
+ */
+export interface SessionPrdView {
+  readonly status: PrdStatus;
+  readonly project: string | null;
+  readonly description: string | null;
+  readonly stories: readonly SessionPrdStoryView[];
+  readonly openQuestions: readonly string[];
+}
+
+export interface SessionPrdStoryView {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly priority: number;
+  readonly status: PrdStory['status'];
+  readonly acceptanceCriteria: readonly { readonly text: string; readonly checked: boolean }[];
+}
+
 /** What creating a session, or retrying its setup, answers with. */
 export interface SessionSetupView {
   readonly session: SessionView;
@@ -355,6 +377,33 @@ export class SessionService {
   stories(id: string): Story[] {
     this.requireSession(id);
     return listStories(this.db, id);
+  }
+
+  /**
+   * The parsed `prd.md` of any session, planned or not. A missing or broken
+   * file is still a 200: its state is in `status`, next to whatever stories
+   * the parser did find.
+   */
+  prd(id: string): SessionPrdView {
+    const session = this.requireSession(id);
+    const { status, parsed } = readPrdDocument(this.prdFile(session), prdPathFor(session.name));
+    return {
+      status,
+      project: parsed?.project ?? null,
+      description: parsed?.description ?? null,
+      stories: (parsed?.stories ?? []).map((story) => ({
+        id: story.id,
+        title: story.title,
+        description: story.description,
+        priority: story.priority,
+        status: story.status,
+        acceptanceCriteria: story.acceptanceCriteria.map((criterion) => ({
+          text: criterion.text,
+          checked: criterion.done,
+        })),
+      })),
+      openQuestions: parsed?.openQuestions ?? [],
+    };
   }
 
   /**
