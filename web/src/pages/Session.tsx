@@ -316,6 +316,9 @@ export function Session() {
   // A scheduled run that committed nothing: it finished on purpose without a
   // pull request, so there is nothing to retry and nothing missing.
   const cleanRun = isCleanRun(session);
+  // Pull request turned off: the branch was pushed and that is the delivery.
+  // There is deliberately no way to open a pull request afterwards.
+  const pushedOnly = status === 'finished' && session.prUrl === null && !session.openPullRequest && !cleanRun;
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -363,7 +366,7 @@ export function Session() {
       {status === 'failed' && !build.queued && (
         <button type="button" className="button button--primary" onClick={onRetry} disabled={busy !== null}>
           <Icon name="sync" />
-          {busy === 'retry' ? 'Retrying…' : retryIsDelivery ? 'Retry push & PR' : 'Retry build'}
+          {busy === 'retry' ? 'Retrying…' : retryIsDelivery ? (session.openPullRequest ? 'Retry push & PR' : 'Retry push') : 'Retry build'}
         </button>
       )}
       {isEnded(session) && session.prUrl !== null && (
@@ -373,7 +376,7 @@ export function Session() {
           <Icon name="link-external" />
         </a>
       )}
-      {status === 'finished' && session.prUrl === null && complete && !cleanRun && (
+      {status === 'finished' && session.prUrl === null && complete && !cleanRun && session.openPullRequest && (
         <button type="button" className="button button--primary" onClick={onRetryDelivery} disabled={busy !== null}>
           <Icon name="sync" />
           {busy === 'delivery' ? 'Retrying…' : 'Retry push & PR'}
@@ -429,6 +432,12 @@ export function Session() {
           <strong>Nothing to deliver.</strong> This scheduled run committed nothing on{' '}
           <span className="mono">{session.featureBranch}</span>, so the branch was not pushed and no pull request was
           opened. The run counts as clean.
+        </Notice>
+      )}
+      {pushedOnly && (
+        <Notice kind="ok">
+          <strong>Branch pushed.</strong> Pull request is off for this session, so{' '}
+          <span className="mono">{session.featureBranch}</span> was pushed and no pull request was opened.
         </Notice>
       )}
       {session.scheduleMissed && (
@@ -537,8 +546,10 @@ export function Session() {
                       },
                     ]
                   : []),
+                { label: 'Pull request', value: session.openPullRequest ? 'on' : 'off' },
+                ...(pushedOnly ? [{ label: 'Pushed branch', value: session.featureBranch, mono: true }] : []),
                 ...(session.prUrl !== null
-                  ? [{ label: 'Pull request', value: <a className="link" href={session.prUrl} target="_blank" rel="noreferrer">{session.prUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '')}</a> }]
+                  ? [{ label: 'Pull request link', value: <a className="link" href={session.prUrl} target="_blank" rel="noreferrer">{session.prUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '')}</a> }]
                   : []),
                 { label: 'Created', value: localTime(session.createdAt) },
                 { label: 'Updated', value: localTime(session.updatedAt) },
@@ -686,7 +697,9 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
               : status === 'finished'
                 ? isCleanRun(session)
                   ? 'nothing to deliver'
-                  : 'no pull request'
+                  : session.openPullRequest
+                    ? 'no pull request'
+                    : 'branch pushed, pull request off'
                 : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };
