@@ -68,6 +68,7 @@ import { createSettingsRouter } from './routes/settings.js';
 import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index.js';
 import { SessionAgentRegistry } from './voice/session-agent/registry.js';
 import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
+import { createBrowserViewRoute } from './voice/browser-view.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -523,6 +524,8 @@ export function createApp(
   });
   api.use(voice.router);
   deps.gateway?.register(voice.socketRoute);
+  // The live page view of that browser in the call panel (voice feedback US-008).
+  deps.gateway?.register(createBrowserViewRoute(browsers, config));
   // Only the half of it that runs an agent needs Claude Code. A session whose
   // *push* or *pull request* failed has nothing left to build, so blocking its
   // retry on credentials it does not use would strand finished work.

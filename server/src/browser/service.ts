@@ -362,6 +362,17 @@ export class BrowserService {
     return (await run).info();
   }
 
+  /**
+   * The session's browser once a start already under way has finished; `null`
+   * when none is running or starting. Never launches one, so a viewer
+   * reconnecting after a crash cannot bring a fresh Chromium up by itself.
+   */
+  async whenRunning(sessionId: string): Promise<BrowserInfo | null> {
+    const starting = this.starting.get(sessionId);
+    if (starting !== undefined) await starting.catch(() => undefined);
+    return this.live(sessionId)?.info() ?? null;
+  }
+
   isRunning(sessionId: string): boolean {
     return this.live(sessionId) !== null;
   }

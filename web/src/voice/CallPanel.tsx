@@ -21,6 +21,7 @@ import {
   parseBrowserUrl,
   type ToolStatus,
 } from './protocol.ts';
+import { PageView } from './PageView.tsx';
 import { bindHoldToTalkButton } from './ptt.ts';
 import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
 
@@ -243,6 +244,10 @@ export function CallPanel() {
 
       {call.debug && <LatencyOverlay times={lastTimedTurn(call.latency)} />}
 
+      {call.pageView !== null && (
+        <PageView key={call.pageView.sessionId} sessionId={call.pageView.sessionId} onClose={call.closePageView} />
+      )}
+
       <ol className="call-transcript" ref={body} aria-label="Transcript">
         {call.transcript.length === 0 && (
           <li className="call-transcript__empty">
@@ -368,7 +373,7 @@ export function TranscriptLine({
   readonly entry: TranscriptEntry;
   readonly onResolve: (id: string, confirm: boolean) => void;
   /** The live panel's "watch with me" card; a stored call has none. */
-  readonly onBrowserAnswer?: (answer: BrowserAnswer) => void;
+  readonly onBrowserAnswer?: (answer: BrowserAnswer, sessionId: string) => void;
   readonly onBrowserCancel?: (id: string) => void;
   /** Debug (US-026): the line's speech-to-text latency; undefined shows nothing. */
   readonly stt?: number | null;
@@ -463,7 +468,7 @@ function BrowserAskCard({
   onCancel,
 }: {
   readonly entry: Extract<TranscriptEntry, { kind: 'browser' }>;
-  readonly onAnswer: ((answer: BrowserAnswer) => void) | undefined;
+  readonly onAnswer: ((answer: BrowserAnswer, sessionId: string) => void) | undefined;
   readonly onCancel: ((id: string) => void) | undefined;
 }) {
   const { sessions } = useAppData();
@@ -505,7 +510,7 @@ function BrowserAskCard({
         : hasLogin
           ? { credentials: { username, password }, save }
           : {}),
-    });
+    }, entry.sessionId);
   };
 
   const urlError = tried && parsedUrl === null;

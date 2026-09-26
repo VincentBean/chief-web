@@ -137,6 +137,8 @@ export interface CallState {
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
   readonly panelOpen: boolean;
+  /** The session whose browser the panel shows live (US-008), from **Open** on its card until **Close browser**. */
+  readonly pageView: { readonly sessionId: string } | null;
   readonly panelRef: RefObject<HTMLElement | null>;
 }
 
@@ -163,7 +165,9 @@ export interface CallActions {
   /** Answers a confirmation pill; the server runs or drops exactly that one. */
   resolve(id: string, confirm: boolean): void;
   /** The "watch with me" card's **Open**: the URL and login go to the server, never back. */
-  answerBrowser(answer: BrowserAnswer): void;
+  answerBrowser(answer: BrowserAnswer, sessionId: string): void;
+  /** Drops the page view; its **Close browser** has already stopped the browser. */
+  closePageView(): void;
   /** The card's **Cancel**. */
   cancelBrowser(id: string): void;
   setDebug(debug: boolean): void;
@@ -369,6 +373,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [latency, setLatency] = useState<Readonly<Record<number, TurnTimes>>>({});
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [pageView, setPageView] = useState<{ readonly sessionId: string } | null>(null);
 
   const panelRef = useRef<HTMLElement | null>(null);
   const socket = useRef<WebSocket | null>(null);
@@ -706,9 +711,10 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   const answerBrowser = useCallback(
-    (answer: BrowserAnswer): void => {
+    (answer: BrowserAnswer, sessionId: string): void => {
       send({ type: 'browser.answer', ...answer });
       settleBrowser(answer.id, 'opened');
+      setPageView((current) => (current?.sessionId === sessionId ? current : { sessionId }));
     },
     [send, settleBrowser],
   );
@@ -761,6 +767,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       latency,
       problem,
       panelOpen,
+      pageView,
+      closePageView: () => setPageView(null),
       panelRef,
       open,
       closePanel: () => setPanelOpen(false),
@@ -799,6 +807,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       latency,
       problem,
       panelOpen,
+      pageView,
       open,
       start,
       hangup,

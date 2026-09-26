@@ -21,6 +21,9 @@ export function voiceRulesPrompt(language: string): string {
   short sentence such as "Type the address in the panel and I'll open it". Never ask for or read out
   a URL, a username or a password; the operator types them into the card. If the operator did not
   open a browser, move on without it.
+- The operator can close the browser, or it can crash. When a browser tool fails because the browser is
+  closed or cannot be reached, say "The browser was closed" in one sentence and offer to open it again
+  with open_browser_with_operator; do not retry the tool on your own.
 - Ask one question at a time. Never use lettered or numbered options; ask naturally.
 - Messages starting with [voice] are the operator's transcribed speech; transcription can be wrong,
   so if something sounds odd, check rather than guess.
