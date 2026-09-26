@@ -154,6 +154,11 @@ export interface SessionView {
    */
   readonly codeReview: boolean;
   /**
+   * Whether delivery opens a pull request for this session (pull-request
+   * US-002); when false it only pushes the feature branch.
+   */
+  readonly openPullRequest: boolean;
+  /**
    * The feedback the session was started from (voice feedback US-001), or
    * `null` for a session that was not started from feedback.
    */
@@ -209,6 +214,8 @@ export interface CreateSessionRequest {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false. */
   readonly codeReview?: boolean;
+  /** Defaults to the repository's `openPullRequestDefault`. */
+  readonly openPullRequest?: boolean;
   /**
    * The recurring task this session is a run of (US-004), when it is one.
    * Only the scheduler passes it; a session created from the API is never a
@@ -313,6 +320,7 @@ export class SessionService {
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
         codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
+        openPullRequest: request.openPullRequest ?? repository.openPullRequestDefault,
         recurringTaskId: request.recurringTaskId ?? null,
         feedback: request.feedback ?? null,
       });
@@ -714,6 +722,7 @@ export class SessionService {
       failureStage: session.failureStage,
       waitingUntil: session.waitingUntil,
       codeReview: session.codeReview,
+      openPullRequest: session.openPullRequest,
       feedback: session.feedback,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),

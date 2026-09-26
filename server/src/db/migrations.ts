@@ -1113,6 +1113,15 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE repositories ADD COLUMN open_pull_request_default INTEGER NOT NULL DEFAULT 1;
     `,
   },
+  {
+    id: '0021_session_open_pull_request',
+    sql: `
+      -- Whether delivery opens a pull request for this session (pull-request
+      -- US-002). 1 for every existing session: they were all created when
+      -- delivery always opened one.
+      ALTER TABLE sessions ADD COLUMN open_pull_request INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
 ];
 
 /**

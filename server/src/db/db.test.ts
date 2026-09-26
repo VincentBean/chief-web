@@ -65,6 +65,9 @@ const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
 /** The migration under test in 'adds `open_pull_request_default` as true'. */
 const OPEN_PULL_REQUEST_DEFAULT_MIGRATION = '0020_repository_open_pull_request_default';
 
+/** The migration under test in 'adds `open_pull_request` to existing sessions'. */
+const SESSION_OPEN_PULL_REQUEST_MIGRATION = '0021_session_open_pull_request';
+
 /** The migration under test in 'adds `feedback` to existing sessions'. */
 const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 
@@ -229,7 +232,11 @@ describe('migrations', () => {
           code_review, created_at, updated_at)
        VALUES (?, ?, 'legacy', 'pending', 'main', 'chief/legacy', 'main', 1, ?, ?)`,
     ).run(session.id, repository.id, at, at);
-    failSession(db, session.id, 'push', 'Permission denied (publickey).');
+    // Failed by hand for the same reason: `failSession` reads the row back
+    // through today's `mapSession`, which wants columns added after this.
+    db.prepare(
+      `UPDATE sessions SET status = 'failed', failure_stage = 'push', last_error = ? WHERE id = ?`,
+    ).run('Permission denied (publickey).', session.id);
     syncStories(db, session.id, [
       { storyId: 'US-001', title: 'First', priority: 1, status: 'done' },
     ]);
@@ -581,6 +588,59 @@ describe('session feedback migration', () => {
     assert.equal(updateSession(db, id, { feedback })?.feedback, feedback);
     assert.equal(updateSession(db, id, { status: 'pending' })?.feedback, feedback);
     assert.equal(updateSession(db, id, { feedback: null })?.feedback, null);
+
+    closeDatabase(db);
+  });
+});
+
+describe('session open pull request migration', () => {
+  it('adds `open_pull_request` to existing sessions as true', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex(
+      (migration) => migration.id === SESSION_OPEN_PULL_REQUEST_MIGRATION,
+    );
+    assert.ok(index > 0, `${SESSION_OPEN_PULL_REQUEST_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-26T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'ready', 'develop', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(SESSION_OPEN_PULL_REQUEST_MIGRATION));
+    assert.equal(getSession(db, id)?.openPullRequest, true);
+
+    // A partial update leaves it be; an explicit one changes it.
+    assert.equal(updateSession(db, id, { status: 'pending' })?.openPullRequest, true);
+    assert.equal(updateSession(db, id, { openPullRequest: false })?.openPullRequest, false);
+    assert.equal(getSession(db, id)?.openPullRequest, false);
+
+    closeDatabase(db);
+  });
+
+  it('stores the flag a new session is created with, true when unsaid', () => {
+    const db = freshDb();
+    const repository = seedRepository(db);
+    const base = { repositoryId: repository.id, baseBranch: 'develop', prTargetBranch: 'main' } as const;
+
+    assert.equal(createSession(db, { ...base, name: 'unsaid' }).openPullRequest, true);
+    const off = createSession(db, { ...base, name: 'no-pr', openPullRequest: false });
+    assert.equal(off.openPullRequest, false);
+    assert.equal(getSession(db, off.id)?.openPullRequest, false);
 
     closeDatabase(db);
   });

@@ -265,6 +265,48 @@ describe('sessions api', () => {
     }
   });
 
+  it('takes the repository default for the pull request flag unless the request says', async () => {
+    // Without a value, the repository's default applies — on by default.
+    const unsaid = await create({ name: 'pr-default-on' });
+    assert.equal(unsaid.status, 201);
+    assert.equal(unsaid.body.session.openPullRequest, true);
+
+    // An explicit false wins over a repository default of true.
+    const off = await create({ name: 'pr-explicit-off', openPullRequest: false });
+    assert.equal(off.body.session.openPullRequest, false);
+
+    // It is on every session payload, not just the create answer.
+    const fetched = await call('GET', `/api/sessions/${off.body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).openPullRequest, false);
+
+    const noPr = createRepository(db, {
+      name: 'no-pr',
+      sshUrl: 'git@github.com:acme/no-pr.git',
+      githubSlug: 'acme/no-pr',
+      openPullRequestDefault: false,
+    });
+    writePrivateKey(config, noPr.id, PRIVATE_KEY);
+
+    // Without a value, a repository default of false applies too.
+    const unsaidOff = await create({ repositoryId: noPr.id, name: 'pr-default-off' });
+    assert.equal(unsaidOff.status, 201);
+    assert.equal(unsaidOff.body.session.openPullRequest, false);
+
+    // An explicit true wins over a repository default of false.
+    const on = await create({ repositoryId: noPr.id, name: 'pr-explicit-on', openPullRequest: true });
+    assert.equal(on.body.session.openPullRequest, true);
+  });
+
+  it('rejects a pull request flag that is not a boolean', async () => {
+    for (const openPullRequest of ['false', 0, null]) {
+      const { status, body } = await create({ name: 'bad-pr-flag', openPullRequest });
+
+      assert.equal(status, 400, JSON.stringify(openPullRequest));
+      assert.equal(body.error, 'invalid_open_pull_request');
+    }
+    assert.equal(listSessions(db).length, 0);
+  });
+
   it('rejects a code review flag that is not a boolean', async () => {
     const { body } = await create();
 

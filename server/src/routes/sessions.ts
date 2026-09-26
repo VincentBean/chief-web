@@ -265,6 +265,21 @@ function optionalBoolean(
   return raw;
 }
 
+/** Absent is fine; anything present that is not a boolean, `null` included, is not. */
+function parseOpenPullRequest(
+  input: Record<string, unknown>,
+): { openPullRequest?: boolean } | Invalid {
+  const raw = input.openPullRequest;
+  if (raw === undefined) return {};
+  if (typeof raw !== 'boolean') {
+    return {
+      error: 'invalid_open_pull_request',
+      message: 'openPullRequest must be true or false.',
+    };
+  }
+  return { openPullRequest: raw };
+}
+
 function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -314,6 +329,9 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const codeReview = optionalBoolean(input, 'codeReview');
   if (typeof codeReview === 'object') return codeReview;
 
+  const pullRequest = parseOpenPullRequest(input);
+  if ('error' in pullRequest) return pullRequest;
+
   // Trimmed, and blank counts as none: a session either was started from
   // feedback or it was not.
   const feedback = optionalString(input, 'feedback', 'invalid_feedback');
@@ -333,6 +351,8 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     // Left out when the request is silent: the service applies the global
     // default, so an API-created session honours it too.
     ...(codeReview === undefined ? {} : { codeReview }),
+    // Likewise: left out, the service takes the repository's default.
+    ...pullRequest,
     ...(baseBranch === undefined ? {} : { baseBranch }),
     ...(feedback === undefined ? {} : { feedback }),
   };

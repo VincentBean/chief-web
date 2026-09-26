@@ -597,6 +597,7 @@ function session(overrides: Partial<Session>): Session {
     failureStage: null,
     waitingUntil: null,
     codeReview: false,
+    openPullRequest: true,
     recurringTaskId: 'task-1',
     prDescription: null,
     feedback: null,
