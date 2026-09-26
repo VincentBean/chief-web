@@ -16,6 +16,7 @@ import {
   setSetting,
 } from '../db/index.js';
 import { VOICE_FIELDS } from '../settings/index.js';
+import { SCRIBE_TOKENS_PER_HOUR } from './routes.js';
 
 const PASSWORD = 'correct horse battery staple';
 
@@ -382,7 +383,7 @@ describe('voice api (voice US-001)', () => {
   });
 
   describe('POST /api/voice/scribe-token (voice US-022)', () => {
-    it('refuses without an ElevenLabs key, then mints with the Scribe settings and keyterms, 10 per hour', async () => {
+    it('refuses without an ElevenLabs key, then mints with the Scribe settings and keyterms, SCRIBE_TOKENS_PER_HOUR per hour', async () => {
       const refused = await request('POST', '/api/voice/scribe-token');
       assert.equal(refused.status, 400);
       assert.equal((await json(refused))['error'], 'elevenlabs_key_missing');
@@ -413,7 +414,7 @@ describe('voice api (voice US-001)', () => {
       assert.equal((await request('POST', '/api/voice/scribe-token')).status, 400);
 
       replies['/el/v1/single-use-token/realtime_scribe'] = { status: 200, body: { token: 'sutkn_abc' } };
-      for (let i = 1; i < 10; i++) assert.equal((await request('POST', '/api/voice/scribe-token')).status, 200);
+      for (let i = 1; i < SCRIBE_TOKENS_PER_HOUR; i++) assert.equal((await request('POST', '/api/voice/scribe-token')).status, 200);
       const limited = await request('POST', '/api/voice/scribe-token');
       assert.equal(limited.status, 429);
       assert.ok(Number(limited.headers.get('retry-after')) > 0);

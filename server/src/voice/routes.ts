@@ -28,8 +28,13 @@ import { synthesizeOnce, TtsError } from './tts/index.js';
 const MAX_TEST_TTS_CHARS = 500;
 const TEST_TTS_TIMEOUT_MS = 20_000;
 
-/** docs/voice-plan.md §14.3: single-use Scribe tokens, at most this many per hour. */
-export const SCRIBE_TOKENS_PER_HOUR = 10;
+/**
+ * docs/voice-plan.md §14.3: single-use Scribe tokens, at most this many per hour. Every
+ * Scribe socket takes one, and an idle socket closes after
+ * `VOICE_SCRIBE_IDLE_CLOSE_MS`, so a conversation with pauses opens one for
+ * most utterances; this only stops a runaway reconnect loop.
+ */
+export const SCRIBE_TOKENS_PER_HOUR = 120;
 /** ElevenLabs takes at most 50 key terms. */
 const MAX_KEYTERMS = 50;
 /** Always biased towards, before the repository names (docs/voice-plan.md §7.2). */
