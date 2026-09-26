@@ -550,9 +550,9 @@ export function TranscriptLine({
 }
 
 /**
- * The "watch with me" card (voice feedback US-007), shaped like the
- * confirmation pill: the session agent wants to open a page, and the operator
- * types the address (and a login) instead of spelling it out loud.
+ * The "watch with me" card (voice feedback US-007): the session agent wants to
+ * open a page, and the operator types the address (and a login) instead of
+ * spelling it out loud.
  */
 function BrowserAskCard({
   entry,
@@ -577,9 +577,9 @@ function BrowserAskCard({
 
   if (entry.resolution !== null || onAnswer === undefined || onCancel === undefined) {
     return (
-      <li className="call-confirm">
-        <span className="call-confirm__prompt">{hint}</span>
-        <span className="call-confirm__done">{entry.resolution === null ? 'Browser' : BROWSER_OUTCOME_LABEL[entry.resolution]}</span>
+      <li className="call-browser call-browser--done">
+        <span>{hint}</span>
+        <span className="call-browser__outcome">{entry.resolution === null ? 'Browser' : BROWSER_OUTCOME_LABEL[entry.resolution]}</span>
       </li>
     );
   }
@@ -674,7 +674,7 @@ function BrowserAskCard({
             </label>
           </>
         )}
-        <span className="call-confirm__actions">
+        <span className="call-browser__actions">
           <button type="submit" className="button button--small button--primary">
             Open
           </button>
