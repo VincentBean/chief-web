@@ -16,8 +16,11 @@ the pull request's branch**.
 > [What it means to let it push](#what-it-means-to-let-it-push) before leaving
 > it switched on. It ships **on**.
 
-There is nothing to press. The fixer has no button anywhere: it is a poller, and
-what it did shows up as a badge on the [Pull requests](interface.md) page.
+The fixer is a poller: it runs on its own, and what it did shows up as a badge
+on the [Pull requests](interface.md#pull-requests) page. You do not have to wait
+for it, though. Every eligible pull request row on that page has a **Fix
+conflicts** button that starts the same run for that one pull request on demand
+— see [Fixing one pull request by hand](#fixing-one-pull-request-by-hand).
 
 ## What is scanned
 
@@ -53,6 +56,28 @@ mergeability. GitHub's answer is one of three things:
 Nothing is remembered between ticks. A conflict that appeared while the stack
 was down is simply what the first tick after boot finds, and a restart in the
 middle of a scan loses nothing.
+
+## Fixing one pull request by hand
+
+**Fix conflicts** on a row of the Pull requests page (or the voice call's
+`fix_pr_conflicts` tool — both go through the same entry point) checks that one
+pull request now instead of waiting for the next tick:
+
+- **It works even when Fix merge conflicts automatically is off.** The toggle
+  switches off the scan; a click is you asking, so it is not consulted. Neither
+  is a standing failure — pressing the button is asking for another go.
+- **It applies the same rules as the scan**: the head branch starts with
+  `chief/`, it is not on a fork, and no other run (a feedback run, a review or
+  a fix) is already working on that pull request. The button only shows on rows
+  that pass these, and the server checks them again when you press it.
+- **It asks GitHub for that pull request's mergeability first.** When GitHub
+  says there are no conflicts, or has not computed it yet, nothing is started
+  and the refusal is shown as a message — for the second, try again in a
+  minute.
+- **The resulting run pushes to the branch exactly like a scan-started one**:
+  the same container, the same agent, the same checks and the same three
+  attempts. So [What it means to let it push](#what-it-means-to-let-it-push)
+  applies to it too.
 
 ## The two knobs
 
@@ -222,4 +247,4 @@ This is the part to think about before leaving the toggle on. In the tone of the
 
 If any of that is more than you want to hand over, switch **Fix merge conflicts
 automatically** off. The rest of chief-web is unaffected — the scan simply stops
-happening.
+happening, and a fix only runs when you press **Fix conflicts** yourself.
