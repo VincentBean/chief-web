@@ -71,7 +71,10 @@ RUN chmod 755 /usr/local/bin/chief-web-entrypoint
 # The server's only way to Chromium's DevTools port, which stays on the
 # container's loopback: CDP over the stdio of a `docker exec` (US-005).
 COPY cdp-relay.js /usr/local/lib/chief-web/cdp-relay.js
-RUN chmod 644 /usr/local/lib/chief-web/cdp-relay.js
+# The session voice agent's `chief` MCP server (voice feedback US-007): the
+# "watch with me" card's end inside the container.
+COPY chief-mcp.js /usr/local/lib/chief-web/chief-mcp.js
+RUN chmod 644 /usr/local/lib/chief-web/cdp-relay.js /usr/local/lib/chief-web/chief-mcp.js
 
 # `node` (uid 1000) already exists in the base image; the container never runs
 # as root. Both directories are created here so that the volumes mounted over

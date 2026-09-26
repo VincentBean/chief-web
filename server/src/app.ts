@@ -17,8 +17,9 @@ import {
   createBuildService,
 } from './build/index.js';
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
+import { BrowserService } from './browser/index.js';
 import type { Config } from './config.js';
-import type { Database } from './db/index.js';
+import { type Database, getSession } from './db/index.js';
 import {
   createDeliveryService,
   type DeliveryService,
@@ -489,6 +490,14 @@ export function createApp(
   // dispatching on the stage the session failed at. Built ahead of voice,
   // whose chief can retry a session too (voice US-012).
   const retries = createRetryService(db, builds, delivery);
+  // The session browsers (voice feedback US-005), started by the session
+  // agent's "watch with me" card (US-007) in the session's own container.
+  const sessionContainer = async (sessionId: string): Promise<string> => {
+    const session = getSession(db, sessionId);
+    if (session === null) throw new Error('No such session.');
+    return (await orchestrator.start(session)).id;
+  };
+  const browsers = new BrowserService({ docker, container: sessionContainer });
   const voice = createVoice(config, db, {
     chief: {
       db,
@@ -509,6 +518,7 @@ export function createApp(
     events,
     sessionAgents,
     planning,
+    browser: { docker, container: sessionContainer, browsers, stopAll: () => browsers.stopAll() },
     ...deps.voice,
   });
   api.use(voice.router);

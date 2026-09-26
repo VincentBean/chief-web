@@ -30,7 +30,14 @@ export interface SessionAgentCallControls {
   setFocus(focus: CallFocus): void;
   /** What the operator heard of the current turn, for the next `[interrupted after: …]`. */
   spokenSoFar(): string;
+  /** The agent called {@link OPEN_BROWSER_TOOL}: show the "watch with me" card (voice feedback US-007). */
+  askBrowser?(sessionId: string): void;
+  /** That tool call ended, answered or not. */
+  browserToolDone?(sessionId: string): void;
 }
+
+/** The `chief` MCP server's tool, as the CLI names it on the stream (`runner/chief-mcp.js`). */
+export const OPEN_BROWSER_TOOL = 'mcp__chief__open_browser_with_operator';
 
 export interface SessionVoiceAgentDeps {
   readonly db: Database;
@@ -105,6 +112,8 @@ export class SessionVoiceAgent implements VoiceAgent {
 
       let ended = false;
       const tools = new Map<string, { name: string; summary: string }>();
+      // The open_browser_with_operator call of this turn whose result has not come yet.
+      let browserCall: string | null = null;
       try {
         for (;;) {
           const event = await agent.next(signal);
@@ -116,10 +125,20 @@ export class SessionVoiceAgent implements VoiceAgent {
             break;
           }
           const out = toAgentEvent(event, tools);
+          if (out?.type === 'tool' && out.name === OPEN_BROWSER_TOOL) {
+            if (out.status === 'running' && browserCall === null) {
+              browserCall = out.id;
+              this.deps.call.askBrowser?.(this.deps.sessionId);
+            } else if (out.status !== 'running' && out.id === browserCall) {
+              browserCall = null;
+              this.deps.call.browserToolDone?.(this.deps.sessionId);
+            }
+          }
           if (out !== null) yield out;
         }
       } finally {
         if (signal.aborted && !ended && !agent.exited) await this.interrupt(agent);
+        if (browserCall !== null) this.deps.call.browserToolDone?.(this.deps.sessionId);
       }
       // A process that died mid-turn is restarted once and hears the same utterance again.
       if (ended || signal.aborted || !agent.crashed) return;

@@ -46,6 +46,8 @@ export default tseslint.config(
       sourceType: 'commonjs',
       globals: { ...globals.node },
     },
+    // CommonJS is what these are: the image has no package.json around them.
+    rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
   {
     files: ['**/*.config.{js,ts}', 'eslint.config.js'],

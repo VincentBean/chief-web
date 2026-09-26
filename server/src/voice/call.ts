@@ -12,6 +12,7 @@ import {
 import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
 import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
+import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
@@ -165,6 +166,8 @@ export interface VoiceCallDeps {
   readonly earcons?: CallEarcons;
   /** The providers' own usage numbers (US-023); without them the meter is local only. */
   readonly usage?: CallUsageSources;
+  /** The "watch with me" card (voice feedback US-007); without it the card never shows. */
+  readonly browser?: BrowserAskDeps;
 }
 
 /** Where a call reads what the providers say it spent (US-023). */
@@ -275,6 +278,8 @@ export class VoiceCall {
   readonly state: VoiceCallState;
   /** The one pending server-enforced confirmation (US-011), kept in `state`. */
   readonly confirmations: ConfirmationGate;
+  /** The session agent's "watch with me" cards (voice feedback US-007). */
+  private readonly browserAsks: BrowserAsks | null;
   private transport: CallTransport | null = null;
   private tts: CallTts | null = null;
   private sttMode: SttMode = 'openrouter';
@@ -342,6 +347,22 @@ export class VoiceCall {
       send: (message) => this.send(message),
       newId: () => randomUUID(),
     });
+    this.browserAsks =
+      deps.browser === undefined ? null : new BrowserAsks(deps.browser, { clock: deps.clock, send: (message) => this.send(message) });
+  }
+
+  /**
+   * The session agent called `open_browser_with_operator` (voice feedback
+   * US-007): its browser starts and the panel shows the card.
+   */
+  askBrowser(sessionId: string): void {
+    if (this.ended) return;
+    void this.browserAsks?.ask(sessionId);
+  }
+
+  /** That tool call is over on the agent's side; a card it still had goes away. */
+  browserToolDone(sessionId: string): void {
+    this.browserAsks?.toolDone(sessionId);
   }
 
   get id(): string {
@@ -587,6 +608,14 @@ export class VoiceCall {
       case 'confirm.resolve':
         this.submitResolution(message.id, message.accept);
         return;
+      case 'browser.answer':
+        this.touch();
+        void this.browserAsks?.answer(message);
+        return;
+      case 'browser.cancel':
+        this.touch();
+        void this.browserAsks?.cancel(message.id);
+        return;
       case 'metrics': {
         // Only the first report counts; a turn the call no longer tracks is ignored.
         if (this.turnTimes.get(message.turn)?.firstAudioPlayed !== null) return;
@@ -622,6 +651,8 @@ export class VoiceCall {
     this.clearAck();
     // A hang-up or takeover takes the pending confirmation with it.
     this.confirmations.cancel();
+    // An open "watch with me" card is answered `cancelled`, so the tool stops waiting.
+    const browserAsks = this.browserAsks?.cancelAll();
     this.state.activeTurn?.abort(new Error('call ended'));
     this.dropSpeculation();
     this.state.phase = 'ended';
@@ -635,6 +666,7 @@ export class VoiceCall {
     this.deps.onEnded?.(this);
     if (this.persisted) this.settling = this.settle();
     await this.running.catch(() => undefined);
+    await browserAsks;
     await this.tts?.close();
   }
 

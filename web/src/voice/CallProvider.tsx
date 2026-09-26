@@ -16,10 +16,13 @@ import { useToast } from '../toast.tsx';
 import { CallAudio, type SttOptions, type TalkMode } from './call-audio.ts';
 import {
   type AgentKind,
+  type BrowserAskOutcome,
+  type BrowserCredentials,
   type CallFocus,
   type CallPhase,
   type ClientMessage,
   type ConfirmationOutcome,
+  type SavedLoginView,
   type ServerMessage,
   type SttMode,
   type ToolStatus,
@@ -85,6 +88,17 @@ export type TranscriptEntry =
       readonly expiresAt: string;
       readonly resolution: ConfirmationOutcome | null;
     }
+  /** The "watch with me" card (voice feedback US-007): the session agent wants to open a page. */
+  | {
+      readonly kind: 'browser';
+      readonly key: string;
+      readonly id: string;
+      readonly sessionId: string;
+      readonly hint: string;
+      readonly savedLogins: readonly SavedLoginView[];
+      readonly expiresAt: string;
+      readonly resolution: BrowserAskOutcome | null;
+    }
   | { readonly kind: 'notice'; readonly key: string; readonly text: string }
   /** A background event or focus change, as the call history stores them (US-024). */
   | { readonly kind: 'event'; readonly key: string; readonly text: string };
@@ -148,7 +162,19 @@ export interface CallActions {
   setMode(mode: TalkMode): void;
   /** Answers a confirmation pill; the server runs or drops exactly that one. */
   resolve(id: string, confirm: boolean): void;
+  /** The "watch with me" card's **Open**: the URL and login go to the server, never back. */
+  answerBrowser(answer: BrowserAnswer): void;
+  /** The card's **Cancel**. */
+  cancelBrowser(id: string): void;
   setDebug(debug: boolean): void;
+}
+
+/** What **Open** on the "watch with me" card sends. */
+export interface BrowserAnswer {
+  readonly id: string;
+  readonly url: string;
+  readonly credentials?: BrowserCredentials;
+  readonly save?: boolean;
 }
 
 export type CallContext = CallState & CallActions;
@@ -285,6 +311,24 @@ function applyToTranscript(entries: readonly TranscriptEntry[], message: ServerM
         entry.kind === 'confirm' && entry.id === message.id
           ? { ...entry, resolution: message.outcome }
           : entry,
+      );
+    case 'browser.ask':
+      return [
+        ...entries,
+        {
+          kind: 'browser',
+          key: `b${message.id}`,
+          id: message.id,
+          sessionId: message.sessionId,
+          hint: message.hint,
+          savedLogins: message.savedLogins,
+          expiresAt: message.expiresAt,
+          resolution: null,
+        },
+      ];
+    case 'browser.resolved':
+      return entries.map((entry) =>
+        entry.kind === 'browser' && entry.id === message.id ? { ...entry, resolution: message.outcome } : entry,
       );
     case 'error':
       return [...entries, { kind: 'notice', key: `e${String(entries.length)}`, text: message.message }];
@@ -655,6 +699,28 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     [send],
   );
 
+  const settleBrowser = useCallback((id: string, outcome: BrowserAskOutcome): void => {
+    setTranscript((entries) =>
+      entries.map((entry) => (entry.kind === 'browser' && entry.id === id ? { ...entry, resolution: outcome } : entry)),
+    );
+  }, []);
+
+  const answerBrowser = useCallback(
+    (answer: BrowserAnswer): void => {
+      send({ type: 'browser.answer', ...answer });
+      settleBrowser(answer.id, 'opened');
+    },
+    [send, settleBrowser],
+  );
+
+  const cancelBrowser = useCallback(
+    (id: string): void => {
+      send({ type: 'browser.cancel', id });
+      settleBrowser(id, 'cancelled');
+    },
+    [send, settleBrowser],
+  );
+
   const open = useCallback((): void => {
     setPanelOpen(true);
     if (socket.current === null && audio.current === null) start();
@@ -711,6 +777,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      answerBrowser,
+      cancelBrowser,
       setDebug,
     }),
     [
@@ -741,6 +809,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      answerBrowser,
+      cancelBrowser,
       setDebug,
     ],
   );

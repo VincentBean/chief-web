@@ -352,6 +352,35 @@
     gap: 0.25rem;
   }
 
+  /* The "watch with me" card (voice feedback US-007): the confirmation pill's colours, room for a form. */
+  .call-browser {
+    background: --alpha(var(--color-status-wait) / 10%);
+    border: 1px solid --alpha(var(--color-status-wait) / 35%);
+    border-radius: 0.75rem;
+    font-size: var(--text-sm);
+    padding: 0.625rem 0.75rem;
+  }
+
+  .call-browser__form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .call-browser__form .field {
+    margin: 0;
+  }
+
+  .call-browser__hint {
+    align-items: center;
+    display: flex;
+    gap: 0.375rem;
+  }
+
+  .call-browser__form .call-confirm__actions {
+    justify-content: flex-end;
+  }
+
   .call-confirm__done {
     color: var(--color-fg-muted);
     font-size: var(--text-xs);
