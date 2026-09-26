@@ -14,6 +14,12 @@ CPU is the busy fraction since the previous poll, so it reads `…` for the firs
 few seconds after a server restart. Below a laptop-width viewport the sidebar becomes a
 drawer behind the menu button.
 
+The **Sentry** item carries a red count of the issues waiting on your decision —
+those with a proposed fix plan, local status `planned`, listed under **Needs your
+decision** on the [Sentry tab](sentry.md#the-sentry-tab). It is chief-web's own
+count, not the number of unresolved issues in Sentry, and it is hidden when it is
+zero or when no Sentry token is configured.
+
 Navigation is client-side, so moving between pages does not reload the app.
 Keyboard shortcuts: press `g` then a letter to jump — `o` overview, `s`
 sessions, `p` pull requests, `r` repositories, `t` terminals, `,` settings, `n`
@@ -47,6 +53,9 @@ lately:
 The numbers come from `GET /api/stats`, an aggregate over the database plus the
 host's own CPU and memory counters (no Docker or GitHub calls), polled every
 five seconds while the tab is visible.
+The answer also carries a `sentry` block — `configured` (whether a Sentry token
+is saved) and `awaitingDecision` (how many issues have local status `planned`) —
+which is what the sidebar's Sentry badge reads.
 `?days=` widens or narrows the activity window (1–90, default 14).
 
 ## Sessions

@@ -365,7 +365,10 @@ and it is also the reason the warning at the top of this page matters:
 ## The Sentry tab
 
 **Sentry** in the sidebar (`g y`) lists every issue chief-web has ever tracked,
-in five panels — one per status, except that `pending` and `working` share one:
+in five panels — one per status, except that `pending` and `working` share one.
+The sidebar item carries the count of the **Needs your decision** panel — issues
+with local status `planned`, not Sentry's unresolved count — refreshed by the
+shell's stats poll and hidden at zero:
 
 | Panel | Rows |
 | --- | --- |

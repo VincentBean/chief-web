@@ -280,6 +280,18 @@ export function listSentryIssuesByStatus(db: Database, status: SentryIssueStatus
     .map(mapSentryIssue);
 }
 
+/**
+ * How many issues carry a fix plan the operator has not yet approved or
+ * rejected: the one status nothing moves on without a person. Counted in SQL
+ * because the stats poll asks for it every few seconds.
+ */
+export function countSentryIssuesAwaitingDecision(db: Database): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM sentry_issues WHERE status = 'planned'")
+    .get() as Row;
+  return integer(row, 'n');
+}
+
 export function updateSentryIssue(
   db: Database,
   id: string,

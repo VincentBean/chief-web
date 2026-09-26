@@ -17,7 +17,7 @@ import {
   unapproveSentryPlan,
 } from '../api.ts';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import { describeError, redirectIfUnauthorised } from '../data.tsx';
+import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { since } from '../schedule.ts';
@@ -40,6 +40,11 @@ import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.ts
  * tick, so a three-second poll would ask fifty times for the same answer; the
  * page loads once, refreshes on demand, revalidates when the tab comes back
  * into view, and patches in the one row the server just answered with.
+ *
+ * The sidebar's Sentry badge counts the plans waiting on a decision, and it is
+ * read from the shared stats rather than from this list. So every decision and
+ * every manual refresh here also re-reads the stats, or the badge would claim
+ * work is waiting until its next poll.
  */
 
 const REVALIDATE_AFTER_MS = 120_000;
@@ -96,13 +101,17 @@ function byLastSeen(a: SentryIssue, b: SentryIssue): number {
 
 export function Sentry() {
   const toast = useToast();
+  const { refresh: refreshStats } = useAppData();
   const [list, setList] = useState<SentryIssueList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const loadedAt = useRef(0);
 
   const load = useCallback((options: { refresh?: boolean } = {}): void => {
-    if (options.refresh === true) setRefreshing(true);
+    if (options.refresh === true) {
+      setRefreshing(true);
+      void refreshStats();
+    }
     fetchSentryIssues()
       .then((value) => {
         setList(value);
@@ -114,7 +123,7 @@ export function Sentry() {
         setLoadError(describeError(error));
       })
       .finally(() => setRefreshing(false));
-  }, []);
+  }, [refreshStats]);
 
   useEffect(() => {
     load();
@@ -149,6 +158,7 @@ export function Sentry() {
   const changed = (issue: SentryIssue, message: string): void => {
     replace(issue);
     toast.ok(message);
+    void refreshStats();
   };
 
   return (

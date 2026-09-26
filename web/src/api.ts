@@ -1083,6 +1083,12 @@ export interface Stats {
   host: { cpu: number | null; cores: number; memory: { used: number; total: number } };
   /** Voice calls this calendar month (UTC); ElevenLabs credits include Scribe once its rate was measured. */
   voice: { enabled: boolean; calls: number; minutes: number; elCredits: number; orCostUsd: number };
+  /**
+   * What the sidebar's Sentry badge reads. `configured` is whether a Sentry token
+   * is saved; `awaitingDecision` counts issues with local status `planned`: a fix
+   * plan waiting on the operator.
+   */
+  sentry: { configured: boolean; awaitingDecision: number };
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];
