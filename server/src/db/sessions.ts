@@ -155,6 +155,19 @@ export interface Session {
    */
   readonly codeReview: boolean;
   /**
+   * Whether delivery opens a pull request for this session (pull-request
+   * US-002), or only pushes the feature branch. Stored as 0/1; true for every
+   * session created before the feature existed.
+   */
+  readonly openPullRequest: boolean;
+  /**
+   * Whether the last delivery ended by pushing the feature branch without
+   * opening a pull request, because {@link openPullRequest} was off. Stored as
+   * 0/1. It is what tells that ending apart from a recurring-task run that
+   * committed nothing: both finish with no pull request.
+   */
+  readonly pushedOnly: boolean;
+  /**
    * The recurring task this session is a run of (US-001), and null for every
    * session a human started. Nulled if that task is deleted; the run itself is
    * an ordinary session and outlives it.
@@ -191,6 +204,8 @@ export interface CreateSessionInput {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false: a session asks for a review only when it says so. */
   readonly codeReview?: boolean;
+  /** Defaults to true: delivery opened a pull request before this was a choice. */
+  readonly openPullRequest?: boolean;
   /** Set only by the scheduler when firing a recurring task (US-001). */
   readonly recurringTaskId?: string | null;
   /** The feedback the session was started from; defaults to null. */
@@ -210,6 +225,8 @@ export interface UpdateSessionInput {
   readonly failureStage?: FailureStage | null;
   readonly waitingUntil?: string | null;
   readonly codeReview?: boolean;
+  readonly openPullRequest?: boolean;
+  readonly pushedOnly?: boolean;
   readonly recurringTaskId?: string | null;
   readonly prDescription?: string | null;
   readonly feedback?: string | null;
@@ -233,6 +250,8 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   failureStage: 'failure_stage',
   waitingUntil: 'waiting_until',
   codeReview: 'code_review',
+  openPullRequest: 'open_pull_request',
+  pushedOnly: 'pushed_only',
   recurringTaskId: 'recurring_task_id',
   prDescription: 'pr_description',
   feedback: 'feedback',
@@ -284,6 +303,8 @@ export function mapSession(row: Row): Session {
     failureStage: failureStageOf(row),
     waitingUntil: nullableText(row, 'waiting_until'),
     codeReview: integer(row, 'code_review') === 1,
+    openPullRequest: integer(row, 'open_pull_request') !== 0,
+    pushedOnly: integer(row, 'pushed_only') === 1,
     recurringTaskId: nullableText(row, 'recurring_task_id'),
     prDescription: nullableText(row, 'pr_description'),
     feedback: nullableText(row, 'feedback'),
@@ -311,6 +332,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     failureStage: null,
     waitingUntil: null,
     codeReview: input.codeReview ?? false,
+    openPullRequest: input.openPullRequest ?? true,
+    pushedOnly: false,
     recurringTaskId: input.recurringTaskId ?? null,
     prDescription: null,
     feedback: input.feedback ?? null,
@@ -322,8 +345,9 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
-        waiting_until, code_review, recurring_task_id, feedback, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, code_review, open_pull_request, recurring_task_id, feedback,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -339,6 +363,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.failureStage,
     session.waitingUntil,
     sqlBoolean(session.codeReview),
+    sqlBoolean(session.openPullRequest),
     session.recurringTaskId,
     session.feedback,
     session.createdAt,

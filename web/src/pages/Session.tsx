@@ -23,6 +23,7 @@ import {
   retrySessionSetup,
   type Session as SessionData,
   setSessionCodeReview,
+  setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
   startPlanning,
@@ -73,6 +74,7 @@ type Busy =
   | 'setup'
   | 'schedule'
   | 'code-review'
+  | 'open-pull-request'
   | 'delete'
   | null;
 
@@ -230,6 +232,15 @@ export function Session() {
         : 'Code review off: the pull request is opened without one.';
     });
 
+  const onOpenPullRequest = (openPullRequest: boolean): void =>
+    run('open-pull-request', async () => {
+      const next = await setSessionOpenPullRequest(id, openPullRequest);
+      setSession(next);
+      return next.openPullRequest
+        ? 'Pull request on: a pull request is opened after the branch is pushed.'
+        : 'Pull request off: the branch is pushed without a pull request.';
+    });
+
   const onBackToPlanning = (): void =>
     run('planning', async () => {
       const result = await backToPlanning(id);
@@ -316,6 +327,9 @@ export function Session() {
   // A scheduled run that committed nothing: it finished on purpose without a
   // pull request, so there is nothing to retry and nothing missing.
   const cleanRun = isCleanRun(session);
+  // Pull request turned off: the branch was pushed and that is the delivery.
+  // There is deliberately no way to open a pull request afterwards.
+  const pushedOnly = status === 'finished' && session.prUrl === null && session.pushedOnly;
 
   // The one primary action per state, and the secondary ones beside it.
   const actions = (
@@ -363,7 +377,7 @@ export function Session() {
       {status === 'failed' && !build.queued && (
         <button type="button" className="button button--primary" onClick={onRetry} disabled={busy !== null}>
           <Icon name="sync" />
-          {busy === 'retry' ? 'Retrying…' : retryIsDelivery ? 'Retry push & PR' : 'Retry build'}
+          {busy === 'retry' ? 'Retrying…' : retryIsDelivery ? (session.openPullRequest ? 'Retry push & PR' : 'Retry push') : 'Retry build'}
         </button>
       )}
       {isEnded(session) && session.prUrl !== null && (
@@ -373,7 +387,7 @@ export function Session() {
           <Icon name="link-external" />
         </a>
       )}
-      {status === 'finished' && session.prUrl === null && complete && !cleanRun && (
+      {status === 'finished' && session.prUrl === null && complete && !cleanRun && session.openPullRequest && (
         <button type="button" className="button button--primary" onClick={onRetryDelivery} disabled={busy !== null}>
           <Icon name="sync" />
           {busy === 'delivery' ? 'Retrying…' : 'Retry push & PR'}
@@ -429,6 +443,12 @@ export function Session() {
           <strong>Nothing to deliver.</strong> This scheduled run committed nothing on{' '}
           <span className="mono">{session.featureBranch}</span>, so the branch was not pushed and no pull request was
           opened. The run counts as clean.
+        </Notice>
+      )}
+      {pushedOnly && (
+        <Notice kind="ok">
+          <strong>Branch pushed.</strong> Pull request is off for this session, so{' '}
+          <span className="mono">{session.featureBranch}</span> was pushed and no pull request was opened.
         </Notice>
       )}
       {session.scheduleMissed && (
@@ -537,8 +557,10 @@ export function Session() {
                       },
                     ]
                   : []),
+                { label: 'Pull request', value: session.openPullRequest ? 'on' : 'off' },
+                ...(pushedOnly ? [{ label: 'Pushed branch', value: session.featureBranch, mono: true }] : []),
                 ...(session.prUrl !== null
-                  ? [{ label: 'Pull request', value: <a className="link" href={session.prUrl} target="_blank" rel="noreferrer">{session.prUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '')}</a> }]
+                  ? [{ label: 'Pull request link', value: <a className="link" href={session.prUrl} target="_blank" rel="noreferrer">{session.prUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '')}</a> }]
                   : []),
                 { label: 'Created', value: localTime(session.createdAt) },
                 { label: 'Updated', value: localTime(session.updatedAt) },
@@ -549,6 +571,8 @@ export function Session() {
           <PrdPanel prd={planning.prd} />
 
           <SchedulePanel session={session} busy={busy} onSave={onSchedule} />
+
+          <OpenPullRequestPanel session={session} busy={busy} onToggle={onOpenPullRequest} />
 
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
         </aside>
@@ -686,7 +710,9 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
               : status === 'finished'
                 ? isCleanRun(session)
                   ? 'nothing to deliver'
-                  : 'no pull request'
+                  : session.pushedOnly
+                    ? 'branch pushed, pull request off'
+                    : 'no pull request'
                 : '',
   };
   const labels: Record<StageKey, string> = { plan: 'Plan', ready: 'Ready', build: 'Build', deliver: 'Pull request' };
@@ -1236,6 +1262,63 @@ function DraftPanel({ status, prUrl }: { readonly status: 'reviewing' | 'fixing'
           </a>
         </p>
       )}
+    </Panel>
+  );
+}
+
+/* ---------------------------------------------------------- pull request */
+
+/**
+ * Why the pull-request flag is frozen, per status — the mirror of the
+ * server's guard (US-008). A session with a pull request URL is frozen too.
+ */
+const OPEN_PULL_REQUEST_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  reviewing: 'the pull request is open and the review is running.',
+  fixing: 'the pull request is open and its review feedback is being fixed.',
+  finished: 'this session has finished, so its delivery is over.',
+  'pr-open': 'the pull request is already open.',
+  merged: 'the pull request has already been merged.',
+};
+
+/**
+ * Whether delivery opens a pull request after pushing the branch (US-008).
+ * Changeable until the pull request exists, so a failed pull request can be
+ * given up on and the session retried as a push only.
+ */
+function OpenPullRequestPanel({
+  session,
+  busy,
+  onToggle,
+}: {
+  readonly session: SessionData;
+  readonly busy: Busy;
+  readonly onToggle: (openPullRequest: boolean) => void;
+}) {
+  const locked =
+    OPEN_PULL_REQUEST_LOCKED[session.status] ??
+    (session.prUrl === null ? undefined : 'the pull request has already been opened.');
+  return (
+    <Panel
+      title="Pull request"
+      icon="git-pull-request"
+      meta={
+        <Badge tone={session.openPullRequest ? 'ready' : 'neutral'}>{session.openPullRequest ? 'on' : 'off'}</Badge>
+      }
+    >
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={session.openPullRequest}
+          disabled={locked !== undefined || busy !== null}
+          onChange={(event) => onToggle(event.target.checked)}
+        />
+        Open pull request
+      </label>
+      <p className="field__hint">
+        {locked !== undefined
+          ? `The pull request can no longer be turned ${session.openPullRequest ? 'off' : 'on'}: ${locked}`
+          : 'When this is off, the feature branch is still pushed but no pull request is opened.'}
+      </p>
     </Panel>
   );
 }

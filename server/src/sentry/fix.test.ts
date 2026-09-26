@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { BuildError } from '../build/index.js';
+import { loadConfig } from '../config.js';
 import {
   closeDatabase,
   createRepository,
@@ -28,7 +29,9 @@ import {
   updateSentryIssue,
   updateSession,
 } from '../db/index.js';
-import { sessionRepoDir } from '../orchestrator/index.js';
+import { FakeDockerDaemon } from '../docker/fake-daemon.js';
+import { DockerApi } from '../docker/index.js';
+import { SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
 import { prdPathFor, readPrdDocument } from '../prd/index.js';
 import type {
   CreateSessionRequest,
@@ -36,7 +39,8 @@ import type {
   SessionSetupView,
   SessionView,
 } from '../sessions/index.js';
-import { sessionPrdFile, storyInputOf } from '../sessions/index.js';
+import { SessionService, sessionPrdFile, storyInputOf } from '../sessions/index.js';
+import { writePrivateKey } from '../ssh/index.js';
 
 import { SentryApiError, type SentryIssueDetails, type SentryIssueSummary } from './client.js';
 import type { SentryDetailsGateway } from './classify.js';
@@ -812,5 +816,99 @@ describe('the Sentry fix session builder', () => {
       assert.equal(row.attempts, 0);
       assert.equal(w.sessions.created.length, 0);
     });
+  });
+});
+
+describe('the pull-request flag of a fix session', () => {
+  it('follows the repository default, through the real session service', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-sentry-fix-pr-'));
+    workspaces.push(dataDir);
+    const daemon = await FakeDockerDaemon.start();
+    try {
+      const config = loadConfig({ DATA_DIR: dataDir, DOCKER_SOCKET: daemon.socketPath });
+      fs.mkdirSync(config.workspacesDir, { recursive: true });
+      fs.mkdirSync(config.sshKeysDir, { recursive: true });
+
+      const db = openDatabase(IN_MEMORY);
+      databases.push(db);
+      setSetting(db, 'sentry_token', 'sntrys_token');
+      const repository = createRepository(db, {
+        name: 'demo',
+        sshUrl: 'git@github.com:acme/demo.git',
+        githubSlug: 'acme/demo',
+        defaultBaseBranch: 'main',
+        sentryOrg: 'acme',
+        sentryProject: 'web',
+        openPullRequestDefault: false,
+      });
+      writePrivateKey(
+        config,
+        repository.id,
+        '-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----',
+      );
+      // Every git command succeeds, and the clone leaves a working copy behind.
+      daemon.onExec = (exec) => {
+        const script = exec.cmd[2] ?? '';
+        if (script.includes('ls-remote')) return { exitCode: 2 };
+        if (script.includes('git clone')) {
+          for (const session of listSessions(db, {})) {
+            fs.mkdirSync(path.join(sessionRepoDir(config, session.id), '.git'), {
+              recursive: true,
+            });
+          }
+        }
+        return {};
+      };
+
+      const docker = new DockerApi(daemon.socketPath);
+      const sessions = new SessionService(
+        config,
+        db,
+        new SessionOrchestrator(config, db, docker),
+        docker,
+      );
+      const created: CreateSessionRequest[] = [];
+      const recording: FixSessionService = {
+        create: (request) => {
+          created.push(request);
+          return sessions.create(request);
+        },
+        markReady: (id) => sessions.markReady(id),
+        delete: (id) => sessions.delete(id),
+      };
+      const sentry = new FakeSentry();
+      const fixer = new SentryFixService(config, db, recording, new FakeBuilds(db), () => sentry);
+
+      const row = createSentryIssue(db, {
+        repositoryId: repository.id,
+        sentryIssueId: '4507',
+        shortId: 'PROJ-123',
+        title: 'TypeError: cannot read property x of undefined',
+        culprit: 'app/handlers.ts in handle',
+        permalink: 'https://sentry.io/organizations/acme/issues/4507/',
+        level: 'error',
+        eventCount: 12,
+        firstSeen: '2026-08-01T10:00:00.000Z',
+        lastSeen: '2026-09-04T22:15:00.000Z',
+      });
+      updateSentryIssue(db, row.id, {
+        status: 'approved',
+        explanation: 'The handler never checks x.',
+        plan: 'Guard the read in app/handlers.ts.',
+      });
+
+      const result = await fixer.createFixSession([row.id]);
+      assert.ok(result.ok, JSON.stringify(result));
+
+      // The fixer leaves the choice to the repository rather than forcing one.
+      assert.equal(created.length, 1);
+      assert.equal('openPullRequest' in (created[0] ?? {}), false);
+      const [session] = listSessions(db, {});
+      assert.ok(session);
+      assert.equal(session.openPullRequest, false);
+      assert.equal(session.status, 'building');
+    } finally {
+      await daemon.close();
+    }
   });
 });

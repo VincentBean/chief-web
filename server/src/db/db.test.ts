@@ -62,6 +62,15 @@ const FEEDBACK_STAGE_MIGRATION = '0011_session_feedback_failure_stage';
 /** The migration under test in 'adds `review_context`'. */
 const REVIEW_CONTEXT_MIGRATION = '0014_review_context';
 
+/** The migration under test in 'adds `open_pull_request_default` as true'. */
+const OPEN_PULL_REQUEST_DEFAULT_MIGRATION = '0020_repository_open_pull_request_default';
+
+/** The migration under test in 'adds `open_pull_request` to existing sessions'. */
+const SESSION_OPEN_PULL_REQUEST_MIGRATION = '0021_session_open_pull_request';
+
+/** The migration under test in 'keeps every task, occurrence and run link'. */
+const RECURRING_OUTCOME_PUSHED_MIGRATION = '0023_recurring_task_outcome_pushed';
+
 /** The migration under test in 'adds `feedback` to existing sessions'. */
 const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 
@@ -226,7 +235,11 @@ describe('migrations', () => {
           code_review, created_at, updated_at)
        VALUES (?, ?, 'legacy', 'pending', 'main', 'chief/legacy', 'main', 1, ?, ?)`,
     ).run(session.id, repository.id, at, at);
-    failSession(db, session.id, 'push', 'Permission denied (publickey).');
+    // Failed by hand for the same reason: `failSession` reads the row back
+    // through today's `mapSession`, which wants columns added after this.
+    db.prepare(
+      `UPDATE sessions SET status = 'failed', failure_stage = 'push', last_error = ? WHERE id = ?`,
+    ).run('Permission denied (publickey).', session.id);
     syncStories(db, session.id, [
       { storyId: 'US-001', title: 'First', priority: 1, status: 'done' },
     ]);
@@ -483,6 +496,61 @@ describe('migrations', () => {
   });
 });
 
+describe('open pull request default migration', () => {
+  it('adds `open_pull_request_default` to existing repositories as true', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex(
+      (migration) => migration.id === OPEN_PULL_REQUEST_DEFAULT_MIGRATION,
+    );
+    assert.ok(index > 0, `${OPEN_PULL_REQUEST_DEFAULT_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+
+    assert.ok(runMigrations(db).includes(OPEN_PULL_REQUEST_DEFAULT_MIGRATION));
+    assert.equal(getRepository(db, repository.id)?.openPullRequestDefault, true);
+
+    closeDatabase(db);
+  });
+
+  it('round-trips the flag through create and a partial update', () => {
+    const db = freshDb();
+
+    assert.equal(seedRepository(db).openPullRequestDefault, true);
+
+    const off = createRepository(db, {
+      name: 'no-pr',
+      sshUrl: 'git@github.com:owner/no-pr.git',
+      githubSlug: 'owner/no-pr',
+      openPullRequestDefault: false,
+    });
+    assert.equal(off.openPullRequestDefault, false);
+    assert.equal(getRepository(db, off.id)?.openPullRequestDefault, false);
+
+    // An update that does not mention the flag keeps it.
+    assert.equal(updateRepository(db, off.id, { name: 'renamed' })?.openPullRequestDefault, false);
+    assert.equal(
+      updateRepository(db, off.id, { openPullRequestDefault: true })?.openPullRequestDefault,
+      true,
+    );
+    assert.equal(
+      updateRepository(db, off.id, { openPullRequestDefault: false })?.openPullRequestDefault,
+      false,
+    );
+
+    closeDatabase(db);
+  });
+});
+
 describe('session feedback migration', () => {
   it('adds `feedback` to existing sessions as NULL', () => {
     // A plain ADD COLUMN, so what the walk proves is that a session written
@@ -523,6 +591,119 @@ describe('session feedback migration', () => {
     assert.equal(updateSession(db, id, { feedback })?.feedback, feedback);
     assert.equal(updateSession(db, id, { status: 'pending' })?.feedback, feedback);
     assert.equal(updateSession(db, id, { feedback: null })?.feedback, null);
+
+    closeDatabase(db);
+  });
+});
+
+describe('session open pull request migration', () => {
+  it('adds `open_pull_request` to existing sessions as true', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex(
+      (migration) => migration.id === SESSION_OPEN_PULL_REQUEST_MIGRATION,
+    );
+    assert.ok(index > 0, `${SESSION_OPEN_PULL_REQUEST_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-26T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'ready', 'develop', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(SESSION_OPEN_PULL_REQUEST_MIGRATION));
+    assert.equal(getSession(db, id)?.openPullRequest, true);
+
+    // A partial update leaves it be; an explicit one changes it.
+    assert.equal(updateSession(db, id, { status: 'pending' })?.openPullRequest, true);
+    assert.equal(updateSession(db, id, { openPullRequest: false })?.openPullRequest, false);
+    assert.equal(getSession(db, id)?.openPullRequest, false);
+
+    closeDatabase(db);
+  });
+
+  it('stores the flag a new session is created with, true when unsaid', () => {
+    const db = freshDb();
+    const repository = seedRepository(db);
+    const base = { repositoryId: repository.id, baseBranch: 'develop', prTargetBranch: 'main' } as const;
+
+    assert.equal(createSession(db, { ...base, name: 'unsaid' }).openPullRequest, true);
+    const off = createSession(db, { ...base, name: 'no-pr', openPullRequest: false });
+    assert.equal(off.openPullRequest, false);
+    assert.equal(getSession(db, off.id)?.openPullRequest, false);
+
+    closeDatabase(db);
+  });
+});
+
+describe('recurring task `pushed` outcome migration', () => {
+  it('keeps every task, occurrence and run link, and accepts `pushed`', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === RECURRING_OUTCOME_PUSHED_MIGRATION);
+    assert.ok(index > 0, `${RECURRING_OUTCOME_PUSHED_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-26T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-26T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO recurring_tasks
+         (id, repository_id, name, prompt, cron_expression, base_branch, pr_target,
+          last_outcome, created_at, updated_at)
+       VALUES ('task-1', ?, 'rector', 'Run rector.', '0 3 * * *', 'develop', 'develop', 'clean', ?, ?)`,
+    ).run(repository.id, at, at);
+    const sessionId = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          recurring_task_id, created_at, updated_at)
+       VALUES (?, ?, 'rector-1', 'finished', 'develop', 'chief/rector-1', 'develop', 'task-1', ?, ?)`,
+    ).run(sessionId, repository.id, at, at);
+    db.prepare(
+      `INSERT INTO recurring_task_occurrences
+         (recurring_task_id, occurred_at, outcome, detail, session_id, created_at, updated_at)
+       VALUES ('task-1', ?, 'clean', 'nothing', ?, ?, ?)`,
+    ).run(at, sessionId, at, at);
+
+    assert.ok(runMigrations(db).includes(RECURRING_OUTCOME_PUSHED_MIGRATION));
+
+    // Dropping the old tables neither nulled the run's link nor took the history.
+    assert.equal(getSession(db, sessionId)?.recurringTaskId, 'task-1');
+    assert.equal(getSession(db, sessionId)?.pushedOnly, false);
+    const occurrences = db
+      .prepare('SELECT outcome, session_id FROM recurring_task_occurrences WHERE recurring_task_id = ?')
+      .all('task-1')
+      .map((row) => ({ ...row }));
+    assert.deepEqual(occurrences, [{ outcome: 'clean', session_id: sessionId }]);
+
+    db.prepare(`UPDATE recurring_tasks SET last_outcome = 'pushed' WHERE id = 'task-1'`).run();
+    db.prepare(`UPDATE recurring_task_occurrences SET outcome = 'pushed'`).run();
+    assert.throws(() => db.prepare(`UPDATE recurring_task_occurrences SET outcome = 'nope'`).run());
+    const leftovers = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_backup'")
+      .all();
+    assert.deepEqual(leftovers, []);
 
     closeDatabase(db);
   });
