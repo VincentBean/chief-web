@@ -138,6 +138,12 @@ export type DeliveryCode =
    * no pull request to link to and nothing for anyone to look at.
    */
   | 'clean'
+  /**
+   * The session has pull request turned off, so it pushed its branch and
+   * finished there: no pull request, no review. A success, like `clean`, with
+   * nothing to link to.
+   */
+  | 'pushed'
   | 'container_unavailable'
   | 'push_failed'
   | 'github_token_missing'
@@ -155,7 +161,7 @@ export type DeliveryCode =
  * review — and a `review` failure is the one that re-runs *only* the review.
  */
 /** The codes that really are a failure: not `ok`, `clean` or the hold. */
-type DeliveryFailureCode = Exclude<DeliveryCode, 'ok' | 'clean' | 'usage_limit_hold'>;
+type DeliveryFailureCode = Exclude<DeliveryCode, 'ok' | 'clean' | 'pushed' | 'usage_limit_hold'>;
 
 const FAILURE_STAGE_OF: Record<DeliveryFailureCode, FailureStage> = {
   container_unavailable: 'push',
@@ -330,6 +336,10 @@ export class DeliveryService implements BuildCompletion {
     if (!push.ok) {
       return this.failed(session, 'push_failed', { message: push.message, stderr: push.stderr });
     }
+
+    // Pull request turned off for this session: the pushed branch is the
+    // delivery, so nothing on GitHub is asked for beyond the push itself.
+    if (!session.openPullRequest) return this.pushedOnly(session);
 
     const token = getGithubToken(this.db);
     if (token === null) {
@@ -521,6 +531,34 @@ export class DeliveryService implements BuildCompletion {
       adopted: false,
       code: 'clean',
       message,
+      stderr: '',
+    };
+  }
+
+  /** Finishes a session with pull request turned off once its branch is pushed. */
+  private pushedOnly(session: Session): DeliveryResult {
+    logger.info('feature branch pushed; pull request is turned off for this session', {
+      session: session.id,
+      name: session.name,
+      branch: session.featureBranch,
+    });
+
+    const updated = updateSession(this.db, session.id, {
+      status: 'finished',
+      lastError: null,
+      failureStage: null,
+    });
+
+    return {
+      ok: true,
+      sessionId: session.id,
+      status: updated?.status ?? 'finished',
+      prUrl: null,
+      adopted: false,
+      code: 'pushed',
+      message:
+        `Pushed "${session.featureBranch}". Pull request is turned off for this session, so no ` +
+        'pull request was opened.',
       stderr: '',
     };
   }

@@ -2381,3 +2381,130 @@ describe('the functional description of a delivery (US-003)', () => {
     assert.equal(world.reload().prDescription, null);
   });
 });
+
+describe('delivering a session with pull request turned off', () => {
+  /** The session as the build loop hands it over, with the flag off. */
+  function pushOnlySession(world: World, fields: { codeReview?: boolean } = {}): Session {
+    return (
+      updateSession(world.db, world.session.id, { openPullRequest: false, ...fields }) ??
+      (undefined as never)
+    );
+  }
+
+  it('pushes, finishes the session, and asks GitHub for nothing', async () => {
+    const world = new World();
+    const opener = new FakeOpener();
+    const reviewer = new FakeReviewer();
+    const publisher = new FakePublisher();
+    const delivery = createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+      new ReviewStep(reviewer, publisher),
+    );
+
+    await delivery.complete(pushOnlySession(world, { codeReview: true }), world.stories());
+
+    assert.deepEqual(
+      world.execs.map((spec) => spec.cmd),
+      [['/bin/sh', '-c', PUSH_SCRIPT]],
+      'the push is the only thing that ran',
+    );
+    assert.equal(opener.calls.length, 0, 'no pull request is opened');
+    assert.equal(opener.lookups.length, 0);
+    assert.equal(opener.ready.length, 0);
+    assert.equal(reviewer.calls, 0, 'no review is run without a pull request');
+    assert.equal(publisher.calls.length, 0);
+
+    const finished = world.reload();
+    assert.equal(finished.status, 'finished');
+    assert.equal(finished.prUrl, null);
+    assert.equal(finished.lastError, null);
+    assert.equal(finished.failureStage, null);
+  });
+
+  it('does not need a GitHub token or a valid slug', async () => {
+    const world = new World({ slug: 'not a slug' });
+    world.db.prepare("DELETE FROM settings WHERE key = 'github_token'").run();
+    const opener = new FakeOpener();
+    updateSession(world.db, pushOnlySession(world).id, {
+      status: 'failed',
+      lastError: 'push failed',
+      failureStage: 'push',
+    });
+
+    const result = await createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      opener,
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.code, 'pushed');
+    assert.equal(result.status, 'finished');
+    assert.equal(result.prUrl, null);
+    assert.match(result.message, /Pushed "chief\/add-login"/);
+    assert.match(result.message, /no pull request was opened/);
+    assert.equal(opener.calls.length, 0);
+
+    const finished = world.reload();
+    assert.equal(finished.status, 'finished');
+    assert.equal(finished.lastError, null);
+    assert.equal(finished.failureStage, null);
+  });
+
+  it('still fails the session when the push is rejected', async () => {
+    const world = new World();
+    world.push = {
+      exitCode: 1,
+      stdout: '',
+      stderr: '! [rejected] chief/add-login -> chief/add-login (fetch first)',
+      timedOut: false,
+    };
+    const opener = new FakeOpener();
+    const delivery = createDeliveryService(world.config, world.db, world.containers, world.exec, opener);
+
+    await delivery.complete(pushOnlySession(world), world.stories());
+
+    const failed = world.reload();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failureStage, 'push');
+    assert.match(failed.lastError ?? '', /\[rejected\]/);
+    assert.equal(opener.calls.length, 0);
+  });
+
+  it('answers a retried rejected push with push_failed', async () => {
+    const world = new World();
+    updateSession(world.db, pushOnlySession(world).id, { status: 'failed' });
+    world.push = { exitCode: 1, stdout: '', stderr: 'Permission denied (publickey).', timedOut: false };
+
+    const result = await createDeliveryService(
+      world.config,
+      world.db,
+      world.containers,
+      world.exec,
+      new FakeOpener(),
+    ).retry(world.session.id);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'push_failed');
+    assert.equal(world.reload().status, 'failed');
+  });
+
+  it('finishes a recurring run that committed nothing clean, without pushing', async () => {
+    const world = new World({ recurring: true });
+    world.commits = { exitCode: 0, stdout: '0\n', stderr: '', timedOut: false };
+    const opener = new FakeOpener();
+    const delivery = createDeliveryService(world.config, world.db, world.containers, world.exec, opener);
+
+    await delivery.complete(pushOnlySession(world), world.stories());
+
+    assert.ok(world.execs.every((spec) => spec.cmd[2] !== PUSH_SCRIPT), 'nothing was pushed');
+    assert.equal(opener.calls.length, 0);
+    assert.equal(world.reload().status, 'finished');
+  });
+});
