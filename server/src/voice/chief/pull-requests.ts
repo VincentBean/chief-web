@@ -324,9 +324,7 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
         return prepared(target, { runId });
       },
       execute: async (target, args) => {
-        // Resolved again: the run may have ended between the question and the yes.
-        const runId = activeRunId(services, target.repositoryId, target.number);
-        if (runId === null || runId !== args['runId']) return noActiveRun(target.repository, target.number);
+        const runId = args['runId'] as string;
         const stopping = services.prFeedback.stop(runId);
         const outcome = await Promise.race([
           stopping.then((run) => ({ kind: 'stopped' as const, run })),

@@ -1,6 +1,5 @@
-import type { AttachedExec, ExecOutput, ExecSpec, ExecState } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
-import { BROWSER_ASK_USER, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS } from './browser-ask.js';
+import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from './request-files.js';
 
 /**
  * The server's half of the `chief` MCP server's `start_build` tool (US-008,
@@ -14,10 +13,6 @@ import { BROWSER_ASK_USER, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS } from './brows
 
 /** Where the MCP server and the call meet inside the container: the browser directory's sibling. */
 export const BUILD_REQUEST_DIR = '/tmp/.chief-voice/build';
-const EXEC_TIMEOUT_MS = 10_000;
-
-/** What the MCP server writes; the id names both files. */
-const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The answer file, as `runner/chief-mcp.js` reads it. */
 export type BuildAnswer =
@@ -25,35 +20,9 @@ export type BuildAnswer =
   | { readonly started: false; readonly errors: readonly string[] }
   | { readonly started: false; readonly reason: string };
 
-/** Lists every pending request file, one JSON object per line. */
-export function listBuildRequestsSpec(): ExecSpec {
-  return {
-    cmd: ['/bin/sh', '-c', `for f in ${BUILD_REQUEST_DIR}/*.request; do [ -f "$f" ] && cat "$f" && echo; done; true`],
-    user: BROWSER_ASK_USER,
-    tty: false,
-    attachStdin: false,
-  };
-}
-
-/** Writes stdin to `<id>.answer`, renamed into place so the MCP server never reads half a file. */
-export function buildAnswerWriteSpec(id: string): ExecSpec {
-  if (!REQUEST_ID.test(id)) throw new Error(`not a request id: ${id}`);
-  const file = `${BUILD_REQUEST_DIR}/${id}.answer`;
-  return {
-    cmd: ['/bin/sh', '-c', `umask 077 && mkdir -p ${BUILD_REQUEST_DIR} && cat > ${file}.tmp && mv ${file}.tmp ${file}`],
-    user: BROWSER_ASK_USER,
-    tty: false,
-    attachStdin: true,
-  };
-}
-
 /** What the relay needs of the session's container. */
 export interface BuildRequestDeps {
-  readonly docker: {
-    runExec(container: string, spec: ExecSpec, timeoutMs?: number): Promise<ExecOutput>;
-    attachExec(container: string, spec: ExecSpec): Promise<AttachedExec>;
-    inspectExec(execId: string): Promise<ExecState>;
-  };
+  readonly docker: RequestFileDocker;
   /** The session's running container id. */
   readonly container: (sessionId: string) => Promise<string>;
   readonly discoveryMs?: number;
@@ -87,7 +56,7 @@ export class BuildRequests {
       const deadline = Date.now() + (this.deps.discoveryMs ?? REQUEST_DISCOVERY_MS);
       for (;;) {
         if (stopped()) return null;
-        const fresh = (await this.list(containerId)).filter((request) => !this.seen.has(request.id));
+        const fresh = (await listRequestFiles(this.deps.docker, containerId, BUILD_REQUEST_DIR, 'build')).filter((request) => !this.seen.has(request.id));
         const newest = fresh.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
         if (newest !== undefined) {
           this.seen.add(newest.id);
@@ -107,42 +76,8 @@ export class BuildRequests {
     }
   }
 
-  private async list(containerId: string): Promise<{ id: string; createdAt: string }[]> {
-    let output: ExecOutput;
-    try {
-      output = await this.deps.docker.runExec(containerId, listBuildRequestsSpec(), EXEC_TIMEOUT_MS);
-    } catch (cause) {
-      logger.warn('could not list build requests', { container: containerId, error: String(cause) });
-      return [];
-    }
-    const requests: { id: string; createdAt: string }[] = [];
-    for (const line of output.stdout.split('\n')) {
-      if (line.trim() === '') continue;
-      try {
-        const { id, createdAt } = JSON.parse(line) as Record<string, unknown>;
-        if (typeof id !== 'string' || !REQUEST_ID.test(id)) continue;
-        requests.push({ id, createdAt: typeof createdAt === 'string' ? createdAt : '' });
-      } catch {
-        // Renamed into place by the MCP server, so this is junk; skip it.
-      }
-    }
-    return requests;
-  }
-
   /** Writes the answer file through stdin; false when that failed. */
-  private async write(sessionId: string, containerId: string, id: string, answer: BuildAnswer): Promise<boolean> {
-    try {
-      const exec = await this.deps.docker.attachExec(containerId, buildAnswerWriteSpec(id));
-      exec.stdin.end(JSON.stringify({ id, ...answer }));
-      let stderr = '';
-      for await (const chunk of exec.output) if (chunk.stream === 'stderr') stderr += chunk.text;
-      const state = await this.deps.docker.inspectExec(exec.execId);
-      if (state.exitCode === 0) return true;
-      logger.warn('could not write the build answer', { session: sessionId, exitCode: state.exitCode, stderr: stderr.trim().slice(0, 200) });
-      return false;
-    } catch (cause) {
-      logger.warn('could not write the build answer', { session: sessionId, error: String(cause) });
-      return false;
-    }
+  private write(sessionId: string, containerId: string, id: string, answer: BuildAnswer): Promise<boolean> {
+    return writeAnswerFile(this.deps.docker, containerId, BUILD_REQUEST_DIR, id, { id, ...answer }, { what: 'build', session: sessionId });
   }
 }
