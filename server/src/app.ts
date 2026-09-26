@@ -17,8 +17,9 @@ import {
   createBuildService,
 } from './build/index.js';
 import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
+import { BrowserService } from './browser/index.js';
 import type { Config } from './config.js';
-import type { Database } from './db/index.js';
+import { type Database, getSession } from './db/index.js';
 import {
   createDeliveryService,
   type DeliveryService,
@@ -58,6 +59,7 @@ import {
 } from './sentry/index.js';
 import { createPullRequestsRouter } from './routes/pull-requests.js';
 import { createRecurringTaskRunner } from './recurringtasks/index.js';
+import { createBrowserSavedLogins } from './repositories/index.js';
 import { createRecurringTasksRouter } from './routes/recurring-tasks.js';
 import { createRepositoriesRouter } from './routes/repositories.js';
 import { createRetryRouter } from './routes/retry.js';
@@ -68,6 +70,7 @@ import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index
 import { PlanningStates } from './voice/session-agent/planning-state.js';
 import { SessionAgentRegistry } from './voice/session-agent/registry.js';
 import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
+import { createBrowserViewRoute } from './voice/browser-view.js';
 import { createStatsRouter } from './routes/stats.js';
 import { createTerminalsRouter } from './routes/terminals.js';
 import { createScheduler, type SessionScheduler } from './scheduler/index.js';
@@ -279,6 +282,8 @@ export function createApp(
     containers: orchestrator,
     hold,
     planning: (): PlanningService => planning,
+    // Stopping or reaping an agent stops its session's browser (voice feedback US-012).
+    browsers: (): BrowserService => browsers,
   });
   const planning: PlanningService =
     deps.planning ??
@@ -490,6 +495,22 @@ export function createApp(
   // dispatching on the stage the session failed at. Built ahead of voice,
   // whose chief can retry a session too (voice US-012).
   const retries = createRetryService(db, builds, delivery);
+  // The session browsers (voice feedback US-005), started by the session
+  // agent's "watch with me" card (US-007) in the session's own container.
+  const sessionContainer = async (sessionId: string): Promise<string> => {
+    const session = getSession(db, sessionId);
+    if (session === null) throw new Error('No such session.');
+    return (await orchestrator.start(session)).id;
+  };
+  // One per session, at most as many as session agents, stopped when idle (US-012).
+  const browsers: BrowserService = new BrowserService({
+    docker,
+    container: sessionContainer,
+    maxBrowsers: config.voiceMaxSessionAgents,
+    idleMs: config.voiceBrowserIdleMs,
+  });
+  // A session container that stops takes its browser down first (US-012).
+  sessionOrchestrator.onStopping((sessionId) => browsers.stop(sessionId));
   const voice = createVoice(config, db, {
     chief: {
       db,
@@ -514,10 +535,20 @@ export function createApp(
     events,
     sessionAgents,
     planning,
+    browser: {
+      docker,
+      container: sessionContainer,
+      browsers,
+      // A repository's saved logins on the card (voice feedback US-010).
+      savedLogins: createBrowserSavedLogins(db),
+      stopAll: () => browsers.stopAll(),
+    },
     ...deps.voice,
   });
   api.use(voice.router);
   deps.gateway?.register(voice.socketRoute);
+  // The live page view of that browser in the call panel (voice feedback US-008).
+  deps.gateway?.register(createBrowserViewRoute(browsers, config));
   // Only the half of it that runs an agent needs Claude Code. A session whose
   // *push* or *pull request* failed has nothing left to build, so blocking its
   // retry on credentials it does not use would strand finished work.

@@ -41,3 +41,15 @@ export function progressPathFor(sessionName: string): string {
 export function agentLogPathFor(sessionName: string): string {
   return `${prdDirFor(sessionName)}/agent.log`;
 }
+
+/**
+ * `.chief/prds/<session name>/screenshots`, relative to the repository root.
+ *
+ * Where a voice session agent's browser screenshots land (voice feedback
+ * US-011): Playwright MCP's `--output-dir`, and the directory the planning
+ * prompt tells the agent to name its screenshots into. The PRD links them as
+ * `screenshots/<file>`, relative to itself.
+ */
+export function screenshotsDirFor(sessionName: string): string {
+  return `${prdDirFor(sessionName)}/screenshots`;
+}

@@ -16,11 +16,14 @@ import { useToast } from '../toast.tsx';
 import { CallAudio, type SttOptions, type TalkMode } from './call-audio.ts';
 import {
   type AgentKind,
+  type BrowserAskOutcome,
+  type BrowserCredentials,
   type CallFocus,
   type CallPhase,
   type ClientMessage,
   type ConfirmationOutcome,
   type PlanningSessionView,
+  type SavedLoginView,
   type ServerMessage,
   type SttMode,
   type ToolStatus,
@@ -86,6 +89,17 @@ export type TranscriptEntry =
       readonly expiresAt: string;
       readonly resolution: ConfirmationOutcome | null;
     }
+  /** The "watch with me" card (voice feedback US-007): the session agent wants to open a page. */
+  | {
+      readonly kind: 'browser';
+      readonly key: string;
+      readonly id: string;
+      readonly sessionId: string;
+      readonly hint: string;
+      readonly savedLogins: readonly SavedLoginView[];
+      readonly expiresAt: string;
+      readonly resolution: BrowserAskOutcome | null;
+    }
   | { readonly kind: 'notice'; readonly key: string; readonly text: string }
   /** A background event or focus change, as the call history stores them (US-024). */
   | { readonly kind: 'event'; readonly key: string; readonly text: string };
@@ -126,6 +140,8 @@ export interface CallState {
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
   readonly panelOpen: boolean;
+  /** The session whose browser the panel shows live (US-008), from **Open** on its card until **Close browser**. */
+  readonly pageView: { readonly sessionId: string } | null;
   readonly panelRef: RefObject<HTMLElement | null>;
 }
 
@@ -151,7 +167,21 @@ export interface CallActions {
   setMode(mode: TalkMode): void;
   /** Answers a confirmation pill; the server runs or drops exactly that one. */
   resolve(id: string, confirm: boolean): void;
+  /** The "watch with me" card's **Open**: the URL and login go to the server, never back. */
+  answerBrowser(answer: BrowserAnswer, sessionId: string): void;
+  /** Drops the page view; its **Close browser** has already stopped the browser. */
+  closePageView(): void;
+  /** The card's **Cancel**. */
+  cancelBrowser(id: string): void;
   setDebug(debug: boolean): void;
+}
+
+/** What **Open** on the "watch with me" card sends. */
+export interface BrowserAnswer {
+  readonly id: string;
+  readonly url: string;
+  readonly credentials?: BrowserCredentials;
+  readonly save?: boolean;
 }
 
 export type CallContext = CallState & CallActions;
@@ -289,6 +319,24 @@ function applyToTranscript(entries: readonly TranscriptEntry[], message: ServerM
           ? { ...entry, resolution: message.outcome }
           : entry,
       );
+    case 'browser.ask':
+      return [
+        ...entries,
+        {
+          kind: 'browser',
+          key: `b${message.id}`,
+          id: message.id,
+          sessionId: message.sessionId,
+          hint: message.hint,
+          savedLogins: message.savedLogins,
+          expiresAt: message.expiresAt,
+          resolution: null,
+        },
+      ];
+    case 'browser.resolved':
+      return entries.map((entry) =>
+        entry.kind === 'browser' && entry.id === message.id ? { ...entry, resolution: message.outcome } : entry,
+      );
     case 'error':
       return [...entries, { kind: 'notice', key: `e${String(entries.length)}`, text: message.message }];
     default:
@@ -329,6 +377,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [planning, setPlanning] = useState<readonly PlanningSessionView[]>([]);
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [pageView, setPageView] = useState<{ readonly sessionId: string } | null>(null);
 
   const panelRef = useRef<HTMLElement | null>(null);
   const socket = useRef<WebSocket | null>(null);
@@ -424,7 +473,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           else toastRef.current.info(message.text);
           return;
         case 'error':
-          if (message.fatal) toastRef.current.error(message.message);
+          // A browser that could not start (voice feedback US-012) has no card to show it on.
+          if (message.fatal || message.code === 'browser_unavailable') toastRef.current.error(message.message);
           setTranscript((entries) => applyToTranscript(entries, message));
           return;
         default:
@@ -663,6 +713,29 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     [send],
   );
 
+  const settleBrowser = useCallback((id: string, outcome: BrowserAskOutcome): void => {
+    setTranscript((entries) =>
+      entries.map((entry) => (entry.kind === 'browser' && entry.id === id ? { ...entry, resolution: outcome } : entry)),
+    );
+  }, []);
+
+  const answerBrowser = useCallback(
+    (answer: BrowserAnswer, sessionId: string): void => {
+      send({ type: 'browser.answer', ...answer });
+      settleBrowser(answer.id, 'opened');
+      setPageView((current) => (current?.sessionId === sessionId ? current : { sessionId }));
+    },
+    [send, settleBrowser],
+  );
+
+  const cancelBrowser = useCallback(
+    (id: string): void => {
+      send({ type: 'browser.cancel', id });
+      settleBrowser(id, 'cancelled');
+    },
+    [send, settleBrowser],
+  );
+
   const open = useCallback((): void => {
     setPanelOpen(true);
     if (socket.current === null && audio.current === null) start();
@@ -704,6 +777,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       planning,
       problem,
       panelOpen,
+      pageView,
+      closePageView: () => setPageView(null),
       panelRef,
       open,
       closePanel: () => setPanelOpen(false),
@@ -720,6 +795,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      answerBrowser,
+      cancelBrowser,
       setDebug,
     }),
     [
@@ -741,6 +818,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       planning,
       problem,
       panelOpen,
+      pageView,
       open,
       start,
       hangup,
@@ -751,6 +829,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       muteVoice,
       setMode,
       resolve,
+      answerBrowser,
+      cancelBrowser,
       setDebug,
     ],
   );

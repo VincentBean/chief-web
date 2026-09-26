@@ -329,6 +329,14 @@ describe('the iteration prompt', () => {
     assert.ok(prompt.includes('This file does not exist yet'));
   });
 
+  it('keeps the screenshots of a feedback session out of every cleanup and commit (voice feedback US-011)', () => {
+    const prompt = agentPrompt({ sessionName: 'add-login', story: first, timeoutMs: 1_800_000, prd: null, progress: null });
+
+    assert.ok(prompt.includes(`the screenshots it links are in \`${CONTAINER_REPO_DIR}/.chief/prds/add-login/screenshots/\``));
+    assert.match(prompt, /never\ndelete, move or commit it/);
+    assert.match(prompt, /never run `git clean`, `git stash -u`/);
+  });
+
   it('tells the agent how long it has, in minutes', () => {
     const of = (timeoutMs: number): string =>
       agentPrompt({ sessionName: 'add-login', story: first, timeoutMs, prd: null, progress: null });

@@ -16,11 +16,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { interruptRequestLine, userMessageLine } from '../process.js';
-import { voiceUtterance } from '../prompt.js';
+import { CHIEF_MCP_SCRIPT, interruptRequestLine, mcpConfig, userMessageLine } from '../process.js';
+import { voiceRulesPrompt, voiceUtterance } from '../prompt.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MODEL = process.env['RECORD_MODEL'] ?? 'haiku';
+/** `@playwright/mcp`'s binary on this host; the image has it on the PATH. */
+const PLAYWRIGHT_MCP = process.env['RECORD_PLAYWRIGHT_MCP'] ?? 'playwright-mcp';
 
 /** Flags of docs/voice-plan.md §10.1, minus the prompt. */
 const STREAM_FLAGS = [
@@ -93,6 +95,17 @@ const SCENARIOS: Record<string, Scenario> = {
       run.send(interruptRequestLine(randomUUID()));
       await run.waitFor(isResult);
       run.send(userMessageLine(voiceUtterance('Never mind. Say: understood.', 'Once')));
+      await run.waitFor(isResult);
+      run.endStdin();
+    },
+  },
+  // The browser's MCP servers (voice feedback US-006): `mcpConfig()`'s shape,
+  // passed like `sessionAgentCommand` does (the variadic flag followed by
+  // another flag). `chief` points at the image's path, which a host lacks.
+  'mcp-config': {
+    args: [...STREAM_FLAGS, '--include-partial-messages', '--mcp-config', 'mcp.json', '--append-system-prompt', voiceRulesPrompt('en')],
+    async steps(run) {
+      run.send(userMessageLine('[voice] Reply with exactly: OK.'));
       await run.waitFor(isResult);
       run.endStdin();
     },
@@ -182,6 +195,7 @@ function withoutParentSession(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 const cwd = mkdtempSync(join(tmpdir(), 'chief-voice-record-'));
 writeFileSync(join(cwd, 'README.md'), '# demo\n');
 writeFileSync(join(cwd, 'math.js'), 'export const add = (a, b) => a + b;\nexport const PI = 3.14;\n');
+writeFileSync(join(cwd, 'mcp.json'), mcpConfig('recording', { playwright: [PLAYWRIGHT_MCP], chief: ['node', CHIEF_MCP_SCRIPT] }));
 
 const wanted = process.argv.slice(2);
 for (const [name, scenario] of Object.entries(SCENARIOS)) {

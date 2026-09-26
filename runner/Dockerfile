@@ -18,10 +18,17 @@ ARG CLAUDE_CODE_VERSION=latest
 # bash/ripgrep/jq/curl/less: the shell and search tools the agent expects.
 # libgcc/libstdc++: musl runtime deps of the CLI's native pieces.
 # tini: PID 1 that reaps the processes the server execs into the container.
+# chromium: the headless browser a feedback session shares between the agent
+#   and the operator (voice feedback US-005); ~750 MB, see docs/development.md.
+# font-dejavu/font-liberation: Latin text for it; Liberation is metric-compatible
+#   with Arial, Helvetica and Times, the fonts pages name most.
 RUN apk add --no-cache \
         bash \
         ca-certificates \
+        chromium \
         curl \
+        font-dejavu \
+        font-liberation \
         git \
         jq \
         less \
@@ -41,6 +48,14 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force \
  && claude --version
 
+# The session voice agent's browser tools (voice feedback US-006): the
+# `playwright-mcp` binary, which the agent's MCP config points at the Chromium
+# above over CDP (`--cdp-endpoint`), so Playwright never downloads a browser.
+ARG PLAYWRIGHT_MCP_VERSION=latest
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+ && npm cache clean --force \
+ && command -v playwright-mcp
+
 # SSH: GitHub's host keys are pinned, everything else is accept-new so a clone
 # from any other remote still runs non-interactively.
 COPY ssh/known_hosts /etc/ssh/ssh_known_hosts
@@ -52,6 +67,14 @@ RUN cat /etc/ssh/chief-web_ssh_config /etc/ssh/ssh_config > /etc/ssh/ssh_config.
 
 COPY entrypoint.sh /usr/local/bin/chief-web-entrypoint
 RUN chmod 755 /usr/local/bin/chief-web-entrypoint
+
+# The server's only way to Chromium's DevTools port, which stays on the
+# container's loopback: CDP over the stdio of a `docker exec` (US-005).
+COPY cdp-relay.js /usr/local/lib/chief-web/cdp-relay.js
+# The session voice agent's `chief` MCP server (voice feedback US-007): the
+# "watch with me" card's end inside the container.
+COPY chief-mcp.js /usr/local/lib/chief-web/chief-mcp.js
+RUN chmod 644 /usr/local/lib/chief-web/cdp-relay.js /usr/local/lib/chief-web/chief-mcp.js
 
 # `node` (uid 1000) already exists in the base image; the container never runs
 # as root. Both directories are created here so that the volumes mounted over

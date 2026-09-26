@@ -20,6 +20,8 @@ and no provider is contacted.
 - [HTTPS](#https)
 - [What chief can do](#what-chief-can-do)
 - [Session agents](#session-agents)
+- [Feedback sessions](#feedback-sessions)
+- [Watch with me](#watch-with-me)
 - [Intents](#intents)
 - [Background events](#background-events)
 - [Privacy](#privacy)
@@ -109,6 +111,7 @@ server with a message. They are listed in `.env.example` as well.
 | `VOICE_MAX_UTTERANCE_MS` | `60000` | longest utterance sent to speech-to-text |
 | `VOICE_CHIEF_MAX_TOOL_HOPS` | `6` | tool round trips chief may make for one thing you say |
 | `VOICE_SCRIBE_IDLE_CLOSE_MS` | `20000` | close an idle Scribe socket after this long |
+| `VOICE_BROWSER_IDLE_MS` | `600000` | stop a session browser that had no frame request and no tool call for 10 minutes |
 | `OPENROUTER_API_URL` | `https://openrouter.ai/api/v1` | only for a proxy or a test stub |
 | `ELEVENLABS_API_URL` | `https://api.elevenlabs.io` | only for a proxy or a test stub |
 
@@ -212,6 +215,7 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 | `focus_session` | hands the call to a session's agent | – |
 | `answer_planning_question` | passes an answer to one open question (by number) or all of a planning session's open questions; the session updates its PRD alone and its end is announced like a finished draft ("csv-export updated its PRD; 3 open questions left"). Refused for a session that is not planning, is drafting or has no open questions, and during the usage-limit hold or with the planning terminal open | – (read back) |
 | `create_session` | creates a session; the clone continues in the background | yes |
+| `start_feedback_session` | creates a session from your feedback on an existing application ("the checkout total is wrong with a coupon"), named `feedback-…` unless you name it; once the clone is announced the call goes to its agent, which starts from the feedback | yes |
 | `start_build` | starts (or queues) a ready session | yes |
 | `stop_build` | stops a build, or takes a session out of the queue | yes |
 | `mark_ready` | parses the PRD and reads out any errors | yes |
@@ -235,7 +239,9 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 
 **What chief cannot do.** There is no tool to delete anything (sessions,
 repositories, tasks, transcripts), change settings, open a terminal, merge a
-pull request or touch the Claude login. Those stay in the UI.
+pull request or touch the Claude login. Those stay in the UI. Chief has no
+browser either: "watch with me" goes to the session agent, and it has no tool for
+saved logins, which are added on the Repositories page or from the card.
 
 ## Session agents
 
@@ -258,9 +264,140 @@ call and `VOICE_KEEP_AGENTS_MS` after it.
   first; handing a call to a session whose terminal is open asks to close it.
 
 A session agent refuses to start for a session without a clone yet, and while
-Claude's usage-limit hold is on. It has no chief-web tools at all: it cannot
-build, create or change anything outside its own container, so it asks you to
-say "back to chief".
+Claude's usage-limit hold is on. It has no chief-web management tools: it
+cannot build, create or change anything outside its own container, so it asks
+you to say "back to chief". Its one tool that reaches the call panel,
+`open_browser_with_operator`, only asks you for a page to open (see
+[Watch with me](#watch-with-me)).
+
+## Feedback sessions
+
+A feedback session starts from something that is wrong, or could be better, in
+an application a repository already has. Say it to chief the way you would say
+it to a colleague: "I have feedback on shop-api: the checkout total is wrong
+when you use a coupon." Chief calls `start_feedback_session` with the
+repository and your feedback, and reads it back like any other change:
+"Start a feedback session on shop-api about "the checkout total is wrong when
+you use a coupon"?" (a long feedback is clipped in the read-back, not in what
+is stored). **Confirm** or "yes" creates it, exactly as read back.
+
+- **The name** is `feedback-` plus the gist of what you said
+  (`feedback-checkout-total-is-wrong-with-coupon`), with `-2`, `-3`… when that
+  is taken. Say a name ("call it coupon-total") to choose your own; a name that
+  is taken is refused, as with `create_session`.
+- **The branches**: the base branch is the repository's default, and the pull
+  request targets `main` unless you say `develop`.
+- **The feedback is stored** on the session (up to 4000 characters) and shown
+  on its page; see [Feedback sessions](sessions.md#feedback-sessions).
+
+The clone runs in the background, as for `create_session`. **Once chief has
+announced that the clone is ready, the call moves to the session's agent on
+its own**, and the agent opens with one question about your feedback instead
+of asking what you want to build. With **Events chief mentions during a call**
+on None there is no announcement and the call moves as soon as the clone is
+ready. It does not move when the clone fails, when the call ended, when you
+talked over the announcement, or when you already moved the call somewhere
+else yourself; "switch to feedback-…" gets you there later.
+
+The agent works through the feedback with you: it finds the code involved, asks
+what it needs to know, and where it helps looks at the running application with
+you ([Watch with me](#watch-with-me)). Then it writes `prd.md` with a
+**`## Feedback`** section next to the stories:
+
+- your feedback, verbatim;
+- the pages involved, as paths (`/checkout`), never with a login or a query
+  string;
+- when the browser was used, the numbered steps that reproduce it, with
+  **Expected:** and **Observed:**, and links to the screenshots the agent took
+  (`screenshots/<name>.png`, stored next to the PRD in
+  `.chief/prds/<session-name>/screenshots/`).
+
+The section is not a story: the PRD parser ignores it, so **Mark ready** reads
+exactly the stories it would without it. Every build iteration is told to read
+it and look at the screenshots. The screenshots stay in the session's clone on
+the data volume and are never committed; see
+[the build loop](build-loop.md).
+
+A feedback session is otherwise an ordinary session: "back to chief", mark it
+ready and build it. The same session can be created without a call by filling
+in **Feedback** on the new-session form; its planning terminal then starts
+from the feedback too.
+
+## Watch with me
+
+Say "watch with me" or "let's look at it" while a session agent has the call
+(chief hands the call over when it hears this). The agent says one sentence
+and asks for a page with `open_browser_with_operator`. That starts a headless
+Chromium inside the session's container, and a card appears in the call panel.
+**The address and any login are only ever typed into the card, never spoken**:
+the agent says "Type the address in the panel and I'll open it".
+
+### The card
+
+- **URL**: an absolute `http://` or `https://` address. The browser runs in the
+  session container, so `localhost` is the container itself, not your machine.
+  With Docker Desktop (macOS, Windows) your machine is
+  `http://host.docker.internal:<port>/`, which the card suggests. Session
+  containers are not given that name on Docker Engine for Linux: use the
+  address of the Docker bridge (usually `172.17.0.1`) or your machine's LAN
+  address, and make sure the app listens on that interface rather than only on
+  `127.0.0.1`. An app on a private network is reachable only if the container
+  can route to it.
+- **Saved login**: a list of the logins saved for this session's repository,
+  shown only when there is one. Picking one sends only its id; the server looks
+  the password up itself.
+- **Username** and **Password**, both optional. **Save this login for
+  <repository>** stores what you typed as a saved login once a password is
+  entered. Saved logins are listed, added and deleted under **Saved logins** in
+  the repository editor ([Repositories](repositories.md#saved-logins)).
+- **Open** opens the page. With a login, the tool fills the first visible
+  password field and the text field before it, and submits the form. It tells
+  the agent that you supplied a login, never what it is. When there is no login
+  form, the agent asks you to log in in the page view yourself.
+- **Cancel**, or letting the card sit for five minutes, tells the agent you did
+  not open a browser, and it moves on without one. Talking while the card is up
+  can interrupt the agent's turn, which also drops the card; type in it in
+  silence, or mute the microphone.
+
+### The page view
+
+Once the page opens, the call panel shows the browser live: the current
+address above a picture of the page. Click, scroll and type in it; keys go to
+the page while the pointer is over the view (Space-to-talk is ignored there).
+**Expand** fills the content area and resizes the browser to match;
+collapsing it returns to 1280 × 800. The agent sees the same page and drives it
+through [Playwright MCP](https://github.com/microsoft/playwright-mcp):
+navigating, clicking, reading the page and taking screenshots, one sentence
+before each action. Its tool cards say what it does in paths and element names
+only ("Navigating to /checkout", "Typing into Coupon code"), never what it
+types. One view per session: opening it in a second tab replaces the first.
+
+The picture is a stream of JPEG frames from Chromium's screencast. They are
+drawn and dropped; neither the server nor the browser stores them. Only the
+screenshots the agent chooses to take are saved, next to the PRD.
+
+### Limits
+
+**The browser needs a session container with at least 1 GB of memory**; a
+container whose limit (`CONTAINER_MEMORY_LIMIT_MB`, default 8192) is below 1 GB
+gets no browser, and the agent tells you why. Raise the limit and recreate the
+container.
+
+- **One per session**, and at most `VOICE_MAX_SESSION_AGENTS` at once across all
+  sessions. Beyond that the agent hears "no browser available right now" and no
+  card is shown.
+- **It stops** when you click **Close browser**, when the call ends, when the
+  session agent is stopped or reaped, when the session container stops, and
+  after `VOICE_BROWSER_IDLE_MS` (10 minutes) without a frame request or a
+  browser tool call; the page view then says why. The agent then says "The
+  browser was closed" and offers to open it again rather than retrying on its
+  own.
+- **When Chromium does not start** (not installed, or it crashes within five
+  seconds), the card goes away with a toast, the agent hears the cause, and
+  Chromium's stderr is in the server log (`the session browser failed to start`).
+- **Only on a call.** The browser belongs to a session agent on a voice call.
+  The build loop, code reviews and the other headless runs get no browser tools
+  and no page view, even though Chromium is in the same runner image.
 
 ### Planning several sessions at once
 
@@ -391,6 +528,12 @@ panel count down as you answer.
     session agent conversation, exactly as it does for planning and builds.
   - With **Browser speech recognition** or **Live captions**, your browser may
     send audio to its vendor's speech service (Chrome does).
+- **The shared browser's picture is never stored.** Page view frames are
+  passed from Chromium to your browser and dropped. The session agent reads
+  the page through Claude Code, so what it looks at reaches Anthropic like
+  anything else it reads. A login typed into the card is never spoken, never
+  shown to the agent, and kept out of transcripts and tool cards; a saved one
+  is stored in the database (see [Security model](security.md#voice-calls)).
 - **Keys stay on the server.** See [Security model](security.md#voice-calls).
 
 ## Latency
@@ -481,6 +624,11 @@ trusting a change to the call, go through this list:
       the first drafts, then hear the first announced, answer one of its open
       questions through chief, and walk through the rest by switching back.
       Both PRDs must end with no open questions and parse.
+- [ ] **A feedback call with the browser:** "I have feedback on …", confirm,
+      wait for the automatic hand-off, say "watch with me", open a page of an
+      app on your machine with a login, click around in the page view, then
+      let the agent write the PRD. The `## Feedback` section must list the
+      steps and screenshots, and **Mark ready** must go green.
 
 ## Troubleshooting
 
@@ -529,3 +677,8 @@ needs a new token; raise that value.
 
 **Replies are slow.** Open the latency strip (pulse icon) and see which stage is
 long; [Latency](#latency) lists what moves each one.
+
+**"Watch with me" opens a blank or error page.** The browser runs in the session
+container, so `localhost` there is not your machine; see [The card](#the-card)
+for the address to use. "No browser" in a toast gives the cause: too little
+container memory, too many browsers at once, or Chromium failing to start.

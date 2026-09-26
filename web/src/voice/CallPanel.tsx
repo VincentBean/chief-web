@@ -4,8 +4,25 @@ import { useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { Segmented } from '../ui.tsx';
-import { type CallStatus, type CallUsage, HTTPS_DOCS_URL, type TranscriptEntry, useCall } from './CallProvider.tsx';
-import type { CallFocus, CallPhase, ConfirmationOutcome, PlanningSessionView, ToolStatus } from './protocol.ts';
+import {
+  type BrowserAnswer,
+  type CallStatus,
+  type CallUsage,
+  HTTPS_DOCS_URL,
+  type TranscriptEntry,
+  useCall,
+} from './CallProvider.tsx';
+import {
+  type BrowserAskOutcome,
+  type CallFocus,
+  type CallPhase,
+  type ConfirmationOutcome,
+  MAX_CREDENTIAL_CHARS,
+  parseBrowserUrl,
+  type PlanningSessionView,
+  type ToolStatus,
+} from './protocol.ts';
+import { PageView } from './PageView.tsx';
 import { bindHoldToTalkButton } from './ptt.ts';
 import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
 
@@ -60,6 +77,7 @@ function toolIcon(name: string): IconName {
 
 const TOOL_STATUS_LABEL: Record<ToolStatus, string> = { running: 'running', ok: 'done', error: 'failed' };
 const CONFIRM_OUTCOME_LABEL: Record<ConfirmationOutcome, string> = { confirmed: 'Confirmed', cancelled: 'Cancelled', expired: 'Expired' };
+const BROWSER_OUTCOME_LABEL: Record<BrowserAskOutcome, string> = { opened: 'Opened', cancelled: 'Cancelled', expired: 'Expired' };
 
 function focusValue(focus: CallFocus): string {
   return focus.kind === 'chief' ? 'chief' : `session:${focus.sessionId}`;
@@ -341,6 +359,10 @@ export function CallPanel() {
 
       {call.debug && <LatencyOverlay times={lastTimedTurn(call.latency)} />}
 
+      {call.pageView !== null && (
+        <PageView key={call.pageView.sessionId} sessionId={call.pageView.sessionId} onClose={call.closePageView} />
+      )}
+
       <ol className="call-transcript" ref={body} aria-label="Transcript">
         {call.transcript.length === 0 && (
           <li className="call-transcript__empty">
@@ -352,6 +374,8 @@ export function CallPanel() {
             key={entry.key}
             entry={entry}
             onResolve={call.resolve}
+            onBrowserAnswer={call.answerBrowser}
+            onBrowserCancel={call.cancelBrowser}
             {...(call.debug && entry.kind === 'user' ? { stt: sttMs(call.latency[entry.turn]) } : {})}
           />
         ))}
@@ -457,10 +481,15 @@ export function CallPanel() {
 export function TranscriptLine({
   entry,
   onResolve,
+  onBrowserAnswer,
+  onBrowserCancel,
   stt,
 }: {
   readonly entry: TranscriptEntry;
   readonly onResolve: (id: string, confirm: boolean) => void;
+  /** The live panel's "watch with me" card; a stored call has none. */
+  readonly onBrowserAnswer?: (answer: BrowserAnswer, sessionId: string) => void;
+  readonly onBrowserCancel?: (id: string) => void;
   /** Debug (US-026): the line's speech-to-text latency; undefined shows nothing. */
   readonly stt?: number | null;
 }) {
@@ -524,6 +553,8 @@ export function TranscriptLine({
           )}
         </li>
       );
+    case 'browser':
+      return <BrowserAskCard entry={entry} onAnswer={onBrowserAnswer} onCancel={onBrowserCancel} />;
     case 'notice':
       return (
         <li className="call-notice">
@@ -539,6 +570,144 @@ export function TranscriptLine({
         </li>
       );
   }
+}
+
+/**
+ * The "watch with me" card (voice feedback US-007), shaped like the
+ * confirmation pill: the session agent wants to open a page, and the operator
+ * types the address (and a login) instead of spelling it out loud.
+ */
+function BrowserAskCard({
+  entry,
+  onAnswer,
+  onCancel,
+}: {
+  readonly entry: Extract<TranscriptEntry, { kind: 'browser' }>;
+  readonly onAnswer: ((answer: BrowserAnswer, sessionId: string) => void) | undefined;
+  readonly onCancel: ((id: string) => void) | undefined;
+}) {
+  const { sessions } = useAppData();
+  const [url, setUrl] = useState('');
+  const [savedLoginId, setSavedLoginId] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [save, setSave] = useState(false);
+  const [tried, setTried] = useState(false);
+  const repositoryName = sessions?.find((session) => session.id === entry.sessionId)?.repositoryName ?? 'this repository';
+  const parsedUrl = parseBrowserUrl(url);
+  const hasLogin = savedLoginId === '' && password !== '';
+  const hint = entry.hint.trim() === '' ? 'The session agent wants to open a page with you.' : entry.hint;
+
+  if (entry.resolution !== null || onAnswer === undefined || onCancel === undefined) {
+    return (
+      <li className="call-confirm">
+        <span className="call-confirm__prompt">{hint}</span>
+        <span className="call-confirm__done">{entry.resolution === null ? 'Browser' : BROWSER_OUTCOME_LABEL[entry.resolution]}</span>
+      </li>
+    );
+  }
+
+  const choose = (id: string): void => {
+    setSavedLoginId(id);
+    const login = entry.savedLogins.find((saved) => saved.id === id);
+    if (login !== undefined) setUrl(login.url);
+  };
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault();
+    setTried(true);
+    if (parsedUrl === null) return;
+    onAnswer({
+      id: entry.id,
+      url: parsedUrl,
+      ...(savedLoginId !== ''
+        ? { credentials: { savedLoginId } }
+        : hasLogin
+          ? { credentials: { username, password }, save }
+          : {}),
+    }, entry.sessionId);
+  };
+
+  const urlError = tried && parsedUrl === null;
+  return (
+    <li className="call-browser">
+      <form className="call-browser__form" onSubmit={submit} autoComplete="off">
+        <span className="call-browser__hint">
+          <Icon name="link-external" />
+          {hint}
+        </span>
+        {entry.savedLogins.length > 0 && (
+          <label className="field">
+            <span className="field__label">Saved login</span>
+            <select className="field__input" value={savedLoginId} onChange={(event) => choose(event.target.value)}>
+              <option value="">Type an address and login</option>
+              {entry.savedLogins.map((login) => (
+                <option key={login.id} value={login.id}>
+                  {login.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="field">
+          <span className="field__label">URL</span>
+          <input
+            className="field__input"
+            type="url"
+            required
+            placeholder="http://host.docker.internal:3000/"
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            aria-invalid={urlError}
+            autoFocus
+          />
+          <span className={urlError ? 'field__error' : 'field__hint'}>
+            {urlError
+              ? 'Enter a full http:// or https:// address.'
+              : 'The container reaches your machine as host.docker.internal, not localhost.'}
+          </span>
+        </label>
+        {savedLoginId === '' && (
+          <>
+            <div className="field__pair">
+              <input
+                className="field__input"
+                type="text"
+                placeholder="Username (optional)"
+                aria-label="Username"
+                autoComplete="off"
+                maxLength={MAX_CREDENTIAL_CHARS}
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+              />
+              <input
+                className="field__input"
+                type="password"
+                placeholder="Password (optional)"
+                aria-label="Password"
+                autoComplete="new-password"
+                maxLength={MAX_CREDENTIAL_CHARS}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+            <label className="checkbox">
+              <input type="checkbox" checked={save} disabled={!hasLogin} onChange={(event) => setSave(event.target.checked)} />
+              Save this login for {repositoryName}
+            </label>
+          </>
+        )}
+        <span className="call-confirm__actions">
+          <button type="submit" className="button button--small button--primary">
+            Open
+          </button>
+          <button type="button" className="button button--small" onClick={() => onCancel(entry.id)}>
+            Cancel
+          </button>
+        </span>
+      </form>
+    </li>
+  );
 }
 
 /** The debug overlay (US-026): where the last turn's time went, stage by stage. */

@@ -612,6 +612,25 @@ describe('session container lifecycle', () => {
     assert.equal(fs.existsSync(sessionKeyPath(env.config, session.id)), false);
   });
 
+  it('tells its listeners before a container is stopped or removed (voice feedback US-012)', async () => {
+    const session = env.session();
+    const started = await orchestrator.start(session);
+    const seen: { sessionId: string; running: boolean | undefined }[] = [];
+    orchestrator.onStopping((sessionId) => {
+      seen.push({ sessionId, running: daemon.container(started.id)?.running });
+      return Promise.resolve();
+    });
+    orchestrator.onStopping(() => Promise.reject(new Error('a failing listener holds nothing up')));
+
+    await orchestrator.stop(session.id);
+    assert.deepEqual(seen, [{ sessionId: session.id, running: true }]);
+    assert.equal(daemon.container(started.id)?.running, false);
+
+    await orchestrator.remove(session.id);
+    assert.equal(seen.length, 2);
+    assert.equal(daemon.container(started.id), undefined);
+  });
+
   it('removing a session with no container is not an error', async () => {
     const session = env.session();
     await orchestrator.remove(session.id);

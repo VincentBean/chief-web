@@ -169,6 +169,13 @@ export interface Session {
    * body is written once.
    */
   readonly prDescription: string | null;
+  /**
+   * The feedback this session was started from (voice feedback US-001): what
+   * the operator said or typed about the running app, kept on the session so
+   * planning, a resume in the terminal and the session page can all read it.
+   * Null for every session that was not started from feedback.
+   */
+  readonly feedback: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -186,6 +193,8 @@ export interface CreateSessionInput {
   readonly codeReview?: boolean;
   /** Set only by the scheduler when firing a recurring task (US-001). */
   readonly recurringTaskId?: string | null;
+  /** The feedback the session was started from; defaults to null. */
+  readonly feedback?: string | null;
 }
 
 export interface UpdateSessionInput {
@@ -203,6 +212,7 @@ export interface UpdateSessionInput {
   readonly codeReview?: boolean;
   readonly recurringTaskId?: string | null;
   readonly prDescription?: string | null;
+  readonly feedback?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -225,6 +235,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   codeReview: 'code_review',
   recurringTaskId: 'recurring_task_id',
   prDescription: 'pr_description',
+  feedback: 'feedback',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -275,6 +286,7 @@ export function mapSession(row: Row): Session {
     codeReview: integer(row, 'code_review') === 1,
     recurringTaskId: nullableText(row, 'recurring_task_id'),
     prDescription: nullableText(row, 'pr_description'),
+    feedback: nullableText(row, 'feedback'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -301,6 +313,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     codeReview: input.codeReview ?? false,
     recurringTaskId: input.recurringTaskId ?? null,
     prDescription: null,
+    feedback: input.feedback ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -309,8 +322,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     `INSERT INTO sessions
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
-        waiting_until, code_review, recurring_task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        waiting_until, code_review, recurring_task_id, feedback, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -327,6 +340,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.waitingUntil,
     sqlBoolean(session.codeReview),
     session.recurringTaskId,
+    session.feedback,
     session.createdAt,
     session.updatedAt,
   );

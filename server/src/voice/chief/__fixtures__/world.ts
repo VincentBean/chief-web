@@ -234,6 +234,7 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
           baseBranch: request.baseBranch ?? 'main',
           prTargetBranch: request.prTargetBranch,
           status: 'pending',
+          feedback: request.feedback ?? null,
         });
         return new Promise<SessionSetupView>(() => undefined);
       },

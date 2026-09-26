@@ -154,6 +154,8 @@ export interface Config {
   readonly voiceChiefMaxToolHops: number;
   /** A Scribe realtime socket idle for this long is closed. */
   readonly voiceScribeIdleCloseMs: number;
+  /** A session browser with no frame request and no tool call for this long is stopped (voice feedback US-012). */
+  readonly voiceBrowserIdleMs: number;
   /** Base URL of the OpenRouter API; only tests point it elsewhere. */
   readonly openrouterApiUrl: string;
   /** Base URL of the ElevenLabs API; only tests point it elsewhere. */
@@ -304,6 +306,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     voiceMaxUtteranceMs: bounded('VOICE_MAX_UTTERANCE_MS', 60_000, 1_000, 60_000),
     voiceChiefMaxToolHops: bounded('VOICE_CHIEF_MAX_TOOL_HOPS', 6, 1, 50),
     voiceScribeIdleCloseMs: bounded('VOICE_SCRIBE_IDLE_CLOSE_MS', 20_000, 1_000, 600_000),
+    voiceBrowserIdleMs: bounded('VOICE_BROWSER_IDLE_MS', 600_000, 60_000, 86_400_000),
     openrouterApiUrl: str('OPENROUTER_API_URL', 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
     elevenlabsApiUrl: str('ELEVENLABS_API_URL', 'https://api.elevenlabs.io').replace(/\/+$/, ''),
     webRoot: path.resolve(str('WEB_ROOT', path.join(REPO_ROOT, 'web', 'dist'))),

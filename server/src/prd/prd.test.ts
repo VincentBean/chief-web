@@ -132,6 +132,51 @@ describe('prd parser', () => {
     assert.equal(parsed.stories.length, 1);
     assert.equal(parsed.stories[0]?.acceptanceCriteria.length, 1);
   });
+
+  it('accepts a ## Feedback section before the first story without making it one', () => {
+    const parsed = parsePrd(
+      [
+        '# PRD: Fix billing',
+        '',
+        '## Introduction',
+        '',
+        'The plan switcher resets the price.',
+        '',
+        '## Feedback',
+        '',
+        '> The billing page shows €0,00 after I change the plan.',
+        '',
+        '**Pages visited:** /settings/billing',
+        '',
+        '**Reproduction steps:**',
+        '1. Open /settings/billing',
+        '2. Switch to the yearly plan',
+        '- [ ] a stray checkbox in the observations',
+        '',
+        '**Observed:** the total reads €0,00.',
+        '',
+        '## User Stories',
+        '',
+        '### US-001: Keep the price when switching plans',
+        '**Status:** todo',
+        '**Priority:** 1',
+        '**Description:** As an operator, I want the price to stay right.',
+        '',
+        '**Acceptance Criteria:**',
+        '- [ ] The total is recalculated',
+        '',
+      ].join('\n'),
+    );
+
+    assert.deepEqual(parsed.errors, []);
+    assert.equal(parsed.project, 'Fix billing');
+    assert.equal(parsed.description, 'The plan switcher resets the price.');
+    assert.deepEqual(
+      parsed.stories.map((story) => story.id),
+      ['US-001'],
+    );
+    assert.deepEqual(parsed.stories[0]?.acceptanceCriteria, [{ text: 'The total is recalculated', done: false }]);
+  });
 });
 
 describe('prd open questions', () => {

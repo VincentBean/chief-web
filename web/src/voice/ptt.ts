@@ -96,7 +96,7 @@ export class PushToTalkRecorder {
  */
 export function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], .xterm')) return true;
+  if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], .xterm, [data-captures-keys]')) return true;
   return target instanceof HTMLElement && target.isContentEditable;
 }
 

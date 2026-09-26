@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BuildError } from '../../build/index.js';
-import { createSession } from '../../db/index.js';
+import { createRepository, createSession, getSession, listSessions } from '../../db/index.js';
 import { RetryError } from '../../recovery/index.js';
 import { SessionError } from '../../sessions/index.js';
 import type { PlanningState } from '../session-agent/planning-state.js';
 import { answerPrompt } from '../session-agent/prompt.js';
 import { prdPathFor } from '../../prd/index.js';
 import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
-import { SLUG_MAX, slugify } from './actions.js';
+import { FEEDBACK_QUOTE_MAX, feedbackSessionName, SLUG_MAX, slugify } from './actions.js';
 import { parseStartTime, speakTime } from './time.js';
 import {
   BUILD_LOG_SUMMARY_CHARS,
@@ -122,6 +122,7 @@ describe('chief read-only tools (voice US-008)', () => {
       'schedule_start',
       'show',
       'start_build',
+      'start_feedback_session',
       'stop_build',
       'stop_pr_run',
       'update_recurring_task',
@@ -411,6 +412,113 @@ describe('chief session actions (voice US-012)', () => {
     ]) {
       const { result, parked } = await ask('create_session', args);
       assert.equal(result.ok, false, JSON.stringify(args));
+      assert.equal(parked, false);
+    }
+  });
+
+  const FEEDBACK = 'The checkout total is wrong with a coupon';
+
+  it('start_feedback_session: schema, and a read-back naming the repository and quoting the feedback', async () => {
+    const tool = createChiefTools(chiefWorld().services).get('start_feedback_session');
+    assert.ok(tool);
+    const parameters = tool.definition.function.parameters as { properties: Record<string, unknown>; required: string[] };
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ['feedback', 'name', 'repository', 'targetBranch']);
+    assert.deepEqual(parameters.required, ['repository', 'feedback']);
+
+    const { result, parked } = await ask('start_feedback_session', { repository: 'shop api', feedback: `  ${FEEDBACK} ` });
+    assert.equal(parked, true);
+    assert.equal((result.data as { say: string }).say, `Start a feedback session on shop-api about "${FEEDBACK}"?`);
+  });
+
+  it('start_feedback_session: confirm creates the session with the feedback, navigates, and asks the call to hand over', async () => {
+    const handOffs: string[] = [];
+    const w = chiefWorld();
+    const { gate, sent } = testGate();
+    const tools = createChiefTools({ ...w.services, sessionAgents: { acquire: () => Promise.resolve() } });
+    const ctx = (turn: number): ToolContext => ({ ...ctxAt(gate, turn), handOffWhenReady: (id) => handOffs.push(id) });
+    await (tools.get('start_feedback_session') as ChiefTool).handler({ repository: 'shop-api', feedback: FEEDBACK }, ctx(1));
+    const confirm = sent.find((message) => message.type === 'confirm');
+    assert.ok(confirm !== undefined && confirm.type === 'confirm');
+    assert.deepEqual(handOffs, []);
+    const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctx(2));
+
+    assert.equal(ran.ok, true, ran.summary);
+    assert.deepEqual(w.state.calls, [
+      {
+        method: 'sessions.create',
+        arg: {
+          repositoryId: w.ids['shop'],
+          name: 'feedback-checkout-total-is-wrong-with-coupon',
+          baseBranch: 'develop',
+          prTargetBranch: 'main',
+          feedback: FEEDBACK,
+        },
+      },
+    ]);
+    const id = (ran.data as { id: string }).id;
+    assert.equal(getSession(w.db, id)?.feedback, FEEDBACK);
+    assert.deepEqual(ran.ui, [{ action: 'navigate', path: `/sessions/${id}` }]);
+    assert.equal(ran.summary, 'Created session: feedback-checkout-total-is-wrong-with-coupon');
+    assert.deepEqual(handOffs, [id]);
+  });
+
+  it('start_feedback_session: no handoff is promised without session agents', async () => {
+    const { ran } = await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK });
+    assert.equal(ran.ok, true);
+    assert.equal((ran.data as { handOffWhenReady: boolean }).handOffWhenReady, false);
+  });
+
+  it('start_feedback_session: cancel creates nothing', async () => {
+    const w = chiefWorld();
+    const { gate } = testGate();
+    const tools = createChiefTools(w.services);
+    await (tools.get('start_feedback_session') as ChiefTool).handler({ repository: 'shop-api', feedback: FEEDBACK }, ctxAt(gate, 1));
+    assert.ok(gate.cancel());
+    assert.deepEqual(w.state.calls, []);
+    assert.deepEqual(listSessions(w.db).filter((session) => session.feedback !== null), []);
+  });
+
+  it('start_feedback_session: an ambiguous repository asks which one, without parking anything', async () => {
+    const w = chiefWorld();
+    createRepository(w.db, { name: 'shop-web', sshUrl: 'git@github.com:acme/shop-web.git', githubSlug: 'acme/shop-web', defaultBaseBranch: 'main' });
+    const { result, parked } = await ask('start_feedback_session', { repository: 'shop', feedback: FEEDBACK }, w);
+    assert.equal(parked, false);
+    assert.equal(result.ok, false);
+    assert.equal((result.data as { error: string }).error, 'ambiguous');
+    assert.deepEqual([...(result.data as { candidates: string[] }).candidates].sort(), ['shop-api', 'shop-web']);
+  });
+
+  it('start_feedback_session: the name is feedback-<slug>, made unique; a given name and targetBranch are used', async () => {
+    assert.equal(feedbackSessionName(FEEDBACK), 'feedback-checkout-total-is-wrong-with-coupon');
+    assert.equal(feedbackSessionName('?!'), 'feedback');
+    const long = feedbackSessionName('the search results page shows duplicate products when filtering by colour and size');
+    assert.ok(long.length <= 'feedback-'.length + SLUG_MAX, long);
+
+    const w = chiefWorld();
+    await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
+    w.state.calls.length = 0;
+    const second = await roundTrip('start_feedback_session', { repository: 'shop-api', feedback: FEEDBACK }, w);
+    assert.equal(second.ran.summary, 'Created session: feedback-checkout-total-is-wrong-with-coupon-2');
+
+    const named = await roundTrip('start_feedback_session', { repository: 'chief-web', feedback: FEEDBACK, name: 'Coupon total', targetBranch: 'develop' });
+    assert.deepEqual(named.w.state.calls[0]?.arg, {
+      repositoryId: named.w.ids['web'],
+      name: 'coupon-total',
+      baseBranch: 'main',
+      prTargetBranch: 'develop',
+      feedback: FEEDBACK,
+    });
+
+    const quote = await ask('start_feedback_session', { repository: 'shop-api', feedback: 'x'.repeat(FEEDBACK_QUOTE_MAX * 2) });
+    assert.ok((quote.result.data as { say: string }).say.length < FEEDBACK_QUOTE_MAX + 60);
+    for (const args of [
+      { repository: 'shop-api', feedback: '   ' },
+      { repository: 'shop-api', feedback: FEEDBACK, targetBranch: 'staging' },
+      { repository: 'shop-api', feedback: FEEDBACK, name: 'Billing export' },
+      { repository: 'shop-api', feedback: 'x'.repeat(4001) },
+    ]) {
+      const { result, parked } = await ask('start_feedback_session', args);
+      assert.equal(result.ok, false, JSON.stringify(args).slice(0, 80));
       assert.equal(parked, false);
     }
   });

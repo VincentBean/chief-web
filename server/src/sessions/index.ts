@@ -2,6 +2,7 @@ export {
   type CreateSessionRequest,
   createSessionService,
   isCloned,
+  MAX_FEEDBACK_LENGTH,
   type ReadyResult,
   type SessionContainers,
   SessionError,

@@ -4,8 +4,8 @@
 
 A session is one feature: its own container, its own clone, its own branch. The
 [dashboard](interface.md#sessions) creates one from a repository, a name, a base branch, a PR
-target (`develop` or `main`), an optional scheduled start and a [code
-review](code-review.md) flag. The name is a slug (letters, numbers, hyphens,
+target (`develop` or `main`), an optional scheduled start, a [code
+review](code-review.md) flag and optional [feedback](#feedback-sessions). The name is a slug (letters, numbers, hyphens,
 underscores), unique per repository, and becomes both the feature branch
 **`chief/<session-name>`** and the workspace directory.
 
@@ -62,6 +62,29 @@ the same delivery. Three things are different:
 Deleting a recurring task does not delete the sessions it ran; they stay exactly
 where they are, with their branches and pull requests, and simply stop belonging
 to a task.
+
+## Feedback sessions
+
+A session can carry **feedback**: what is wrong, or could be better, in an
+application the repository already has ("the checkout total is wrong when you
+use a coupon"). It is the session's `feedback` field, up to 4000 characters
+(trimmed; blank means none), set when the session is created: by the
+**Feedback** box on the new-session form, by `feedback` in
+`POST /api/sessions`, or by chief's `start_feedback_session` on a
+[voice call](voice.md#feedback-sessions). `GET /api/sessions` and
+`GET /api/sessions/:id` return it (`null` when there is none), and the
+dashboard marks such a session with a **Feedback** badge.
+
+A feedback session is planned from the feedback instead of from "what do you
+want to build?". The [planning](#planning) prompt quotes it verbatim and asks
+the agent to find the code involved, to reproduce the problem in the browser
+when one is available, and to write a `## Feedback` section into `prd.md`: the
+feedback, the pages involved as paths, and, when the browser was used, the
+steps to reproduce it with what was expected and what was observed, plus links
+to screenshots in `.chief/prds/<session-name>/screenshots/`. That section is
+not a story, so [Mark ready](#marking-a-session-ready) ignores it; the
+[build loop](build-loop.md) tells every iteration to read it. Past planning, a
+feedback session is an ordinary session.
 
 ## Session states
 

@@ -1,5 +1,7 @@
 import { listRepositories, listSessions, PR_TARGET_BRANCHES, type PrTargetBranch } from '../../db/index.js';
 import { logger } from '../../lib/logger.js';
+import { uniqueFixSessionName } from '../../sentry/index.js';
+import { type CreateSessionRequest, MAX_FEEDBACK_LENGTH } from '../../sessions/index.js';
 import { getVoiceSettings } from '../../settings/index.js';
 import type { UiAction } from '../protocol.js';
 import { confirmable, type PreparedAction } from './confirm.js';
@@ -20,7 +22,8 @@ import {
 } from './tools.js';
 
 /**
- * Chief's session actions (voice US-012): create a session, start and stop
+ * Chief's session actions (voice US-012): create a session (or a feedback
+ * session, voice feedback US-003), start and stop
  * its build, mark it ready or send it back to planning, schedule its start and
  * retry it. Every one of them is `confirmable`: `prepare` resolves the spoken
  * names, parses the time and words the prompt the operator answers; `execute`
@@ -110,6 +113,55 @@ function prepared(prompt: string, args: Readonly<Record<string, unknown>>): Prep
   return { prompt, args };
 }
 
+/** How much of the feedback the read-back quotes; the stored feedback is never cut. */
+export const FEEDBACK_QUOTE_MAX = 160;
+
+/** `feedback-<slug of its first words>`, or plain `feedback` when they make no slug. */
+export function feedbackSessionName(feedback: string): string {
+  const slug = slugify(feedback);
+  return slug === '' ? 'feedback' : `feedback-${slug}`;
+}
+
+function quoted(feedback: string): string {
+  const flat = feedback.replace(/\s+/g, ' ');
+  return flat.length <= FEEDBACK_QUOTE_MAX ? flat : `${flat.slice(0, FEEDBACK_QUOTE_MAX - 1).trimEnd()}…`;
+}
+
+/**
+ * Creates the session and returns once the row is written: the clone carries
+ * on, and its outcome is the `session.setup` event's to report (US-015).
+ */
+async function createInBackground(
+  services: ChiefServices,
+  request: CreateSessionRequest,
+  repository: unknown,
+): Promise<ToolResult & { readonly sessionId?: string }> {
+  const { name, repositoryId } = request;
+  const creating = services.sessions.create(request);
+  // The row is written, or the request refused, before `create` reaches the
+  // clone; one macrotask later a refusal has settled.
+  const early = await Promise.race([
+    creating.then(
+      () => ({ kind: 'done' as const }),
+      (cause: unknown) => ({ kind: 'refused' as const, cause }),
+    ),
+    new Promise<{ kind: 'pending' }>((resolve) => setImmediate(() => resolve({ kind: 'pending' }))),
+  ]);
+  if (early.kind === 'refused') return serviceFailure(early.cause, `Could not create ${name}`);
+  creating.catch((cause: unknown) => logger.warn('session setup failed after chief created it', { name, error: String(cause) }));
+  const session = listSessions(services.db, { repositoryId }).find((entry) => entry.name === name);
+  if (session === undefined) {
+    return { ok: false, data: { error: 'not_created', name }, summary: `Could not create ${name}` };
+  }
+  return {
+    ok: true,
+    data: { id: session.id, name: session.name, repository, status: session.status, setup: 'running' },
+    summary: `Created session: ${session.name}`,
+    ui: [{ action: 'navigate', path: sessionPath(session.id) }],
+    sessionId: session.id,
+  };
+}
+
 /** The session actions over `services`. */
 export function sessionActionTools(services: ChiefServices): ChiefTool[] {
   const { db } = services;
@@ -168,39 +220,101 @@ export function sessionActionTools(services: ChiefServices): ChiefTool[] {
           }),
         execute: (args) =>
           guarded(`Could not create ${String(args['name'])}`, async () => {
-            const repositoryId = args['repositoryId'] as string;
-            const name = args['name'] as string;
             const codeReview = args['codeReview'];
-            const creating = services.sessions.create({
-              repositoryId,
-              name,
-              baseBranch: args['baseBranch'] as string,
-              prTargetBranch: args['prTargetBranch'] as PrTargetBranch,
-              ...(typeof codeReview === 'boolean' ? { codeReview } : {}),
-            });
-            // The row is written, or the request refused, before `create`
-            // reaches the clone; one macrotask later a refusal has settled.
-            // Setup carries on without us: its outcome is the `session.setup`
-            // event's to report (US-015), so only a log line waits for it.
-            const early = await Promise.race([
-              creating.then(
-                () => ({ kind: 'done' as const }),
-                (cause: unknown) => ({ kind: 'refused' as const, cause }),
-              ),
-              new Promise<{ kind: 'pending' }>((resolve) => setImmediate(() => resolve({ kind: 'pending' }))),
-            ]);
-            if (early.kind === 'refused') return serviceFailure(early.cause, `Could not create ${name}`);
-            creating.catch((cause: unknown) => logger.warn('session setup failed after chief created it', { name, error: String(cause) }));
-            const session = listSessions(db, { repositoryId }).find((entry) => entry.name === name);
-            if (session === undefined) {
-              return { ok: false, data: { error: 'not_created', name }, summary: `Could not create ${name}` };
+            const { sessionId: _id, ...result } = await createInBackground(
+              services,
+              {
+                repositoryId: args['repositoryId'] as string,
+                name: args['name'] as string,
+                baseBranch: args['baseBranch'] as string,
+                prTargetBranch: args['prTargetBranch'] as PrTargetBranch,
+                ...(typeof codeReview === 'boolean' ? { codeReview } : {}),
+              },
+              args['repository'],
+            );
+            return result;
+          }),
+      },
+    ),
+
+    confirmable(
+      'start_feedback_session',
+      'Start a session about feedback on an existing application: something wrong or wanted in what is already there. ' +
+        "Pass the operator's words as feedback, verbatim. Once the clone is done the call goes to the session's agent " +
+        'on its own, which starts from the feedback.',
+      {
+        repository: { type: 'string', description: 'Repository id or spoken name' },
+        feedback: { type: 'string', description: "The operator's feedback, word for word" },
+        name: { type: 'string', description: 'Only when the operator names the session; otherwise it is named after the feedback' },
+        targetBranch: { type: 'string', enum: [...PR_TARGET_BRANCHES], description: 'Branch the pull request targets; default main' },
+      },
+      ['repository', 'feedback'],
+      {
+        prepare: (args) =>
+          guarded('Could not start the feedback session', () => {
+            const repoQuery = stringArg(args, 'repository');
+            if (repoQuery === null) return missing('repository');
+            const feedback = stringArg(args, 'feedback')?.trim() ?? null;
+            if (feedback === null) return missing('feedback');
+            if (feedback.length > MAX_FEEDBACK_LENGTH) {
+              return {
+                ok: false,
+                data: { error: 'feedback_too_long', max: MAX_FEEDBACK_LENGTH },
+                summary: `The feedback is longer than ${String(MAX_FEEDBACK_LENGTH)} characters`,
+              };
             }
-            return {
-              ok: true,
-              data: { id: session.id, name: session.name, repository: args['repository'], status: session.status, setup: 'running' },
-              summary: `Created session: ${session.name}`,
-              ui: open(session.id),
-            };
+            const resolution = resolveName(repoQuery, listRepositories(db));
+            if (resolution.kind !== 'one') return unresolved('repository', repoQuery, resolution);
+            const repository = resolution.item;
+            const target = stringArg(args, 'targetBranch') ?? 'main';
+            if (!(PR_TARGET_BRANCHES as readonly string[]).includes(target)) {
+              return { ok: false, data: { error: 'invalid_pr_target', allowed: PR_TARGET_BRANCHES }, summary: `No PR target ${target}` };
+            }
+            const taken = new Set(listSessions(db, { repositoryId: repository.id }).map((session) => session.name));
+            const spoken = stringArg(args, 'name');
+            let name: string;
+            if (spoken === null) {
+              // A name nobody said is never refused: the next free `-2`, `-3`, …
+              name = uniqueFixSessionName(feedbackSessionName(feedback), taken);
+            } else {
+              name = slugify(spoken);
+              if (name === '') {
+                return { ok: false, data: { error: 'invalid_name', name: spoken }, summary: `"${spoken}" makes no usable session name` };
+              }
+              if (taken.has(name)) {
+                return {
+                  ok: false,
+                  data: { error: 'session_name_taken', name },
+                  summary: `"${repository.name}" already has a session named "${name}"`,
+                };
+              }
+            }
+            return prepared(`Start a feedback session on ${repository.name} about "${quoted(feedback)}"?`, {
+              repositoryId: repository.id,
+              repository: repository.name,
+              name,
+              baseBranch: repository.defaultBaseBranch,
+              prTargetBranch: target,
+              feedback,
+            });
+          }),
+        execute: (args, ctx) =>
+          guarded(`Could not create ${String(args['name'])}`, async () => {
+            const { sessionId, ...result } = await createInBackground(
+              services,
+              {
+                repositoryId: args['repositoryId'] as string,
+                name: args['name'] as string,
+                baseBranch: args['baseBranch'] as string,
+                prTargetBranch: args['prTargetBranch'] as PrTargetBranch,
+                feedback: args['feedback'] as string,
+              },
+              args['repository'],
+            );
+            // Without session agents a focus switch would only reach chief again.
+            const handOff = sessionId !== undefined && services.sessionAgents !== undefined && ctx.handOffWhenReady !== undefined;
+            if (handOff) ctx.handOffWhenReady?.(sessionId);
+            return sessionId === undefined ? result : { ...result, data: { ...(result.data as object), handOffWhenReady: handOff } };
           }),
       },
     ),
