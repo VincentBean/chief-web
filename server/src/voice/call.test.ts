@@ -43,7 +43,7 @@ import {
 import type { ChiefServices } from './chief/tools.js';
 import type { AgentEvent, CallClock, CallEarcons, CallStt, CallTts, VoiceAgent } from './call.js';
 import { EVENT_QUIET_MS, IDLE_GOODBYE } from './call.js';
-import { VoiceEventBus } from './events.js';
+import { draftedLine, type VoiceBusEvent, VoiceEventBus } from './events.js';
 import { createVoice, type Voice } from './index.js';
 import {
   decodeFrame,
@@ -1119,6 +1119,69 @@ describe('a scripted call end to end (US-027)', () => {
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
     assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Heard you. What next?');
     assert.ok(sessionStdin(sessionId).some((text) => text.includes('carry on')));
+    await s.hangUp();
+  });
+
+  it('a detached turn that ends is announced at the next quiet moment, once, in the call language (US-008)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    const seen: VoiceBusEvent[] = [];
+    s.events.subscribe((event) => {
+      if (event.kind === 'planning.drafted' || event.kind === 'prd.valid') seen.push(event);
+    });
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('Werk het maar uit.');
+    await s.agents().detachedTurnEnded(sessionId);
+    await waitFor(() => seen.length > 0);
+    const event = seen[0];
+    assert.equal(event?.kind, 'planning.drafted');
+    assert.equal(event.ok, true);
+    assert.equal(event.reason, 'ok');
+    assert.equal(event.sessionId, sessionId);
+    assert.equal(event.name, 'onboarding-copy');
+    const line = draftedLine('nl', event);
+    await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text === draftedLine('en', event)));
+
+    // The PRD also became valid in the same stretch: said once, by the fixed line.
+    s.events.publish({ kind: 'prd.valid', sessionId, name: 'onboarding-copy', stories: event.stories });
+    const done = s.client.messages('agent.done').length;
+    const requests = openrouter.requests.length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    await flush();
+    assert.equal(s.client.messages('agent.done').length, done + 1);
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), line);
+    await s.hangUp();
+  });
+
+  it('a finished draft of another session is spoken while a session agent has the focus (US-008)', async () => {
+    const s = await scriptedCall();
+    const sessionId = s.chief.ids['onboarding'] ?? '';
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je aan onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    const done = s.client.messages('agent.done').length;
+    s.events.publish({
+      kind: 'planning.drafted',
+      sessionId: 'another-session',
+      name: 'csv-export',
+      repository: 'shop-api',
+      stories: 5,
+      openQuestions: 4,
+      ok: true,
+      reason: 'ok',
+    });
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    assert.equal(spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'Je sessie csv-export op shop-api is klaar met 4 open vragen.');
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
     await s.hangUp();
   });
 

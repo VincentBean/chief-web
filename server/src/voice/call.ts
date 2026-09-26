@@ -16,7 +16,7 @@ import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index
 import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
-import { describeEvent, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
+import { describeEvent, draftedLine, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
 import { matchCallIntent, matchConfirmIntent } from './intents.js';
 import {
   type AgentKind,
@@ -900,6 +900,8 @@ export class VoiceCall {
     clicked?: AgentInput['resolution'],
     /** `event`: background events for chief; `greeting`: a session agent's opening, with no utterance. */
     mode: 'user' | 'event' | 'greeting' = 'user',
+    /** An `event` turn the call answers with this fixed line instead of chief's model. */
+    line?: string,
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
@@ -918,7 +920,7 @@ export class VoiceCall {
     if (signal.aborted) cut();
     else signal.addEventListener('abort', cut, { once: true });
     try {
-      await this.answer(text, turn, controller, times, clicked, mode);
+      await this.answer(text, turn, controller, times, clicked, mode, line);
     } finally {
       signal.removeEventListener('abort', cut);
     }
@@ -931,6 +933,7 @@ export class VoiceCall {
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
     clicked: AgentInput['resolution'],
     mode: 'user' | 'event' | 'greeting',
+    line?: string,
   ): Promise<void> {
     const { signal } = controller;
     const tts = this.tts;
@@ -952,6 +955,10 @@ export class VoiceCall {
       });
     }
     this.noteTimes(turn, { speechEnd: times.tSpeechEnd ?? null, transcript: times.tTranscript ?? null });
+    if (line !== undefined) {
+      await this.sayLine(tts, turn, line, signal);
+      return;
+    }
 
     // The operator spoke first: the session agent answers that, not a greeting.
     if (mode === 'user') this.greetPending = null;
@@ -1411,6 +1418,8 @@ export class VoiceCall {
    * whatever happens next. Chief speaks it only if `voice_event_verbosity`
    * allows the kind and, while a session agent has the focus, only if it is
    * about that session; then it waits in `state.queue` for a quiet moment.
+   * A finished draft (`planning.drafted`, US-008) is the exception: it is
+   * spoken whatever the focus, as a fixed line the call says itself.
    */
   postEvent(event: VoiceBusEvent): void {
     if (this.ended || !this.persisted) return;
@@ -1422,16 +1431,21 @@ export class VoiceCall {
     const planned = event.kind === 'prd.valid' && this.agents.has(`session:${event.sessionId}`);
     if (planned) this.send({ type: 'ui', action: 'highlight', target: 'prd' });
     if (!isAnnounced(event.kind, settings.eventVerbosity) && !(planned && settings.eventVerbosity !== 'none')) return;
-    const queued: VoiceEvent = { kind: event.kind, text, sessionId: eventSessionId(event) };
+    const queued: VoiceEvent = {
+      kind: event.kind,
+      text,
+      sessionId: eventSessionId(event),
+      ...(event.kind === 'planning.drafted' ? { line: draftedLine(settings.language, event) } : {}),
+    };
     if (!this.concerns(queued)) return;
     this.state.queue.push(queued);
     this.scheduleDrain();
   }
 
-  /** Chief speaks about anything; a focused session agent's call only hears its own session. */
+  /** Chief speaks about anything; a focused session agent's call only hears its own session, and every finished draft. */
   private concerns(event: VoiceEvent): boolean {
     const focus = this.state.focus;
-    return focus.kind === 'chief' || event.sessionId === focus.sessionId;
+    return focus.kind === 'chief' || event.kind === 'planning.drafted' || event.sessionId === focus.sessionId;
   }
 
   private markActivity(): void {
@@ -1475,10 +1489,22 @@ export class VoiceCall {
       return;
     }
     // The focus may have moved since the events were queued.
-    const events = this.state.queue.splice(0).filter((event) => this.concerns(event));
+    const queued = this.state.queue.splice(0).filter((event) => this.concerns(event));
+    // A finished draft already says what a `prd.valid` for its session would.
+    const drafted = new Set(queued.flatMap((event) => (event.kind === 'planning.drafted' ? [event.sessionId] : [])));
+    const events = queued.filter((event) => !(event.kind === 'prd.valid' && drafted.has(event.sessionId)));
     if (events.length === 0) return;
-    const text = events.map((event) => `[event] ${event.text}`).join('\n');
-    void this.enqueue((controller) => this.runTurn(text, controller, {}, undefined, 'event'));
+    const lines = events.filter((event) => event.line !== undefined);
+    const rest = events.filter((event) => event.line === undefined);
+    const asEvents = (list: VoiceEvent[]): string => list.map((event) => `[event] ${event.text}`).join('\n');
+    // One piece of work: a second `enqueue` would supersede the first.
+    void this.enqueue(async (controller) => {
+      if (lines.length > 0) {
+        const line = lines.map((event) => event.line).join(' ');
+        await this.runTurn(asEvents(lines), controller, {}, undefined, 'event', line);
+      }
+      if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, undefined, 'event');
+    });
   }
 
   /* ---------------------------------------------------------------- idle */

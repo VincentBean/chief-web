@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import type { Config } from '../config.js';
-import { type Database, getSession } from '../db/index.js';
+import { type Database, getRepository, getSession } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { prdPathFor } from '../prd/index.js';
 import {
@@ -33,7 +33,7 @@ import type { VoiceEventBus } from './events.js';
 import { SessionVoiceAgent } from './session-agent/agent.js';
 import { PlanningStates } from './session-agent/planning-state.js';
 import { detachPrompt } from './session-agent/prompt.js';
-import type { SessionAgentRegistry } from './session-agent/registry.js';
+import type { DetachedTurnOutcome, SessionAgentRegistry } from './session-agent/registry.js';
 import {
   type CallFocus,
   encodeFrame,
@@ -313,7 +313,8 @@ export class VoiceService {
   /**
    * The call left a session it had briefed (US-005): a planning session goes
    * on alone with the detach prompt, unless its PRD is already complete or it
-   * is drafting still. Fire and forget; the detached turn records itself.
+   * is drafting still. Fire and forget; the detached turn records itself, and
+   * its end is published as `planning.drafted` (US-008).
    */
   private detach(sessionId: string): void {
     const registry = this.deps.sessionAgents;
@@ -323,11 +324,41 @@ export class VoiceService {
       if (state === null || state.state === 'done' || state.state === 'drafting') return;
       const session = getSession(this.db, sessionId);
       if (session === null) return;
-      registry.runDetached(sessionId, detachPrompt(prdPathFor(session.name))).catch((cause: unknown) => {
-        logger.warn('detached session agent turn failed', { session: sessionId, error: String(cause) });
-      });
+      registry.runDetached(sessionId, detachPrompt(prdPathFor(session.name))).then(
+        (result) => {
+          this.drafted(sessionId, result.reason);
+        },
+        (cause: unknown) => {
+          logger.warn('detached session agent turn failed', { session: sessionId, error: String(cause) });
+          this.drafted(sessionId, 'error');
+        },
+      );
     } catch (cause) {
       logger.warn('could not detach the session agent', { session: sessionId, error: String(cause) });
+    }
+  }
+
+  /** A detached turn ended: `planning.drafted` with what `prd.md` holds now. */
+  private drafted(sessionId: string, reason: DetachedTurnOutcome): void {
+    const registry = this.deps.sessionAgents;
+    const events = this.deps.events;
+    if (registry === undefined || events === undefined) return;
+    try {
+      const session = getSession(this.db, sessionId);
+      if (session === null) return;
+      const state = new PlanningStates({ db: this.db, config: this.config, registry }).planningState(sessionId);
+      events.publish({
+        kind: 'planning.drafted',
+        sessionId,
+        name: session.name,
+        repository: state?.repositoryName ?? getRepository(this.db, session.repositoryId)?.name ?? session.repositoryId,
+        stories: state?.stories ?? 0,
+        openQuestions: state?.openQuestions.length ?? 0,
+        ok: reason === 'ok',
+        reason,
+      });
+    } catch (cause) {
+      logger.warn('could not announce the drafted session', { session: sessionId, error: String(cause) });
     }
   }
 

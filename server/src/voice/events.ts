@@ -39,6 +39,18 @@ export type VoiceBusEvent =
       readonly adopted: boolean;
     }
   | { readonly kind: 'prd.valid'; readonly sessionId: string; readonly name: string; readonly stories: number }
+  | {
+      /** A detached planning turn ended (US-008): the draft is there, or the agent gave up on it. */
+      readonly kind: 'planning.drafted';
+      readonly sessionId: string;
+      readonly name: string;
+      readonly repository: string;
+      readonly stories: number;
+      readonly openQuestions: number;
+      /** False when the turn ended in `error`, `timeout` or `stopped`. */
+      readonly ok: boolean;
+      readonly reason: 'ok' | 'error' | 'timeout' | 'stopped';
+    }
   | { readonly kind: 'limits.hold'; readonly until: string }
   | {
       readonly kind: 'pr.run_finished' | 'pr.review_finished' | 'pr.conflict_fixed';
@@ -95,6 +107,7 @@ export const EVENT_TIERS: Readonly<Record<VoiceEventKind, 'important' | 'all'>> 
   'pr.run_finished': 'important',
   'pr.conflict_fixed': 'important',
   'limits.hold': 'important',
+  'planning.drafted': 'important',
   'build.story_done': 'all',
   'build.waiting': 'all',
   'task.fired': 'all',
@@ -134,6 +147,8 @@ export function describeEvent(event: VoiceBusEvent, timeZone?: string): string {
         : `Pull request ${String(event.number)} is open for ${event.name}.`;
     case 'prd.valid':
       return `The PRD for ${event.name} has ${String(event.stories)} ${event.stories === 1 ? 'story' : 'stories'} and parses cleanly.`;
+    case 'planning.drafted':
+      return draftedLine('en', event);
     case 'limits.hold':
       return `Claude hit its usage limit; builds resume at ${clockTime(event.until, timeZone)}.`;
     case 'pr.run_finished':
@@ -153,11 +168,35 @@ export function describeEvent(event: VoiceBusEvent, timeZone?: string): string {
   }
 }
 
+/**
+ * What the call itself says about a finished draft (US-008), in its language;
+ * a fixed line, not one chief's model words.
+ */
+export function draftedLine(language: string, event: Extract<VoiceBusEvent, { kind: 'planning.drafted' }>): string {
+  const nl = language === 'nl';
+  const { name, repository, stories, openQuestions: questions } = event;
+  if (!event.ok) {
+    return nl
+      ? `Je sessie ${name} op ${repository} is gestopt voordat het concept af was.`
+      : `Your session ${name} on ${repository} stopped before finishing its draft.`;
+  }
+  if (questions > 0) {
+    return nl
+      ? `Je sessie ${name} op ${repository} is klaar met ${String(questions)} ${questions === 1 ? 'open vraag' : 'open vragen'}.`
+      : `Your session ${name} on ${repository} has finished with ${String(questions)} open ${questions === 1 ? 'question' : 'questions'}.`;
+  }
+  return nl
+    ? `Je sessie ${name} op ${repository} is klaar: ${String(stories)} ${stories === 1 ? 'story' : 'stories'} en geen open vragen.`
+    : `Your session ${name} on ${repository} is done: ${String(stories)} ${stories === 1 ? 'story' : 'stories'} and no open questions.`;
+}
+
 /** A background event waiting in the call for a quiet moment (docs/voice-plan.md §5 `queue`). */
 export interface VoiceEvent {
   readonly kind: VoiceEventKind;
   readonly text: string;
   readonly sessionId: string | null;
+  /** A line the call speaks itself instead of handing the event to chief (`planning.drafted`). */
+  readonly line?: string;
 }
 
 /**

@@ -7,7 +7,7 @@ import { type AgentEvent, type AgentInput, type CallClock, type CallTts, EVENT_Q
 import { chiefWorld, NOW } from './chief/__fixtures__/world.js';
 import { type ScriptedOpenRouter, startScriptedOpenRouter, textReply } from './chief/__fixtures__/scripted-openrouter.js';
 import { ChiefAgent } from './chief/agent.js';
-import { describeEvent, isAnnounced, type VoiceBusEvent, VoiceEventBus } from './events.js';
+import { describeEvent, draftedLine, EVENT_TIERS, isAnnounced, type VoiceBusEvent, VoiceEventBus } from './events.js';
 import type { AgentKind, CallFocus, ServerMessage } from './protocol.js';
 import type { SpeakCallbacks, SpeakResult } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
@@ -319,6 +319,139 @@ describe('background events in a call (voice US-015)', () => {
     t.clock.advance(EVENT_QUIET_MS);
     await t.settled(1);
     assert.equal(t.chief.inputs.length, 1);
+    await t.call.end('hangup');
+  });
+});
+
+const drafted = (over: Partial<Extract<VoiceBusEvent, { kind: 'planning.drafted' }>> = {}): Extract<VoiceBusEvent, { kind: 'planning.drafted' }> => ({
+  kind: 'planning.drafted',
+  sessionId: 's-csv',
+  name: 'csv-export',
+  repository: 'shop-api',
+  stories: 6,
+  openQuestions: 4,
+  ok: true,
+  reason: 'ok',
+  ...over,
+});
+
+describe('finished drafts (US-008)', () => {
+  const failed = drafted({ ok: false, reason: 'timeout' });
+  const complete = drafted({ openQuestions: 0 });
+
+  it('is important, and has one line per outcome in English and Dutch', () => {
+    assert.equal(EVENT_TIERS['planning.drafted'], 'important');
+    assert.equal(draftedLine('en', drafted()), 'Your session csv-export on shop-api has finished with 4 open questions.');
+    assert.equal(draftedLine('en', complete), 'Your session csv-export on shop-api is done: 6 stories and no open questions.');
+    assert.equal(draftedLine('en', failed), 'Your session csv-export on shop-api stopped before finishing its draft.');
+    for (const reason of ['error', 'stopped'] as const) {
+      assert.equal(draftedLine('en', drafted({ ok: false, reason })), 'Your session csv-export on shop-api stopped before finishing its draft.');
+    }
+    assert.equal(draftedLine('nl', drafted()), 'Je sessie csv-export op shop-api is klaar met 4 open vragen.');
+    assert.equal(draftedLine('nl', complete), 'Je sessie csv-export op shop-api is klaar: 6 stories en geen open vragen.');
+    assert.equal(draftedLine('nl', failed), 'Je sessie csv-export op shop-api is gestopt voordat het concept af was.');
+    assert.equal(describeEvent(drafted()), draftedLine('en', drafted()));
+  });
+
+  it('is spoken as a fixed line under chief focus, not through the model', async () => {
+    const t = await liveCall();
+    setSetting(t.w.db, 'voice_language', 'en');
+    t.call.postEvent(drafted());
+    assert.deepEqual(t.toasts(), ['Your session csv-export on shop-api has finished with 4 open questions.']);
+    t.clock.advance(EVENT_QUIET_MS - 1);
+    await t.flush();
+    assert.equal(t.dones(), 0);
+
+    t.clock.advance(1);
+    await t.settled(1);
+    assert.deepEqual(t.chief.inputs, []);
+    const deltas = t.sent.filter((m) => m.type === 'agent.delta');
+    assert.deepEqual(deltas.map((m) => [m.agent, m.text]), [['chief', 'Your session csv-export on shop-api has finished with 4 open questions.']]);
+    assert.deepEqual(listVoiceTurns(t.w.db, 'call-1').map((row) => [row.speaker, row.text]), [
+      ['event', '[event] Your session csv-export on shop-api has finished with 4 open questions.'],
+      ['chief', 'Your session csv-export on shop-api has finished with 4 open questions.'],
+    ]);
+    await t.call.end('hangup');
+  });
+
+  it('speaks in the call language', async () => {
+    const t = await liveCall();
+    setSetting(t.w.db, 'voice_language', 'nl');
+    t.call.postEvent(complete);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(1);
+    const deltas = t.sent.filter((m) => m.type === 'agent.delta');
+    assert.deepEqual(deltas.map((m) => m.text), ['Je sessie csv-export op shop-api is klaar: 6 stories en geen open vragen.']);
+    await t.call.end('hangup');
+  });
+
+  it('is spoken under the focus of another session, which keeps the focus', async () => {
+    const focus: CallFocus = { kind: 'session', sessionId: 's-billing' };
+    const t = await liveCall(focus);
+    setSetting(t.w.db, 'voice_language', 'en');
+    t.call.postEvent(failed);
+    t.call.postEvent(buildFailed);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(1);
+    await t.flush();
+    const deltas = t.sent.filter((m) => m.type === 'agent.delta');
+    assert.deepEqual(deltas.map((m) => [m.agent, m.text]), [['chief', 'Your session csv-export on shop-api stopped before finishing its draft.']]);
+    assert.deepEqual(t.chief.inputs, [], 'the other session\'s build failure is still not spoken');
+    assert.deepEqual(t.session.inputs, []);
+    assert.deepEqual(t.call.focus, focus);
+    assert.equal(t.dones(), 1);
+    await t.call.end('hangup');
+  });
+
+  it('never cuts into a spoken turn, and goes out at the first quiet moment after it', async () => {
+    const focus: CallFocus = { kind: 'session', sessionId: 's-billing' };
+    const t = await liveCall(focus);
+    setSetting(t.w.db, 'voice_language', 'en');
+    const release = t.session.hold();
+    t.call.handleMessage({ type: 'text', text: 'add a column' });
+    await t.flush();
+    t.call.postEvent(drafted());
+    t.clock.advance(10_000);
+    await t.flush();
+    assert.equal(t.dones(), 0);
+
+    release();
+    await t.settled(1);
+    t.clock.advance(EVENT_QUIET_MS - 1);
+    await t.flush();
+    assert.equal(t.dones(), 1);
+    t.clock.advance(1);
+    await t.settled(2);
+    assert.equal(t.sent.filter((m) => m.type === 'agent.delta').at(-1)?.text, 'Your session csv-export on shop-api has finished with 4 open questions.');
+    await t.call.end('hangup');
+  });
+
+  it('is only toasted under voice_event_verbosity none', async () => {
+    const t = await liveCall();
+    setSetting(t.w.db, 'voice_language', 'en');
+    setSetting(t.w.db, 'voice_event_verbosity', 'none');
+    t.call.postEvent(drafted());
+    t.clock.advance(EVENT_QUIET_MS * 5);
+    await t.flush();
+    assert.equal(t.dones(), 0);
+    assert.equal(t.call.state.queue.length, 0);
+    assert.deepEqual(t.toasts(), ['Your session csv-export on shop-api has finished with 4 open questions.']);
+    await t.call.end('hangup');
+  });
+
+  it('drops a prd.valid of the same session in the same quiet moment, but not of another', async () => {
+    const t = await liveCall();
+    setSetting(t.w.db, 'voice_language', 'en');
+    setSetting(t.w.db, 'voice_event_verbosity', 'all');
+    t.call.postEvent({ kind: 'prd.valid', sessionId: 's-csv', name: 'csv-export', stories: 6 });
+    t.call.postEvent({ kind: 'prd.valid', sessionId: 's-billing', name: 'billing-export', stories: 2 });
+    t.call.postEvent(drafted());
+    assert.equal(t.toasts().length, 3);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(2);
+    assert.deepEqual(t.chief.inputs, ['[event] The PRD for billing-export has 2 stories and parses cleanly.']);
+    const lines = t.sent.filter((m) => m.type === 'agent.delta').map((m) => m.text);
+    assert.deepEqual(lines, ['Your session csv-export on shop-api has finished with 4 open questions.', 'Noted.']);
     await t.call.end('hangup');
   });
 });

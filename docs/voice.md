@@ -284,13 +284,17 @@ quiet moment (2 s of silence on both sides):
 
 - **Important** (default): a session cloned or failed to set up, a build
   finished or failed, a pull request opened, a feedback run finished, a conflict
-  fixed, Claude's usage-limit hold.
+  fixed, Claude's usage-limit hold, a planning session that finished drafting
+  on its own ("Your session csv-export on shop-api has finished with 4 open
+  questions.").
 - **All** adds: each finished story, a build waiting, a recurring task fired, a
   review finished, a PRD that just became valid.
 - **None** speaks nothing.
 
 Every event is also shown as a toast in the panel. With a session agent in
-focus, only events about that session are spoken.
+focus, only events about that session are spoken — except a finished draft,
+which is announced whoever has the focus. A PRD that became valid is not
+announced separately when its finished draft is.
 
 ## Privacy
 
