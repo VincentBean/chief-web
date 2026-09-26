@@ -1,4 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import type { FakeDockerDaemon, FakeExec } from '../../../docker/fake-daemon.js';
+
+/** A recorded turn's stdout lines (`<name>.jsonl` next to this file). */
+export function recording(name: string): string[] {
+  const file = join(dirname(fileURLToPath(import.meta.url)), `${name}.jsonl`);
+  return readFileSync(file, 'utf8').split('\n').filter((entry) => entry.trim() !== '');
+}
 
 export const CLAUDE_SESSION = 'claude-conv-1';
 
@@ -10,7 +20,8 @@ const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
 /**
  * A stream-json `claude` on the fake daemon: one scripted turn per user line,
  * shaped like the recorded fixtures. Markers in the message steer it:
- * `#crash` exits, `#read` uses a tool first, `#long` opens with a sentence
+ * `#crash` exits, `#replay:<name>` answers with the `<name>.jsonl` recording
+ * verbatim, `#read` uses a tool first, `#long` opens with a sentence
  * long enough to be spoken on its own, `#hang` never ends the turn by itself
  * and `#deaf` also ignores the interrupt request (only a signal ends it).
  */
@@ -51,6 +62,11 @@ export class FakeClaude {
         const said = ((entry['message'] as { content: { text: string }[] }).content[0] as { text: string }).text;
         if (said.includes('#crash')) {
           this.daemon.finish(exec.id, 1);
+          return;
+        }
+        const replay = /#replay:([\w-]+)/.exec(said)?.[1];
+        if (replay !== undefined) {
+          for (const recorded of recording(replay)) this.daemon.emitFramed(exec.id, `${recorded}\n`);
           return;
         }
         const id = `msg_${String(++this.message)}`;

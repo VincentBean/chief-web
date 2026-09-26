@@ -283,9 +283,7 @@ export class VoiceService {
 
   private newCall(focus: CallFocus): VoiceCall {
     const { db, config } = this;
-    this.deps.sessionAgents?.callStarted();
-    if (focus.kind === 'session') this.deps.sessionAgents?.focused(focus.sessionId);
-    return new VoiceCall(this.deps.newCallId?.() ?? randomUUID(), focus, {
+    const call = new VoiceCall(this.deps.newCallId?.() ?? randomUUID(), focus, {
       db,
       config,
       stt: this.stt,
@@ -303,6 +301,9 @@ export class VoiceService {
         this.clearResumeTimer();
       },
     });
+    this.deps.sessionAgents?.callStarted({ id: call.id, turn: () => call.state.turn });
+    if (focus.kind === 'session') this.deps.sessionAgents?.focused(focus.sessionId);
+    return call;
   }
 
   private agentFor(focus: CallFocus, call: VoiceCall): VoiceAgent {

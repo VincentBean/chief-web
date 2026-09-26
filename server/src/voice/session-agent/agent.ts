@@ -7,12 +7,11 @@ import { getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
 import type { CallFocus } from '../protocol.js';
 import type { SessionAgentEvent } from './events.js';
-import { interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
+import { INTERRUPT_GRACE_MS, interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
 import { voiceUtterance } from './prompt.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
-/** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
-export const INTERRUPT_GRACE_MS = 5_000;
+export { INTERRUPT_GRACE_MS } from './process.js';
 
 /** Said before the one restart of a call (docs/voice-plan.md §10.4). */
 export const RESTARTING: Readonly<Record<string, string>> = {
@@ -60,6 +59,14 @@ export class SessionVoiceAgent implements VoiceAgent {
     const { signal } = input;
     const utterance = voiceUtterance(input.text, this.interruptedAfter);
     this.interruptedAfter = null;
+
+    // A detached turn owns the process until it ends (it reads the same
+    // output); "one sec" covers the wait, and the utterance goes after it.
+    if (this.deps.registry.detachedState(this.deps.sessionId).running) {
+      yield { type: 'earcon', name: 'one_sec' };
+      await this.deps.registry.detachedTurnEnded(this.deps.sessionId, signal);
+      if (signal.aborted) return;
+    }
 
     for (;;) {
       if (this.process?.crashed === true) {

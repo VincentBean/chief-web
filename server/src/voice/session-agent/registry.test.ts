@@ -9,10 +9,12 @@ import {
   closeDatabase,
   createRepository,
   createSession,
+  createVoiceCall,
   type Database,
   featureBranchFor,
   getVoiceSessionAgent,
   IN_MEMORY,
+  listVoiceTurns,
   openDatabase,
   type Session,
   updateSession,
@@ -32,8 +34,9 @@ import type { CallFocus } from '../protocol.js';
 import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './agent.js';
 import { VOICE_PID_DIR, voicePidFile } from './process.js';
 import { voiceUtterance } from './prompt.js';
+import { SessionAgentEventParser } from './events.js';
 import { SessionAgentError, SessionAgentRegistry } from './registry.js';
-import { CLAUDE_SESSION, FakeClaude } from './__fixtures__/fake-claude.js';
+import { CLAUDE_SESSION, FakeClaude, recording } from './__fixtures__/fake-claude.js';
 
 /* ------------------------------------------------------------------ world */
 
@@ -113,9 +116,9 @@ describe('session voice agents', () => {
     return { ...session, status };
   };
 
-  const makeRegistry = (): SessionAgentRegistry =>
+  const makeRegistry = (overrides: Partial<Config> = {}): SessionAgentRegistry =>
     new SessionAgentRegistry({
-      config,
+      config: { ...config, ...overrides },
       db,
       docker,
       containers,
@@ -541,6 +544,138 @@ describe('session voice agents', () => {
     assert.deepEqual(registry.detachedState('s2'), { running: false, lastOutcome: null });
     registry.focused('s1');
     assert.deepEqual(registry.detachedState('s1'), { running: false, lastOutcome: null });
+  });
+
+  describe('detached turns', () => {
+    const newCall = (): { id: string; turn(): number } => {
+      const call = createVoiceCall(db, { sttProvider: 'browser', ttsProvider: 'elevenlabs' });
+      return { id: call.id, turn: () => 3 };
+    };
+    const execsOf = (session: Session): FakeExec[] => claude.agentExecs().filter((entry) => entry.containerId === `c-${session.id}`);
+
+    it('runs a turn nobody hears and stores its reply and tools as a [detached] agent row of the open call', async () => {
+      const session = newSession('draft-alone');
+      const call = newCall();
+      registry.callStarted(call);
+      const result = await registry.runDetached(session.id, '#replay:tool-use', { timeoutMs: 5_000 });
+
+      // The complete reply of the recorded turn, exactly as the parser reads it.
+      const parser = new SessionAgentEventParser();
+      const expected = recording('tool-use')
+        .flatMap((entry) => parser.line(entry))
+        .map((event) => (event.type === 'delta' ? event.text : ''))
+        .join('');
+      assert.notEqual(expected, '');
+      assert.equal(result.ok, true);
+      assert.equal(result.reason, 'ok');
+      assert.equal(result.text, expected);
+      assert.equal(typeof result.durationMs, 'number');
+      assert.deepEqual(registry.detachedState(session.id), { running: false, lastOutcome: 'ok' });
+
+      const [exec] = execsOf(session);
+      assert.ok(exec);
+      assert.deepEqual(claude.userTexts(exec.id), ['#replay:tool-use']);
+      const rows = listVoiceTurns(db, call.id);
+      assert.equal(rows.length, 1);
+      const [row] = rows;
+      assert.ok(row);
+      assert.equal(row.speaker, 'agent');
+      assert.equal(row.sessionId, session.id);
+      assert.equal(row.turn, 3);
+      assert.equal(row.text, `[detached] ${expected}`);
+      assert.deepEqual(
+        (JSON.parse(row.toolsJson ?? '[]') as { name: string; status: string }[]).map((tool) => [tool.name, tool.status]),
+        [['Read', 'ok']],
+      );
+    });
+
+    it('refuses a second detached turn for a busy session with 409 session_agent_busy, never queueing it', async () => {
+      const session = newSession('busy-drafting');
+      const first = registry.runDetached(session.id, '#hang drafting', { timeoutMs: 200 });
+      await assert.rejects(
+        registry.runDetached(session.id, 'and this too'),
+        (error: unknown) => error instanceof SessionAgentError && error.status === 409 && error.code === 'session_agent_busy',
+      );
+      assert.equal(registry.detachedState(session.id).running, true);
+      await first;
+      const [exec] = execsOf(session);
+      assert.ok(exec);
+      assert.deepEqual(claude.userTexts(exec.id), ['#hang drafting']);
+    });
+
+    it('interrupts a turn past its timeout with the interrupt request and reports timeout', async () => {
+      const session = newSession('slow-drafter');
+      const result = await registry.runDetached(session.id, '#hang forever', { timeoutMs: 50 });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'timeout');
+      assert.equal(result.text, 'Heard you. ');
+      assert.ok(result.durationMs >= 40);
+      const [exec] = execsOf(session);
+      assert.ok(exec);
+      assert.equal((claude.stdin.get(exec.id) ?? []).filter((entry) => entry['type'] === 'control_request').length, 1);
+      assert.equal(registry.isAlive(session.id), true);
+      assert.deepEqual(registry.detachedState(session.id), { running: false, lastOutcome: 'timeout' });
+    });
+
+    it('reports a crash as error and does not retry it', async () => {
+      const session = newSession('crash-drafting');
+      const result = await registry.runDetached(session.id, '#crash please');
+      assert.deepEqual({ ok: result.ok, reason: result.reason, text: result.text }, { ok: false, reason: 'error', text: '' });
+      assert.equal(execsOf(session).length, 1);
+      assert.equal(registry.detachedState(session.id).lastOutcome, 'error');
+    });
+
+    it('stores the rows against the call that started the turn once no call is open, else against the open one', async () => {
+      const registry = makeRegistry({ voiceKeepAgentsMs: 60_000 });
+      try {
+        const session = newSession('call-hopping');
+        const first = newCall();
+        registry.callStarted(first);
+        const lonely = registry.runDetached(session.id, '#hang one', { timeoutMs: 50 });
+        registry.callEnded();
+        await lonely;
+        assert.deepEqual(listVoiceTurns(db, first.id).map((row) => row.text), ['[detached] Heard you. ']);
+
+        registry.callStarted(first);
+        const moved = registry.runDetached(session.id, '#hang two', { timeoutMs: 50 });
+        registry.callEnded();
+        const second = newCall();
+        registry.callStarted(second);
+        await moved;
+        assert.equal(listVoiceTurns(db, first.id).length, 1);
+        assert.deepEqual(listVoiceTurns(db, second.id).map((row) => [row.speaker, row.text]), [['agent', '[detached] Heard you. ']]);
+      } finally {
+        await registry.stopAll();
+      }
+    });
+
+    it('makes a focused session wait for its detached turn with "one sec", then speaks the utterance after it', async () => {
+      const session = newSession('focus-while-drafting');
+      const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call: controls() });
+      await turn(agent, 'hello');
+
+      const drafting = registry.runDetached(session.id, '#hang write the PRD', { timeoutMs: 150 });
+      const events: AgentEvent[] = [];
+      let earconBeforeEnd = false;
+      for await (const event of agent.run({ text: 'how far are you', turn: 2, signal: new AbortController().signal })) {
+        if (event.type === 'earcon') earconBeforeEnd = registry.detachedState(session.id).running;
+        events.push(event);
+      }
+      const result = await drafting;
+      assert.equal(result.reason, 'timeout');
+      assert.equal(earconBeforeEnd, true);
+      assert.deepEqual(events[0], { type: 'earcon', name: 'one_sec' });
+      // Nothing of the detached turn reached the call: only this turn's reply.
+      assert.equal(spoken(events), 'Heard you. What next?');
+      assert.equal(events.some((event) => event.type === 'tool'), false);
+
+      const [exec] = execsOf(session);
+      assert.ok(exec);
+      const lines = (claude.stdin.get(exec.id) ?? []).map((entry) =>
+        entry['type'] === 'user' ? ((entry['message'] as { content: { text: string }[] }).content[0] as { text: string }).text : 'interrupt',
+      );
+      assert.deepEqual(lines.slice(1), ['#hang write the PRD', 'interrupt', '[voice] how far are you']);
+    });
   });
 
   it('describes tool uses for their cards', () => {

@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
+
 import type { Config } from '../../config.js';
 import {
   type Database,
   getRepository,
   getSession,
   getVoiceSessionAgent,
+  insertVoiceTurn,
   type Session,
   upsertVoiceSessionAgent,
   type VoiceAgentMode,
@@ -12,7 +15,15 @@ import { logger } from '../../lib/logger.js';
 import { prdPathFor, readPrdStatus } from '../../prd/index.js';
 import { isCloned, type SessionContainers, sessionPrdFile } from '../../sessions/index.js';
 import { getVoiceSettings } from '../../settings/index.js';
-import { QA_DISALLOWED_TOOLS, type SessionAgentDocker, SessionAgentProcess } from './process.js';
+import { toolCardSummary } from './agent.js';
+import {
+  INTERRUPT_GRACE_MS,
+  interruptRequestLine,
+  QA_DISALLOWED_TOOLS,
+  type SessionAgentDocker,
+  SessionAgentProcess,
+  userMessageLine,
+} from './process.js';
 import { voicePlanningPrompt, voiceQaPrompt, voiceRulesPrompt } from './prompt.js';
 
 /**
@@ -46,8 +57,27 @@ export class SessionAgentError extends Error {
   }
 }
 
-/** How a detached turn (one nobody on the call is listening to) ended. */
-export type DetachedTurnOutcome = 'ok' | 'error' | 'timeout';
+/**
+ * How a detached turn (one nobody on the call is listening to) ended:
+ * `stopped` when the process was stopped on purpose (eviction, shutdown).
+ */
+export type DetachedTurnOutcome = 'ok' | 'error' | 'timeout' | 'stopped';
+
+/** What {@link SessionAgentRegistry.runDetached} resolves with. */
+export interface DetachedTurnResult {
+  readonly ok: boolean;
+  readonly reason: DetachedTurnOutcome;
+  /** The agent's complete reply, as far as it got. */
+  readonly text: string;
+  readonly durationMs: number;
+}
+
+/** The call a detached turn's rows are stored against. */
+export interface DetachedTurnCall {
+  readonly id: string;
+  /** The call's turn in progress, for the row's `turn`. */
+  turn(): number;
+}
 
 /** What the registry knows of a session's detached turns; in memory only. */
 export interface DetachedTurnState {
@@ -57,7 +87,7 @@ export interface DetachedTurnState {
 }
 
 export interface SessionAgentRegistryDeps {
-  readonly config: Pick<Config, 'workspacesDir' | 'voiceMaxSessionAgents' | 'voiceKeepAgentsMs'>;
+  readonly config: Pick<Config, 'workspacesDir' | 'voiceMaxSessionAgents' | 'voiceKeepAgentsMs' | 'voiceDetachedTurnTimeoutMs'>;
   readonly db: Database;
   readonly docker: SessionAgentDocker;
   readonly containers: SessionContainers;
@@ -69,6 +99,8 @@ export interface SessionAgentRegistryDeps {
    */
   readonly planning?: () => { isTerminalRunning(sessionId: string): boolean } | null;
   readonly now?: () => number;
+  /** How long a timed-out detached turn may take to end after the interrupt. */
+  readonly interruptGraceMs?: number;
 }
 
 export class SessionAgentRegistry {
@@ -78,6 +110,10 @@ export class SessionAgentRegistry {
   private readonly starting = new Map<string, Promise<SessionAgentProcess>>();
   private keepTimer: NodeJS.Timeout | null = null;
   private readonly detached = new Map<string, DetachedTurnState>();
+  /** Settles when the session's running detached turn ends. */
+  private readonly detachedRuns = new Map<string, Promise<void>>();
+  /** The open call, for the rows of detached turns. */
+  private activeCall: DetachedTurnCall | null = null;
 
   constructor(private readonly deps: SessionAgentRegistryDeps) {}
 
@@ -118,6 +154,55 @@ export class SessionAgentRegistry {
     if (state === undefined) return;
     if (state.running) this.detached.set(sessionId, { running: true, lastOutcome: null });
     else this.detached.delete(sessionId);
+  }
+
+  /** Resolves once the session's detached turn (if one runs) has ended, or `signal` aborts. */
+  detachedTurnEnded(sessionId: string, signal?: AbortSignal): Promise<void> {
+    const run = this.detachedRuns.get(sessionId);
+    if (run === undefined || signal?.aborted === true) return Promise.resolve();
+    if (signal === undefined) return run;
+    return new Promise<void>((resolve) => {
+      const done = (): void => {
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      signal.addEventListener('abort', done, { once: true });
+      void run.then(done);
+    });
+  }
+
+  /**
+   * Runs one turn on the session's agent that nobody is listening to (the
+   * call is elsewhere): `message` goes in as one stream-json turn, and the
+   * reply is collected instead of spoken. Its text and tool names are stored
+   * in `voice_turns` as a `[detached] ` agent row of the open call, or of
+   * the call that started it once that one has ended. Never queued: a second
+   * one for the same session is refused with 409 while the first runs. After
+   * `timeoutMs` (`VOICE_DETACHED_TURN_TIMEOUT_MS`) the turn is interrupted;
+   * a crash is reported, not retried.
+   */
+  async runDetached(sessionId: string, message: string, options: { timeoutMs?: number } = {}): Promise<DetachedTurnResult> {
+    if (this.detachedState(sessionId).running) {
+      throw new SessionAgentError(409, 'session_agent_busy', 'The session agent is still working on its previous detached turn.');
+    }
+    this.detachedStarted(sessionId);
+    const call = this.activeCall;
+    const startedAt = this.now();
+    let settle = (): void => undefined;
+    this.detachedRuns.set(sessionId, new Promise<void>((resolve) => (settle = resolve)));
+    let outcome: DetachedTurnOutcome = 'error';
+    try {
+      const agent = await this.acquire(sessionId);
+      const turn = await this.detachedTurn(agent, message, options.timeoutMs ?? this.deps.config.voiceDetachedTurnTimeoutMs);
+      outcome = turn.reason;
+      this.storeDetached(this.activeCall ?? call, sessionId, turn.text, turn.tools);
+      logger.info('detached session agent turn ended', { session: sessionId, reason: outcome });
+      return { ok: outcome === 'ok', reason: outcome, text: turn.text, durationMs: this.now() - startedAt };
+    } finally {
+      this.detachedEnded(sessionId, outcome);
+      this.detachedRuns.delete(sessionId);
+      settle();
+    }
   }
 
   /**
@@ -199,13 +284,15 @@ export class SessionAgentRegistry {
     await Promise.all([...this.agents.keys()].map((sessionId) => this.stop(sessionId)));
   }
 
-  /** A call began: the agents it may find stay. */
-  callStarted(): void {
+  /** A call began: the agents it may find stay, and detached turns are stored against `call`. */
+  callStarted(call: DetachedTurnCall | null = null): void {
     this.clearKeepTimer();
+    this.activeCall = call;
   }
 
   /** The call ended: every agent goes after `VOICE_KEEP_AGENTS_MS`, unless a call comes back first. */
   callEnded(): void {
+    this.activeCall = null;
     this.clearKeepTimer();
     this.keepTimer = setTimeout(() => {
       this.keepTimer = null;
@@ -251,6 +338,78 @@ export class SessionAgentRegistry {
     return agent;
   }
 
+  /** Reads one detached turn to its end; a turn past `timeoutMs` is interrupted. */
+  private async detachedTurn(
+    agent: SessionAgentProcess,
+    message: string,
+    timeoutMs: number,
+  ): Promise<{ reason: DetachedTurnOutcome; text: string; tools: DetachedTool[] }> {
+    agent.discardPending();
+    agent.write(userMessageLine(message));
+    const deadline = AbortSignal.timeout(timeoutMs);
+    let text = '';
+    const tools = new Map<string, DetachedTool>();
+    const result = (reason: DetachedTurnOutcome): { reason: DetachedTurnOutcome; text: string; tools: DetachedTool[] } => ({
+      reason,
+      text,
+      tools: [...tools.values()],
+    });
+    for (;;) {
+      const event = await agent.next(deadline);
+      if (event === null) break;
+      switch (event.type) {
+        case 'turnEnd':
+          return result(event.ok ? 'ok' : 'error');
+        case 'delta':
+          text += event.text;
+          break;
+        case 'tool':
+          tools.set(event.toolUseId ?? randomUUID(), { name: event.name, status: 'running', summary: toolCardSummary(event.name, event.input) });
+          break;
+        case 'toolResult': {
+          const tool = event.toolUseId === null ? undefined : tools.get(event.toolUseId);
+          if (tool !== undefined) tool.status = event.ok ? 'ok' : 'error';
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    if (agent.exited) return result(agent.crashed ? 'error' : 'stopped');
+
+    // Past the deadline: the interrupt, then the rest of the turn dropped until its `result`.
+    logger.warn('detached session agent turn timed out', { session: agent.sessionId, timeoutMs });
+    agent.write(interruptRequestLine(randomUUID()));
+    const grace = AbortSignal.timeout(this.deps.interruptGraceMs ?? INTERRUPT_GRACE_MS);
+    for (;;) {
+      const event = await agent.next(grace);
+      if (event?.type === 'turnEnd') return result('timeout');
+      if (event === null) break;
+    }
+    if (!agent.exited) {
+      logger.warn('session voice agent ignored the interrupt', { session: agent.sessionId });
+      await this.stop(agent.sessionId, 'INT');
+    }
+    return result('timeout');
+  }
+
+  /** The `[detached] ` agent row, so Call history shows what the agent did. */
+  private storeDetached(call: DetachedTurnCall | null, sessionId: string, text: string, tools: readonly DetachedTool[]): void {
+    if (call === null) return;
+    try {
+      insertVoiceTurn(this.deps.db, {
+        callId: call.id,
+        turn: call.turn(),
+        speaker: 'agent',
+        sessionId,
+        text: `[detached] ${text}`,
+        toolsJson: tools.length === 0 ? null : JSON.stringify(tools),
+      });
+    } catch (cause) {
+      logger.warn('could not store a detached session agent turn', { session: sessionId, call: call.id, error: String(cause) });
+    }
+  }
+
   /** `init` repeats every turn; the row only changes when the conversation does. */
   private remember(sessionId: string, claudeSessionId: string, mode: VoiceAgentMode): void {
     const stored = getVoiceSessionAgent(this.deps.db, sessionId);
@@ -259,14 +418,15 @@ export class SessionAgentRegistry {
     upsertVoiceSessionAgent(this.deps.db, { sessionId, claudeSessionId, mode });
   }
 
-  /** Stops the least recently used agents (never `keep`) until the cap holds. */
+  /** Stops the least recently used agents (never `keep`, nor one mid detached turn) until the cap holds. */
   private evict(keep: string): void {
     for (const [sessionId, agent] of this.agents) {
       if (!agent.exited) continue;
       this.agents.delete(sessionId);
       this.modes.delete(sessionId);
     }
-    const others = [...this.agents.values()].filter((agent) => agent.sessionId !== keep).sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    const others = [...this.agents.values()].filter((agent) => agent.sessionId !== keep && !this.detachedState(agent.sessionId).running)
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
     while (this.agents.size > this.deps.config.voiceMaxSessionAgents) {
       const oldest = others.shift();
       if (oldest === undefined) return;
@@ -290,4 +450,11 @@ export class SessionAgentRegistry {
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
+}
+
+/** A tool a detached turn used, as `voice_turns.tools_json` stores it. */
+interface DetachedTool {
+  readonly name: string;
+  status: 'running' | 'ok' | 'error';
+  readonly summary: string;
 }

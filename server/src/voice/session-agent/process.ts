@@ -41,6 +41,9 @@ export function interruptRequestLine(requestId: string): string {
   })}\n`;
 }
 
+/** How long an interrupted turn may take to end before the process is sent SIGINT (docs/voice-plan.md §10.5). */
+export const INTERRUPT_GRACE_MS = 5_000;
+
 /* ------------------------------------------------------------- the process */
 
 /** Directory inside the session container holding the voice agents' pid files. */

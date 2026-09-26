@@ -258,7 +258,8 @@ function toEntries(turns: readonly VoiceTurn[]): HistoryLine[] {
       case 'event':
         return [{ entry: { kind: 'event', key: `e${key}`, text: eventText(turn) }, latency: null }];
       case 'chief':
-      case 'session': {
+      case 'session':
+      case 'agent': {
         const tools = turn.tools.map((tool, i): HistoryLine => ({
           entry: {
             kind: 'tool' as const,
@@ -271,7 +272,7 @@ function toEntries(turns: readonly VoiceTurn[]): HistoryLine[] {
           latency: null,
         }));
         if (turn.text === '') return tools;
-        const who = turn.speaker === 'session' ? (turn.sessionName ?? undefined) : undefined;
+        const who = turn.speaker === 'chief' ? undefined : (turn.sessionName ?? undefined);
         return [
           ...tools,
           {
@@ -279,7 +280,8 @@ function toEntries(turns: readonly VoiceTurn[]): HistoryLine[] {
               kind: 'agent' as const,
               key: `a${key}`,
               turn: turn.turn,
-              agent: turn.speaker,
+              // A detached turn is still the session's agent talking.
+              agent: turn.speaker === 'agent' ? 'session' : turn.speaker,
               ...(who === undefined ? {} : { who }),
               text: turn.text,
               interrupted: turn.interrupted,
