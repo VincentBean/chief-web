@@ -65,6 +65,7 @@ import { createSentryRouter } from './routes/sentry.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createVoice, VoiceEventBus, type VoiceServiceDeps } from './voice/index.js';
+import { PlanningStates } from './voice/session-agent/planning-state.js';
 import { SessionAgentRegistry } from './voice/session-agent/registry.js';
 import { GithubVoiceReviews } from './voice/chief/pull-requests.js';
 import { createStatsRouter } from './routes/stats.js';
@@ -505,6 +506,7 @@ export function createApp(
       recurringTasks: recurringRuns,
       planning,
       sessionAgents,
+      planningStates: new PlanningStates({ db, config, registry: sessionAgents }),
     },
     events,
     sessionAgents,

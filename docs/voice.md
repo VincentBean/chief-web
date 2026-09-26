@@ -180,7 +180,10 @@ is not that address.
 
 Chief answers most questions ("what's building?", "does anything need me?")
 from a snapshot of the sessions, queue and pull requests that it gets with every
-request, without calling a tool. Sessions, repositories and tasks can be named
+request, without calling a tool. The snapshot also lists the planning sessions
+with their state and number of open questions, so "what's still open?" or
+"welke sessies wachten op mij?" is answered with names and counts; ask what a
+session wants to know and chief reads its questions with `get_session`. Sessions, repositories and tasks can be named
 the way you say them: "billing export" finds `billing-export`, and when a name
 matches more than one, chief asks which.
 
@@ -200,8 +203,8 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 
 | Tool | What it does | Confirmed |
 | --- | --- | --- |
-| `list_sessions` | sessions, active first, filtered by status or repository | – |
-| `get_session` | one session: status, stories, build progress, PRD, pull request | – |
+| `list_sessions` | sessions, active first, filtered by status or repository; `planning` for only the planning sessions with their state | – |
+| `get_session` | one session: status, stories, build progress, PRD, pull request; a planning session's state and open questions | – |
 | `list_repositories` | the registered repositories | – |
 | `overview` | the dashboard numbers and the usage-limit hold | – |
 | `build_status` | the current story and a summary of the latest build log | – |

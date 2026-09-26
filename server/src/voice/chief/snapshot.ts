@@ -124,6 +124,7 @@ export function buildSnapshot(services: ChiefServices, input: SnapshotInput): st
     lines.push(`- ${session.name} [${repo}] ${describeSession(services, session, now, timeZone)}`);
   }
   if (sessions.length > SNAPSHOT_MAX_SESSIONS) lines.push(`- and ${sessions.length - SNAPSHOT_MAX_SESSIONS} older`);
+  lines.push(...planningSessions(services));
 
   const pool = services.builds.pool();
   const queued = pool.queue.map((entry) => entry.label);
@@ -141,6 +142,26 @@ export function buildSnapshot(services: ChiefServices, input: SnapshotInput): st
   if (focus.kind === 'chief') lines.push('FOCUS: chief');
   else lines.push(`FOCUS: ${sessions.find((session) => session.id === focus.sessionId)?.name ?? focus.sessionId}`);
   return lines.join('\n');
+}
+
+/**
+ * The planning sessions (voice multi-planning US-010): whether each is still
+ * being briefed, drafting on its own, waiting on the operator, done or stuck,
+ * and how many open questions its PRD has. Read off disk and the registry on
+ * every request, so a session left waiting in an earlier call is here from
+ * the first turn of the next one.
+ */
+function planningSessions(services: ChiefServices): string[] {
+  if (services.planningStates === undefined) return [];
+  const states = services.planningStates.listPlanningSessions();
+  if (states.length === 0) return ['PLANNING SESSIONS: none'];
+  const lines = [`PLANNING SESSIONS (latest first, max ${SNAPSHOT_MAX_SESSIONS}):`];
+  for (const state of states.slice(0, SNAPSHOT_MAX_SESSIONS)) {
+    const count = state.openQuestions.length;
+    lines.push(`- ${state.sessionName} [${state.repositoryName}] ${state.state}, ${count} open question${count === 1 ? '' : 's'}`);
+  }
+  if (states.length > SNAPSHOT_MAX_SESSIONS) lines.push(`- and ${states.length - SNAPSHOT_MAX_SESSIONS} older`);
+  return lines;
 }
 
 function needsYou(services: ChiefServices, sessions: readonly Session[]): string[] {
