@@ -274,8 +274,8 @@ export class VoiceService {
   }
 
   /**
-   * The planning terminal takes the session over (voice US-025, after the
-   * operator confirmed): a call talking to its agent goes back to chief, and
+   * The planning terminal takes the session over (voice US-025, once the
+   * operator agreed to it on the dashboard): a call talking to its agent goes back to chief, and
    * the agent stops, so the terminal can resume its conversation.
    */
   async handOverToTerminal(sessionId: string): Promise<void> {

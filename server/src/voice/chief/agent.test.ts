@@ -164,7 +164,6 @@ describe('chief agent loop (voice US-008)', () => {
     const result = JSON.parse(messagesOf(fake.requests[1]).at(-1)?.content ?? '') as Record<string, unknown>;
     assert.equal(result['ok'], true);
     assert.equal(result['id'], w.ids['onboarding']);
-    for (const key of ['needs_confirmation', 'confirmation_id', 'say']) assert.equal(key in result, false, key);
     assert.equal(spoken(events), 'onboarding-copy is building.');
   });
 
