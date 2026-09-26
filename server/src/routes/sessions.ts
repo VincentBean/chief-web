@@ -3,6 +3,7 @@ import { type Response, Router } from 'express';
 import { PR_TARGET_BRANCHES, type PrTargetBranch, SESSION_NAME_PATTERN } from '../db/index.js';
 import {
   type CreateSessionRequest,
+  MAX_FEEDBACK_LENGTH,
   SessionError,
   type SessionService,
 } from '../sessions/index.js';
@@ -15,8 +16,6 @@ interface Invalid {
 
 const MAX_SESSION_NAME_LENGTH = 60;
 const MAX_BRANCH_LENGTH = 255;
-/** The feedback a session is started from (voice feedback US-001). */
-const MAX_FEEDBACK_LENGTH = 4000;
 
 /**
  * Sessions (US-010).

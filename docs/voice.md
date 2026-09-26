@@ -207,6 +207,7 @@ call to a session cancels it. "No", "nee" or **Cancel** drops it.
 | `show` | opens a page: Overview, Sessions, Pull requests, Recurring tasks, Repositories, Sentry, Settings | – |
 | `focus_session` | hands the call to a session's agent | – |
 | `create_session` | creates a session; the clone continues in the background | yes |
+| `start_feedback_session` | creates a session from your feedback on an existing application ("the checkout total is wrong with a coupon"), named `feedback-…` unless you name it; once the clone is announced the call goes to its agent, which starts from the feedback | yes |
 | `start_build` | starts (or queues) a ready session | yes |
 | `stop_build` | stops a build, or takes a session out of the queue | yes |
 | `mark_ready` | parses the PRD and reads out any errors | yes |

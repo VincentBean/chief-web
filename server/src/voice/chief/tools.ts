@@ -99,6 +99,8 @@ export interface ToolContext {
   readonly setFocus?: (focus: CallFocus) => void;
   /** Plays a cached earcon (US-021): "one sec" while `focus_session` boots an agent. */
   readonly earcon?: (name: EarconName) => void;
+  /** Hands the call to the session's agent once its clone is announced (`start_feedback_session`); absent outside a call. */
+  readonly handOffWhenReady?: (sessionId: string) => void;
 }
 
 export interface ToolResult {

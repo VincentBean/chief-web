@@ -375,3 +375,77 @@ describe("events in chief's conversation (voice US-015)", () => {
     await call.end('hangup');
   });
 });
+
+describe('the handoff to a feedback session (voice feedback US-003)', () => {
+  const focusOf = (sent: ServerMessage[]): (CallFocus | null)[] =>
+    sent.flatMap((m) => (m.type === 'state' ? [m.focus] : []));
+
+  it('announces the clone through chief, then hands the call to the session agent, which opens the conversation', async () => {
+    const t = await liveCall();
+    t.call.handOffWhenReady('s-billing');
+    t.call.postEvent(setupDone);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(2);
+    assert.deepEqual(t.chief.inputs, ['[event] billing-export is cloned and ready to plan.']);
+    assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's-billing' });
+    // A greeting: no words of the operator's, so the agent opens on the session's feedback.
+    assert.deepEqual(t.session.inputs, ['']);
+    assert.ok(t.sent.some((m) => m.type === 'ui' && m.action === 'navigate' && m.path === '/sessions/s-billing'));
+    await t.call.end('hangup');
+  });
+
+  it('hands over at once when the event is not announced', async () => {
+    const t = await liveCall();
+    setSetting(t.w.db, 'voice_event_verbosity', 'none');
+    t.call.handOffWhenReady('s-billing');
+    t.call.postEvent(setupDone);
+    await t.settled(1);
+    assert.deepEqual(t.chief.inputs, []);
+    assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's-billing' });
+    assert.deepEqual(t.session.inputs, ['']);
+    await t.call.end('hangup');
+  });
+
+  it('hands nothing over when the setup failed, or for another session', async () => {
+    const t = await liveCall();
+    t.call.handOffWhenReady('s-billing');
+    t.call.postEvent({ ...setupDone, sessionId: 's-other', name: 'other' });
+    t.call.postEvent({ ...setupDone, ok: false, message: 'Permission denied (publickey).' });
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(1);
+    // A later success of the same session no longer counts either.
+    t.call.postEvent(setupDone);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(2);
+    await t.flush();
+    assert.deepEqual(t.call.focus, { kind: 'chief' });
+    assert.deepEqual(t.session.inputs, []);
+    await t.call.end('hangup');
+  });
+
+  it('hands nothing over once the call has moved to another session', async () => {
+    const t = await liveCall();
+    t.call.handOffWhenReady('s-billing');
+    t.call.switchFocus({ kind: 'session', sessionId: 's-csv' });
+    await t.settled(1);
+    t.call.switchFocus({ kind: 'chief' });
+    t.call.postEvent(setupDone);
+    t.clock.advance(EVENT_QUIET_MS);
+    await t.settled(2);
+    await t.flush();
+    assert.deepEqual(t.call.focus, { kind: 'chief' });
+    assert.deepEqual(focusOf(t.sent).filter((f) => f?.kind === 'session' && f.sessionId === 's-billing'), []);
+    await t.call.end('hangup');
+  });
+
+  it('hands nothing over once the call has ended', async () => {
+    const t = await liveCall();
+    t.call.handOffWhenReady('s-billing');
+    await t.call.end('hangup');
+    t.call.postEvent(setupDone);
+    t.call.handOffWhenReady('s-billing');
+    await t.flush();
+    assert.deepEqual(t.call.focus, { kind: 'chief' });
+    assert.deepEqual(t.session.inputs, []);
+  });
+});

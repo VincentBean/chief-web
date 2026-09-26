@@ -219,6 +219,9 @@ export interface CreateSessionRequest {
   readonly feedback?: string | null;
 }
 
+/** The longest feedback a session is started from (voice feedback US-001), after trimming. */
+export const MAX_FEEDBACK_LENGTH = 4000;
+
 /**
  * The statuses the code review flag is frozen in, and why (US-007).
  *

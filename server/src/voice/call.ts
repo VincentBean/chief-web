@@ -296,6 +296,8 @@ export class VoiceCall {
   private hangUpAfter = false;
   /** A session focus whose agent still has to be started and heard (docs/voice-plan.md §11 step 4–5). */
   private greetPending: string | null = null;
+  /** A session chief created from feedback: the call goes to its agent once its setup is announced (voice feedback US-003). */
+  private handOffOnSetup: string | null = null;
   private readonly agents = new Map<string, VoiceAgent>();
   /** What the call spent (US-023), persisted to `voice_calls` and sent as `usage`. */
   readonly usage = new CallUsage();
@@ -377,6 +379,8 @@ export class VoiceCall {
       this.sendState();
       return;
     }
+    // The call moved elsewhere: the feedback session no longer takes it over.
+    this.handOffOnSetup = null;
     this.state.focus = focus;
     const sessionId = focus.kind === 'session' ? focus.sessionId : null;
     if (this.persisted) {
@@ -388,6 +392,24 @@ export class VoiceCall {
     this.send({ type: 'ui', action: 'navigate', path: `/sessions/${encodeURIComponent(sessionId)}` });
     this.greetPending = sessionId;
     if (this.state.activeTurn === null) void this.enqueue((controller) => this.greet(controller));
+  }
+
+  /**
+   * Once `sessionId`'s setup succeeds, and chief has announced it, the call
+   * moves to the session's agent, which opens on the session's feedback. The
+   * call ending, the focus moving or the setup failing first drops it.
+   */
+  handOffWhenReady(sessionId: string): void {
+    if (this.ended) return;
+    this.handOffOnSetup = sessionId;
+  }
+
+  /** Makes the handoff {@link handOffWhenReady} promised, if it still stands. */
+  private handOff(sessionId: string): void {
+    if (this.handOffOnSetup !== sessionId) return;
+    this.handOffOnSetup = null;
+    if (this.ended || this.state.focus.kind !== 'chief') return;
+    this.setFocus({ kind: 'session', sessionId });
   }
 
   /**
@@ -1364,9 +1386,15 @@ export class VoiceCall {
     // points at it, and chief says so even below `all` verbosity.
     const planned = event.kind === 'prd.valid' && this.agents.has(`session:${event.sessionId}`);
     if (planned) this.send({ type: 'ui', action: 'highlight', target: 'prd' });
-    if (!isAnnounced(event.kind, settings.eventVerbosity) && !(planned && settings.eventVerbosity !== 'none')) return;
+    const handOff = event.kind === 'session.setup' && event.sessionId === this.handOffOnSetup;
+    if (handOff && !event.ok) this.handOffOnSetup = null;
+    const announced = isAnnounced(event.kind, settings.eventVerbosity) || (planned && settings.eventVerbosity !== 'none');
     const queued: VoiceEvent = { kind: event.kind, text, sessionId: eventSessionId(event) };
-    if (!this.concerns(queued)) return;
+    if (!announced || !this.concerns(queued)) {
+      // Nothing to wait for: the handoff happens now.
+      if (handOff && event.ok) this.handOff(event.sessionId);
+      return;
+    }
     this.state.queue.push(queued);
     this.scheduleDrain();
   }
@@ -1421,7 +1449,16 @@ export class VoiceCall {
     const events = this.state.queue.splice(0).filter((event) => this.concerns(event));
     if (events.length === 0) return;
     const text = events.map((event) => `[event] ${event.text}`).join('\n');
-    void this.enqueue((controller) => this.runTurn(text, controller, {}, undefined, 'event'));
+    const handOff = this.handOffOnSetup;
+    const ready = handOff !== null && events.some((event) => event.kind === 'session.setup' && event.sessionId === handOff);
+    void this.enqueue(async (controller) => {
+      await this.runTurn(text, controller, {}, undefined, 'event');
+      // Chief has said the session is ready; the session's agent speaks next. An
+      // operator who talked over the announcement is answered by chief instead.
+      if (!ready) return;
+      if (controller.signal.aborted) this.handOffOnSetup = null;
+      else this.handOff(handOff);
+    });
   }
 
   /* ---------------------------------------------------------------- idle */

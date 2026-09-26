@@ -45,6 +45,8 @@ export interface ChiefCallControls {
   setFocus?(focus: CallFocus): void;
   /** Plays a cached earcon (US-021). */
   earcon?(name: EarconName): void;
+  /** Hands the call to a session's agent once its setup is announced (voice feedback US-003). */
+  handOffWhenReady?(sessionId: string): void;
   /** What the operator heard of the current turn (US-020), for the cut-off note. */
   spokenSoFar?(): string;
 }
@@ -305,6 +307,7 @@ export class ChiefAgent implements VoiceAgent {
       confirmations: this.deps.call.confirmations,
       setFocus: (focus) => this.deps.call.setFocus?.(focus),
       earcon: (name) => this.deps.call.earcon?.(name),
+      handOffWhenReady: (sessionId) => this.deps.call.handOffWhenReady?.(sessionId),
     };
   }
 
