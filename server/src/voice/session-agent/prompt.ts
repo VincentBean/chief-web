@@ -37,7 +37,38 @@ VOICE MODE OVERRIDES
 - Before writing the PRD, summarize the scope in two or three sentences and ask "shall I write it?".
 - Write the PRD exactly in the story format specified above to ${prdPath}; that format is parsed
   by a machine.
+- The operator may leave the call at any moment. When a message starting with [detached] says so,
+  continue alone: write the draft PRD in the exact story format to ${prdPath}, put every question you
+  would have asked under a \`## Open Questions\` heading as a plain bullet list, most important first,
+  and end your reply with one sentence stating the number of stories and the number of open questions.
+  A question you can answer by reading the code is not an open question: read the code. A decision only
+  the operator can make (scope, naming, priorities, behaviour the code does not settle) is never guessed:
+  list it as an open question and write the affected story with the most conservative reading.
 - Start now by greeting the operator in one sentence and asking ${ask}${said}.`;
+}
+
+/**
+ * The [detached] message sent when the operator leaves a planning session
+ * (US-004): the agent finishes the draft PRD alone, collecting its questions.
+ */
+export function detachPrompt(prdPath: string): string {
+  return `[detached] The operator has left the call. Nobody is listening and nobody will answer, so do not ask anything. Continue alone: finish your research, then write the draft PRD in the exact story format to ${prdPath} before this reply ends, with every question you would have asked under a \`## Open Questions\` heading as a plain bullet list, most important first. End your reply with one sentence stating the number of stories and the number of open questions.`;
+}
+
+/**
+ * The message sent when the operator returns to a planning session (US-004):
+ * the open questions of a `waiting` session one by one, or, when none are
+ * left (`done`), a one-sentence "the PRD is complete".
+ */
+export function resumePrompt(openQuestions: readonly string[]): string {
+  if (openQuestions.length === 0) {
+    return 'The operator is back on the call. The PRD is complete and has no open questions. Say so in one sentence and suggest saying "back to chief" to mark it ready and build it.';
+  }
+  const numbered = openQuestions.map((question, i) => `${i + 1}. ${question}`).join('\n');
+  return `The operator is back on the call. These are the open questions in the PRD:
+${numbered}
+
+Greet the operator in one sentence and ask the first question. As soon as a question is answered, remove it from \`## Open Questions\` in the PRD and update the affected stories.`;
 }
 
 export interface VoicePlanningPromptInput extends Omit<PlanningPromptInput, 'context'> {
