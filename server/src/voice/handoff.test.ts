@@ -430,7 +430,7 @@ describe('reminding of the other planning sessions (US-009)', () => {
     ]);
   });
 
-  it('reminds of the others when the focused session is done, and offers no switch-over itself', async () => {
+  it('reminds of the others when the focused session is done, and switches to the one waiting session', async () => {
     const { clock, advance } = manualClock();
     const t = setup({ kind: 'session', sessionId: 's1' }, { clock });
     setSetting(t.db, 'voice_language', 'en');
@@ -446,20 +446,20 @@ describe('reminding of the other planning sessions (US-009)', () => {
     };
     say(t.call, 'Only admins can export.');
     await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 1);
-    const line = 'billing-export on shop-api is waiting with 4 open questions, and search on webshop is done.';
+    const line = "billing-export on shop-api is waiting with 4 open questions, and search on webshop is done. I'm switching you over to billing-export.";
     assert.deepEqual(t.call.state.queue.map((event) => event.line), [line]);
-    // The event still names the one waiting session.
+    // The event keeps the one waiting session to switch to.
     assert.deepEqual(t.call.state.queue[0]?.offer, { sessionId: 's2', name: 'billing-export' });
 
     advance(EVENT_QUIET_MS);
-    await until(() => t.of('agent.done').length === 2 && t.call.state.activeTurn === null);
-    assert.equal(t.tts.spoken.at(-1), line);
-    // Nothing is parked: the focus stays where it was.
-    assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's1' });
-    assert.equal(t.agents.get('s2'), undefined);
+    await until(() => t.agents.get('s2')?.inputs.length === 1);
+    assert.equal(t.tts.spoken[1], line);
+    // Once the line is spoken, the call is on billing-export and its questions start.
+    assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's2' });
+    assert.equal(t.agents.get('s2')?.inputs[0]?.resume, resumePrompt(questions(4), { state: 'waiting' }));
   });
 
-  it('asks nothing with two sessions waiting, and says nothing for a session that was done already', async () => {
+  it('switches nowhere with two sessions waiting, and says nothing for a session that was done already', async () => {
     const t = setup({ kind: 'session', sessionId: 's1' });
     setSetting(t.db, 'voice_language', 'en');
     t.states.push(

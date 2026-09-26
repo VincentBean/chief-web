@@ -36,7 +36,7 @@ import {
 import type { PlanningState, PlanningStateName } from './session-agent/planning-state.js';
 import { resumePrompt } from './session-agent/prompt.js';
 import { voiceAgentMode } from './session-agent/registry.js';
-import { SentenceChunker, toSpeakable, type WaitingSession, waitingSummary } from './speakable.js';
+import { SentenceChunker, toSpeakable, type WaitingSession, switchingOver, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
@@ -1395,8 +1395,9 @@ export class VoiceCall {
 
   /**
    * The focused planning session has just become `done` (US-009): the other
-   * planning sessions are named at the next quiet moment; the event keeps the
-   * one waiting session, when there is exactly one, as its `offer`.
+   * planning sessions are named at the next quiet moment. When exactly one of
+   * them waits for the operator, the line says the call switches to it and the
+   * event keeps it as its `offer`: the focus moves once the line is spoken.
    */
   private remindOfOthers(sessionId: string): void {
     const settings = getVoiceSettings(this.deps.db);
@@ -1410,7 +1411,7 @@ export class VoiceCall {
       kind: 'planning.waiting',
       text: summary,
       sessionId,
-      line: summary,
+      line: offer === null ? summary : `${summary} ${switchingOver(settings.language, offer.sessionName)}`,
       ...(offer === null ? {} : { offer: { sessionId: offer.sessionId, name: offer.sessionName } }),
     });
     this.scheduleDrain();
@@ -1733,6 +1734,13 @@ export class VoiceCall {
         await this.runTurn(asEvents(lines), controller, {}, 'event', line);
       }
       if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, 'event');
+      // The line said the call moves to the one waiting session; the rest still
+      // concerned the old focus. A call that ended or moved meanwhile stays put.
+      const offer = lines.findLast((event) => event.offer !== undefined)?.offer;
+      if (offer !== undefined && !controller.signal.aborted && !this.ended) {
+        this.setFocus({ kind: 'session', sessionId: offer.sessionId });
+        return;
+      }
       // Chief has said the session is ready; the session's agent speaks next. An
       // operator who talked over the announcement is answered by chief instead.
       if (!ready) return;

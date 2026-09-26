@@ -28,6 +28,7 @@ import {
   openDatabase,
   setSetting,
   updateSession,
+  upsertVoiceSessionAgent,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
 import { FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
@@ -66,6 +67,7 @@ import { CLAUDE_SESSION, FakeClaude, LONG_OPENING, SECRET_LOGIN } from './sessio
 import { PlanningStates } from './session-agent/planning-state.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
+import { switchingOver } from './speakable.js';
 import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
 import { FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
 import type { SttResult } from './stt/index.js';
@@ -1523,7 +1525,8 @@ describe('a scripted call end to end (US-027)', () => {
     const viewA = s.client.messages('planning').at(-1)?.sessions.find((view) => view.sessionId === a);
     assert.deepEqual([viewA?.state, viewA?.stories, viewA?.openQuestions], ['waiting', 3, 4]);
 
-    // B's agent finishes its PRD: the call reminds the operator of A.
+    // B's agent finishes its PRD: A is the one waiting session, so the call
+    // names it and moves there, and A's agent is sent its four questions.
     await s.say('the button goes on the invoices page');
     assert.equal(s.agents().detachedState(b).running, false);
     done = s.client.messages('agent.done').length;
@@ -1531,16 +1534,48 @@ describe('a scripted call end to end (US-027)', () => {
     await s.client.until('agent.done', done + 1);
     assert.equal(
       spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
-      'onboarding-copy on chief-web is waiting with 4 open questions.',
+      "onboarding-copy on chief-web is waiting with 4 open questions. I'm switching you over to onboarding-copy.",
     );
-
-    // "Switch to A": chief moves the call, and A's agent is sent its four questions.
-    openrouter.replies.push(textReply(['Here is onboarding-copy.']));
-    await s.say('switch to onboarding copy', 2);
+    assert.equal(openrouter.requests.length, requests, 'the switch is not a model call');
+    await waitFor(() => sessionStdin(a).at(-1) === resumePrompt(A_QUESTIONS, { state: 'waiting' }));
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: a });
-    assert.equal(sessionStdin(a).at(-1), resumePrompt(A_QUESTIONS, { state: 'waiting' }));
     assert.equal(s.agents().detachedState(b).running, false, 'a done session is not sent off again');
     await s.hangUp();
+  });
+
+  it('with two other sessions waiting, the line names them and the focus stays (US-004)', async () => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', 'nl') });
+    const a = s.chief.ids['onboarding'] ?? '';
+    for (const name of ['csv-export', 'search']) {
+      const other = createSession(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '', name, baseBranch: 'develop', prTargetBranch: 'main', status: 'pending' });
+      upsertVoiceSessionAgent(s.w.db, { sessionId: other.id, claudeSessionId: `claude-${name}`, mode: 'plan' });
+      writePrd(s, other.id, 1, ['Which columns?', 'Who may see it?']);
+    }
+    claude.onTurn = ({ containerId, text }) => {
+      if (containerId === `c-${a}` && text.includes('invoices page')) writePrd(s, a, 2, []);
+      return undefined;
+    };
+    openrouter.replies.push(
+      toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
+      textReply(['Ik geef je onboarding-copy.']),
+    );
+    await s.say("let's plan the onboarding copy", 2);
+    await s.say('the button goes on the invoices page');
+    const done = s.client.messages('agent.done').length;
+    s.w.clock.advance(EVENT_QUIET_MS);
+    await s.client.until('agent.done', done + 1);
+    const line = spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0);
+    assert.match(line, /csv-export op shop-api wacht met 2 open vragen/);
+    assert.match(line, /search op shop-api wacht met 2 open vragen/);
+    assert.match(line, /vragen\.$/, 'no switch-over is announced');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: a });
+    await s.hangUp();
+  });
+
+  it('the switch-over sentence in both call languages (US-004)', () => {
+    assert.equal(switchingOver('en', 'csv-export'), "I'm switching you over to csv-export.");
+    assert.equal(switchingOver('nl', 'csv-export'), 'Ik verbind je door met csv-export.');
   });
 
   it('chief answers an open question of A while B is being planned, and the update is announced with one question fewer (US-014)', async () => {
