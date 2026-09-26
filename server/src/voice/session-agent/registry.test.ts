@@ -256,7 +256,15 @@ describe('session voice agents', () => {
             playwright: {
               type: 'stdio',
               command: 'playwright-mcp',
-              args: ['--cdp-endpoint', 'http://127.0.0.1:9222', '--caps', 'core,vision'],
+              args: [
+                '--cdp-endpoint',
+                'http://127.0.0.1:9222',
+                '--caps',
+                'core,vision',
+                // Voice feedback US-011: unnamed screenshots land next to the PRD.
+                '--output-dir',
+                `/workspace/repo/.chief/prds/mcp-${status}/screenshots`,
+              ],
             },
             chief: { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] },
           },

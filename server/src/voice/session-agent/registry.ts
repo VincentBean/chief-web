@@ -198,6 +198,7 @@ export class SessionAgentRegistry {
     const resumeId = stored !== null && stored.mode === mode ? stored.claudeSessionId : null;
     const agent = await SessionAgentProcess.start(this.deps.docker, {
       sessionId,
+      sessionName: session.name,
       containerId,
       command: {
         model: settings.sessionModel,

@@ -44,9 +44,25 @@ describe('feedback planning prompt', () => {
     assert.match(prompt, /the feedback above, verbatim/);
     assert.match(prompt, /the pages visited, as paths only/);
     assert.match(prompt, /never write credentials into the PRD/);
-    assert.match(prompt, /the reproduction steps/);
-    assert.match(prompt, /what was observed/);
+    assert.match(prompt, /numbered reproduction steps/);
+    assert.match(prompt, /what was expected and what was observed/);
   });
+
+  for (const mode of ['create', 'edit'] as const) {
+    it(`asks for what the browser showed, with linked screenshots, in ${mode} mode (voice feedback US-011)`, () => {
+      const prompt = planningPrompt(mode, { ...INPUT, feedback: FEEDBACK });
+      const dir = '/workspace/repo/.chief/prds/fix-billing/screenshots';
+
+      assert.match(prompt, /when you used the browser:\n {2}- the pages visited, as paths only/);
+      assert.match(prompt, /numbered reproduction steps \(`1\.`, `2\.`, …\)/);
+      assert.match(prompt, /labelled \*\*Expected:\*\* and \*\*Observed:\*\*/);
+      assert.match(prompt, /relative links to the screenshots, as `!\[What it shows\]\(screenshots\/<file>\.png\)`/);
+      assert.ok(prompt.includes(`Screenshots are saved in \`${dir}/\``));
+      assert.match(prompt, /pass `filename` as an\nabsolute path in that directory, with a descriptive name/);
+      assert.ok(prompt.includes(`${dir}/billing-page-total-missing.png`));
+      assert.match(prompt, /never delete them/);
+    });
+  }
 
   it('replaces chief’s "what do you want to build" default in the context slot', () => {
     const prompt = planningPrompt('create', { ...INPUT, feedback: FEEDBACK });

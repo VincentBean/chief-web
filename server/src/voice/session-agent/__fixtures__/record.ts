@@ -195,7 +195,7 @@ function withoutParentSession(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 const cwd = mkdtempSync(join(tmpdir(), 'chief-voice-record-'));
 writeFileSync(join(cwd, 'README.md'), '# demo\n');
 writeFileSync(join(cwd, 'math.js'), 'export const add = (a, b) => a + b;\nexport const PI = 3.14;\n');
-writeFileSync(join(cwd, 'mcp.json'), mcpConfig({ playwright: [PLAYWRIGHT_MCP], chief: ['node', CHIEF_MCP_SCRIPT] }));
+writeFileSync(join(cwd, 'mcp.json'), mcpConfig('recording', { playwright: [PLAYWRIGHT_MCP], chief: ['node', CHIEF_MCP_SCRIPT] }));
 
 const wanted = process.argv.slice(2);
 for (const [name, scenario] of Object.entries(SCENARIOS)) {

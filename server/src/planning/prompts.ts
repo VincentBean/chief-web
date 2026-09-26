@@ -1,4 +1,4 @@
-import { prdDirFor } from '../prd/index.js';
+import { prdDirFor, screenshotsDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import { EDIT_PROMPT_TEMPLATE, INIT_PROMPT_TEMPLATE } from './templates.js';
 
@@ -123,7 +123,7 @@ Rules chief-web enforces when it reads the file:
 export function planningPrompt(mode: PlanningMode, input: PlanningPromptInput): string {
   const body = mode === 'edit' ? editPlanningPrompt(input.sessionName) : initPlanningPrompt(input);
   const feedback = sessionFeedback(input);
-  return feedback === null ? body : body + feedbackBlock(feedback);
+  return feedback === null ? body : body + feedbackBlock(feedback, input.sessionName);
 }
 
 /** The feedback as the prompt quotes it: trimmed, cut at {@link MAX_CONTEXT_LENGTH}, null when blank. */
@@ -135,9 +135,13 @@ function sessionFeedback(input: PlanningPromptInput): string | null {
 /**
  * The feedback variant's instructions: the feedback verbatim between tags (a
  * fence could be closed by the feedback itself), then where to look, when to
- * reproduce, and the `## Feedback` section the PRD has to open with.
+ * reproduce, and the `## Feedback` section the PRD has to open with. What the
+ * browser showed goes into that section with its screenshots (voice feedback
+ * US-011): Playwright MCP resolves a named screenshot against the working
+ * directory, so the agent is handed the absolute directory to name it into.
  */
-function feedbackBlock(feedback: string): string {
+function feedbackBlock(feedback: string, sessionName: string): string {
+  const screenshots = `${CONTAINER_REPO_DIR}/${screenshotsDirFor(sessionName)}`;
   return `
 
 ---
@@ -162,10 +166,21 @@ The PRD must contain a \`## Feedback\` section after the introduction and before
 with:
 
 - the feedback above, verbatim;
-- the pages visited, as paths only (\`/settings/billing\`, never a full URL with a host, a token or
-  a password — never write credentials into the PRD);
-- the reproduction steps;
-- what was observed.
+- when you used the browser:
+  - the pages visited, as paths only (\`/settings/billing\`, never a full URL with a host, a token
+    or a password — never write credentials into the PRD);
+  - numbered reproduction steps (\`1.\`, \`2.\`, …), each one thing you did;
+  - what was expected and what was observed, labelled **Expected:** and **Observed:**;
+  - relative links to the screenshots, as \`![What it shows](screenshots/<file>.png)\`;
+- without the browser: that it was not used, and what the code shows instead.
+
+Use bold labels and lists inside that section, not \`###\` headings: \`###\` belongs to the stories.
+
+Screenshots are saved in \`${screenshots}/\`, next to the PRD, and stay there for the build
+agent and the reviewer. Take each one with \`browser_take_screenshot\` and pass \`filename\` as an
+absolute path in that directory, with a descriptive name that says what it shows
+(\`${screenshots}/billing-page-total-missing.png\`), never a default or numbered name. They are
+the one exception to writing only the PRD; never delete them.
 
 The stories then fix what that section describes.`;
 }

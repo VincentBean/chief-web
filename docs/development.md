@@ -45,7 +45,9 @@ The image also installs `@playwright/mcp` globally (about 18 MB, no browser
 download: `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`). A session voice agent starts
 with `--mcp-config /tmp/.chief-voice/mcp.json`, which the server writes into
 the container before every start: `playwright` (`playwright-mcp --cdp-endpoint
-http://127.0.0.1:9222 --caps core,vision`) and `chief`
+http://127.0.0.1:9222 --caps core,vision --output-dir
+/workspace/repo/.chief/prds/<session>/screenshots`, so screenshots land next to
+the PRD) and `chief`
 (`node /usr/local/lib/chief-web/chief-mcp.js`). Playwright only connects to
 the DevTools port on its first browser tool call, so an agent that never
 browses never needs Chromium running.

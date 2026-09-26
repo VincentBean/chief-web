@@ -166,6 +166,20 @@ in flight — startup reconciliation marks such a session `failed` at the
 `container_lost` stage, and retrying it starts a fresh container on the very
 same workspace.
 
+**A feedback session's screenshots travel with the branch.** When the voice
+session agent looked at the problem in the browser while planning, its
+screenshots are in `.chief/prds/<session-name>/screenshots/` (Playwright MCP's
+`--output-dir`, and where the planning prompt has it name them), and the PRD's
+`## Feedback` section links them as `screenshots/<file>.png`. They sit in the
+branch's clone next to `prd.md` and `progress.md`, so every iteration, a stopped
+and resumed build, a retry on a fresh container and the
+[code review](code-review.md) all find them there. A story's commit never
+deletes them: like everything under `.chief/` they are never staged, and the
+iteration prompt tells the agent to read them, to leave the directory alone and
+not to run `git clean`, `git stash -u` or anything else that sweeps untracked
+files. For the same reason they are not part of the pushed branch or the pull
+request; they live as long as the session's workspace does.
+
 ## The usage-limit hold
 
 Claude's usage limit is on the **account**, not on a session. When it is
