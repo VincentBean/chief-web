@@ -526,6 +526,23 @@ describe('session voice agents', () => {
     });
   });
 
+  it('keeps whether a detached turn runs and how the last one ended, until the session is focused', () => {
+    const registry = makeRegistry();
+    assert.deepEqual(registry.detachedState('s1'), { running: false, lastOutcome: null });
+    registry.detachedStarted('s1');
+    assert.deepEqual(registry.detachedState('s1'), { running: true, lastOutcome: null });
+    registry.detachedEnded('s1', 'timeout');
+    assert.deepEqual(registry.detachedState('s1'), { running: false, lastOutcome: 'timeout' });
+    registry.detachedStarted('s1');
+    assert.deepEqual(registry.detachedState('s1'), { running: true, lastOutcome: 'timeout' });
+    registry.focused('s1');
+    assert.deepEqual(registry.detachedState('s1'), { running: true, lastOutcome: null });
+    registry.detachedEnded('s1', 'error');
+    assert.deepEqual(registry.detachedState('s2'), { running: false, lastOutcome: null });
+    registry.focused('s1');
+    assert.deepEqual(registry.detachedState('s1'), { running: false, lastOutcome: null });
+  });
+
   it('describes tool uses for their cards', () => {
     assert.equal(toolCardSummary('Read', { file_path: '/workspace/repo/server/src/auth/service.ts' }), 'Reading server/src/auth/service.ts');
     assert.equal(toolCardSummary('Grep', { pattern: 'invoice' }), 'Searching for "invoice"');

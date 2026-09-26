@@ -155,6 +155,8 @@ export interface VoiceCallDeps {
   readonly clock: CallClock;
   /** Told once, when the call has ended, so the service can let go of it. */
   readonly onEnded?: (call: VoiceCall) => void;
+  /** Told whenever the call's focus moves to a session (not when it opens on one). */
+  readonly onSessionFocused?: (sessionId: string) => void;
   /**
    * The planning poller (US-019): read after every session-agent turn, so a
    * `prd.md` that just became valid publishes `prd.valid`, and for the
@@ -385,6 +387,7 @@ export class VoiceCall {
     }
     this.sendState();
     if (sessionId === null) return;
+    this.deps.onSessionFocused?.(sessionId);
     this.send({ type: 'ui', action: 'navigate', path: `/sessions/${encodeURIComponent(sessionId)}` });
     this.greetPending = sessionId;
     if (this.state.activeTurn === null) void this.enqueue((controller) => this.greet(controller));

@@ -86,6 +86,7 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
   let closed: number | null = null;
   const agents = new Map<string, Agent>();
   const planningPolls: string[] = [];
+  const focused: string[] = [];
   const planning: CallPlanning & { onPoll: ((id: string) => void) | null } = {
     onPoll: null,
     status: (sessionId) => {
@@ -108,6 +109,7 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
     },
     clock,
     planning,
+    onSessionFocused: (sessionId) => focused.push(sessionId),
   });
   const transport: CallTransport = {
     send: (message) => sent.push(message),
@@ -119,7 +121,7 @@ function setup(focus: CallFocus = { kind: 'chief' }) {
   call.attach(transport);
   const of = <T extends ServerMessage['type']>(type: T) =>
     sent.filter((m): m is Extract<ServerMessage, { type: T }> => m.type === type);
-  return { db, call, sent, of, agents, tts, planning, planningPolls, closed: () => closed };
+  return { db, call, sent, of, agents, tts, planning, planningPolls, focused, closed: () => closed };
 }
 
 const say = (call: VoiceCall, text: string): void => call.handleMessage({ type: 'text', text });
@@ -133,6 +135,8 @@ describe('focus, handoff and control intents (voice US-019)', () => {
     await until(() => t.call.state.activeTurn === null);
 
     assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's1' });
+    // The registry forgets the last detached outcome of a session the operator returns to.
+    assert.deepEqual(t.focused, ['s1']);
     assert.ok(t.of('state').some((m) => m.focus.kind === 'session'));
     assert.ok(t.of('ui').some((m) => m.action === 'navigate' && m.path === '/sessions/s1'));
     // The opening: no words of the operator's, and no user transcript.

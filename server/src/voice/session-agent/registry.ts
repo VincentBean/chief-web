@@ -46,6 +46,16 @@ export class SessionAgentError extends Error {
   }
 }
 
+/** How a detached turn (one nobody on the call is listening to) ended. */
+export type DetachedTurnOutcome = 'ok' | 'error' | 'timeout';
+
+/** What the registry knows of a session's detached turns; in memory only. */
+export interface DetachedTurnState {
+  readonly running: boolean;
+  /** The last one that ended, until the operator focuses the session again. */
+  readonly lastOutcome: DetachedTurnOutcome | null;
+}
+
 export interface SessionAgentRegistryDeps {
   readonly config: Pick<Config, 'workspacesDir' | 'voiceMaxSessionAgents' | 'voiceKeepAgentsMs'>;
   readonly db: Database;
@@ -67,6 +77,7 @@ export class SessionAgentRegistry {
   private readonly modes = new Map<string, VoiceAgentMode>();
   private readonly starting = new Map<string, Promise<SessionAgentProcess>>();
   private keepTimer: NodeJS.Timeout | null = null;
+  private readonly detached = new Map<string, DetachedTurnState>();
 
   constructor(private readonly deps: SessionAgentRegistryDeps) {}
 
@@ -81,6 +92,32 @@ export class SessionAgentRegistry {
       .filter((agent) => !agent.exited)
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
       .map((agent) => agent.sessionId);
+  }
+
+  /** Whether a detached turn runs for the session, and how the last one ended. */
+  detachedState(sessionId: string): DetachedTurnState {
+    return this.detached.get(sessionId) ?? { running: false, lastOutcome: null };
+  }
+
+  /** A detached turn started for the session. */
+  detachedStarted(sessionId: string): void {
+    this.detached.set(sessionId, { running: true, lastOutcome: this.detachedState(sessionId).lastOutcome });
+  }
+
+  /** The session's detached turn ended with `outcome`. */
+  detachedEnded(sessionId: string, outcome: DetachedTurnOutcome): void {
+    this.detached.set(sessionId, { running: false, lastOutcome: outcome });
+  }
+
+  /**
+   * The operator focused the session: the last detached outcome has been dealt
+   * with. A turn still running keeps running, and how it ends is recorded anew.
+   */
+  focused(sessionId: string): void {
+    const state = this.detached.get(sessionId);
+    if (state === undefined) return;
+    if (state.running) this.detached.set(sessionId, { running: true, lastOutcome: null });
+    else this.detached.delete(sessionId);
   }
 
   /**
