@@ -5,7 +5,7 @@ import { BrowserService, NO_BROWSER_MESSAGE } from '../browser/index.js';
 import { loadConfig } from '../config.js';
 import { closeDatabase, createRepository, createSession, IN_MEMORY, openDatabase } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
-import { type FakeExec, FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
+import { FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
 import {
   BROWSER_ASK_TTL_MS,
   type BrowserAskDeps,
@@ -17,10 +17,11 @@ import { type AgentEvent, type AgentInput, type CallClock, type CallTts, type Vo
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import { createBrowserSavedLogins, saveRepositoryLogin } from '../repositories/index.js';
 import { parseBrowserUrl, parseClientMessage, type ServerMessage } from './protocol.js';
+import { FAKE_REQUEST_ID, FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
 import type { SpeakResult } from './tts/index.js';
 
 const PASSWORD = 'hunter2-s3cret!';
-const REQUEST_ID = '6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab';
+const REQUEST_ID = FAKE_REQUEST_ID;
 const OTHER_ID = '7a1c2d3e-4a5b-4c6d-8e7f-0123456789ab';
 
 class FakeClock implements CallClock {
@@ -55,55 +56,6 @@ const until = async (condition: () => boolean, timeoutMs = 2_000): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 };
-
-/**
- * The container's side of the relay: the request files the MCP server would
- * have written, and every answer file written through stdin.
- */
-class FakeMcpSide {
-  /** Request files per container. */
-  readonly requests = new Map<string, { id: string; hint: string; createdAt: string }[]>();
-  /** Answer files as written: container, exec, raw content. */
-  readonly answers: { containerId: string; exec: FakeExec; content: string }[] = [];
-  failWrites = false;
-
-  constructor(
-    daemon: FakeDockerDaemon,
-    private readonly now: () => number,
-  ) {
-    const previous = daemon.onExec;
-    daemon.onExec = (exec) => {
-      const command = exec.cmd.join(' ');
-      if (command.includes(`${BROWSER_REQUEST_DIR}/*.request`)) {
-        const lines = (this.requests.get(exec.containerId) ?? []).map((request) => `${JSON.stringify(request)}\n`);
-        return { stdout: lines.join('') };
-      }
-      if (command.includes('.answer.tmp') && exec.attachStdin) {
-        let content = '';
-        return {
-          onLine: (line) => {
-            content += line;
-          },
-          onStdinEnd: () => {
-            this.answers.push({ containerId: exec.containerId, exec, content });
-            daemon.finish(exec.id, this.failWrites ? 1 : 0);
-          },
-        };
-      }
-      return previous?.(exec) ?? {};
-    };
-  }
-
-  request(containerId: string, id = REQUEST_ID, hint = 'the checkout page', createdAt = new Date(this.now()).toISOString()): void {
-    const list = this.requests.get(containerId) ?? [];
-    list.push({ id, hint, createdAt });
-    this.requests.set(containerId, list);
-  }
-
-  answersFor(containerId: string): Record<string, unknown>[] {
-    return this.answers.filter((a) => a.containerId === containerId).map((a) => JSON.parse(a.content) as Record<string, unknown>);
-  }
-}
 
 describe('the watch-with-me card relay (voice feedback US-007)', () => {
   let daemon: FakeDockerDaemon;

@@ -10,6 +10,7 @@ import { after, before, describe, it } from 'node:test';
 import { WebSocket } from 'ws';
 
 import { createAuthService } from '../auth/index.js';
+import { BrowserService } from '../browser/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -27,8 +28,9 @@ import {
   setSetting,
 } from '../db/index.js';
 import { DockerApi } from '../docker/index.js';
-import { FakeDockerDaemon } from '../docker/fake-daemon.js';
+import { FakeBrowser, FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { sessionRepoDir } from '../orchestrator/index.js';
+import { createBrowserSavedLogins } from '../repositories/index.js';
 import { WebSocketGateway } from '../ws/gateway.js';
 import { type ChiefWorld, chiefWorld } from './chief/__fixtures__/world.js';
 import {
@@ -54,10 +56,12 @@ import {
   WS_CLOSE_NOT_CONFIGURED,
   WS_CLOSE_TAKEN_OVER,
 } from './protocol.js';
-import { RESUME_WINDOW_MS } from './service.js';
+import { RESUME_WINDOW_MS, type VoiceServiceDeps } from './service.js';
 import { CLAUDE_SESSION, FakeClaude, LONG_OPENING, SECRET_LOGIN } from './session-agent/__fixtures__/fake-claude.js';
 import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
+import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
+import { FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
 import type { SttResult } from './stt/index.js';
 import { type SpeakCallbacks, type SpeakResult, SWITCHED_TOAST, type TtsSink } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
@@ -201,6 +205,27 @@ class Client {
   }
 }
 
+/** The call panel's page view socket (voice feedback US-008): JSON messages parsed, JPEG frames kept. */
+class ViewClient {
+  readonly json: Record<string, unknown>[] = [];
+  readonly frames: Buffer[] = [];
+  readonly closed: Promise<{ code: number; reason: string }>;
+
+  constructor(readonly socket: WebSocket) {
+    socket.on('message', (data: Buffer, isBinary: boolean) => {
+      if (isBinary) this.frames.push(data);
+      else this.json.push(JSON.parse(data.toString()) as Record<string, unknown>);
+    });
+    this.closed = new Promise((resolve) => {
+      socket.on('close', (code: number, reason: Buffer) => resolve({ code, reason: reason.toString() }));
+    });
+  }
+
+  send(message: Record<string, unknown>): void {
+    this.socket.send(JSON.stringify(message));
+  }
+}
+
 interface World {
   readonly db: Database;
   readonly clock: FakeClock;
@@ -209,6 +234,8 @@ interface World {
   readonly ttses: FakeTts[];
   readonly voice: Voice;
   connect(query?: string): Promise<Client>;
+  /** Opens the page view socket of a session's browser (voice feedback US-008); needs `browser`. */
+  connectView(sessionId: string): Promise<ViewClient>;
   /** Connects, says hello and waits for `ready`. */
   call(query?: string): Promise<{ client: Client; callId: string }>;
 }
@@ -226,6 +253,7 @@ after(async () => {
 
 /** `chief`: the real chief agent over these services instead of {@link ScriptedAgent}. */
 /** `sessionAgents`: real session voice agents over this registry (and no scripted agent). */
+/** `browser`: the session browsers, the "watch with me" card and the page view socket, as in app.ts. */
 /** `providerTts`: the real `TtsService` against `ELEVENLABS_API_URL`/`OPENROUTER_API_URL` instead of {@link FakeTts}. */
 async function world(
   env: Record<string, string> = {},
@@ -235,6 +263,7 @@ async function world(
     earcons?: CallEarcons;
     events?: VoiceEventBus;
     providerTts?: boolean;
+    browser?: (db: Database) => { deps: NonNullable<VoiceServiceDeps['browser']>; browsers: ViewBrowsers };
   } = {},
 ): Promise<World> {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'pw', VOICE_IDLE_TIMEOUT_MS: String(IDLE_MS), ...env });
@@ -250,6 +279,7 @@ async function world(
   let calls = 0;
   const chief = opts.chief?.(db);
   const sessionAgents = opts.sessionAgents?.(db, config);
+  const browser = opts.browser?.(db);
   const voice = createVoice(config, db, {
     stt,
     ...(opts.providerTts === true
@@ -268,6 +298,7 @@ async function world(
         }),
     ...(sessionAgents === undefined ? {} : { sessionAgents }),
     ...(opts.events === undefined ? {} : { events: opts.events }),
+    ...(browser === undefined ? {} : { browser: browser.deps }),
     ...(chief === undefined && sessionAgents === undefined
       ? {
           agent: () => {
@@ -284,12 +315,14 @@ async function world(
   });
   const gateway = new WebSocketGateway(auth);
   gateway.register(voice.socketRoute);
+  if (browser !== undefined) gateway.register(createBrowserViewRoute(browser.browsers, config));
   const server = createServer((_req, res) => res.end());
   gateway.attach(server);
   server.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   worlds.push({ gateway, server, db });
-  const base = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/voice/stream`;
+  const origin = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const base = `${origin}/api/voice/stream`;
 
   const connect = async (query = ''): Promise<Client> => {
     const client = new Client(new WebSocket(`${base}${query}`, { headers: { cookie } }));
@@ -299,6 +332,14 @@ async function world(
     });
     return client;
   };
+  const connectView = async (sessionId: string): Promise<ViewClient> => {
+    const view = new ViewClient(new WebSocket(`${origin}/api/voice/browser/${sessionId}`, { headers: { cookie } }));
+    await new Promise<void>((resolve, reject) => {
+      view.socket.once('open', resolve);
+      view.socket.once('error', reject);
+    });
+    return view;
+  };
   return {
     db,
     clock,
@@ -307,6 +348,7 @@ async function world(
     ttses,
     voice,
     connect,
+    connectView,
     call: async (query = '') => {
       const client = await connect(query);
       client.hello();
@@ -792,12 +834,13 @@ describe('barge-in', () => {
 
 describe('a scripted call end to end (US-027)', () => {
   let daemon: FakeDockerDaemon;
+  let claude: FakeClaude;
   let openrouter: ScriptedOpenRouter;
   let dataDir: string;
 
   before(async () => {
     daemon = await FakeDockerDaemon.start();
-    new FakeClaude(daemon);
+    claude = new FakeClaude(daemon);
     openrouter = await startScriptedOpenRouter();
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-e2e-call-'));
   });
@@ -812,36 +855,52 @@ describe('a scripted call end to end (US-027)', () => {
    * A call on the real chief over the seeded install, scripted through
    * {@link openrouter}, with the pending `onboarding-copy` session's agent
    * running as the fake `claude` on the fake daemon. `say` goes through STT as
-   * an utterance and waits for `turns` turns to finish.
+   * an utterance and waits for `turns` turns to finish. `browser` adds the
+   * session browsers on the fake daemon, the card and the page view socket.
    */
-  const scriptedCall = async (opts: { env?: Record<string, string>; providerTts?: boolean; before?: (db: Database) => void } = {}) => {
+  const scriptedCall = async (
+    opts: { env?: Record<string, string>; providerTts?: boolean; before?: (db: Database) => void; browser?: boolean } = {},
+  ) => {
     openrouter.replies.length = 0;
     openrouter.requests.length = 0;
     openrouter.speech.length = 0;
     const events = new VoiceEventBus();
     let seeded: ChiefWorld | null = null;
     let registry: SessionAgentRegistry | null = null;
+    let config: Config | null = null;
     const agents = (): SessionAgentRegistry => registry ?? assert.fail('no session agent registry');
     const w = await world(
       { DATA_DIR: dataDir, OPENROUTER_API_URL: openrouter.baseUrl, ...opts.env },
       {
         events,
         ...(opts.providerTts === true ? { providerTts: true } : {}),
+        ...(opts.browser === true
+          ? {
+              browser: (db: Database) => {
+                const docker = new DockerApi(daemon.socketPath);
+                const container = (id: string): Promise<string> => Promise.resolve(`c-${id}`);
+                const browsers = new BrowserService({ docker, container });
+                return { deps: { docker, container, browsers, savedLogins: createBrowserSavedLogins(db), stopAll: () => browsers.stopAll() }, browsers };
+              },
+            }
+          : {}),
         chief: (db) => {
           seeded = chiefWorld(db);
           // Like app.ts: chief reaches the registry built after it.
           return { ...seeded.services, sessionAgents: { acquire: (id) => agents().acquire(id), isAlive: (id) => agents().isAlive(id) } };
         },
-        sessionAgents: (db, config) => {
+        sessionAgents: (db, loaded) => {
+          config = loaded;
           const id = (seeded ?? assert.fail('chief was not seeded')).ids['onboarding'] ?? '';
-          fs.mkdirSync(path.join(sessionRepoDir(config, id), '.git'), { recursive: true });
+          fs.mkdirSync(path.join(sessionRepoDir(loaded, id), '.git'), { recursive: true });
           daemon.addContainer({ id: `c-${id}`, name: `chief-web-onboarding-copy-${id}` });
           registry = new SessionAgentRegistry({
-            config,
+            config: loaded,
             db,
             docker: new DockerApi(daemon.socketPath),
             containers: {
-              start: () => Promise.resolve({ id: `c-${id}`, name: `chief-web-onboarding-copy-${id}`, running: true, state: 'running' as const }),
+              // Each session in its own container, named after it.
+              start: (session) => Promise.resolve({ id: `c-${session.id}`, name: `chief-web-${session.name}-${session.id}`, running: true, state: 'running' as const }),
               remove: () => Promise.resolve(),
             },
             hold: { active: () => false, until: () => null },
@@ -864,7 +923,12 @@ describe('a scripted call end to end (US-027)', () => {
       client.send({ type: 'hangup' });
       assert.equal((await client.closed).code, WS_CLOSE_CALL_ENDED);
     };
-    return { w, chief, events, client, callId, say, hangUp };
+    /** What the clone leaves behind: a checkout on the data volume and a container to run its agent in. */
+    const cloned = (sessionId: string, name: string): void => {
+      fs.mkdirSync(path.join(sessionRepoDir(config ?? assert.fail('no config'), sessionId), '.git'), { recursive: true });
+      daemon.addContainer({ id: `c-${sessionId}`, name: `chief-web-${name}-${sessionId}` });
+    };
+    return { w, chief, events, client, callId, say, hangUp, cloned };
   };
 
   /** The deltas of one turn, joined. */
@@ -1030,6 +1094,110 @@ describe('a scripted call end to end (US-027)', () => {
     assert.match(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), /^Je bent weer bij mij\./);
     assert.equal(openrouter.requests.length, requests, 'the handback is a fixed line, not a model call');
     await s.hangUp();
+  });
+
+  it('"I have feedback on shop-api about …" → confirm → cloned → handed over → the agent opens a browser → frames → Close browser (voice feedback US-013)', async () => {
+    const FEEDBACK = 'the checkout total is wrong with a coupon';
+    const LOGIN = { username: 'qa-ann@example.com', password: 'c0upon-hunter2!' };
+    const URL_ = 'http://host.docker.internal:3000/checkout';
+    // Every log line of the call (the logger writes to these two), to prove the password is in none of them.
+    const logged: string[] = [];
+    const record = (...args: unknown[]): void => {
+      logged.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
+    };
+    const { log, error } = console;
+    console.log = record;
+    console.error = record;
+    try {
+      const s = await scriptedCall({ browser: true });
+      const mcp = new FakeMcpSide(daemon, () => s.w.clock.now());
+      const browser = new FakeBrowser(daemon);
+      browser.replies.set('Page.getFrameTree', () => ({ result: { frameTree: { frame: { id: 'main', url: URL_ } } } }));
+
+      // Chief reads the request back and parks it.
+      openrouter.replies.push(
+        toolReply([{ id: 'fb1', name: 'start_feedback_session', args: JSON.stringify({ repository: 'shop-api', feedback: FEEDBACK }) }]),
+        textReply(['Shall I start a feedback session on shop-api?']),
+      );
+      await s.say(`I have feedback on shop-api about ${FEEDBACK}`);
+      assert.equal(s.client.messages('confirm').at(-1)?.prompt, `Start a feedback session on shop-api about "${FEEDBACK}"?`);
+      assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
+
+      // "yes": the session is written with the feedback and its clone starts.
+      openrouter.replies.push(textReply(['Done. I will hand you over once it is cloned.']));
+      await s.say('yes');
+      assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
+      const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.feedback === FEEDBACK);
+      assert.ok(session, 'the session carries the feedback');
+      assert.equal(session.name, 'feedback-checkout-total-is-wrong-with-coupon');
+      assert.ok(s.client.messages('ui').some((m) => m.action === 'navigate' && m.path === `/sessions/${session.id}`));
+      assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+
+      // The clone finishes: chief says so after a quiet moment, then hands the call over by itself.
+      s.cloned(session.id, session.name);
+      const done = s.client.messages('agent.done').length;
+      s.events.publish({ kind: 'session.setup', sessionId: session.id, name: session.name, ok: true, message: null });
+      await waitFor(() => s.client.messages('ui').some((m) => m.action === 'toast' && m.text.includes(`${session.name} is cloned`)));
+      openrouter.replies.push(textReply([`${session.name} is cloned. Handing you over.`]));
+      s.w.clock.advance(EVENT_QUIET_MS);
+      await s.client.until('agent.done', done + 2);
+      assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId: session.id });
+      const agentExec = (): string => claude.agentExecs().find((exec) => exec.containerId === `c-${session.id}`)?.id ?? '';
+      assert.ok(claude.userTexts(agentExec()).some((text) => text.includes(FEEDBACK)), 'the session agent opens on the feedback');
+      await waitFor(() => s.client.messages('state').at(-1)?.phase === 'listening');
+
+      // The session agent calls open_browser_with_operator; the MCP server writes its request; the card appears.
+      claude.onOpenBrowser = (containerId) => mcp.request(containerId);
+      mcp.onAnswer = (_containerId, answer) =>
+        claude.finishBrowserTool(answer['credentials'] === undefined ? `opened ${URL_}` : `opened ${URL_} and logged in`);
+      const turns = s.client.messages('agent.done').length;
+      s.w.stt.canned.push("#browser let's look at it together");
+      s.client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+      const card = await s.client.until('browser.ask');
+      assert.equal(card.sessionId, session.id);
+      assert.equal(card.hint, 'the checkout page');
+      assert.ok(s.client.messages('tool').some((m) => m.status === 'running' && m.summary === 'Opening the browser'));
+      assert.equal(s.client.messages('agent.done').length, turns, 'the turn waits for the operator');
+
+      // The operator answers with a URL and a login: it reaches the container, and the turn goes on.
+      s.client.send({ type: 'browser.answer', id: card.id, url: URL_, credentials: LOGIN });
+      assert.deepEqual(await s.client.until('browser.resolved'), { type: 'browser.resolved', id: card.id, outcome: 'opened' });
+      await waitFor(() => mcp.answers.length > 0);
+      assert.deepEqual(mcp.answersFor(`c-${session.id}`), [{ id: card.id, cancelled: false, url: URL_, credentials: LOGIN }]);
+      await s.client.until('agent.done', turns + 1);
+      assert.equal(said(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0), 'The checkout page is open.');
+
+      // The page view: the URL, then the frames Chromium paints.
+      const view = await s.w.connectView(session.id);
+      const relay = browser.relayExecs().find((exec) => exec.running && exec.containerId === `c-${session.id}`)?.id ?? '';
+      await waitFor(() => browser.commands.some((c) => c.execId === relay && c.method === 'Page.startScreencast'));
+      assert.deepEqual(view.json[0], { type: 'url', url: URL_ });
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+      browser.emitEvent('Page.screencastFrame', { data: jpeg.toString('base64'), sessionId: 1, metadata: { deviceWidth: 1280, deviceHeight: 800 } });
+      await waitFor(() => view.frames.length === 1);
+      assert.deepEqual(view.frames[0], jpeg);
+
+      // **Close browser**: the view closes and Chromium is stopped.
+      view.send({ type: 'close' });
+      await view.closed;
+      const chromium = browser.chromiumExecs().find((exec) => exec.containerId === `c-${session.id}`);
+      await waitFor(() => chromium?.running === false);
+      assert.ok(browser.signals.includes('TERM'));
+      await s.hangUp();
+
+      const socket = JSON.stringify(s.client.received) + JSON.stringify(view.json);
+      const voiceTurns = JSON.stringify(listVoiceTurns(s.w.db, s.callId));
+      const tables = (s.w.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name);
+      const database = JSON.stringify(tables.map((table) => s.w.db.prepare(`SELECT * FROM "${table}"`).all()));
+      assert.match(voiceTurns, /Opening the browser/, 'the tool card is stored');
+      assert.ok(!socket.includes(LOGIN.password), 'the password reached a socket');
+      assert.ok(!voiceTurns.includes(LOGIN.password), 'the password reached voice_turns');
+      assert.ok(!database.includes(LOGIN.password), 'the password reached the database');
+      assert.ok(!logged.join('\n').includes(LOGIN.password), 'the password reached the logs');
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
   });
 
   it('ElevenLabs answering 402 → the call speaks through OpenRouter and toasts', async () => {
