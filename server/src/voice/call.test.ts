@@ -1083,28 +1083,20 @@ describe('a scripted call end to end (US-027)', () => {
     await s.hangUp();
   });
 
-  it('"create a session …" → confirm → "yes" → created, opened, and the setup event spoken after a quiet moment', async () => {
+  it('"create a session …" → created and opened on the first tool call, and the setup event spoken after a quiet moment', async () => {
     const s = await scriptedCall();
     openrouter.replies.push(
       toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
-      textReply(['Shall I create csv-export in shop-api?']),
+      textReply(['Done. csv-export is being set up.']),
     );
     await s.say('create a session for the CSV export on shop-api');
-    const pill = s.client.messages('confirm').at(-1);
-    assert.equal(pill?.prompt, 'Create session csv-export in shop-api, from develop with a pull request into main?');
-    assert.deepEqual(toolCards(s.client, 1).map(([name]) => name), ['create_session']);
-    assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
-    spoken(s.client, 1);
-
-    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
-    await s.say('yes');
     assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
     const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
     assert.ok(session);
-    assert.deepEqual(toolCards(s.client, 2), [['create_session', 'ok', 'Created session: csv-export']]);
+    assert.deepEqual(toolCards(s.client, 1), [['create_session', 'ok', 'Created session: csv-export']]);
     assert.ok(s.client.messages('ui').some((m) => m.action === 'navigate' && m.path === `/sessions/${session.id}`));
-    assert.equal(s.client.messages('confirm.resolved').at(-1)?.outcome, 'confirmed');
-    assert.equal(spoken(s.client, 2), 'Done. csv-export is being set up.');
+    assert.deepEqual(s.client.messages('confirm'), [], 'nothing is asked');
+    assert.equal(spoken(s.client, 1), 'Done. csv-export is being set up.');
 
     // The clone finishes: toasted at once, spoken only once the call has been quiet.
     const done = s.client.messages('agent.done').length;
@@ -1116,34 +1108,30 @@ describe('a scripted call end to end (US-027)', () => {
     s.w.clock.advance(EVENT_QUIET_MS);
     await s.client.until('agent.done', done + 1);
     assert.match(lastModelInput(), /^\[event\] csv-export is cloned and ready to plan\./);
-    assert.equal(spoken(s.client, 3), 'csv-export is cloned and ready to plan.');
+    assert.equal(spoken(s.client, 2), 'csv-export is cloned and ready to plan.');
     await s.hangUp();
   });
 
-  it('"pause the nightly rector task" → confirm → "ja" → paused and read back', async () => {
+  it('"pause the nightly rector task" → paused on the first tool call and read back', async () => {
     const s = await scriptedCall();
-    openrouter.replies.push(
-      toolReply([{ id: 'p1', name: 'pause_recurring_task', args: '{"task":"nightly rector"}' }]),
-      textReply(['Zal ik nightly-rector pauzeren?']),
-    );
-    await s.say('pause the nightly rector task');
-    assert.equal(s.client.messages('confirm').at(-1)?.prompt, 'Pause the recurring task nightly-rector?');
     const task = (): boolean | undefined => getRecurringTaskByName(s.w.db, s.chief.ids['shop'] ?? '', 'nightly-rector')?.paused;
     assert.equal(task(), false);
-
-    const requests = openrouter.requests.length;
-    openrouter.replies.push(textReply(['nightly-rector is gepauzeerd; ', 'hij draait vannacht niet.']));
-    await s.say('ja');
+    openrouter.replies.push(
+      toolReply([{ id: 'p1', name: 'pause_recurring_task', args: '{"task":"nightly rector"}' }]),
+      textReply(['nightly-rector is gepauzeerd; ', 'hij draait vannacht niet.']),
+    );
+    await s.say('pause the nightly rector task');
     assert.equal(task(), true);
-    assert.deepEqual(toolCards(s.client, 2), [['pause_recurring_task', 'ok', 'Paused: nightly-rector']]);
-    // One model round trip: chief reads the outcome back.
-    assert.equal(openrouter.requests.length, requests + 1);
+    assert.deepEqual(toolCards(s.client, 1), [['pause_recurring_task', 'ok', 'Paused: nightly-rector']]);
+    assert.deepEqual(s.client.messages('confirm'), [], 'nothing is asked');
+    // Two model round trips: the tool call, then chief reads the outcome back.
+    assert.equal(openrouter.requests.length, 2);
     assert.deepEqual(JSON.parse(lastModelInput()), { ok: true, name: 'nightly-rector', paused: true, nextRun: null });
-    assert.equal(spoken(s.client, 2), 'nightly-rector is gepauzeerd; hij draait vannacht niet.');
+    assert.equal(spoken(s.client, 1), 'nightly-rector is gepauzeerd; hij draait vannacht niet.');
     await s.hangUp();
   });
 
-  it('"change PR 213: …" → confirm → "yes" → the request is posted and a feedback run started', async () => {
+  it('"change PR 213: …" → the request is posted and a feedback run started on the first tool call', async () => {
     const s = await scriptedCall();
     const list = s.chief.state.pullRequests;
     const [shop] = list?.repositories ?? [];
@@ -1153,22 +1141,17 @@ describe('a scripted call end to end (US-027)', () => {
     s.chief.state.pullRequests = { ...list, repositories: [{ ...shop, pullRequests: [...shop.pullRequests, csv] }] };
     openrouter.replies.push(
       toolReply([{ id: 'r1', name: 'request_pr_change', args: '{"repository":"shop-api","number":213,"instruction":"use league csv instead of fgetcsv"}' }]),
-      textReply(['Shall I ask for that on 213?']),
+      textReply(['Posted, and a run is picking it up.']),
     );
     await s.say('change PR 213: use league csv instead of fgetcsv');
-    const prompt = s.client.messages('confirm').at(-1)?.prompt ?? '';
-    assert.match(prompt, /213, "CSV import", ask for: "use league csv instead of fgetcsv"\?$/);
-    assert.equal(s.chief.state.calls.length, 0);
-
-    openrouter.replies.push(textReply(['Posted, and a run is picking it up.']));
-    await s.say('yes');
+    assert.deepEqual(s.client.messages('confirm'), [], 'nothing is asked');
     assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['pullRequests.feedback', 'github.postReview', 'prFeedback.start']);
     const posted = s.chief.state.calls[1]?.arg as { prNumber: number; body: string };
     assert.equal(posted.prNumber, 213);
     assert.match(posted.body, /use league csv instead of fgetcsv/);
     assert.deepEqual(s.chief.state.calls[2]?.arg, { repositoryId: s.chief.ids['shop'], prNumber: 213 });
-    assert.deepEqual(toolCards(s.client, 2).map(([name, status]) => [name, status]), [['request_pr_change', 'ok']]);
-    spoken(s.client, 2);
+    assert.deepEqual(toolCards(s.client, 1).map(([name, status]) => [name, status]), [['request_pr_change', 'ok']]);
+    assert.equal(spoken(s.client, 1), 'Posted, and a run is picking it up.');
     await s.hangUp();
   });
 
@@ -1489,11 +1472,9 @@ describe('a scripted call end to end (US-027)', () => {
     // Chief creates B on shop-api and hands the call to it.
     openrouter.replies.push(
       toolReply([{ id: 'c1', name: 'create_session', args: '{"repository":"shop-api","name":"CSV export"}' }]),
-      textReply(['Shall I create csv-export in shop-api?']),
+      textReply(['Done. csv-export is being set up.']),
     );
     await s.say('create a session for the CSV export on shop-api');
-    openrouter.replies.push(textReply(['Done. csv-export is being set up.']));
-    await s.say('yes');
     const created = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.name === 'csv-export');
     assert.ok(created);
     b = created.id;
@@ -1529,7 +1510,7 @@ describe('a scripted call end to end (US-027)', () => {
     await s.client.until('agent.done', done + 1);
     assert.equal(
       spoken(s.client, s.client.messages('agent.done').at(-1)?.turn ?? 0),
-      'onboarding-copy on chief-web is waiting with 4 open questions. Shall I switch you over?',
+      'onboarding-copy on chief-web is waiting with 4 open questions.',
     );
 
     // "Switch to A": chief moves the call, and A's agent is sent its four questions.
@@ -1650,7 +1631,7 @@ describe('a scripted call end to end (US-027)', () => {
     await s.hangUp();
   });
 
-  it('"I have feedback on shop-api about …" → confirm → cloned → handed over → the agent opens a browser → frames → Close browser (voice feedback US-013)', async () => {
+  it('"I have feedback on shop-api about …" → created on the first tool call → cloned → handed over → the agent opens a browser → frames → Close browser (voice feedback US-013)', async () => {
     const FEEDBACK = 'the checkout total is wrong with a coupon';
     const LOGIN = { username: 'qa-ann@example.com', password: 'c0upon-hunter2!' };
     const URL_ = 'http://host.docker.internal:3000/checkout';
@@ -1668,18 +1649,13 @@ describe('a scripted call end to end (US-027)', () => {
       const browser = new FakeBrowser(daemon);
       browser.replies.set('Page.getFrameTree', () => ({ result: { frameTree: { frame: { id: 'main', url: URL_ } } } }));
 
-      // Chief reads the request back and parks it.
+      // Chief's one tool call writes the session with the feedback, and its clone starts.
       openrouter.replies.push(
         toolReply([{ id: 'fb1', name: 'start_feedback_session', args: JSON.stringify({ repository: 'shop-api', feedback: FEEDBACK }) }]),
-        textReply(['Shall I start a feedback session on shop-api?']),
+        textReply(['Done. I will hand you over once it is cloned.']),
       );
       await s.say(`I have feedback on shop-api about ${FEEDBACK}`);
-      assert.equal(s.client.messages('confirm').at(-1)?.prompt, `Start a feedback session on shop-api about "${FEEDBACK}"?`);
-      assert.equal(s.chief.state.calls.length, 0, 'nothing is created before the yes');
-
-      // "yes": the session is written with the feedback and its clone starts.
-      openrouter.replies.push(textReply(['Done. I will hand you over once it is cloned.']));
-      await s.say('yes');
+      assert.deepEqual(s.client.messages('confirm'), [], 'nothing is asked');
       assert.deepEqual(s.chief.state.calls.map((c) => c.method), ['sessions.create']);
       const session = listSessions(s.w.db, { repositoryId: s.chief.ids['shop'] ?? '' }).find((row) => row.feedback === FEEDBACK);
       assert.ok(session, 'the session carries the feedback');

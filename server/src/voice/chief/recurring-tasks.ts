@@ -14,12 +14,13 @@ import {
 import { getVoiceSettings } from '../../settings/index.js';
 import type { UiAction } from '../protocol.js';
 import { guarded, serviceFailure, slugify } from './actions.js';
-import { confirmable, type PreparedAction } from './confirm.js';
 import { formatLocal } from './snapshot.js';
 import {
+  acting,
   type ChiefServices,
   type ChiefTool,
   missing,
+  type PreparedAction,
   resolveName,
   stringArg,
   tool,
@@ -35,7 +36,7 @@ import {
  * schedule the scheduler cannot fire, is refused here with the same words.
  *
  * The model turns the spoken schedule into a cron expression; `previewCron`
- * is the judge of it, and the confirmation reads it back in words.
+ * is the judge of it, and the result reads it back in words.
  */
 
 /** How many occurrences `get_recurring_task` returns. */
@@ -123,8 +124,8 @@ function prTargetArg(args: Readonly<Record<string, unknown>>): PrTargetBranch | 
   return target as PrTargetBranch;
 }
 
-function prepared(prompt: string, args: Readonly<Record<string, unknown>>): PreparedAction {
-  return { prompt, args };
+function prepared(args: Readonly<Record<string, unknown>>): PreparedAction {
+  return { args };
 }
 
 /** The recurring task tools over `services`. */
@@ -135,7 +136,7 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
   const local = (iso: string | null): string | null => (iso === null ? null : formatLocal(new Date(iso), timeZone()));
   const open = (id: string): readonly UiAction[] => [{ action: 'navigate', path: recurringTaskPath(id) }];
 
-  /** A confirmable action on one existing task: resolved in `prepare`, run by id. */
+  /** An action on one existing task: resolved in `prepare`, run by id. */
   const taskAction = (
     name: string,
     description: string,
@@ -145,7 +146,7 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
       execute(target: { id: string; name: string }, args: Readonly<Record<string, unknown>>): ToolResult | Promise<ToolResult>;
     },
   ): ChiefTool =>
-    confirmable(name, description, { task: TASK_PARAM, ...extra }, ['task'], {
+    acting(name, description, { task: TASK_PARAM, ...extra }, ['task'], {
       prepare: (args) =>
         guarded(`Could not ${name.replace(/_/g, ' ')}`, () => {
           const task = taskArg(services, args);
@@ -236,14 +237,14 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
       prepare: (task) =>
         task.paused
           ? { ok: false, data: { error: 'already_paused', name: task.name }, summary: `${task.name} is already paused` }
-          : prepared(`Pause the recurring task ${task.name}?`, { taskId: task.id, name: task.name }),
+          : prepared({ taskId: task.id, name: task.name }),
       execute: setPaused(true),
     }),
 
     taskAction('resume_recurring_task', 'Resume a paused recurring task; its schedule is counted from now.', {}, {
       prepare: (task) =>
         task.paused
-          ? prepared(`Resume the recurring task ${task.name}, ${lowerFirst(task.scheduleDescription ?? task.cronExpression)}?`, { taskId: task.id, name: task.name })
+          ? prepared({ taskId: task.id, name: task.name })
           : { ok: false, data: { error: 'not_paused', name: task.name }, summary: `${task.name} is not paused` },
       execute: setPaused(false),
     }),
@@ -255,7 +256,7 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
       {},
       {
         prepare: (task) =>
-          prepared(`Run ${task.name} now${task.paused ? ', even though it is paused' : ''}?`, { taskId: task.id, name: task.name }),
+          prepared({ taskId: task.id, name: task.name }),
         execute: async (target) => {
           const firing = services.recurringTasks.fireNow(target.id);
           // A skip or a refused session settles within a few microtasks; a
@@ -283,9 +284,9 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
       },
     ),
 
-    confirmable(
+    acting(
       'create_recurring_task',
-      'Create a recurring task in a repository. Turn the spoken schedule into a cron expression; the confirmation reads it back in words.',
+      'Create a recurring task in a repository. Turn the spoken schedule into a cron expression; the result reads it back in words.',
       {
         repository: { type: 'string', description: 'Repository id or spoken name' },
         name: { type: 'string', description: 'Task name; turned into a slug' },
@@ -318,7 +319,7 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
             if (prTarget !== null && typeof prTarget === 'object') return prTarget;
             const baseBranch = stringArg(args, 'base_branch')?.trim() ?? null;
             const codeReview = typeof args['code_review'] === 'boolean' ? args['code_review'] : null;
-            return prepared(`Create recurring task ${name} in ${repository.name}, ${lowerFirst(cron.words)}, with the prompt "${firstSentence(prompt)}"?`, {
+            return prepared({
               repositoryId: repository.id,
               name,
               cronExpression: cron.cron,
@@ -403,13 +404,13 @@ export function recurringTaskTools(services: ChiefServices): ChiefTool[] {
             return { ok: false, data: { error: 'no_changes', name: task.name }, summary: `Nothing to change on ${task.name}` };
           }
           const list = said.length === 1 ? (said[0] as string) : `${said.slice(0, -1).join(', ')} and ${said.at(-1) as string}`;
-          return prepared(`For ${task.name}: ${list}?`, { taskId: task.id, name: task.name, changes });
+          return prepared({ taskId: task.id, name: task.name, changes, changed: list });
         },
         execute: (target, args) => {
           const view = updateRecurringTaskFromRequest(db, target.id, args['changes'] as UpdateRecurringTaskRequest);
           return {
             ok: true,
-            data: { name: view.name, schedule: view.scheduleDescription, paused: view.paused, nextRun: local(view.nextRunAt) },
+            data: { name: view.name, changed: args['changed'], schedule: view.scheduleDescription, paused: view.paused, nextRun: local(view.nextRunAt) },
             summary: `Updated recurring task: ${view.name}`,
             ui: open(view.id),
           };

@@ -7,8 +7,8 @@ import { type ChiefServices, type ChiefTool, isResult, missing, SESSION_PARAM, s
  * export should be CSV only" passes the operator's answer to a planning
  * session without moving the call. The session agent takes it in a detached
  * turn, updates its PRD and drops the answered question; the end of that turn
- * is announced like any finished draft (`planning.drafted`, US-008). Not
- * confirmed: chief reads back what it passed on, and returns at once.
+ * is announced like any finished draft (`planning.drafted`, US-008).
+ * Chief reads back what it passed on, and returns at once.
  */
 export function answerPlanningQuestionTool(services: ChiefServices): ChiefTool {
   return tool(

@@ -4,7 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { loadConfig } from '../../config.js';
 import { setSetting } from '../../db/index.js';
 import type { AgentEvent } from '../call.js';
-import { chiefWorld, NOW, testGate } from './__fixtures__/world.js';
+import { chiefWorld, NOW } from './__fixtures__/world.js';
 import {
   errorReply,
   type ScriptedOpenRouter,
@@ -39,7 +39,7 @@ function setup(env: Record<string, string> = {}): { agent: ChiefAgent; w: Return
     db: w.db,
     config,
     services: w.services,
-    call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => (hangUps += 1), confirmations: testGate().gate },
+    call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => (hangUps += 1) },
     operatorName: 'Vincent',
     now: () => NOW,
   });
@@ -94,7 +94,7 @@ describe('chief agent loop (voice US-008)', () => {
     assert.deepEqual(
       ((request['tools'] ?? []) as { function: { name: string } }[]).map((tool) => tool.function.name).sort(),
       [
-        'address_pr_feedback', 'answer_planning_question', 'back_to_planning', 'build_status', 'confirm', 'create_recurring_task', 'create_session', 'end_call',
+        'address_pr_feedback', 'answer_planning_question', 'back_to_planning', 'build_status', 'create_recurring_task', 'create_session', 'end_call',
         'fix_pr_conflicts', 'focus_session', 'get_recurring_task', 'get_session', 'list_pull_requests', 'list_recurring_tasks', 'list_repositories',
         'list_sessions', 'mark_ready', 'overview', 'pause_recurring_task', 'request_pr_change', 'resume_recurring_task', 'retry',
         'review_pull_request', 'run_recurring_task_now', 'schedule_start', 'show', 'start_build', 'start_feedback_session', 'stop_build', 'stop_pr_run',
@@ -145,6 +145,27 @@ describe('chief agent loop (voice US-008)', () => {
     assert.equal(data.ok, true);
     assert.equal(data.name, 'billing-export');
     assert.ok(data.log.summary.length <= 600);
+  });
+
+  it('runs a changing tool on its first call, with the resolved session id, and hears its result', async () => {
+    const { agent, w } = setup();
+    fake.replies.push(
+      toolReply([{ id: 'call_1', name: 'start_build', args: '{"session":"onboarding copy"}' }], '', 0.001),
+      textReply(['onboarding-copy is building.'], 0.002),
+    );
+
+    const events = await turn(agent, 'Build onboarding copy');
+
+    assert.deepEqual(w.state.calls, [{ method: 'builds.start', arg: w.ids['onboarding'] }]);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'tool').at(-1),
+      { type: 'tool', id: 'call_1', name: 'start_build', status: 'ok', summary: 'Started build: onboarding-copy' },
+    );
+    const result = JSON.parse(messagesOf(fake.requests[1]).at(-1)?.content ?? '') as Record<string, unknown>;
+    assert.equal(result['ok'], true);
+    assert.equal(result['id'], w.ids['onboarding']);
+    for (const key of ['needs_confirmation', 'confirmation_id', 'say']) assert.equal(key in result, false, key);
+    assert.equal(spoken(events), 'onboarding-copy is building.');
   });
 
   it('reports a bad tool call as an error and lets the model go on', async () => {
@@ -282,7 +303,7 @@ describe('chief agent loop (voice US-008)', () => {
       db: w.db,
       config,
       services: w.services,
-      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined, confirmations: testGate().gate },
+      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined },
       tools: new Map([['start_build', slow]]),
       now: () => NOW,
     });
@@ -313,7 +334,7 @@ describe('chief agent loop (voice US-008)', () => {
       db: w.db,
       config,
       services: w.services,
-      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined, confirmations: testGate().gate, spokenSoFar: () => 'Two builds are running, one' },
+      call: { focus: { kind: 'chief' }, hangUpAfterTurn: () => undefined, spokenSoFar: () => 'Two builds are running, one' },
       now: () => NOW,
     });
     fake.replies.push(textReply(['Two builds are running, one for billing ', 'and one for the export.']));

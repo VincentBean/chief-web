@@ -6,12 +6,10 @@ import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg
  * Claude Code: it plans a `pending` session and answers questions about any
  * other (the registry's Q&A mode, voice US-025). Everything the registry
  * refuses on (no clone, the usage-limit hold, a container that does not
- * start) comes back as its message for chief to say. An open planning terminal is the one case that
- * asks first: closing it ends a conversation the operator may still want.
+ * start) comes back as its message for chief to say. So does an open planning
+ * terminal: closing it would end a conversation the operator may still want,
+ * so the operator closes it in the browser.
  */
-
-/** What chief asks when the planning terminal is open for the session. */
-export const CLOSE_TERMINAL_PROMPT = 'The planning terminal is open for this session. Should I close it and continue by voice?';
 
 const NAME = 'focus_session';
 
@@ -29,7 +27,6 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
       guarded('Could not switch to the session', async () => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
-        // Checked before offering to close the terminal, so a yes is never followed by a refusal.
         const holdUntil = services.hold.until();
         if (holdUntil !== null) {
           return {
@@ -39,26 +36,14 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
           };
         }
         if (services.planning?.isTerminalRunning(session.id) === true) {
-          const confirmation = ctx.confirmations.request(
-            { tool: NAME, args: { sessionId: session.id, name: session.name }, prompt: CLOSE_TERMINAL_PROMPT },
-            ctx.turn,
-          );
           return {
-            ok: true,
-            data: { needs_confirmation: true, confirmation_id: confirmation.id, say: confirmation.prompt },
-            summary: `Waiting for confirmation: ${confirmation.prompt}`,
+            ok: false,
+            data: { error: 'session_in_planning_terminal' },
+            summary: `The planning terminal is open for ${session.name}; close it in the browser first, then ask again.`,
           };
         }
         return switchTo(services, { id: session.id, name: session.name }, ctx);
       }),
-    // Only reached through `confirm`, i.e. the terminal was open and the operator said yes.
-    execute: (args, ctx) => {
-      const target = { id: args['sessionId'] as string, name: args['name'] as string };
-      return guarded(`Could not switch to ${target.name}`, async () => {
-        await services.planning?.stop(target.id);
-        return switchTo(services, target, ctx);
-      });
-    },
   };
 }
 

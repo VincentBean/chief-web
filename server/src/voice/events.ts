@@ -210,7 +210,7 @@ export interface VoiceEvent {
   readonly sessionId: string | null;
   /** A line the call speaks itself instead of handing the event to chief (`planning.drafted`, `planning.waiting`). */
   readonly line?: string;
-  /** The one waiting session the line offers to switch to; the call parks the confirmation once it is said. */
+  /** The one waiting session the line names, when exactly one waits for the operator. */
   readonly offer?: { readonly sessionId: string; readonly name: string };
 }
 

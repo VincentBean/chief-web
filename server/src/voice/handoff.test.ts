@@ -14,7 +14,6 @@ import {
   type CallTts,
   EVENT_QUIET_MS,
   HANGUP_GOODBYE,
-  SWITCH_OVER_TOOL,
   type VoiceAgent,
   VoiceCall,
 } from './call.js';
@@ -431,7 +430,7 @@ describe('reminding of the other planning sessions (US-009)', () => {
     ]);
   });
 
-  it('reminds of the others when the focused session is done, and a "yes" switches over', async () => {
+  it('reminds of the others when the focused session is done, and offers no switch-over itself', async () => {
     const { clock, advance } = manualClock();
     const t = setup({ kind: 'session', sessionId: 's1' }, { clock });
     setSetting(t.db, 'voice_language', 'en');
@@ -447,23 +446,18 @@ describe('reminding of the other planning sessions (US-009)', () => {
     };
     say(t.call, 'Only admins can export.');
     await until(() => t.call.state.activeTurn === null && t.of('agent.done').length === 1);
-    const line =
-      'billing-export on shop-api is waiting with 4 open questions, and search on webshop is done. Shall I switch you over?';
+    const line = 'billing-export on shop-api is waiting with 4 open questions, and search on webshop is done.';
     assert.deepEqual(t.call.state.queue.map((event) => event.line), [line]);
+    // The event still names the one waiting session.
+    assert.deepEqual(t.call.state.queue[0]?.offer, { sessionId: 's2', name: 'billing-export' });
 
     advance(EVENT_QUIET_MS);
     await until(() => t.of('agent.done').length === 2 && t.call.state.activeTurn === null);
     assert.equal(t.tts.spoken.at(-1), line);
-    assert.equal(t.call.state.pendingConfirmation?.tool, SWITCH_OVER_TOOL);
-    assert.ok(t.of('confirm').some((m) => m.prompt === 'Switch over to billing-export?'));
-
-    say(t.call, 'yes');
-    await until(() => t.call.focus.kind === 'session' && t.call.focus.sessionId === 's2');
-    assert.equal(t.call.state.pendingConfirmation, null);
-    // The yes went to no agent: the call answered it itself, and the new session opens.
-    assert.equal(t.agents.get('s1')?.inputs.length, 1);
-    await until(() => t.agents.get('s2')?.inputs.length === 1);
-    assert.equal(t.agents.get('s2')?.inputs[0]?.text, '');
+    // Nothing is asked and nothing is parked: the focus stays where it was.
+    assert.deepEqual(t.of('confirm'), []);
+    assert.deepEqual(t.call.focus, { kind: 'session', sessionId: 's1' });
+    assert.equal(t.agents.get('s2'), undefined);
   });
 
   it('asks nothing with two sessions waiting, and says nothing for a session that was done already', async () => {

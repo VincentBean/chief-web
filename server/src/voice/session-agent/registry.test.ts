@@ -27,8 +27,7 @@ import { PlanningError, PlanningService, type PlanningTerminals } from '../../pl
 import type { CreateTerminalInput, TerminalView } from '../../terminal/index.js';
 import { setSetting } from '../../db/index.js';
 import type { AgentEvent } from '../call.js';
-import { ConfirmationGate } from '../chief/confirm.js';
-import { CLOSE_TERMINAL_PROMPT, focusSessionTool } from '../chief/focus.js';
+import { focusSessionTool } from '../chief/focus.js';
 import type { ChiefServices, ToolContext } from '../chief/tools.js';
 import type { CallFocus } from '../protocol.js';
 import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './agent.js';
@@ -556,25 +555,19 @@ describe('session voice agents', () => {
   });
 
   describe('focus_session', () => {
-    const context = (gate: ConfirmationGate, focus: CallFocus[], turnNo = 1): ToolContext => ({
+    const context = (focus: CallFocus[]): ToolContext => ({
       signal: new AbortController().signal,
-      turn: turnNo,
+      turn: 1,
       focus: { kind: 'chief' },
       endCall: () => undefined,
-      confirmations: gate,
       setFocus: (next) => focus.push(next),
     });
-    const newGate = (): ConfirmationGate => {
-      const holder = { pendingConfirmation: null };
-      let id = 0;
-      return new ConfirmationGate({ holder, now: () => Date.now(), send: () => undefined, newId: () => `confirm-${String(++id)}` });
-    };
 
     it('hands a finished session to its Q&A agent (voice US-025)', async () => {
       const session = newSession('done-already', 'finished');
       const focus: CallFocus[] = [];
       const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
-      const result = await tool.handler({ session: session.name }, context(newGate(), focus));
+      const result = await tool.handler({ session: session.name }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
       assert.equal(registry.isAlive(session.id), true);
@@ -584,13 +577,13 @@ describe('session voice agents', () => {
       const session = newSession('talk-it-through');
       const focus: CallFocus[] = [];
       const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
-      const result = await tool.handler({ session: 'talk it through' }, context(newGate(), focus));
+      const result = await tool.handler({ session: 'talk it through' }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
       assert.equal(registry.isAlive(session.id), true);
     });
 
-    it('asks before closing an open planning terminal, then closes it through PlanningService.stop', async () => {
+    it('refuses while the planning terminal is open: nothing is stopped and the focus stays', async () => {
       const session = newSession('terminal-first');
       terminalRunning.add(session.id);
       const stopped: string[] = [];
@@ -603,18 +596,17 @@ describe('session voice agents', () => {
         },
       };
       const focus: CallFocus[] = [];
-      const gate = newGate();
       const tool = focusSessionTool({ db, sessionAgents: registry, planning, hold: { until: () => null } } as unknown as ChiefServices);
-      const asked = await tool.handler({ session: session.name }, context(gate, focus));
-      assert.equal((asked.data as { say: string }).say, CLOSE_TERMINAL_PROMPT);
+      const result = await tool.handler({ session: session.name }, context(focus));
+      assert.deepEqual(result, {
+        ok: false,
+        data: { error: 'session_in_planning_terminal' },
+        summary: 'The planning terminal is open for terminal-first; close it in the browser first, then ask again.',
+      });
+      assert.deepEqual(stopped, []);
+      assert.equal(terminalRunning.has(session.id), true);
       assert.deepEqual(focus, []);
-
-      const confirmation = gate.take((asked.data as { confirmation_id: string }).confirmation_id, 2);
-      assert.equal(confirmation.kind, 'ok');
-      const done = await tool.execute?.(confirmation.kind === 'ok' ? confirmation.confirmation.args : {}, context(gate, focus, 2));
-      assert.equal(done?.ok, true);
-      assert.deepEqual(stopped, [session.id]);
-      assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
+      assert.equal(registry.isAlive(session.id), false);
     });
   });
 
@@ -747,7 +739,6 @@ describe('session voice agents', () => {
         turn: 1,
         focus: { kind: 'chief' },
         endCall: () => undefined,
-        confirmations: new ConfirmationGate({ holder: { pendingConfirmation: null }, now: () => Date.now(), send: () => undefined, newId: () => 'confirm-1' }),
         setFocus: (next) => focus.push(next),
       });
       assert.equal(result.ok, false);
