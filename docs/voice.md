@@ -262,10 +262,15 @@ call and `VOICE_KEEP_AGENTS_MS` after it.
 
 - **Planning** (a `pending` session): it asks about the feature, reads the code
   where that helps, and writes `prd.md`. When the PRD parses, the PRD indicator
-  fills in and chief mentions it. Say "back to chief" and ask chief to mark it
-  ready and build it.
+  fills in and chief mentions it. When it is complete, say "build it", or ask
+  the agent in your own words ("I think we're done, go ahead and build it"):
+  it calls its `start_build` tool, which marks the session ready and starts
+  the build the same way (see "Build it" below). When the build starts, chief
+  takes the call back with the same line; a PRD that does not parse, or a
+  refusal, comes back to the agent, which says it and stays with you.
 - **Q&A** (any other status): it can read the code and the build log, but is
-  started with the edit tools disallowed, because the build loop owns the tree.
+  started with the edit tools and `start_build` disallowed, because the build
+  loop owns the tree.
 - **Handing over to the keyboard.** **Resume planning** in the session's
   terminal continues the voice conversation where it left off. Starting the
   terminal while a voice agent runs for that session asks to stop the agent
@@ -273,9 +278,10 @@ call and `VOICE_KEEP_AGENTS_MS` after it.
   says so, and you close the terminal in the browser and ask again.
 
 A session agent refuses to start for a session without a clone yet, and while
-Claude's usage-limit hold is on. It has no chief-web management tools: it
-cannot build, create or change anything outside its own container, so it asks
-you to say "back to chief". Its one tool that reaches the call panel,
+Claude's usage-limit hold is on. It has no chief-web management tools beyond
+building its own planning session: it cannot create or change anything else
+outside its own container, so it asks you to say "back to chief". Its one tool
+that reaches the call panel,
 `open_browser_with_operator`, only asks you for a page to open (see
 [Watch with me](#watch-with-me)).
 

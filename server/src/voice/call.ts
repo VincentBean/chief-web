@@ -15,6 +15,7 @@ import type { PrdStatus } from '../prd/index.js';
 import type { ReadyResult } from '../sessions/index.js';
 import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
 import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
+import { type BuildAnswer, type BuildRequestDeps, BuildRequests } from './build-ask.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
 import { describeEvent, draftedLine, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
@@ -194,6 +195,14 @@ export interface VoiceCallDeps {
 export interface CallBuilds {
   markReady(sessionId: string): Promise<ReadyResult>;
   start(sessionId: string): Promise<BuildView>;
+  /** The session agent's `start_build` requests (US-008); without them the tool is never answered. */
+  readonly requests?: BuildRequestDeps;
+}
+
+/** What marking a session ready and starting its build came to: chief's line, and the tool's answer. */
+interface BuildOutcome {
+  readonly line: string;
+  readonly answer: BuildAnswer;
 }
 
 /** Where a call reads what the providers say it spent (US-023). */
@@ -373,6 +382,10 @@ export class VoiceCall {
   readonly state: VoiceCallState;
   /** The session agent's "watch with me" cards (voice feedback US-007). */
   private readonly browserAsks: BrowserAsks | null;
+  /** The session agent's `start_build` calls (US-008). */
+  private readonly buildRequests: BuildRequests | null;
+  /** Sessions whose `start_build` call is still running on the agent's side. */
+  private readonly buildCalls = new Set<string>();
   private transport: CallTransport | null = null;
   private tts: CallTts | null = null;
   private sttMode: SttMode = 'openrouter';
@@ -451,6 +464,44 @@ export class VoiceCall {
     };
     this.browserAsks =
       deps.browser === undefined ? null : new BrowserAsks(deps.browser, { clock: deps.clock, send: (message) => this.send(message) });
+    this.buildRequests = deps.builds?.requests === undefined ? null : new BuildRequests(deps.builds.requests);
+  }
+
+  /**
+   * The session agent called `start_build` (US-008): the same mark-ready-then-start
+   * path as the `build` intent, its outcome written back as the tool's answer. A
+   * build that started takes the call back to chief, which says so; anything
+   * else the agent hears as the tool's result and says itself.
+   */
+  startBuild(sessionId: string): void {
+    const builds = this.deps.builds;
+    if (this.ended || builds === undefined || this.buildRequests === null) return;
+    this.buildCalls.add(sessionId);
+    void this.answerBuild(sessionId, builds, this.buildRequests).catch((cause: unknown) => {
+      logger.error('could not answer start_build', { call: this.id, session: sessionId, error: String(cause) });
+    });
+  }
+
+  /** That tool call is over on the agent's side; a request not found yet is no longer looked for. */
+  buildToolDone(sessionId: string): void {
+    this.buildCalls.delete(sessionId);
+  }
+
+  private async answerBuild(sessionId: string, builds: CallBuilds, requests: BuildRequests): Promise<void> {
+    const request = await requests.find(sessionId, () => this.ended || !this.buildCalls.has(sessionId));
+    if (request === null) return;
+    // Only a planning session is built; the tool is not offered to any other.
+    const outcome = this.isPlanning(sessionId)
+      ? await this.markReadyAndStart(sessionId, builds)
+      : { line: '', answer: { started: false, reason: 'this session is not being planned' } as const };
+    await request.answer(outcome.answer);
+    if (!outcome.answer.started || this.ended) return;
+    // At once, not once the interrupted turn has wound down: an utterance in between is chief's.
+    const focus = this.state.focus;
+    if (focus.kind === 'session' && focus.sessionId === sessionId) this.switchFocus({ kind: 'chief' });
+    void this.enqueue(async (controller) => {
+      await this.runTurn(`[event] start_build: ${sessionId}`, controller, {}, 'event', outcome.line);
+    });
   }
 
   /**
@@ -1291,24 +1342,29 @@ export class VoiceCall {
    * session agent can fix it.
    */
   private async buildFromIntent(tts: CallTts, turn: number, sessionId: string, builds: CallBuilds, signal: AbortSignal): Promise<void> {
+    const { line, answer } = await this.markReadyAndStart(sessionId, builds);
+    if (answer.started && !signal.aborted && !this.ended) this.setFocus({ kind: 'chief' });
+    await this.sayLine(tts, turn, line, signal);
+  }
+
+  /** Marks `sessionId` ready and, unless that already started it, starts its build (US-007, US-008). */
+  private async markReadyAndStart(sessionId: string, builds: CallBuilds): Promise<BuildOutcome> {
     const language = getVoiceSettings(this.deps.db).language;
-    let line: string;
-    let built = false;
     try {
       const ready = await builds.markReady(sessionId);
-      if (ready.ok) {
-        // A schedule missed while pending already started it (ReadyResult.started).
-        const build = ready.started ? null : await builds.start(sessionId);
-        line = buildingNow(language, ready.session.name, build?.queued === true);
-        built = true;
-      } else {
-        line = prdDoesNotParse(language, ready.prd.errors);
+      if (!ready.ok) {
+        const errors = ready.prd.errors.map((error) => (error.line > 0 ? `line ${String(error.line)}: ${error.message}` : error.message));
+        const line = prdDoesNotParse(language, ready.prd.errors);
+        return { line, answer: errors.length > 0 ? { started: false, errors } : { started: false, reason: line } };
       }
+      // A schedule missed while pending already started it (ReadyResult.started).
+      const build = ready.started ? null : await builds.start(sessionId);
+      const queued = build?.queued === true;
+      return { line: buildingNow(language, ready.session.name, queued), answer: { started: true, queued } };
     } catch (cause) {
-      line = cause instanceof Error ? cause.message : String(cause);
+      const line = cause instanceof Error ? cause.message : String(cause);
+      return { line, answer: { started: false, reason: line } };
     }
-    if (built && !signal.aborted && !this.ended) this.setFocus({ kind: 'chief' });
-    await this.sayLine(tts, turn, line, signal);
   }
 
   /** A fixed line the call says itself, as chief: an intent's answer, not a model's. */

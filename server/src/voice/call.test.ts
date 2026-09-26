@@ -69,7 +69,7 @@ import { SessionAgentRegistry } from './session-agent/registry.js';
 import { originAllowed } from './socket.js';
 import { switchingOver } from './speakable.js';
 import { createBrowserViewRoute, type ViewBrowsers } from './browser-view.js';
-import { FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
+import { FAKE_BUILD_REQUEST_ID, FakeMcpSide } from './__fixtures__/fake-mcp-side.js';
 import type { SttResult } from './stt/index.js';
 import { type SpeakCallbacks, type SpeakResult, SWITCHED_TOAST, type TtsSink } from './tts/index.js';
 import type { TtsSegment } from './tts/types.js';
@@ -1314,8 +1314,11 @@ describe('a scripted call end to end (US-027)', () => {
   });
 
   /** A scripted call with the focus on the planning session onboarding-copy. */
-  const onPlanningSession = async (language: 'en' | 'nl'): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string }> => {
-    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', language) });
+  const onPlanningSession = async (
+    language: 'en' | 'nl',
+    browser = false,
+  ): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string }> => {
+    const s = await scriptedCall({ before: (db) => setSetting(db, 'voice_language', language), browser });
     const sessionId = s.chief.ids['onboarding'] ?? '';
     openrouter.replies.push(
       toolReply([{ id: 'f1', name: 'focus_session', args: '{"session":"onboarding copy"}' }]),
@@ -1387,6 +1390,66 @@ describe('a scripted call end to end (US-027)', () => {
     assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
     assert.equal(lastSaid(s), 'Which session should I build?');
     assert.deepEqual(s.chief.state.calls, []);
+    await s.hangUp();
+  });
+
+  /** A planning session whose agent calls `start_build` on `#build`; the fake MCP server writes the request. */
+  const withStartBuild = async (): Promise<{ s: Awaited<ReturnType<typeof scriptedCall>>; sessionId: string; mcp: FakeMcpSide }> => {
+    const { s, sessionId } = await onPlanningSession('en', true);
+    const mcp = new FakeMcpSide(daemon, () => s.w.clock.now());
+    claude.onStartBuild = (containerId) => mcp.buildRequest(containerId);
+    // What the real tool returns for an answer that did not start a build.
+    mcp.onBuildAnswer = (_containerId, answer) => {
+      if (answer['started'] === true) return;
+      const errors = answer['errors'] as string[] | undefined;
+      claude.finishBuildTool(errors === undefined ? `The build did not start: ${String(answer['reason']).replace(/\.$/, '')}.` : `The PRD does not parse yet: ${errors.join('; ')}.`);
+    };
+    return { s, sessionId, mcp };
+  };
+
+  it('the session agent calls start_build: marked ready, built, the answer written, and chief takes the call (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    const requests = openrouter.requests.length;
+    s.w.stt.canned.push("#build I think we're done, go ahead and build it");
+    s.client.socket.send(encodeFrame(FRAME_KIND_UTTERANCE, 0, Buffer.from('RIFF-not-really')));
+    const line = 'Okay, onboarding-copy is marked ready and building. Back with me.';
+    await waitFor(() => s.client.messages('agent.delta').some((d) => d.agent === 'chief' && d.text === line));
+    assert.ok(s.client.messages('tool').some((m) => m.status === 'running' && m.summary === 'Starting the build'));
+    assert.deepEqual(mcp.buildAnswers, [{ containerId: `c-${sessionId}`, answer: { id: FAKE_BUILD_REQUEST_ID, started: true, queued: false } }]);
+    assert.deepEqual(s.chief.state.calls, [
+      { method: 'sessions.markReady', arg: sessionId },
+      { method: 'builds.start', arg: sessionId },
+    ]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'chief' });
+    assert.equal(openrouter.requests.length, requests, 'a fixed line, not a model call');
+    await waitFor(() => s.client.messages('state').at(-1)?.phase === 'listening');
+    await s.hangUp();
+  });
+
+  it('start_build on a PRD that does not parse: the errors are the answer, and the session agent says them (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    s.chief.state.prdErrors = [
+      { line: 12, message: 'US-002 has no acceptance criteria' },
+      { line: 30, message: 'US-004 has no title' },
+    ];
+    await s.say('#build go ahead and build it');
+    assert.deepEqual(mcp.buildAnswers.map((a) => a.answer), [
+      { id: FAKE_BUILD_REQUEST_ID, started: false, errors: ['line 12: US-002 has no acceptance criteria', 'line 30: US-004 has no title'] },
+    ]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The PRD does not parse yet: line 12: US-002 has no acceptance criteria; line 30: US-004 has no title.');
+    assert.equal(s.client.messages('agent.delta').filter((d) => d.agent === 'chief').at(-1)?.text.includes('does not parse'), false, 'chief says nothing');
+    assert.deepEqual(s.chief.state.calls.map((call) => call.method), ['sessions.markReady'], 'no build is started');
+    await s.hangUp();
+  });
+
+  it('start_build that the service refuses: the reason is the answer, and the focus stays (US-008)', async () => {
+    const { s, sessionId, mcp } = await withStartBuild();
+    s.chief.state.failures.set('builds.start', Object.assign(new Error('Builds are on hold until 18:00.'), { status: 409, code: 'usage_hold' }));
+    await s.say('#build go ahead and build it');
+    assert.deepEqual(mcp.buildAnswers.map((a) => a.answer), [{ id: FAKE_BUILD_REQUEST_ID, started: false, reason: 'Builds are on hold until 18:00.' }]);
+    assert.deepEqual(s.w.voice.service.activeCall?.focus, { kind: 'session', sessionId });
+    assert.equal(lastSaid(s), 'The build did not start: Builds are on hold until 18:00.');
     await s.hangUp();
   });
 

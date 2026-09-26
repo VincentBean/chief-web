@@ -284,7 +284,11 @@ describe('session voice agents', () => {
                 `/workspace/repo/.chief/prds/mcp-${status}/screenshots`,
               ],
             },
-            chief: { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] },
+            // Only a planning agent's chief server offers start_build (US-008).
+            chief:
+              status === 'pending'
+                ? { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] }
+                : { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'], env: { CHIEF_MCP_START_BUILD: '0' } },
           },
         });
         assert.equal(flag(argvOf(agent.execId), '--mcp-config'), MCP_CONFIG_FILE);
@@ -311,12 +315,13 @@ describe('session voice agents', () => {
       const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
       assert.ok(exec);
       assert.equal(flag(argvOf(exec.id), '--disallowedTools'), null);
+      assert.match(argvOf(exec.id).at(-1) as string, /call start_build/);
       assert.match(claude.userTexts(exec.id)[0] as string, /VOICE MODE OVERRIDES/);
       assert.equal(getVoiceSessionAgent(db, session.id)?.mode, 'plan');
     });
 
     for (const status of ['ready', 'building', 'finished'] as const) {
-      it(`answers questions about a ${status} session: the A.3 prompt, edit tools disallowed, mode qa`, async () => {
+      it(`answers questions about a ${status} session: the A.3 prompt, edit tools and start_build disallowed, mode qa`, async () => {
         const session = newSession(`qa-${status}`, status);
         const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call: controls() });
         const events = await turn(agent, 'what did the build do');
@@ -325,10 +330,12 @@ describe('session voice agents', () => {
         const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
         assert.ok(exec);
         const argv = argvOf(exec.id);
-        assert.equal(flag(argv, '--disallowedTools'), 'Edit,Write,MultiEdit,NotebookEdit');
+        assert.equal(flag(argv, '--disallowedTools'), 'Edit,Write,MultiEdit,NotebookEdit,mcp__chief__start_build');
         // The variadic flag is never last: another flag always ends its values.
         assert.equal(argv[argv.indexOf('--disallowedTools') + 2], '--append-system-prompt');
         assert.match(argv.at(-1) as string, /You are on a live voice call/);
+        // Nor is it told about building (US-008).
+        assert.doesNotMatch(argv.at(-1) as string, /start_build/);
         const [opening] = claude.userTexts(exec.id);
         assert.match(
           opening as string,
@@ -847,6 +854,7 @@ describe('session voice agents', () => {
     assert.equal(toolCardSummary('Read', { file_path: '/workspace/repo/server/src/auth/service.ts' }), 'Reading server/src/auth/service.ts');
     assert.equal(toolCardSummary('Grep', { pattern: 'invoice' }), 'Searching for "invoice"');
     assert.equal(toolCardSummary('Mystery', {}), 'Using Mystery');
+    assert.equal(toolCardSummary('mcp__chief__start_build', {}), 'Starting the build');
   });
 
   it('describes browser tool uses for their cards (voice feedback US-006)', () => {
