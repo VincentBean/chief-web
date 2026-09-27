@@ -7,12 +7,12 @@ import { getVoiceSettings } from '../../settings/index.js';
 import type { AgentEvent, AgentInput, VoiceAgent } from '../call.js';
 import type { CallFocus } from '../protocol.js';
 import type { SessionAgentEvent } from './events.js';
-import { INTERRUPT_GRACE_MS, interruptRequestLine, type SessionAgentProcess, userMessageLine } from './process.js';
+import { INTERRUPT_GRACE_MS, interruptRequestLine, type SessionAgentProcess, START_BUILD_TOOL, userMessageLine } from './process.js';
 import { voiceUtterance } from './prompt.js';
 import { redactCredentials } from './redact.js';
 import { SessionAgentError, type SessionAgentRegistry } from './registry.js';
 
-export { INTERRUPT_GRACE_MS } from './process.js';
+export { INTERRUPT_GRACE_MS, START_BUILD_TOOL } from './process.js';
 
 /** Said before the one restart of a call (docs/voice-plan.md §10.4). */
 export const RESTARTING: Readonly<Record<string, string>> = {
@@ -36,6 +36,10 @@ export interface SessionAgentCallControls {
   browserToolDone?(sessionId: string): void;
   /** Any browser tool call (US-012): the session browser is in use, so it does not idle out. */
   browserActivity?(sessionId: string): void;
+  /** The agent called {@link START_BUILD_TOOL} (US-008): mark the session ready and start its build. */
+  startBuild?(sessionId: string): void;
+  /** That tool call ended, answered or not. */
+  buildToolDone?(sessionId: string): void;
 }
 
 /** The `chief` MCP server's tool, as the CLI names it on the stream (`runner/chief-mcp.js`). */
@@ -132,6 +136,8 @@ export class SessionVoiceAgent implements VoiceAgent {
       const tools = new Map<string, { name: string; summary: string }>();
       // The open_browser_with_operator call of this turn whose result has not come yet.
       let browserCall: string | null = null;
+      // Likewise its start_build call (US-008).
+      let buildCall: string | null = null;
       try {
         for (;;) {
           const event = await agent.next(signal);
@@ -153,11 +159,21 @@ export class SessionVoiceAgent implements VoiceAgent {
               this.deps.call.browserToolDone?.(this.deps.sessionId);
             }
           }
+          if (out?.type === 'tool' && out.name === START_BUILD_TOOL) {
+            if (out.status === 'running' && buildCall === null) {
+              buildCall = out.id;
+              this.deps.call.startBuild?.(this.deps.sessionId);
+            } else if (out.status !== 'running' && out.id === buildCall) {
+              buildCall = null;
+              this.deps.call.buildToolDone?.(this.deps.sessionId);
+            }
+          }
           if (out !== null) yield out;
         }
       } finally {
         if (signal.aborted && !ended && !agent.exited) await this.interrupt(agent);
         if (browserCall !== null) this.deps.call.browserToolDone?.(this.deps.sessionId);
+        if (buildCall !== null) this.deps.call.buildToolDone?.(this.deps.sessionId);
       }
       // A process that died mid-turn is restarted once and hears the same utterance again.
       if (ended || signal.aborted || !agent.crashed) return;
@@ -323,6 +339,8 @@ function chiefToolSummary(tool: string): string {
   switch (tool) {
     case 'open_browser_with_operator':
       return 'Opening the browser';
+    case 'start_build':
+      return 'Starting the build';
     default:
       return `Using ${tool}`;
   }

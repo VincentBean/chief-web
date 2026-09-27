@@ -95,17 +95,23 @@ const IMAGE_MCP_COMMANDS: McpServerCommands = {
  * agent's working directory instead, which is why the planning prompt hands the
  * agent that directory's absolute path to name its screenshots into.
  * `commands` is only swapped by `__fixtures__/record.ts`, which runs on a host.
+ * A Q&A agent (`planning` false) gets a `chief` server without `start_build`.
  */
-export function mcpConfig(sessionName: string, commands: McpServerCommands = IMAGE_MCP_COMMANDS): string {
-  const stdio = (argv: readonly string[]): { type: 'stdio'; command: string; args: string[] } => ({
+export function mcpConfig(sessionName: string, commands: McpServerCommands = IMAGE_MCP_COMMANDS, planning = true): string {
+  const stdio = (
+    argv: readonly string[],
+    env?: Record<string, string>,
+  ): { type: 'stdio'; command: string; args: string[]; env?: Record<string, string> } => ({
     type: 'stdio',
     command: argv[0] as string,
     args: argv.slice(1),
+    ...(env === undefined ? {} : { env }),
   });
   return JSON.stringify({
     mcpServers: {
       playwright: stdio([...commands.playwright, '--cdp-endpoint', CDP_ENDPOINT, '--caps', 'core,vision', '--output-dir', screenshotsOutputDir(sessionName)]),
-      chief: stdio(commands.chief),
+      // Only a planning agent is offered `start_build` (US-008).
+      chief: planning ? stdio(commands.chief) : stdio(commands.chief, { CHIEF_MCP_START_BUILD: '0' }),
     },
   });
 }
@@ -119,14 +125,14 @@ export function screenshotsOutputDir(sessionName: string): string {
 }
 
 /** Writes {@link mcpConfig} to {@link MCP_CONFIG_FILE} as uid 1000; the JSON goes in as an argument, never through the shell. */
-export function mcpConfigWriteSpec(sessionName: string): ExecSpec {
+export function mcpConfigWriteSpec(sessionName: string, planning = true): ExecSpec {
   return {
     cmd: [
       '/bin/sh',
       '-c',
       `mkdir -p ${VOICE_PID_DIR} && printf '%s' "$1" > ${MCP_CONFIG_FILE}`,
       'chief-voice-mcp',
-      mcpConfig(sessionName),
+      mcpConfig(sessionName, IMAGE_MCP_COMMANDS, planning),
     ],
     user: SESSION_AGENT_USER,
   };
@@ -148,12 +154,16 @@ export interface SessionAgentCommandOptions {
   readonly disallowedTools?: readonly string[];
 }
 
+/** The planning agent's `start_build` (US-008), as the CLI names the `chief` MCP server's tool. */
+export const START_BUILD_TOOL = 'mcp__chief__start_build';
+
 /**
  * The edit tools a Q&A agent may not use (docs/voice-plan.md §10.4, FR-25): the build loop
  * owns the tree of a session that is not pending. Passed as
- * `--disallowedTools`, checked against `claude --help` of 2.1.280.
+ * `--disallowedTools`, checked against `claude --help` of 2.1.280. Nor may it
+ * build (US-008): {@link START_BUILD_TOOL} is for a planning agent only.
  */
-export const QA_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+export const QA_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', START_BUILD_TOOL];
 
 /** `claude` with the flags of docs/voice-plan.md §10.1, plus the browser's MCP servers. */
 export function sessionAgentCommand(options: SessionAgentCommandOptions): string[] {
@@ -207,6 +217,8 @@ export interface StartSessionAgentInput {
   readonly sessionName: string;
   readonly containerId: string;
   readonly command: SessionAgentCommandOptions;
+  /** A planning agent (the default) is offered `start_build`; a Q&A agent is not (US-008). */
+  readonly planning?: boolean;
   /** Told about every `init`, so the conversation id can be persisted. */
   readonly onInit?: (claudeSessionId: string) => void;
   readonly now?: () => number;
@@ -243,7 +255,7 @@ export class SessionAgentProcess {
 
   static async start(docker: SessionAgentDocker, input: StartSessionAgentInput): Promise<SessionAgentProcess> {
     // Without the file `claude` exits at boot, so a failed write is the start failing.
-    const written = await docker.runExec(input.containerId, mcpConfigWriteSpec(input.sessionName), SIGNAL_TIMEOUT_MS);
+    const written = await docker.runExec(input.containerId, mcpConfigWriteSpec(input.sessionName, input.planning ?? true), SIGNAL_TIMEOUT_MS);
     if (written.exitCode !== 0) {
       throw new Error(`could not write ${MCP_CONFIG_FILE}: ${written.stderr.trim() || `exit ${String(written.exitCode)}`}`);
     }

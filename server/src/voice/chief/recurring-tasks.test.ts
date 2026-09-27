@@ -3,44 +3,34 @@ import { describe, it } from 'node:test';
 
 import { getRecurringTaskByName, listRecurringTasks, type RecurringTask, recordRecurringTaskOccurrence } from '../../db/index.js';
 import { MAX_RECURRING_TASK_NAME_LENGTH, RecurringTaskError } from '../../recurringtasks/index.js';
-import { chiefWorld, testGate } from './__fixtures__/world.js';
+import { chiefWorld } from './__fixtures__/world.js';
 import { firstSentence } from './recurring-tasks.js';
 import { type ChiefTool, createChiefTools, type ToolContext, type ToolResult } from './tools.js';
 
 type World = ReturnType<typeof chiefWorld>;
 
-const ctxAt = (gate: ToolContext['confirmations'], turn: number): ToolContext => ({
+const ctx: ToolContext = {
   signal: new AbortController().signal,
-  turn,
+  turn: 1,
   focus: { kind: 'chief' },
   endCall: () => undefined,
-  confirmations: gate,
-});
+};
 
-/** Asks in turn 1, checks nothing changed, confirms in turn 2. */
-async function roundTrip(
-  name: string,
-  args: Record<string, unknown>,
-  w: World = chiefWorld(),
-): Promise<{ w: World; prompt: string; ran: ToolResult }> {
-  const { gate, sent } = testGate();
-  const tools = createChiefTools(w.services);
-  const before = JSON.stringify(listRecurringTasks(w.db));
-  const asked = await (tools.get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
-  assert.equal(asked.ok, true, asked.summary);
-  const confirm = sent.find((message) => message.type === 'confirm');
-  assert.ok(confirm !== undefined && confirm.type === 'confirm', 'asks for confirmation');
-  assert.deepEqual(w.state.calls, [], 'nothing runs before the operator answers');
-  assert.equal(JSON.stringify(listRecurringTasks(w.db)), before, 'nothing is written before the operator answers');
-  const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 2));
-  return { w, prompt: confirm.prompt, ran };
+/** Calls a tool once: an acting tool resolves its target and acts in the same call. */
+async function act(name: string, args: Record<string, unknown>, w: World = chiefWorld()): Promise<{ w: World; result: ToolResult }> {
+  const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctx);
+  return { w, result };
 }
 
-/** Asks only: the result, and whether a confirmation was parked. */
-async function ask(name: string, args: Record<string, unknown>, w: World = chiefWorld()): Promise<{ result: ToolResult; parked: boolean }> {
-  const { gate, sent } = testGate();
-  const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
-  return { result, parked: sent.some((message) => message.type === 'confirm') };
+/** Calls a tool that must refuse in `prepare`: nothing is called and nothing is written. */
+async function refused(name: string, args: Record<string, unknown>, w: World = chiefWorld()): Promise<ToolResult> {
+  const before = JSON.stringify(listRecurringTasks(w.db));
+  const calls = w.state.calls.length;
+  const { result } = await act(name, args, w);
+  assert.equal(result.ok, false, result.summary);
+  assert.equal(w.state.calls.length, calls, 'no service call');
+  assert.equal(JSON.stringify(listRecurringTasks(w.db)), before, 'nothing written');
+  return result;
 }
 
 function task(w: World, name: string): RecurringTask {
@@ -51,7 +41,7 @@ function task(w: World, name: string): RecurringTask {
 
 describe('chief recurring task tools (voice US-014)', () => {
   it('list_recurring_tasks: compact rows, and opens the page', async () => {
-    const { result } = await ask('list_recurring_tasks', {});
+    const { result } = await act('list_recurring_tasks', {});
     assert.equal(result.ok, true);
     assert.deepEqual(result.ui, [{ action: 'navigate', path: '/recurring-tasks' }]);
     const data = result.data as { recurringTasks: Record<string, unknown>[]; total: number };
@@ -69,12 +59,12 @@ describe('chief recurring task tools (voice US-014)', () => {
   });
 
   it('list_recurring_tasks: filters by a spoken repository name', async () => {
-    const web = await ask('list_recurring_tasks', { repository: 'chief web' });
+    const web = await act('list_recurring_tasks', { repository: 'chief web' });
     assert.deepEqual(
       (web.result.data as { recurringTasks: { name: string }[] }).recurringTasks.map((row) => row.name).sort(),
       ['monthly-audit', 'weekly-deps'],
     );
-    const unknown = await ask('list_recurring_tasks', { repository: 'billing' });
+    const unknown = await act('list_recurring_tasks', { repository: 'billing' });
     assert.equal(unknown.result.ok, false);
     assert.equal((unknown.result.data as { error: string }).error, 'not_found');
   });
@@ -90,7 +80,7 @@ describe('chief recurring task tools (voice US-014)', () => {
         detail: `skip ${String(i)}`,
       });
     }
-    const { result } = await ask('get_recurring_task', { task: 'the weekly deps task' }, w);
+    const { result } = await act('get_recurring_task', { task: 'the weekly deps task' }, w);
     assert.equal(result.ok, true, result.summary);
     assert.deepEqual(result.ui, [{ action: 'navigate', path: `/recurring-tasks/${weekly.id}` }]);
     const data = result.data as { name: string; schedule: string; prompt: string; occurrences: { at: string; detail: string }[] };
@@ -101,90 +91,92 @@ describe('chief recurring task tools (voice US-014)', () => {
   });
 
   it('get_recurring_task: an unknown or ambiguous name offers candidates', async () => {
-    const none = await ask('get_recurring_task', { task: 'backups' });
+    const none = await act('get_recurring_task', { task: 'backups' });
     assert.equal(none.result.ok, false);
     assert.equal((none.result.data as { error: string }).error, 'not_found');
     assert.match(none.result.summary, /No recurring task called "backups"/);
   });
 
-  it('pause_recurring_task: confirms, then pauses through updateRecurringTaskFromRequest', async () => {
-    const { w, prompt, ran } = await roundTrip('pause_recurring_task', { task: 'nightly rector' });
-    assert.equal(prompt, 'Pause the recurring task nightly-rector?');
-    assert.equal(ran.ok, true, ran.summary);
-    assert.equal(ran.summary, 'Paused: nightly-rector');
+  it('pause_recurring_task: resolves the spoken name and pauses through updateRecurringTaskFromRequest', async () => {
+    const { w, result } = await act('pause_recurring_task', { task: 'nightly rector' });
+    assert.equal(result.ok, true, result.summary);
+    assert.equal(result.summary, 'Paused: nightly-rector');
     const row = task(w, 'nightly-rector');
+    assert.deepEqual(result.ui, [{ action: 'navigate', path: `/recurring-tasks/${row.id}` }]);
     assert.equal(row.paused, true);
     assert.equal(row.nextRunAt, null);
   });
 
-  it('pause_recurring_task: an already paused task is said, not confirmed', async () => {
+  it('pause_recurring_task: an already paused task is said, and nothing changes', async () => {
     const w = chiefWorld();
-    await roundTrip('pause_recurring_task', { task: 'nightly-rector' }, w);
-    const again = await ask('pause_recurring_task', { task: 'nightly-rector' }, w);
-    assert.equal(again.result.ok, false);
-    assert.equal(again.parked, false);
-    assert.equal(again.result.summary, 'nightly-rector is already paused');
+    await act('pause_recurring_task', { task: 'nightly-rector' }, w);
+    const again = await refused('pause_recurring_task', { task: 'nightly-rector' }, w);
+    assert.equal((again.data as { error: string }).error, 'already_paused');
+    assert.equal(again.summary, 'nightly-rector is already paused');
   });
 
-  it('resume_recurring_task: confirms with the schedule, then resumes', async () => {
+  it('pause_recurring_task: an unknown name is refused', async () => {
+    const result = await refused('pause_recurring_task', { task: 'backups' });
+    assert.equal((result.data as { error: string }).error, 'not_found');
+  });
+
+  it('resume_recurring_task: resumes a paused task; a running one is refused', async () => {
     const w = chiefWorld();
-    await roundTrip('pause_recurring_task', { task: 'nightly-rector' }, w);
-    const { prompt, ran } = await roundTrip('resume_recurring_task', { task: 'nightly-rector' }, w);
-    assert.equal(prompt, 'Resume the recurring task nightly-rector, at 02:00?');
-    assert.equal(ran.ok, true, ran.summary);
+    await act('pause_recurring_task', { task: 'nightly-rector' }, w);
+    const { result } = await act('resume_recurring_task', { task: 'nightly-rector' }, w);
+    assert.equal(result.ok, true, result.summary);
+    assert.equal(result.summary, 'Resumed: nightly-rector');
     const row = task(w, 'nightly-rector');
     assert.equal(row.paused, false);
     assert.notEqual(row.nextRunAt, null);
-    const notPaused = await ask('resume_recurring_task', { task: 'weekly-deps' }, w);
-    assert.equal(notPaused.result.ok, false);
-    assert.equal(notPaused.parked, false);
+    const notPaused = await refused('resume_recurring_task', { task: 'weekly-deps' }, w);
+    assert.equal((notPaused.data as { error: string }).error, 'not_paused');
   });
 
-  it('run_recurring_task_now: confirms, then fires one occurrence', async () => {
-    const { w, prompt, ran } = await roundTrip('run_recurring_task_now', { task: 'nightly rector' });
-    assert.equal(prompt, 'Run nightly-rector now?');
-    assert.equal(ran.ok, true, ran.summary);
+  it('run_recurring_task_now: fires one occurrence by id', async () => {
+    const { w, result } = await act('run_recurring_task_now', { task: 'nightly rector' });
+    assert.equal(result.ok, true, result.summary);
     const id = task(w, 'nightly-rector').id;
     assert.deepEqual(w.state.calls, [{ method: 'recurringTasks.fireNow', arg: id }]);
-    assert.deepEqual(ran.data, { name: 'nightly-rector', outcome: 'started', run: 'nightly-rector-20260925-0200' });
-    assert.equal(ran.summary, 'Running now: nightly-rector');
-    assert.deepEqual(ran.ui, [{ action: 'navigate', path: `/recurring-tasks/${id}` }]);
+    assert.deepEqual(result.data, { name: 'nightly-rector', outcome: 'started', run: 'nightly-rector-20260925-0200' });
+    assert.equal(result.summary, 'Running now: nightly-rector');
+    assert.deepEqual(result.ui, [{ action: 'navigate', path: `/recurring-tasks/${id}` }]);
   });
 
-  it('run_recurring_task_now: a paused task may be run by hand, and the prompt says so', async () => {
+  it('run_recurring_task_now: a paused task may be run by hand', async () => {
     const w = chiefWorld();
-    await roundTrip('pause_recurring_task', { task: 'nightly-rector' }, w);
+    await act('pause_recurring_task', { task: 'nightly-rector' }, w);
     w.state.calls.length = 0;
-    const { prompt, ran } = await roundTrip('run_recurring_task_now', { task: 'nightly-rector' }, w);
-    assert.equal(prompt, 'Run nightly-rector now, even though it is paused?');
-    assert.equal(ran.ok, true, ran.summary);
+    const { result } = await act('run_recurring_task_now', { task: 'nightly-rector' }, w);
+    assert.equal(result.ok, true, result.summary);
+    assert.deepEqual(w.state.calls, [{ method: 'recurringTasks.fireNow', arg: task(w, 'nightly-rector').id }]);
   });
 
   it('run_recurring_task_now: a skip is spoken with its reason', async () => {
     const w = chiefWorld();
     w.state.firing = { outcome: 'skipped', detail: 'PR #212 from the previous run is still open.', sessionId: null };
-    const { ran } = await roundTrip('run_recurring_task_now', { task: 'nightly-rector' }, w);
-    assert.equal(ran.ok, false);
-    assert.equal(ran.summary, 'Skipped nightly-rector: PR #212 from the previous run is still open.');
-    assert.equal((ran.data as { error: string }).error, 'skipped');
+    const { result } = await act('run_recurring_task_now', { task: 'nightly-rector' }, w);
+    assert.equal(result.ok, false);
+    assert.equal(result.summary, 'Skipped nightly-rector: PR #212 from the previous run is still open.');
+    assert.equal((result.data as { error: string }).error, 'skipped');
   });
 
   it('run_recurring_task_now: a run still setting up returns at once, and a refusal is spoken', async () => {
     const w = chiefWorld();
     w.state.firing = 'pending';
-    const { ran } = await roundTrip('run_recurring_task_now', { task: 'nightly-rector' }, w);
-    assert.equal(ran.ok, true);
-    assert.equal((ran.data as { setup: string }).setup, 'running');
+    const { result } = await act('run_recurring_task_now', { task: 'nightly-rector' }, w);
+    assert.equal(result.ok, true);
+    assert.equal((result.data as { setup: string }).setup, 'running');
 
-    const refused = chiefWorld();
-    refused.state.failures.set('recurringTasks.fireNow', new RecurringTaskError(503, 'sessions_unavailable', 'The session service is not ready yet.'));
-    const second = await roundTrip('run_recurring_task_now', { task: 'nightly-rector' }, refused);
-    assert.equal(second.ran.ok, false);
-    assert.equal(second.ran.summary, 'The session service is not ready yet.');
+    const failing = chiefWorld();
+    failing.state.failures.set('recurringTasks.fireNow', new RecurringTaskError(503, 'sessions_unavailable', 'The session service is not ready yet.'));
+    const second = await act('run_recurring_task_now', { task: 'nightly-rector' }, failing);
+    assert.equal(second.result.ok, false);
+    assert.equal(second.result.summary, 'The session service is not ready yet.');
   });
 
-  it('create_recurring_task: reads back name, schedule in words and the first sentence, then creates', async () => {
-    const { w, prompt, ran } = await roundTrip('create_recurring_task', {
+  it('create_recurring_task: creates in the resolved repository and reads the schedule back in words', async () => {
+    const { w, result } = await act('create_recurring_task', {
       repository: 'shop api',
       name: 'Weekly cleanup',
       schedule: '0 3 * * 1',
@@ -192,9 +184,12 @@ describe('chief recurring task tools (voice US-014)', () => {
       pr_target: 'develop',
       code_review: true,
     });
-    assert.equal(prompt, 'Create recurring task weekly-cleanup in shop-api, at 03:00, only on Monday, with the prompt "Remove dead code"?');
-    assert.equal(ran.ok, true, ran.summary);
-    assert.equal(ran.summary, 'Created recurring task: weekly-cleanup');
+    assert.equal(result.ok, true, result.summary);
+    assert.equal(result.summary, 'Created recurring task: weekly-cleanup');
+    const data = result.data as { name: string; repository: string; schedule: string };
+    assert.equal(data.name, 'weekly-cleanup');
+    assert.equal(data.repository, 'shop-api');
+    assert.equal(data.schedule, 'At 03:00, only on Monday');
     const row = getRecurringTaskByName(w.db, w.ids['shop'] as string, 'weekly-cleanup');
     assert.ok(row);
     assert.equal(row.cronExpression, '0 3 * * 1');
@@ -203,47 +198,44 @@ describe('chief recurring task tools (voice US-014)', () => {
     assert.equal(row.prTarget, 'develop');
     assert.equal(row.runCodeReview, true);
     assert.equal(row.paused, false);
-    assert.deepEqual(ran.ui, [{ action: 'navigate', path: `/recurring-tasks/${row.id}` }]);
+    assert.deepEqual(result.ui, [{ action: 'navigate', path: `/recurring-tasks/${row.id}` }]);
   });
 
-  it('create_recurring_task: an invalid cron expression is refused before asking', async () => {
-    const { result, parked } = await ask('create_recurring_task', {
+  it('create_recurring_task: an invalid cron expression is refused and nothing is created', async () => {
+    const result = await refused('create_recurring_task', {
       repository: 'shop-api',
       name: 'cleanup',
       schedule: 'every monday',
       prompt: 'Clean up.',
     });
-    assert.equal(result.ok, false);
-    assert.equal(parked, false);
     assert.equal((result.data as { error: string }).error, 'invalid_cron_expression');
     assert.match(result.summary, /^"every monday" is not a schedule I can use: /);
   });
 
   it('create_recurring_task: a name that is too long is refused with the reason', async () => {
     const long = 'a very long name that goes on and on about the nightly database maintenance';
-    const { result, parked } = await ask('create_recurring_task', { repository: 'shop-api', name: long, schedule: '0 3 * * *', prompt: 'x' });
-    assert.equal(result.ok, false);
-    assert.equal(parked, false);
+    const result = await refused('create_recurring_task', { repository: 'shop-api', name: long, schedule: '0 3 * * *', prompt: 'x' });
     assert.equal((result.data as { error: string }).error, 'name_too_long');
     assert.match(result.summary, new RegExp(`at most ${String(MAX_RECURRING_TASK_NAME_LENGTH)}, because every run adds the date and time`));
   });
 
   it('create_recurring_task: a taken name is refused', async () => {
-    const { result } = await ask('create_recurring_task', { repository: 'shop-api', name: 'nightly rector', schedule: '0 3 * * *', prompt: 'x' });
-    assert.equal(result.ok, false);
+    const result = await refused('create_recurring_task', { repository: 'shop-api', name: 'nightly rector', schedule: '0 3 * * *', prompt: 'x' });
     assert.equal((result.data as { error: string }).error, 'task_name_taken');
   });
 
-  it('update_recurring_task: reads back only the fields that change', async () => {
-    const { w, prompt, ran } = await roundTrip('update_recurring_task', {
+  it('update_recurring_task: changes only the fields that differ, and says which', async () => {
+    const { w, result } = await act('update_recurring_task', {
       task: 'weekly deps',
       schedule: '30 4 * * 5',
       prompt: 'Bump dependencies.',
       pr_target: 'main',
       code_review: true,
     });
-    assert.equal(prompt, 'For weekly-deps: run it at 04:30, only on Friday and turn code review on?');
-    assert.equal(ran.ok, true, ran.summary);
+    assert.equal(result.ok, true, result.summary);
+    const data = result.data as { name: string; changed: string; schedule: string };
+    assert.equal(data.changed, 'run it at 04:30, only on Friday and turn code review on');
+    assert.equal(data.schedule, 'At 04:30, only on Friday');
     const row = task(w, 'weekly-deps');
     assert.equal(row.cronExpression, '30 4 * * 5');
     assert.equal(row.runCodeReview, true);
@@ -251,21 +243,19 @@ describe('chief recurring task tools (voice US-014)', () => {
   });
 
   it('update_recurring_task: a rename, and the refusals', async () => {
-    const renamed = await roundTrip('update_recurring_task', { task: 'monthly audit', name: 'Monthly security audit' });
-    assert.equal(renamed.prompt, 'For monthly-audit: rename it to monthly-security-audit?');
-    assert.equal(renamed.ran.ok, true, renamed.ran.summary);
+    const renamed = await act('update_recurring_task', { task: 'monthly audit', name: 'Monthly security audit' });
+    assert.equal(renamed.result.ok, true, renamed.result.summary);
+    assert.equal((renamed.result.data as { changed: string }).changed, 'rename it to monthly-security-audit');
     assert.equal(task(renamed.w, 'monthly-security-audit').cronExpression, '0 3 1 * *');
 
-    const nothing = await ask('update_recurring_task', { task: 'weekly-deps', schedule: '0 3 * * 1' });
-    assert.equal(nothing.result.ok, false);
-    assert.equal((nothing.result.data as { error: string }).error, 'no_changes');
+    const nothing = await refused('update_recurring_task', { task: 'weekly-deps', schedule: '0 3 * * 1' });
+    assert.equal((nothing.data as { error: string }).error, 'no_changes');
 
-    const badCron = await ask('update_recurring_task', { task: 'weekly-deps', schedule: '61 * * * *' });
-    assert.equal(badCron.parked, false);
-    assert.equal((badCron.result.data as { error: string }).error, 'invalid_cron_expression');
+    const badCron = await refused('update_recurring_task', { task: 'weekly-deps', schedule: '61 * * * *' });
+    assert.equal((badCron.data as { error: string }).error, 'invalid_cron_expression');
 
-    const tooLong = await ask('update_recurring_task', { task: 'weekly-deps', name: 'x'.repeat(MAX_RECURRING_TASK_NAME_LENGTH + 1) });
-    assert.equal((tooLong.result.data as { error: string }).error, 'name_too_long');
+    const tooLong = await refused('update_recurring_task', { task: 'weekly-deps', name: 'x'.repeat(MAX_RECURRING_TASK_NAME_LENGTH + 1) });
+    assert.equal((tooLong.data as { error: string }).error, 'name_too_long');
   });
 
   it('does not expose deleting a recurring task', () => {

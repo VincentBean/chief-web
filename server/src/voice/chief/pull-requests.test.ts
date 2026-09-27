@@ -7,42 +7,23 @@ import { loadConfig } from '../../config.js';
 import { createPrRun, createRepository, enqueueBuild, IN_MEMORY, openDatabase, prRefId, setSetting, updatePrRun } from '../../db/index.js';
 import { PrFeedbackError } from '../../prfeedback/index.js';
 import { PrReviewError } from '../../prreview/index.js';
-import { chiefWorld, testGate } from './__fixtures__/world.js';
+import { chiefWorld } from './__fixtures__/world.js';
 import { GithubVoiceReviews, prNumberArg, voiceRequestBody } from './pull-requests.js';
 import { type ChiefTool, createChiefTools, type ToolContext, type ToolResult } from './tools.js';
 
 type World = ReturnType<typeof chiefWorld>;
 
-const ctxAt = (gate: ToolContext['confirmations'], turn: number): ToolContext => ({
+const ctx: ToolContext = {
   signal: new AbortController().signal,
-  turn,
+  turn: 1,
   focus: { kind: 'chief' },
   endCall: () => undefined,
-  confirmations: gate,
-});
+};
 
-/** Asks in turn 1, checks nothing ran, confirms in turn 2. */
-async function roundTrip(
-  name: string,
-  args: Record<string, unknown>,
-  w: World = chiefWorld(),
-): Promise<{ w: World; prompt: string; ran: ToolResult }> {
-  const { gate, sent } = testGate();
-  const tools = createChiefTools(w.services);
-  const asked = await (tools.get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
-  assert.equal(asked.ok, true, asked.summary);
-  const confirm = sent.find((message) => message.type === 'confirm');
-  assert.ok(confirm !== undefined && confirm.type === 'confirm', 'asks for confirmation');
-  assert.deepEqual(w.state.calls, [], 'nothing runs before the operator answers');
-  const ran = await (tools.get('confirm') as ChiefTool).handler({ confirmation_id: confirm.id }, ctxAt(gate, 2));
-  return { w, prompt: confirm.prompt, ran };
-}
-
-/** Asks only: the result, and whether a confirmation was parked. */
-async function ask(name: string, args: Record<string, unknown>, w: World = chiefWorld()): Promise<{ result: ToolResult; parked: boolean }> {
-  const { gate, sent } = testGate();
-  const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctxAt(gate, 1));
-  return { result, parked: sent.some((message) => message.type === 'confirm') };
+/** Calls a tool once: an acting tool resolves its target and acts in the same call. */
+async function act(name: string, args: Record<string, unknown>, w: World = chiefWorld()): Promise<{ w: World; result: ToolResult }> {
+  const result = await (createChiefTools(w.services).get(name) as ChiefTool).handler(args, ctx);
+  return { w, result };
 }
 
 /** Puts a pull request from a fork on shop-api's list. */
@@ -69,7 +50,7 @@ describe('chief pull request tools (voice US-013)', () => {
         { kind: 'review', resolved: false },
       ],
     } as never);
-    const { result } = await ask('list_pull_requests', {}, w);
+    const { result } = await act('list_pull_requests', {}, w);
     assert.equal(result.ok, true);
     assert.deepEqual(result.ui, [{ action: 'navigate', path: '/pull-requests' }]);
     const data = result.data as { pullRequests: unknown[]; total: number };
@@ -102,11 +83,11 @@ describe('chief pull request tools (voice US-013)', () => {
   });
 
   it('list_pull_requests: filters by a spoken repository name, resolved like a session name', async () => {
-    const shop = await ask('list_pull_requests', { repository: 'the shop api', state: 'open' });
+    const shop = await act('list_pull_requests', { repository: 'the shop api', state: 'open' });
     assert.equal((shop.result.data as { total: number }).total, 2);
-    const web = await ask('list_pull_requests', { repository: 'chief web' });
+    const web = await act('list_pull_requests', { repository: 'chief web' });
     assert.equal((web.result.data as { total: number }).total, 0);
-    const unknown = await ask('list_pull_requests', { repository: 'billing' });
+    const unknown = await act('list_pull_requests', { repository: 'billing' });
     assert.equal(unknown.result.ok, false);
     assert.equal((unknown.result.data as { error: string }).error, 'not_found');
   });
@@ -114,32 +95,37 @@ describe('chief pull request tools (voice US-013)', () => {
   it('list_pull_requests: falls back to the cached list and says so when there is none', async () => {
     const w = chiefWorld();
     w.state.pullRequests = null;
-    const { result } = await ask('list_pull_requests', {}, w);
+    const { result } = await act('list_pull_requests', {}, w);
     assert.equal(result.ok, false);
     assert.equal((result.data as { error: string }).error, 'pull_requests_unavailable');
   });
 
-  it('review_pull_request: confirms, then calls PrReviewService.start', async () => {
-    const { w, prompt, ran } = await roundTrip('review_pull_request', { repository: 'shop-api', number: 209 });
-    assert.equal(prompt, 'Review shop-api #209, "Speed up search"?');
-    assert.equal(ran.ok, true, ran.summary);
+  it('review_pull_request: resolves the spoken target and calls PrReviewService.start once with its ids', async () => {
+    const { w, result } = await act('review_pull_request', { repository: 'the shop api', number: 209 });
+    assert.equal(result.ok, true, result.summary);
     assert.deepEqual(w.state.calls, [{ method: 'prReviews.start', arg: { repositoryId: w.ids['shop'], prNumber: 209 } }]);
-    assert.equal(ran.summary, 'Review: shop-api #209');
-    assert.deepEqual(ran.ui, [{ action: 'navigate', path: '/pull-requests' }]);
+    assert.equal(result.summary, 'Review: shop-api #209');
+    assert.deepEqual(result.ui, [{ action: 'navigate', path: '/pull-requests' }]);
   });
 
   it('review_pull_request: a service refusal is spoken, not thrown', async () => {
     const w = chiefWorld();
     w.state.failures.set('prReviews.start', new PrReviewError(409, 'review_already_active', 'That pull request is already being reviewed.'));
-    const { ran } = await roundTrip('review_pull_request', { repository: 'shop-api', number: 212 }, w);
-    assert.equal(ran.ok, false);
-    assert.equal(ran.summary, 'That pull request is already being reviewed.');
+    const { result } = await act('review_pull_request', { repository: 'shop-api', number: 212 }, w);
+    assert.equal(result.ok, false);
+    assert.equal(result.summary, 'That pull request is already being reviewed.');
   });
 
-  it('address_pr_feedback: confirms, then calls PrFeedbackService.start', async () => {
-    const { w, prompt, ran } = await roundTrip('address_pr_feedback', { repository: 'shop api', number: '212' });
-    assert.match(prompt, /Address the review feedback on shop-api #212/);
-    assert.equal(ran.ok, true, ran.summary);
+  it('review_pull_request: an unknown repository is refused before anything runs', async () => {
+    const { w, result } = await act('review_pull_request', { repository: 'billing', number: 209 });
+    assert.equal(result.ok, false);
+    assert.equal((result.data as { error: string }).error, 'not_found');
+    assert.deepEqual(w.state.calls, []);
+  });
+
+  it('address_pr_feedback: calls PrFeedbackService.start once with the resolved ids', async () => {
+    const { w, result } = await act('address_pr_feedback', { repository: 'shop api', number: '212' });
+    assert.equal(result.ok, true, result.summary);
     assert.deepEqual(w.state.calls, [{ method: 'prFeedback.start', arg: { repositoryId: w.ids['shop'], prNumber: 212 } }]);
   });
 
@@ -149,10 +135,10 @@ describe('chief pull request tools (voice US-013)', () => {
     assert.equal(prNumberArg({ number: 'two thirteen' }), null);
     assert.equal(prNumberArg({ number: 2.5 }), null);
     assert.equal(prNumberArg({ number: 0 }), null);
-    const { result, parked } = await ask('address_pr_feedback', { repository: 'shop-api', number: 'two thirteen' });
+    const { w, result } = await act('address_pr_feedback', { repository: 'shop-api', number: 'two thirteen' });
     assert.equal(result.ok, false);
-    assert.equal(parked, false);
     assert.equal((result.data as { error: string }).error, 'invalid_number');
+    assert.deepEqual(w.state.calls, []);
   });
 
   it('refuses a pull request from a fork for feedback, conflict fixes and change requests', async () => {
@@ -162,9 +148,8 @@ describe('chief pull request tools (voice US-013)', () => {
       ['request_pr_change', { instruction: 'rename it' }],
     ] as const) {
       const w = withFork(chiefWorld());
-      const { result, parked } = await ask(name, { repository: 'shop-api', number: 207, ...extra }, w);
+      const { result } = await act(name, { repository: 'shop-api', number: 207, ...extra }, w);
       assert.equal(result.ok, false, name);
-      assert.equal(parked, false, name);
       assert.equal(result.summary, FORK_REASON, name);
       assert.equal((result.data as { error: string }).error, 'pull_request_from_fork');
       assert.deepEqual(w.state.calls, [], name);
@@ -182,74 +167,78 @@ describe('chief pull request tools (voice US-013)', () => {
       baseBranch: 'develop',
     });
     updatePrRun(w.db, run.id, { status: 'running' });
-    const { prompt, ran } = await roundTrip('stop_pr_run', { repository: 'shop-api', number: 212 }, w);
-    assert.match(prompt, /Stop the run on shop-api #212/);
-    assert.equal(ran.ok, true, ran.summary);
+    const { result } = await act('stop_pr_run', { repository: 'shop-api', number: 212 }, w);
+    assert.equal(result.ok, true, result.summary);
     assert.deepEqual(w.state.calls, [{ method: 'prFeedback.stop', arg: run.id }]);
-    assert.equal(ran.summary, 'Stopped: shop-api #212');
+    assert.equal(result.summary, 'Stopped: shop-api #212');
   });
 
   it('stop_pr_run: a queued run counts as active; a finished one or none is { ok: false }', async () => {
     const w = chiefWorld();
     const shop = w.ids['shop'] as string;
-    const none = await ask('stop_pr_run', { repository: 'shop-api', number: 209 }, w);
+    const none = await act('stop_pr_run', { repository: 'shop-api', number: 209 }, w);
     assert.equal(none.result.ok, false);
-    assert.equal(none.parked, false);
     assert.equal(none.result.summary, 'No run is active on shop-api #209');
+    assert.deepEqual(w.state.calls, []);
 
     const run = createPrRun(w.db, { repositoryId: shop, prNumber: 209, prUrl: 'u', prTitle: 't', headBranch: 'b', baseBranch: 'develop' });
     updatePrRun(w.db, run.id, { status: 'finished' });
-    assert.equal((await ask('stop_pr_run', { repository: 'shop-api', number: 209 }, w)).result.ok, false);
+    assert.equal((await act('stop_pr_run', { repository: 'shop-api', number: 209 }, w)).result.ok, false);
+    assert.deepEqual(w.state.calls, []);
 
     updatePrRun(w.db, run.id, { status: 'pending' });
     enqueueBuild(w.db, { kind: 'pr-feedback', refId: prRefId(shop, 209) });
-    const { ran } = await roundTrip('stop_pr_run', { repository: 'shop-api', number: 209 }, w);
-    assert.equal(ran.ok, true);
+    const { result } = await act('stop_pr_run', { repository: 'shop-api', number: 209 }, w);
+    assert.equal(result.ok, true);
     assert.deepEqual(w.state.calls, [{ method: 'prFeedback.stop', arg: run.id }]);
   });
 
-  it('fix_pr_conflicts: confirms, then calls fixNow; a clean pull request is { ok: false } with the reason', async () => {
-    const { w, prompt, ran } = await roundTrip('fix_pr_conflicts', { repository: 'shop-api', number: 209 });
-    assert.match(prompt, /Fix the merge conflicts on shop-api #209/);
-    assert.equal(ran.ok, true);
+  it('fix_pr_conflicts: calls fixNow once; a clean pull request is { ok: false } with the reason', async () => {
+    const { w, result } = await act('fix_pr_conflicts', { repository: 'shop-api', number: 209 });
+    assert.equal(result.ok, true);
     assert.deepEqual(w.state.calls, [{ method: 'prConflicts.fixNow', arg: { repositoryId: w.ids['shop'], prNumber: 209 } }]);
 
     const clean = chiefWorld();
     clean.state.fixNow = { ok: false, code: 'no_conflicts', reason: '#209 has no merge conflicts.' };
-    const refused = await roundTrip('fix_pr_conflicts', { repository: 'shop-api', number: 209 }, clean);
-    assert.equal(refused.ran.ok, false);
-    assert.equal(refused.ran.summary, '#209 has no merge conflicts.');
+    const refused = await act('fix_pr_conflicts', { repository: 'shop-api', number: 209 }, clean);
+    assert.equal(refused.result.ok, false);
+    assert.equal(refused.result.summary, '#209 has no merge conflicts.');
   });
 
-  it('request_pr_change: reads the instruction back, posts a review with the voice body, then starts a feedback run', async () => {
+  it('request_pr_change: posts a review with the voice body, then starts a feedback run', async () => {
     const instruction = 'rename the export button to Download';
-    const { w, prompt, ran } = await roundTrip('request_pr_change', { repository: 'shop-api', number: 212, instruction });
-    assert.equal(prompt, `On shop-api #212, "Nightly rector run", ask for: "${instruction}"?`);
-    assert.equal(ran.ok, true, ran.summary);
+    const { w, result } = await act('request_pr_change', { repository: 'shop-api', number: 212, instruction });
+    assert.equal(result.ok, true, result.summary);
     const shop = w.ids['shop'];
     assert.deepEqual(w.state.calls, [
       { method: 'pullRequests.feedback', arg: { repositoryId: shop, number: 212 } },
       { method: 'github.postReview', arg: { repositoryId: shop, prNumber: 212, body: `Requested by voice: ${instruction}` } },
       { method: 'prFeedback.start', arg: { repositoryId: shop, prNumber: 212 } },
     ]);
-    assert.equal(ran.summary, 'Change requested: shop-api #212');
+    assert.equal(result.summary, 'Change requested: shop-api #212');
+  });
+
+  it('request_pr_change: a missing instruction is refused before anything runs', async () => {
+    const { w, result } = await act('request_pr_change', { repository: 'shop-api', number: 212, instruction: '  ' });
+    assert.equal(result.ok, false);
+    assert.deepEqual(w.state.calls, []);
   });
 
   it('request_pr_change: a fork found on the fresh read posts nothing', async () => {
     const w = chiefWorld();
     w.state.feedback = { fromFork: true, headRef: 'patch-1' };
-    const { ran } = await roundTrip('request_pr_change', { repository: 'shop-api', number: 212, instruction: 'x' }, w);
-    assert.equal(ran.ok, false);
-    assert.match(ran.summary, /lives on another repository/);
+    const { result } = await act('request_pr_change', { repository: 'shop-api', number: 212, instruction: 'x' }, w);
+    assert.equal(result.ok, false);
+    assert.match(result.summary, /lives on another repository/);
     assert.deepEqual(w.state.calls.map((call) => call.method), ['pullRequests.feedback']);
   });
 
   it('request_pr_change: says the request was posted when the run cannot start', async () => {
     const w = chiefWorld();
     w.state.failures.set('prFeedback.start', new PrFeedbackError(409, 'run_already_active', 'That pull request is already running.'));
-    const { ran } = await roundTrip('request_pr_change', { repository: 'shop-api', number: 212, instruction: 'x' }, w);
-    assert.equal(ran.ok, false);
-    assert.equal(ran.summary, 'Posted the request on shop-api #212, but the run did not start: That pull request is already running.');
+    const { result } = await act('request_pr_change', { repository: 'shop-api', number: 212, instruction: 'x' }, w);
+    assert.equal(result.ok, false);
+    assert.equal(result.summary, 'Posted the request on shop-api #212, but the run did not start: That pull request is already running.');
   });
 });
 

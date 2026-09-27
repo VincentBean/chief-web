@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
 
+import type { BuildView } from '../build/index.js';
 import type { Config } from '../config.js';
 import {
   createVoiceCall,
@@ -12,13 +12,14 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { PrdStatus } from '../prd/index.js';
+import type { ReadyResult } from '../sessions/index.js';
 import { getVoiceSettings, setVoiceScribeCreditsPerMin } from '../settings/index.js';
 import { type BrowserAskDeps, BrowserAsks } from './browser-ask.js';
-import { type Confirmation, ConfirmationGate } from './chief/confirm.js';
+import { type BuildAnswer, type BuildRequestDeps, BuildRequests } from './build-ask.js';
 import { sameUtterance } from './chief/speculation.js';
 import { ACK_EARCONS, type EarconClip, earconLanguage, type EarconName } from './earcons.js';
 import { describeEvent, draftedLine, eventSessionId, isAnnounced, type VoiceBusEvent, type VoiceEvent } from './events.js';
-import { matchCallIntent, matchConfirmIntent } from './intents.js';
+import { matchCallIntent } from './intents.js';
 import {
   type AgentKind,
   type CallFocus,
@@ -38,7 +39,7 @@ import {
 import type { PlanningState, PlanningStateName } from './session-agent/planning-state.js';
 import { resumePrompt } from './session-agent/prompt.js';
 import { voiceAgentMode } from './session-agent/registry.js';
-import { SentenceChunker, toSpeakable, type WaitingSession, waitingSummary } from './speakable.js';
+import { SentenceChunker, toSpeakable, type WaitingSession, switchingOver, waitingSummary } from './speakable.js';
 import type { ElevenLabsSubscription } from './providers.js';
 import type { SttResult, TranscribeOptions } from './stt/index.js';
 import type { SpeakCallbacks, SpeakResult, TtsSink } from './tts/index.js';
@@ -88,12 +89,6 @@ export interface AgentInput {
   readonly text: string;
   readonly turn: number;
   readonly signal: AbortSignal;
-  /**
-   * Set when the utterance (a bare "yes"/"no") or the pill's button already
-   * answered the pending confirmation (US-011): the agent runs or cancels it
-   * without asking its model, then speaks about the outcome.
-   */
-  readonly resolution?: { readonly confirmationId: string; readonly accept: boolean };
   /**
    * Set by the `to_session` intent (US-019): chief runs this tool first, as
    * if it had called it, then speaks about the result. Only chief reads it.
@@ -192,6 +187,22 @@ export interface VoiceCallDeps {
   readonly usage?: CallUsageSources;
   /** The "watch with me" card (voice feedback US-007); without it the card never shows. */
   readonly browser?: BrowserAskDeps;
+  /** What the `build` intent drives (US-007); without it "build it" is words for the agent. */
+  readonly builds?: CallBuilds;
+}
+
+/** The slices of `SessionService` and `BuildService` the `build` intent drives. */
+export interface CallBuilds {
+  markReady(sessionId: string): Promise<ReadyResult>;
+  start(sessionId: string): Promise<BuildView>;
+  /** The session agent's `start_build` requests (US-008); without them the tool is never answered. */
+  readonly requests?: BuildRequestDeps;
+}
+
+/** What marking a session ready and starting its build came to: chief's line, and the tool's answer. */
+interface BuildOutcome {
+  readonly line: string;
+  readonly answer: BuildAnswer;
 }
 
 /** Where a call reads what the providers say it spent (US-023). */
@@ -213,13 +224,6 @@ export interface CallPlanningStates {
   listPlanningSessions(): readonly PlanningState[];
 }
 
-/**
- * The confirmation the call parks itself after naming the one waiting session
- * (US-009): a "yes" moves the focus there, with no model deciding anything.
- */
-export const SWITCH_OVER_TOOL = 'switch_over';
-
-export type { Confirmation } from './chief/confirm.js';
 export type { VoiceEvent } from './events.js';
 
 /** How long both sides must have been quiet before chief speaks a background event (docs/voice-plan.md §12). */
@@ -240,7 +244,6 @@ export interface VoiceCallState {
   activeTurn: AbortController | null;
   /** The current turn's text the browser reported as played. */
   spokenSoFar: string;
-  pendingConfirmation: Confirmation | null;
   ttsProvider: TtsProviderName;
   queue: VoiceEvent[];
   /** The voice is off (US-021): replies stream as text only, and no earcons play. */
@@ -293,11 +296,6 @@ export function backWithMe(
   return summary === '' ? `${back} ${state}` : `${back} ${state} ${summary}`;
 }
 
-/** What chief adds to the waiting summary when exactly one session waits (US-009). */
-export function switchOverQuestion(language: string): string {
-  return language === 'nl' ? 'Zal ik je doorverbinden?' : 'Shall I switch you over?';
-}
-
 /** Why a detached turn failed, as the resume message quotes it (US-011). */
 const FAILURE_REASONS: Readonly<Record<NonNullable<PlanningState['failure']>, string>> = {
   timeout: 'it ran out of time before the PRD was finished',
@@ -323,11 +321,28 @@ export function carryingOn(language: string, sessionName: string): string {
     : `Okay, ${sessionName} is working on it. Back with me.`;
 }
 
-/** A "no" to switching over to the waiting session (US-009). */
-export const SWITCH_OVER_DECLINED: Readonly<Record<string, string>> = {
-  nl: 'Oké, we blijven hier.',
-  en: 'Okay, staying here.',
-};
+/**
+ * What chief says when the `build` intent has marked a planning session ready
+ * and started its build (US-007), or queued it when every slot is busy.
+ */
+export function buildingNow(language: string, sessionName: string, queued: boolean): string {
+  if (language === 'nl') {
+    return queued
+      ? `Oké, ${sessionName} staat klaar en wacht op een vrije bouwplek. Ik ben er weer.`
+      : `Oké, ${sessionName} staat klaar en wordt gebouwd. Ik ben er weer.`;
+  }
+  return queued
+    ? `Okay, ${sessionName} is marked ready and queued, every build slot is busy. Back with me.`
+    : `Okay, ${sessionName} is marked ready and building. Back with me.`;
+}
+
+/** The `build` intent on a PRD that does not parse (US-007): the first error, read out. */
+export function prdDoesNotParse(language: string, errors: PrdStatus['errors']): string {
+  const first = errors[0];
+  const where = first === undefined || first.line <= 0 ? '' : language === 'nl' ? `regel ${String(first.line)}: ` : `line ${String(first.line)}: `;
+  const what = `${where}${(first?.message ?? '').replace(/[.\s]+$/, '')}`;
+  return language === 'nl' ? `De PRD klopt nog niet: ${what}.` : `The PRD does not parse yet: ${what}.`;
+}
 
 /** What the `mute` intent answers, as text: it is never spoken. */
 export const MUTED_LINE: Readonly<Record<string, string>> = {
@@ -365,10 +380,12 @@ const NO_TIMES: TurnTimes = {
 
 export class VoiceCall {
   readonly state: VoiceCallState;
-  /** The one pending server-enforced confirmation (US-011), kept in `state`. */
-  readonly confirmations: ConfirmationGate;
   /** The session agent's "watch with me" cards (voice feedback US-007). */
   private readonly browserAsks: BrowserAsks | null;
+  /** The session agent's `start_build` calls (US-008). */
+  private readonly buildRequests: BuildRequests | null;
+  /** Sessions whose `start_build` call is still running on the agent's side. */
+  private readonly buildCalls = new Set<string>();
   private transport: CallTransport | null = null;
   private tts: CallTts | null = null;
   private sttMode: SttMode = 'openrouter';
@@ -441,19 +458,50 @@ export class VoiceCall {
       turn: 0,
       activeTurn: null,
       spokenSoFar: '',
-      pendingConfirmation: null,
       ttsProvider: 'openrouter',
       queue: [],
       muted: false,
     };
-    this.confirmations = new ConfirmationGate({
-      holder: this.state,
-      now: () => this.deps.clock.now(),
-      send: (message) => this.send(message),
-      newId: () => randomUUID(),
-    });
     this.browserAsks =
       deps.browser === undefined ? null : new BrowserAsks(deps.browser, { clock: deps.clock, send: (message) => this.send(message) });
+    this.buildRequests = deps.builds?.requests === undefined ? null : new BuildRequests(deps.builds.requests);
+  }
+
+  /**
+   * The session agent called `start_build` (US-008): the same mark-ready-then-start
+   * path as the `build` intent, its outcome written back as the tool's answer. A
+   * build that started takes the call back to chief, which says so; anything
+   * else the agent hears as the tool's result and says itself.
+   */
+  startBuild(sessionId: string): void {
+    const builds = this.deps.builds;
+    if (this.ended || builds === undefined || this.buildRequests === null) return;
+    this.buildCalls.add(sessionId);
+    void this.answerBuild(sessionId, builds, this.buildRequests).catch((cause: unknown) => {
+      logger.error('could not answer start_build', { call: this.id, session: sessionId, error: String(cause) });
+    });
+  }
+
+  /** That tool call is over on the agent's side; a request not found yet is no longer looked for. */
+  buildToolDone(sessionId: string): void {
+    this.buildCalls.delete(sessionId);
+  }
+
+  private async answerBuild(sessionId: string, builds: CallBuilds, requests: BuildRequests): Promise<void> {
+    const request = await requests.find(sessionId, () => this.ended || !this.buildCalls.has(sessionId));
+    if (request === null) return;
+    // Only a planning session is built; the tool is not offered to any other.
+    const outcome = this.isPlanning(sessionId)
+      ? await this.markReadyAndStart(sessionId, builds)
+      : { line: '', answer: { started: false, reason: 'this session is not being planned' } as const };
+    await request.answer(outcome.answer);
+    if (!outcome.answer.started || this.ended) return;
+    // At once, not once the interrupted turn has wound down: an utterance in between is chief's.
+    const focus = this.state.focus;
+    if (focus.kind === 'session' && focus.sessionId === sessionId) this.switchFocus({ kind: 'chief' });
+    void this.enqueue(async (controller) => {
+      await this.runTurn(`[event] start_build: ${sessionId}`, controller, {}, 'event', outcome.line);
+    });
   }
 
   /**
@@ -494,8 +542,7 @@ export class VoiceCall {
   }
 
   /**
-   * Moves the call's focus (docs/voice-plan.md §11): a pending confirmation does not
-   * survive it; the switch is kept in `voice_turns`, the panel hears `state`
+   * Moves the call's focus (docs/voice-plan.md §11): the switch is kept in `voice_turns`, the panel hears `state`
    * and a session focus opens the session's page. The session's agent is
    * started and speaks its opening once the turn in progress is over.
    *
@@ -504,7 +551,6 @@ export class VoiceCall {
    */
   setFocus(focus: CallFocus): void {
     const current = this.state.focus;
-    this.confirmations.cancel();
     this.greetPending = null;
     if (sameFocus(current, focus)) {
       this.sendState();
@@ -734,9 +780,6 @@ export class VoiceCall {
       case 'focus':
         this.switchFocus(message.target === 'chief' ? { kind: 'chief' } : { kind: 'session', sessionId: message.target.sessionId });
         return;
-      case 'confirm.resolve':
-        this.submitResolution(message.id, message.accept);
-        return;
       case 'browser.answer':
         this.touch();
         void this.browserAsks?.answer(message);
@@ -778,8 +821,6 @@ export class VoiceCall {
     if (this.subscriptionTimer !== null) this.deps.clock.clearTimeout(this.subscriptionTimer);
     this.subscriptionTimer = null;
     this.clearAck();
-    // A hang-up or takeover takes the pending confirmation with it.
-    this.confirmations.cancel();
     // An open "watch with me" card is answered `cancelled`, so the tool stops waiting.
     const browserAsks = this.browserAsks?.cancelAll();
     // Nobody is left to look at the session browsers (US-012): they stop with the call.
@@ -997,23 +1038,6 @@ export class VoiceCall {
     return result.kind === 'dropped' || this.ended ? null : result.text;
   }
 
-  /**
-   * The pill's Confirm / Cancel: a turn like a spoken "yes"/"no", but bound
-   * to the id the operator clicked, so a pill that was replaced meanwhile
-   * cannot answer the new one.
-   */
-  private submitResolution(id: string, accept: boolean): void {
-    this.touch();
-    void this.enqueue(async (controller) => {
-      const pending = this.confirmations.pending;
-      if ((this.state.focus.kind !== 'chief' && pending?.tool !== SWITCH_OVER_TOOL) || pending?.id !== id) {
-        this.send({ type: 'error', code: 'confirmation_gone', message: 'That confirmation is no longer pending.', fatal: false });
-        return;
-      }
-      await this.runTurn(accept ? 'Confirm' : 'Cancel', controller, {}, { confirmationId: id, accept });
-    });
-  }
-
   /** The `text` path (typed) and `transcript.final` (browser STT): no server STT. */
   private submitText(text: string, tTranscript: string | null): void {
     this.speechOpenSince = null;
@@ -1067,14 +1091,13 @@ export class VoiceCall {
     if (sessionId === null || focus.kind !== 'session' || focus.sessionId !== sessionId) return;
     // Only a session agent opens a conversation; chief answering a session focus (no registry) waits.
     if (this.agentFor(focus).kind !== 'session') return;
-    await this.runTurn('', controller, {}, undefined, 'greeting');
+    await this.runTurn('', controller, {}, 'greeting');
   }
 
   private async runTurn(
     text: string,
     controller: AbortController,
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
-    clicked?: AgentInput['resolution'],
     /** `event`: background events for chief; `greeting`: a session agent's opening, with no utterance. */
     mode: 'user' | 'event' | 'greeting' = 'user',
     /** An `event` turn the call answers with this fixed line instead of chief's model. */
@@ -1097,7 +1120,7 @@ export class VoiceCall {
     if (signal.aborted) cut();
     else signal.addEventListener('abort', cut, { once: true });
     try {
-      await this.answer(text, turn, controller, times, clicked, mode, line);
+      await this.answer(text, turn, controller, times, mode, line);
     } finally {
       signal.removeEventListener('abort', cut);
     }
@@ -1108,7 +1131,6 @@ export class VoiceCall {
     turn: number,
     controller: AbortController,
     times: { readonly tSpeechEnd?: string; readonly tTranscript?: string | null },
-    clicked: AgentInput['resolution'],
     mode: 'user' | 'event' | 'greeting',
     line?: string,
   ): Promise<void> {
@@ -1118,8 +1140,8 @@ export class VoiceCall {
     const background = mode === 'event';
     // Background events are always chief's to speak; the focus stays put.
     let focus: CallFocus = background ? { kind: 'chief' } : this.state.focus;
-    // Words an overtaken utterance left behind come first; a click is not words.
-    if (mode === 'user' && clicked === undefined) {
+    // Words an overtaken utterance left behind come first.
+    if (mode === 'user') {
       const said = this.unanswered.splice(0);
       if (said.length > 1) text = said.join(' ');
     }
@@ -1144,13 +1166,8 @@ export class VoiceCall {
 
     // The operator spoke first: the session agent answers that, not a greeting.
     if (mode === 'user') this.greetPending = null;
-    const resolution = mode === 'user' ? (clicked ?? this.spokenResolution(text, focus)) : undefined;
-    if (resolution !== undefined && this.confirmations.pending?.tool === SWITCH_OVER_TOOL) {
-      await this.switchOver(resolution, turn, tts, signal);
-      return;
-    }
     let invoke: AgentInput['invoke'];
-    const intent = mode === 'user' && resolution === undefined ? matchCallIntent(text) : null;
+    const intent = mode === 'user' ? matchCallIntent(text) : null;
     switch (intent?.kind) {
       case 'stop_talking':
         // The turn it interrupted is already aborted; nothing is said.
@@ -1185,6 +1202,13 @@ export class VoiceCall {
         await this.sayLine(tts, turn, carryingOn(getVoiceSettings(this.deps.db).language, name), signal);
         return;
       }
+      case 'build': {
+        // Like `carry_on`: only a planning session is built; anywhere else it is words for the agent.
+        const builds = this.deps.builds;
+        if (focus.kind !== 'session' || !this.isPlanning(focus.sessionId) || builds === undefined) break;
+        await this.buildFromIntent(tts, turn, focus.sessionId, builds, signal);
+        return;
+      }
       case 'repeat':
         await this.replay(tts, turn, signal);
         return;
@@ -1210,7 +1234,7 @@ export class VoiceCall {
     const stateBefore = sessionId !== null && agent.kind === 'session' ? this.planningStateOf(sessionId) : null;
     const resume = sessionId !== null && agent.kind === 'session' ? this.resumes.get(sessionId) : undefined;
     const prefetched =
-      mode === 'user' && resolution === undefined && invoke === undefined && focus.kind === 'chief'
+      mode === 'user' && invoke === undefined && focus.kind === 'chief'
         ? this.adoptSpeculation(text, signal)
         : this.dropSpeculation();
     const marks: { tFirstToken?: string; tFirstChunk?: string; tFirstAudioSent?: string } = {};
@@ -1229,7 +1253,6 @@ export class VoiceCall {
         text,
         turn,
         signal,
-        ...(resolution === undefined ? {} : { resolution }),
         ...(invoke === undefined ? {} : { invoke }),
         ...(prefetched === undefined ? {} : { prefetched }),
         ...(resume === undefined ? {} : { resume }),
@@ -1311,6 +1334,38 @@ export class VoiceCall {
       const after = this.planningOf(sessionId);
       this.planningChanged();
       if (!interrupted && stateBefore !== 'done' && after?.state === 'done') this.remindOfOthers(sessionId);
+    }
+  }
+
+  /**
+   * The `build` intent (US-007): marks the focused planning session ready and
+   * starts its build, then the call goes back to chief. A PRD that does not
+   * parse, or a service that refuses, is read out and the focus stays, so the
+   * session agent can fix it.
+   */
+  private async buildFromIntent(tts: CallTts, turn: number, sessionId: string, builds: CallBuilds, signal: AbortSignal): Promise<void> {
+    const { line, answer } = await this.markReadyAndStart(sessionId, builds);
+    if (answer.started && !signal.aborted && !this.ended) this.setFocus({ kind: 'chief' });
+    await this.sayLine(tts, turn, line, signal);
+  }
+
+  /** Marks `sessionId` ready and, unless that already started it, starts its build (US-007, US-008). */
+  private async markReadyAndStart(sessionId: string, builds: CallBuilds): Promise<BuildOutcome> {
+    const language = getVoiceSettings(this.deps.db).language;
+    try {
+      const ready = await builds.markReady(sessionId);
+      if (!ready.ok) {
+        const errors = ready.prd.errors.map((error) => (error.line > 0 ? `line ${String(error.line)}: ${error.message}` : error.message));
+        const line = prdDoesNotParse(language, ready.prd.errors);
+        return { line, answer: errors.length > 0 ? { started: false, errors } : { started: false, reason: line } };
+      }
+      // A schedule missed while pending already started it (ReadyResult.started).
+      const build = ready.started ? null : await builds.start(sessionId);
+      const queued = build?.queued === true;
+      return { line: buildingNow(language, ready.session.name, queued), answer: { started: true, queued } };
+    } catch (cause) {
+      const line = cause instanceof Error ? cause.message : String(cause);
+      return { line, answer: { started: false, reason: line } };
     }
   }
 
@@ -1465,8 +1520,9 @@ export class VoiceCall {
 
   /**
    * The focused planning session has just become `done` (US-009): the other
-   * planning sessions are named at the next quiet moment, with an offer to
-   * switch when exactly one of them waits for the operator.
+   * planning sessions are named at the next quiet moment. When exactly one of
+   * them waits for the operator, the line says the call switches to it and the
+   * event keeps it as its `offer`: the focus moves once the line is spoken.
    */
   private remindOfOthers(sessionId: string): void {
     const settings = getVoiceSettings(this.deps.db);
@@ -1480,24 +1536,10 @@ export class VoiceCall {
       kind: 'planning.waiting',
       text: summary,
       sessionId,
-      line: offer === null ? summary : `${summary} ${switchOverQuestion(settings.language)}`,
+      line: offer === null ? summary : `${summary} ${switchingOver(settings.language, offer.sessionName)}`,
       ...(offer === null ? {} : { offer: { sessionId: offer.sessionId, name: offer.sessionName } }),
     });
     this.scheduleDrain();
-  }
-
-  /** A "yes" or "no" to {@link SWITCH_OVER_TOOL}: the call answers it itself. */
-  private async switchOver(resolution: NonNullable<AgentInput['resolution']>, turn: number, tts: CallTts, signal: AbortSignal): Promise<void> {
-    if (!resolution.accept) {
-      this.confirmations.cancel();
-      await this.sayLine(tts, turn, this.inLanguage(SWITCH_OVER_DECLINED), signal);
-      return;
-    }
-    const taken = this.confirmations.take(resolution.confirmationId, turn);
-    this.send({ type: 'agent.done', turn, interrupted: false });
-    if (taken.kind !== 'ok') return;
-    const target = taken.confirmation.args['sessionId'];
-    if (typeof target === 'string') this.setFocus({ kind: 'session', sessionId: target });
   }
 
   private readPlanning(sessionId: string): { sessionName: string; prd: PrdStatus } | null {
@@ -1562,19 +1604,6 @@ export class VoiceCall {
     } finally {
       if (started && !signal.aborted) this.send({ type: 'tts.end', segmentId });
     }
-  }
-
-  /**
-   * A bare "yes"/"no" while chief has a confirmation pending answers it
-   * directly (docs/voice-plan.md §9.4), with no model deciding what it meant.
-   */
-  private spokenResolution(text: string, focus: CallFocus): AgentInput['resolution'] {
-    const pending = this.confirmations.pending;
-    if (pending === null) return undefined;
-    // The call's own offer to switch over is also made while a session has the focus.
-    if (focus.kind !== 'chief' && pending.tool !== SWITCH_OVER_TOOL) return undefined;
-    const intent = matchConfirmIntent(text);
-    return intent === null ? undefined : { confirmationId: pending.id, accept: intent === 'yes' };
   }
 
   /**
@@ -1827,15 +1856,16 @@ export class VoiceCall {
     void this.enqueue(async (controller) => {
       if (lines.length > 0) {
         const line = lines.map((event) => event.line).join(' ');
-        await this.runTurn(asEvents(lines), controller, {}, undefined, 'event', line);
-        // Stamped with the turn that asked, so only the operator's next words can answer it.
-        const offer = lines.findLast((event) => event.offer !== undefined)?.offer;
-        if (offer !== undefined && !controller.signal.aborted) {
-          const prompt = getVoiceSettings(this.deps.db).language === 'nl' ? `Doorverbinden met ${offer.name}?` : `Switch over to ${offer.name}?`;
-          this.confirmations.request({ tool: SWITCH_OVER_TOOL, args: { sessionId: offer.sessionId, name: offer.name }, prompt }, this.state.turn);
-        }
+        await this.runTurn(asEvents(lines), controller, {}, 'event', line);
       }
-      if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, undefined, 'event');
+      if (rest.length > 0 && !controller.signal.aborted) await this.runTurn(asEvents(rest), controller, {}, 'event');
+      // The line said the call moves to the one waiting session; the rest still
+      // concerned the old focus. A call that ended or moved meanwhile stays put.
+      const offer = lines.findLast((event) => event.offer !== undefined)?.offer;
+      if (offer !== undefined && !controller.signal.aborted && !this.ended) {
+        this.setFocus({ kind: 'session', sessionId: offer.sessionId });
+        return;
+      }
       // Chief has said the session is ready; the session's agent speaks next. An
       // operator who talked over the announcement is answered by chief instead.
       if (!ready) return;

@@ -5,10 +5,10 @@ import { listSessions } from '../db/index.js';
 import { resolveName } from './chief/tools.js';
 import { chiefWorld } from './chief/__fixtures__/world.js';
 import {
+  BUILD,
   CARRY_ON,
   HANGUP,
   matchCallIntent,
-  matchConfirmIntent,
   MAX_INTENT_WORDS,
   MUTE,
   normalizeUtterance,
@@ -90,9 +90,8 @@ describe('focus and control intents (voice US-019)', () => {
     assert.equal(matchCallIntent('hang up the phone after this one'), null);
   });
 
-  it('keeps the confirm phrases separate', () => {
-    for (const phrase of [...TO_CHIEF, ...STOP_TALKING, ...HANGUP]) assert.equal(matchConfirmIntent(phrase), null, phrase);
-    assert.equal(matchCallIntent('yes'), null);
+  it('leaves a bare yes or no to the agent', () => {
+    for (const text of ['yes', 'ja', 'no', 'nee', 'ok']) assert.equal(matchCallIntent(text), null, text);
     assert.equal(matchCallIntent('go'), null);
   });
 });
@@ -111,7 +110,7 @@ describe('repeat and mute intents (voice US-021)', () => {
   });
 
   it('never lists one phrase under two intents (the later list would silently win)', () => {
-    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE, CARRY_ON };
+    const lists = { TO_CHIEF, STOP_TALKING, HANGUP, REPEAT, MUTE, UNMUTE, CARRY_ON, BUILD };
     const seen = new Map<string, string>();
     for (const [list, phrases] of Object.entries(lists)) {
       for (const phrase of phrases) {
@@ -141,9 +140,23 @@ describe('the carry on intent (US-006)', () => {
       assert.equal(matchCallIntent(text), null, text);
     }
   });
+});
 
-  it('is not a confirmation: "go ahead" still answers a pending one', () => {
-    assert.equal(matchConfirmIntent('go ahead'), 'yes');
-    assert.equal(matchConfirmIntent('carry on'), null);
+describe('the build intent (US-007)', () => {
+  it('matches every build phrase, in English and Dutch', () => {
+    for (const phrase of BUILD) assert.deepEqual(matchCallIntent(phrase), { kind: 'build' }, phrase);
+    for (const text of ['Build it.', 'Start the build!', 'Go build.', 'Bouw maar.', 'Bouw het maar!', 'Start de build.', 'Bouwen.']) {
+      assert.deepEqual(matchCallIntent(text), { kind: 'build' }, text);
+    }
+  });
+
+  it('leaves a longer sentence containing "build it" to the agent', () => {
+    for (const text of [
+      'build it once the header row is fixed',
+      'can you build it with a download button',
+      'bouw maar een extra knop in de PRD',
+    ]) {
+      assert.equal(matchCallIntent(text), null, text);
+    }
   });
 });
