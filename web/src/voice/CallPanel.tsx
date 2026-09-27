@@ -1,4 +1,4 @@
-import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useAppData } from '../data.tsx';
 import { Icon, type IconName } from '../Icon.tsx';
@@ -149,12 +149,14 @@ export function CallPanel() {
     };
   }, [call.panelOpen]);
 
-  // Follow the newest line unless the operator scrolled up to read.
-  useEffect(() => {
+  // The newest line is always in view (calling-interface US-004): every entry,
+  // every streamed delta and the live caption pin the transcript to its bottom,
+  // wherever the operator scrolled to, and so does opening the view.
+  useLayoutEffect(() => {
     const list = body.current;
     if (list === null) return;
-    if (list.scrollHeight - list.scrollTop - list.clientHeight < 80) list.scrollTop = list.scrollHeight;
-  }, [call.transcript]);
+    list.scrollTop = list.scrollHeight;
+  }, [call.transcript, call.caption, call.panelOpen]);
 
   const { ptt } = call;
   useEffect(() => {
