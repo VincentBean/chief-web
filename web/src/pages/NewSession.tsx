@@ -39,6 +39,8 @@ export function NewSession() {
   const [feedback, setFeedback] = useState('');
   /** null until the global default has loaded, so an early create can omit it. */
   const [codeReview, setCodeReview] = useState<boolean | null>(null);
+  /** null until the operator ticks or unticks it: it then follows the repository. */
+  const [openPullRequest, setOpenPullRequest] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stderr, setStderr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -60,6 +62,7 @@ export function NewSession() {
   // the repository until the operator overrides it.
   const selected = usable.find((r) => r.id === repositoryId) ?? usable[0] ?? null;
   const effectiveBase = baseBranch === '' ? (selected?.defaultBaseBranch ?? 'main') : baseBranch;
+  const effectiveOpenPullRequest = openPullRequest ?? selected?.openPullRequestDefault ?? true;
   const trimmedName = name.trim();
   const trimmedFeedback = feedback.trim();
   const feedbackTooLong = trimmedFeedback.length > MAX_FEEDBACK_LENGTH;
@@ -80,9 +83,16 @@ export function NewSession() {
       setError('That repository already has a session with this name.');
       return;
     }
-    const input: SessionInput = { repositoryId: selected.id, name: trimmedName, prTargetBranch };
+    const input: SessionInput = {
+      repositoryId: selected.id,
+      name: trimmedName,
+      prTargetBranch,
+      openPullRequest: effectiveOpenPullRequest,
+    };
+    // A review needs a pull request to comment on, so without one it is off.
+    if (!effectiveOpenPullRequest) input.codeReview = false;
     // Still loading: say nothing and let the server apply the global default.
-    if (codeReview !== null) input.codeReview = codeReview;
+    else if (codeReview !== null) input.codeReview = codeReview;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
     if (feedbackTooLong) {
       setError(`Feedback can be at most ${MAX_FEEDBACK_LENGTH.toLocaleString()} characters.`);
@@ -289,13 +299,32 @@ export function NewSession() {
                   <label className="checkbox">
                     <input
                       type="checkbox"
-                      checked={codeReview ?? false}
+                      checked={effectiveOpenPullRequest}
+                      onChange={(event) => setOpenPullRequest(event.target.checked)}
+                    />
+                    Open pull request
+                  </label>
+                  <p className="field__hint">
+                    {effectiveOpenPullRequest
+                      ? 'Opened when the last story is done.'
+                      : 'The feature branch is pushed, but no pull request is opened.'}
+                  </p>
+                </div>
+
+                <div className="field">
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={effectiveOpenPullRequest && (codeReview ?? false)}
+                      disabled={!effectiveOpenPullRequest}
                       onChange={(event) => setCodeReview(event.target.checked)}
                     />
                     Code review
                   </label>
                   <p className="field__hint">
-                    The review runs automatically after the pull request is created and posts its comments to GitHub.
+                    {effectiveOpenPullRequest
+                      ? 'The review runs automatically after the pull request is created and posts its comments to GitHub.'
+                      : 'A review needs a pull request to comment on, so it is off while no pull request is opened.'}
                   </p>
                 </div>
 

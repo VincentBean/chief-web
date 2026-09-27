@@ -436,9 +436,14 @@ export function settlementOf(
     case 'finished':
     case 'pr-open':
     case 'merged':
-      return session.prUrl === null
-        ? { outcome: 'clean', detail: 'The run finished without opening a pull request.' }
-        : { outcome: 'pr-opened', detail: session.prUrl };
+      if (session.prUrl !== null) return { outcome: 'pr-opened', detail: session.prUrl };
+      // Both end with no pull request; only the push-only one left a branch.
+      return session.pushedOnly
+        ? {
+            outcome: 'pushed',
+            detail: `Pushed "${session.featureBranch}"; pull request is turned off for this run.`,
+          }
+        : { outcome: 'clean', detail: 'The run finished without opening a pull request.' };
     default:
       return null;
   }

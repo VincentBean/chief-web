@@ -39,6 +39,8 @@ export const RECURRING_TASK_OUTCOMES = [
   'fire-failed',
   /** The run finished with commits, and a pull request is open for them. */
   'pr-opened',
+  /** The run finished with commits and pushed them, with pull request turned off. */
+  'pushed',
   /** The run finished having changed nothing, so no pull request was opened. */
   'clean',
   /** The run failed somewhere in the build or the delivery. */
@@ -57,6 +59,8 @@ export function recurringTaskOutcomeLabel(outcome: RecurringTaskOutcome): string
       return 'could not start';
     case 'pr-opened':
       return 'pull request opened';
+    case 'pushed':
+      return 'branch pushed';
     case 'clean':
       return 'nothing to change';
     case 'failed':

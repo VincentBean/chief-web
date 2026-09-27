@@ -443,6 +443,8 @@ export interface Repository {
   sentryProject: string | null;
   /** Markdown folded into this repository's AI code review prompt; null if unset. */
   reviewContext: string | null;
+  /** The starting value of "open a pull request" on a new session for this repository. */
+  openPullRequestDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -460,6 +462,7 @@ export interface RepositoryInput {
   sentryProject?: string | null;
   /** `null` or an empty string clears the review context. */
   reviewContext?: string | null;
+  openPullRequestDefault?: boolean;
 }
 
 export interface ConnectionTestResult {
@@ -604,6 +607,10 @@ export interface Session {
   cloned: boolean;
   /** Whether the pull request this session opens is reviewed automatically. */
   codeReview: boolean;
+  /** Whether delivery opens a pull request, or only pushes the branch. */
+  openPullRequest: boolean;
+  /** Whether the delivery pushed the branch and stopped, pull request off. */
+  pushedOnly: boolean;
   /** The feedback the session was started from; null when it was not. */
   feedback: string | null;
   createdAt: string;
@@ -662,6 +669,8 @@ export interface SessionInput {
   scheduledStartAt?: string | null;
   /** Omit to fall back to the global "code review by default" setting. */
   codeReview?: boolean;
+  /** Omit to fall back to the repository's "open a pull request by default". */
+  openPullRequest?: boolean;
   /**
    * What a user reported; planning then opens on it. At most
    * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
@@ -916,6 +925,17 @@ export async function setSessionCodeReview(id: string, codeReview: boolean): Pro
   return api<Session>(`/api/sessions/${encodeURIComponent(id)}/code-review`, {
     method: 'PUT',
     body: JSON.stringify({ codeReview }),
+  });
+}
+
+/**
+ * Turns opening a pull request for this session on or off (US-008). Refused
+ * once the pull request exists or the delivery is over.
+ */
+export async function setSessionOpenPullRequest(id: string, openPullRequest: boolean): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/open-pull-request`, {
+    method: 'PUT',
+    body: JSON.stringify({ openPullRequest }),
   });
 }
 
@@ -1219,6 +1239,7 @@ export const RECURRING_TASK_OUTCOMES = [
   'skipped',
   'fire-failed',
   'pr-opened',
+  'pushed',
   'clean',
   'failed',
 ] as const;

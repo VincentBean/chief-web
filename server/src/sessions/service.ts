@@ -154,6 +154,16 @@ export interface SessionView {
    */
   readonly codeReview: boolean;
   /**
+   * Whether delivery opens a pull request for this session (pull-request
+   * US-002); when false it only pushes the feature branch.
+   */
+  readonly openPullRequest: boolean;
+  /**
+   * Whether the last delivery pushed the feature branch and stopped there,
+   * pull request turned off — as opposed to a clean run, which pushed nothing.
+   */
+  readonly pushedOnly: boolean;
+  /**
    * The feedback the session was started from (voice feedback US-001), or
    * `null` for a session that was not started from feedback.
    */
@@ -209,6 +219,8 @@ export interface CreateSessionRequest {
   readonly scheduledStartAt?: string | null;
   /** Defaults to false. */
   readonly codeReview?: boolean;
+  /** Defaults to the repository's `openPullRequestDefault`. */
+  readonly openPullRequest?: boolean;
   /**
    * The recurring task this session is a run of (US-004), when it is one.
    * Only the scheduler passes it; a session created from the API is never a
@@ -236,6 +248,19 @@ const CODE_REVIEW_LOCKED: Partial<Record<SessionStatus, string>> = {
   fixing: 'its pull request is open and the review feedback is being fixed.',
   finished: 'this session has finished, so its pull request has already been opened.',
   'pr-open': 'its pull request is already open and any review of it has run.',
+  merged: 'its pull request has already been merged.',
+};
+
+/**
+ * The statuses in which the pull-request flag no longer changes (US-008): the
+ * same ones as the code review, for the same reason. Beyond these, a session
+ * with a `prUrl` is locked whatever its status, because its pull request exists.
+ */
+const OPEN_PULL_REQUEST_LOCKED: Partial<Record<SessionStatus, string>> = {
+  reviewing: 'its pull request is open and the review is running.',
+  fixing: 'its pull request is open and the review feedback is being fixed.',
+  finished: 'this session has finished, so its delivery is over.',
+  'pr-open': 'its pull request is already open.',
   merged: 'its pull request has already been merged.',
 };
 
@@ -313,6 +338,7 @@ export class SessionService {
         status: 'pending',
         scheduledStartAt: request.scheduledStartAt ?? null,
         codeReview: request.codeReview ?? getCodeReviewDefault(this.db),
+        openPullRequest: request.openPullRequest ?? repository.openPullRequestDefault,
         recurringTaskId: request.recurringTaskId ?? null,
         feedback: request.feedback ?? null,
       });
@@ -500,6 +526,36 @@ export class SessionService {
       session: session.id,
       name: session.name,
       codeReview,
+    });
+    return this.toView(updated);
+  }
+
+  /**
+   * Turns opening a pull request on or off (US-008).
+   *
+   * Allowed while the delivery still has to decide it — also while building,
+   * and on a failed session, so a delivery whose push worked but whose pull
+   * request did not can be retried as push-only. Refused once the pull request
+   * exists or the delivery is over.
+   */
+  setOpenPullRequest(id: string, openPullRequest: boolean): SessionView {
+    const session = this.requireSession(id);
+    const locked =
+      OPEN_PULL_REQUEST_LOCKED[session.status] ??
+      (session.prUrl === null ? undefined : 'its pull request has already been opened.');
+    if (locked !== undefined) {
+      throw new SessionError(
+        409,
+        'open_pull_request_locked',
+        `The pull request of "${session.name}" can no longer be turned ${openPullRequest ? 'on' : 'off'}: ${locked}`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { openPullRequest }) ?? session;
+    logger.info('session open pull request updated', {
+      session: session.id,
+      name: session.name,
+      openPullRequest,
     });
     return this.toView(updated);
   }
@@ -714,6 +770,8 @@ export class SessionService {
       failureStage: session.failureStage,
       waitingUntil: session.waitingUntil,
       codeReview: session.codeReview,
+      openPullRequest: session.openPullRequest,
+      pushedOnly: session.pushedOnly,
       feedback: session.feedback,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),

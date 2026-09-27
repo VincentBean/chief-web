@@ -356,6 +356,7 @@ function RepositoryForm({
   const [sentryOrg, setSentryOrg] = useState(initial?.sentryOrg ?? '');
   const [sentryProject, setSentryProject] = useState(initial?.sentryProject ?? '');
   const [reviewContext, setReviewContext] = useState(initial?.reviewContext ?? '');
+  const [openPullRequestDefault, setOpenPullRequestDefault] = useState(initial?.openPullRequestDefault ?? true);
   const [contextView, setContextView] = useState<'write' | 'preview'>('write');
   const [keyMode, setKeyMode] = useState<'generate' | 'paste'>('generate');
   const [privateKey, setPrivateKey] = useState('');
@@ -400,6 +401,7 @@ function RepositoryForm({
       sentryOrg: org === '' ? null : org,
       sentryProject: project === '' ? null : project,
       reviewContext: context === '' ? null : context,
+      openPullRequestDefault,
     };
     if (githubSlug.trim() !== '') input.githubSlug = githubSlug.trim();
     if (keyMode === 'paste') input.privateKey = privateKey;
@@ -446,6 +448,16 @@ function RepositoryForm({
           </label>
           <input id={`slug-${mode}`} className="field__input mono" value={githubSlug} onChange={(event) => setGithubSlug(event.target.value)} placeholder={derived ?? 'owner/repo'} autoComplete="off" spellCheck={false} />
           <p className="field__hint">Used to open pull requests. Leave blank to derive it from the URL{derived === null ? '.' : ` (${derived}).`}</p>
+        </div>
+
+        <div className="field">
+          <label className="checkbox">
+            <input type="checkbox" checked={openPullRequestDefault} onChange={(event) => setOpenPullRequestDefault(event.target.checked)} />
+            Open a pull request by default
+          </label>
+          <p className="field__hint">
+            The starting value of &ldquo;open a pull request&rdquo; on new sessions for this repository. When it is off, the feature branch is still pushed.
+          </p>
         </div>
 
         <div className="field__row">
