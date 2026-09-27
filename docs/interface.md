@@ -23,7 +23,7 @@ zero or when no Sentry token is configured.
 Navigation is client-side, so moving between pages does not reload the app.
 Keyboard shortcuts: press `g` then a letter to jump — `o` overview, `s`
 sessions, `p` pull requests, `r` repositories, `t` terminals, `,` settings, `n`
-new session. On the sessions page `n` opens the new-session form and `/`
+new session, `v` a [voice call](voice.md#making-a-call) when voice is on. On the sessions page `n` opens the new-session form and `/`
 focuses the filter box.
 
 Outcomes of actions (a build started, a session deleted, a token validated) are
@@ -36,6 +36,10 @@ on the page that owns it.
 The home page (`/`) is what the server is doing right now and what it has done
 lately:
 
+- **Start a call** — a large button at the top, shown only when
+  [voice](voice.md) is on. It opens the full-screen call view and starts a call
+  with chief. The call covers the whole app until you press
+  **Hang up** ([Making a call](voice.md#making-a-call)).
 - **Get set up** — shown until Claude Code is signed in, a repository with a
   deploy key exists and a session has been created; each step links to where it
   is done.

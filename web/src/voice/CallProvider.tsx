@@ -130,6 +130,8 @@ export interface CallState {
   readonly planning: readonly PlanningSessionView[];
   /** Why the microphone or the call could not start, shown in the panel. */
   readonly problem: CallProblem | null;
+  /** Why the last call ended when the operator did not hang up, shown in the call view until the next call. */
+  readonly endReason: string | null;
   readonly panelOpen: boolean;
   /** The session whose browser the panel shows live (US-008), from **Open** on its card until **Close browser**. */
   readonly pageView: { readonly sessionId: string } | null;
@@ -342,6 +344,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const [latency, setLatency] = useState<Readonly<Record<number, TurnTimes>>>({});
   const [planning, setPlanning] = useState<readonly PlanningSessionView[]>([]);
   const [problem, setProblem] = useState<CallProblem | null>(null);
+  const [endReason, setEndReason] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [pageView, setPageView] = useState<{ readonly sessionId: string } | null>(null);
 
@@ -350,6 +353,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   const audio = useRef<CallAudio | null>(null);
   const callId = useRef<string | null>(null);
   const droppedAt = useRef<number | null>(null);
+  /** The operator pressed hang up: the close that follows is theirs, not a reason to show. */
+  const hungUp = useRef(false);
   const voiceMutedRef = useRef(false);
   const modeRef = useRef(mode);
   const vadSilenceMs = useRef(DEFAULT_VAD_SILENCE_MS);
@@ -379,7 +384,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   /** Tears the call down on this side; the transcript stays readable. */
-  const finish = useCallback((next: CallStatus): void => {
+  const finish = useCallback((next: CallStatus, reason: string | null = null): void => {
     const ws = socket.current;
     socket.current = null;
     if (ws !== null && ws.readyState <= WebSocket.OPEN) ws.close(WS_CLOSE_CALL_ENDED);
@@ -393,6 +398,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
     setCaption('');
     setPhase('ended');
     setStatus(next);
+    setEndReason(next === 'ended' && !hungUp.current ? reason : null);
   }, []);
 
   const onMessage = useCallback(
@@ -416,7 +422,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           setFocus(message.focus);
           voiceMutedRef.current = message.muted;
           setVoiceMuted(message.muted);
-          if (message.phase === 'ended') finish('ended');
+          if (message.phase === 'ended') finish('ended', 'Chief ended the call.');
           else setPhase(message.phase);
           return;
         case 'usage':
@@ -488,7 +494,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
         const toaster = toastRef.current;
         switch (event.code) {
           case WS_CLOSE_CALL_ENDED:
-            finish('ended');
+            finish('ended', 'Chief ended the call.');
             return;
           case WS_CLOSE_NOT_CONFIGURED:
             toaster.warn(notConfiguredText(event.reason));
@@ -500,7 +506,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
             return;
           case WS_CLOSE_TAKEN_OVER:
             toaster.info('The call moved to another tab.');
-            finish('ended');
+            finish('ended', 'The call moved to another tab.');
             return;
           case WS_CLOSE_BAD_ORIGIN:
             toaster.error('The server refused this address for calls. Open chief at its PUBLIC_URL.');
@@ -524,7 +530,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
           return;
         }
         toaster.error('The call dropped.');
-        finish('ended');
+        finish('ended', 'The call dropped.');
       };
     },
     [finish, onMessage],
@@ -540,6 +546,8 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
         return;
       }
       setProblem(null);
+      setEndReason(null);
+      hungUp.current = false;
       setTranscript([]);
       setUsage(null);
       setLatency({});
@@ -619,6 +627,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
   );
 
   const hangup = useCallback((): void => {
+    hungUp.current = true;
     if (socket.current?.readyState === WebSocket.OPEN) {
       send({ type: 'hangup' });
       // The server ends the call and closes with 1000; stop listening now.
@@ -728,6 +737,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       latency,
       planning,
       problem,
+      endReason,
       panelOpen,
       pageView,
       closePageView: () => setPageView(null),
@@ -768,6 +778,7 @@ export function CallProvider({ children }: { readonly children: ReactNode }) {
       latency,
       planning,
       problem,
+      endReason,
       panelOpen,
       pageView,
       open,

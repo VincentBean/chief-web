@@ -8,8 +8,10 @@ session, start or stop a build, review a pull request, pause a recurring task.
 When you want to think a feature through, chief hands the call to a **session
 agent**: Claude Code running in that session's container with the repository
 open. It plans the feature with you and writes the `prd.md` that **Mark ready**
-expects. While you talk, the UI follows: pages open, the PRD indicator fills in,
-and tool calls show up as cards in the call panel.
+expects. The call takes the whole screen, like a phone call: while you talk,
+tool calls show up as cards in the transcript and, when a session has the call,
+its plan fills in above it. Pages chief opens are waiting behind the call when
+you hang up.
 
 Voice is optional and off by default. Without it, nothing in this document runs
 and no provider is contacted.
@@ -96,7 +98,7 @@ change. The other voice settings:
 | **Interrupting the agent** (`voice_barge_in`) | Careful | On: any speech interrupts. Careful: only clear speech does. Off: use push-to-talk or the stop button |
 | **Events chief mentions during a call** (`voice_event_verbosity`) | Important | see [Background events](#background-events) |
 | **Keep transcripts for** (`voice_transcript_retention_days`) | 30 days | see [Privacy](#privacy) (1–365) |
-| **Push-to-talk works on every page** (`voice_ptt_global`) | off | off: Space only talks while the call panel has focus |
+| **Push-to-talk works on every page** (`voice_ptt_global`) | off | off: Space only talks while the call view has focus |
 | **Pronunciations** (`voice_pronunciations`) | a starter map | JSON of term → how to say it, applied to everything the agents speak |
 
 ### Environment
@@ -120,18 +122,33 @@ server with a message. They are listed in `.env.example` as well.
 
 ## Making a call
 
-Click **Call** in the sidebar, or press `g v`. The call panel opens and stays
-open while you move between pages. Hiding it does not end the call;
-the red dot says the microphone is open.
+Click **Start a call** at the top of the home page, **Call** in the sidebar, or
+press `g v`. The call view opens full screen over the whole app, on a phone as
+on a desktop:
+
+- The **header** says who you are talking to (the focus chip), what they are
+  doing (Listening, Thinking, Speaking), and how long the call has run. The red
+  dot says the microphone is open.
+- The **middle** is the transcript, with tool cards in it. It always shows the
+  newest message: every new line, streamed word and live caption scrolls it to
+  the bottom.
+- The **footer** holds the controls, and ends in one large **Hang up** button,
+  the last thing on the screen.
+
+While the call is connecting, live or reconnecting, the view cannot be hidden:
+**Hang up** ends the call and closes the view in one step. A call that ended
+any other way (chief said goodbye, it was taken over in another tab, or the
+connection dropped for good) leaves the view open with **Call ended:** and the
+reason, a close button, and **Call again** in place of **Hang up**.
 
 - **Hands-free** (default): just talk. A pause of **End of speech after** ends
   your turn.
-- **Push to talk**: hold the talk button, or hold Space while the panel has
+- **Push to talk**: hold the talk button, or hold Space while the call view has
   focus (on every page with **Push-to-talk works on every page**). There is no
   end-of-speech wait, so it is the fastest way to talk.
 - **Typing** in the message box works in either mode.
 - **Mute microphone**, **Mute voice** (text only for the rest of the call) and
-  **Stop the agent** are in the panel's footer. Talking over the agent stops it
+  **Stop the agent** are in the footer. Talking over the agent stops it
   too, depending on **Interrupting the agent**.
 - While the agent is still **thinking** (nothing said yet), you can carry on
   talking: a pause mid-sentence, a cough or noise does not throw its answer
@@ -139,7 +156,8 @@ the red dot says the microphone is open.
   words that were waiting unanswered are sent along with it, so "make a
   session… that shows the PR" reaches the agent as one request.
 - The **focus chip** in the header says who you are talking to: chief, or a
-  session. Pick a session there to hand the call to it.
+  session. Pick a session there to hand the call to it (see
+  [The plan on the call screen](#the-plan-on-the-call-screen)).
 - The footer shows the ElevenLabs credits left this billing month and what
   OpenRouter cost this call.
 
@@ -147,6 +165,20 @@ One call runs at a time. Opening one in a second tab asks whether to take it
 over. A dropped connection reconnects on its own for 30 seconds. Past calls and
 their transcripts are under **Call → History** (`/calls`), where each one can
 be deleted.
+
+### The plan on the call screen
+
+When a session has the call, the call view shows that session's plan above the
+transcript: the PRD's title, its stories in priority order (id, title, **To
+do** / **In progress** / **Done**, description and acceptance criteria), then
+its open questions. The plan takes about two thirds of the height and scrolls on
+its own; the transcript keeps the rest and still shows the newest message.
+
+The plan reloads whenever the session's planning state or number of stories
+changes, so stories appear while you talk them through. Before there is a PRD it says "The plan
+appears here once it has been written."; a PRD that does not parse shows the
+line and the error, with the stories that were found. Back with chief, the plan
+goes away and the transcript takes the whole middle of the screen again.
 
 ## Providers and costs
 
@@ -166,7 +198,7 @@ socket fails twice within 30 s. Out of credits also keeps the next calls on the
 backup voice until the credits reset. If OpenRouter fails too, the reply is shown
 as text only.
 
-**Where to see it.** The call panel's footer has the running figures, **Call
+**Where to see it.** The call view's footer has the running figures, **Call
 history** has each call's characters, seconds and OpenRouter dollars, and the
 Overview shows **Voice this month** (calls, minutes, ElevenLabs credits,
 OpenRouter dollars) for the calendar month. Once you have made a Scribe call of
@@ -189,7 +221,7 @@ falls back to OpenRouter with a toast.
 ## HTTPS
 
 Browsers only hand a page the microphone in a *secure context*: over HTTPS, or
-on `localhost`. Opened over plain HTTP on any other address, the call panel says
+on `localhost`. Opened over plain HTTP on any other address, the call view says
 so instead of starting. Serve chief-web behind a TLS-terminating reverse proxy
 (Caddy, Traefik, nginx) and open it at its `PUBLIC_URL`.
 
@@ -214,7 +246,7 @@ session ready, review a pull request, pause a task…) **runs on the first tool
 call**, without a read-back question. Chief then says in one short sentence
 what happened: the session and its new state, or why the service refused (an
 unknown or ambiguous name, a PRD that does not parse, the usage-limit hold).
-The tool card in the panel shows the same result; there is nothing to click and
+The tool card in the call view shows the same result; there is nothing to click and
 no "yes" to say. Saying "build it" about a pending session marks it ready and
 starts its build in the same reply.
 
@@ -289,7 +321,7 @@ Claude's usage-limit hold is on. It has no chief-web management tools beyond
 building its own planning session: it cannot create or change anything else
 outside its own container, so for anything else it asks you to say "back to
 chief". Its `start_build` tool, given only to a planning agent, is what "build
-it" said in your own words calls. Its one tool that reaches the call panel,
+it" said in your own words calls. Its one tool that reaches the call view,
 `open_browser_with_operator`, only asks you for a page to open (see
 [Watch with me](#watch-with-me)).
 
@@ -349,7 +381,7 @@ from the feedback too.
 Say "watch with me" or "let's look at it" while a session agent has the call
 (chief hands the call over when it hears this). The agent says one sentence
 and asks for a page with `open_browser_with_operator`. That starts a headless
-Chromium inside the session's container, and a card appears in the call panel.
+Chromium inside the session's container, and a card appears in the transcript.
 **The address and any login are only ever typed into the card, never spoken**:
 the agent says "Type the address in the panel and I'll open it".
 
@@ -382,10 +414,11 @@ the agent says "Type the address in the panel and I'll open it".
 
 ### The page view
 
-Once the page opens, the call panel shows the browser live: the current
-address above a picture of the page. Click, scroll and type in it; keys go to
+Once the page opens, the call view shows the browser live, above the
+transcript: the current address above a picture of the page. Click, scroll and type in it; keys go to
 the page while the pointer is over the view (Space-to-talk is ignored there).
-**Expand** fills the content area and resizes the browser to match;
+**Expand** gives it the middle of the call screen, with the transcript below
+it, and resizes the browser to match;
 collapsing it returns to 1280 × 800. The agent sees the same page and drives it
 through [Playwright MCP](https://github.com/microsoft/playwright-mcp):
 navigating, clicking, reading the page and taking screenshots, one sentence
@@ -508,7 +541,7 @@ quiet moment (2 s of silence on both sides):
   review finished, a PRD that just became valid.
 - **None** speaks nothing.
 
-Every event is also shown as a toast in the panel. With a session agent in
+Every event is also shown as a toast over the call view. With a session agent in
 focus, only events about that session are spoken — except a finished draft,
 which is announced whoever has the focus. A PRD that became valid is not
 announced separately when its finished draft is.
@@ -569,10 +602,10 @@ panel count down as you answer.
 ## Latency
 
 The target is **2 seconds** from the moment you stop talking to the moment you
-hear chief's first word. Every turn records six timestamps, and the call panel
+hear chief's first word. Every turn records six timestamps, and the call view
 can show where the time went.
 
-**Seeing it.** Click the pulse icon in the call panel's header. A strip under
+**Seeing it.** Click the pulse icon in the call view's header. A strip under
 the header shows the last turn's stages as deltas, plus the total (drawn in
 amber when it is over 2 s), and every one of your lines gets its speech-to-text
 time next to "You". The toggle is remembered in this browser. Past calls show a
@@ -581,7 +614,7 @@ summary line per reply in **Call history**.
 **The stages.** Each timestamp is stored on the turn's rows in `voice_turns`
 (the first two on your line, the rest on the agent's reply):
 
-| Column | When it is taken | Stage shown in the panel |
+| Column | When it is taken | Stage shown in the call view |
 | --- | --- | --- |
 | `t_speech_end` | the server receives your finished utterance | — |
 | `t_transcript` | the transcript is ready | **STT** = transcript − speech end |
@@ -663,7 +696,7 @@ trusting a change to the call, go through this list:
 
 ## Troubleshooting
 
-**The call panel says the microphone needs HTTPS.** See [HTTPS](#https).
+**The call view says the microphone needs HTTPS.** See [HTTPS](#https).
 
 **"Voice is turned off" / "Voice needs an OpenRouter API key" when calling.**
 The toast says which setting is missing; fix it in **Settings → Voice**. "Scribe
@@ -689,7 +722,7 @@ the key and your balance with **Check ElevenLabs key**. If the backup voice
 sounds too fast or slow, fix **Backup voice sample rate**.
 
 **No voice at all, only text.** Either the voice is muted ("unmute"), or both
-ElevenLabs and OpenRouter speech failed; the panel shows an error per turn.
+ElevenLabs and OpenRouter speech failed; the transcript shows an error per turn.
 
 **Chief says "I can't reach my brain right now".** OpenRouter refused or failed the chat
 request. **Check OpenRouter key** tells you whether the key, the credit or the

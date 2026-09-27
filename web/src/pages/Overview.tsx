@@ -29,6 +29,7 @@ import {
   StatusDot,
   type Tone,
 } from '../ui.tsx';
+import { useCall } from '../voice/CallProvider.tsx';
 
 /**
  * The home page: what needs the operator, what is running, and what the
@@ -92,6 +93,8 @@ export function Overview() {
           </Link>
         }
       />
+
+      <StartCallButton />
 
       {error !== null && (
         <div className="notice notice--error" role="alert">
@@ -309,6 +312,25 @@ export function Overview() {
           )}
         </Panel>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The one-click way into a call: it opens the call view, which starts a call
+ * synchronously in the click as the call’s audio needs. A running call covers
+ * the whole app, so this button is only ever seen with no call in progress.
+ */
+function StartCallButton() {
+  const call = useCall();
+  if (!call.enabled) return null;
+
+  return (
+    <div className="start-call">
+      <button type="button" className="button button--primary button--large" onClick={call.open}>
+        <Icon name="broadcast" />
+        Start a call
+      </button>
     </div>
   );
 }

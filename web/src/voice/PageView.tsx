@@ -302,7 +302,7 @@ export function PageView({ sessionId, onClose }: { readonly sessionId: string; r
             type="button"
             className="button button--quiet"
             aria-pressed={expanded}
-            title={expanded ? 'Back into the call panel' : 'Fill the main area; the transcript stays beside it'}
+            title={expanded ? 'Back to its normal size' : 'Fill the main area; the transcript stays below it'}
             onClick={() => setExpanded(!expanded)}
           >
             Expand
