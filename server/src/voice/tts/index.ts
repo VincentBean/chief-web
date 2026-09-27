@@ -111,6 +111,7 @@ export class TtsService {
       baseUrl: this.config.elevenlabsApiUrl,
       apiKey: key,
       modelId: settings.ttsModel,
+      speed: settings.ttsSpeedPercent / 100,
       ...(this.deps.keepAliveMs === undefined ? {} : { keepAliveMs: this.deps.keepAliveMs }),
     });
     this.provider = this.elevenlabs;
@@ -292,7 +293,7 @@ export async function synthesizeOnce(
     const key = getElevenLabsApiKey(db);
     if (key === null) throw new TtsError('unconfigured', 0, 'Save an ElevenLabs API key first.');
     if (settings.voiceId === null) throw new TtsError('unconfigured', 0, 'Choose an ElevenLabs voice first.');
-    tts = new ElevenLabsTts({ baseUrl: config.elevenlabsApiUrl, apiKey: key, modelId: settings.ttsModel });
+    tts = new ElevenLabsTts({ baseUrl: config.elevenlabsApiUrl, apiKey: key, modelId: settings.ttsModel, speed: settings.ttsSpeedPercent / 100 });
     await tts.open({ callId: 'test', voiceId: settings.voiceId });
   } else {
     const key = getOpenRouterApiKey(db);

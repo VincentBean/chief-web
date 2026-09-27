@@ -840,6 +840,7 @@ export interface VoiceForm {
   secondaryLanguage: string;
   keytermsEnabled: boolean;
   ttsModel: VoiceSettings['ttsModel'];
+  ttsSpeedPercent: string;
   voiceId: string;
   orTtsModel: string;
   orTtsVoice: string;
@@ -864,6 +865,7 @@ export function toVoiceForm(voice: VoiceSettings): VoiceForm {
     voiceId: voice.voiceId ?? '',
     orTtsSampleRate: String(voice.orTtsSampleRate),
     vadSilenceMs: String(voice.vadSilenceMs),
+    ttsSpeedPercent: String(voice.ttsSpeedPercent),
     pronunciations: JSON.stringify(voice.pronunciations, null, 2),
     transcriptRetentionDays: String(voice.transcriptRetentionDays),
   };
@@ -872,6 +874,7 @@ export function toVoiceForm(voice: VoiceSettings): VoiceForm {
 /** The whole-number fields, with the bounds the server enforces. */
 const VOICE_NUMBERS = [
   { field: 'vadSilenceMs', label: 'End of speech after', min: 400, max: 2000 },
+  { field: 'ttsSpeedPercent', label: 'Speaking speed', min: 70, max: 120 },
   { field: 'transcriptRetentionDays', label: 'Keep transcripts for', min: 1, max: 365 },
   { field: 'orTtsSampleRate', label: 'Backup voice sample rate', min: 8000, max: 48000 },
 ] as const;
@@ -917,6 +920,7 @@ export function fromVoiceForm(form: VoiceForm): { voice: VoiceSettings } | { err
       voiceId: form.voiceId === '' ? null : form.voiceId,
       orTtsSampleRate: numbers.orTtsSampleRate ?? 24000,
       vadSilenceMs: numbers.vadSilenceMs ?? 800,
+      ttsSpeedPercent: numbers.ttsSpeedPercent ?? 110,
       transcriptRetentionDays: numbers.transcriptRetentionDays ?? 30,
       pronunciations: pronunciations as Record<string, string>,
     },
@@ -1248,6 +1252,13 @@ function VoicePanel({
               </option>
             ))}
           </select>
+        </div>
+        <div className="field">
+          <label className="field__label" htmlFor="voice-tts-speed">
+            Speaking speed (%)
+          </label>
+          <input id="voice-tts-speed" name="voice-tts-speed" type="number" min={70} max={120} step={5} value={form.ttsSpeedPercent} onChange={(event) => set('ttsSpeedPercent', event.target.value)} className="field__input field__input--narrow" />
+          <p className="field__hint">How fast the ElevenLabs voice talks. 100 is the voice's own pace.</p>
         </div>
       </div>
 

@@ -28,6 +28,14 @@ export const BRAIN_UNREACHABLE: Readonly<Record<string, string>> = {
   en: "I can't reach my brain right now.",
 };
 
+/**
+ * Sent with one retry when a step came back with neither words nor tool
+ * calls while nothing had been said yet this turn: silence reads as a hang.
+ */
+export const EMPTY_REPLY_NUDGE =
+  'You have not said anything to the operator yet this turn. Answer now in one short sentence. ' +
+  'Do not call a tool again that already ran this turn.';
+
 const SUMMARY_PROMPT =
   'You summarize the earlier part of a voice call between the operator and Chief, the voice of chief-web. ' +
   'Write one or two plain sentences with what was asked, decided and done, naming sessions and pull requests. ' +
@@ -148,6 +156,11 @@ export class ChiefAgent implements VoiceAgent {
     let unsaid = '';
     /** Whether this turn had started to answer, so an interrupt cut it off. */
     let spoke = false;
+    /** Everything spoken this turn, across steps. */
+    let said = '';
+    /** Whether the one retry after an empty step has been used. */
+    let nudged = false;
+    let nudgeNext = false;
     try {
       if (input.invoke !== undefined) {
         // An intent already named the tool ("switch to billing export"): it
@@ -169,29 +182,41 @@ export class ChiefAgent implements VoiceAgent {
       }
       for (let hop = 0; hop < this.deps.config.voiceChiefMaxToolHops; hop++) {
         let text = '';
+        let finishReason: string | null = null;
         const calls: ChatToolCall[] = [];
         try {
           const step = prefetched?.replay() ?? this.chat({
             baseUrl: this.deps.config.openrouterApiUrl,
             apiKey: getOpenRouterApiKey(this.deps.db) ?? '',
             model: settings.chiefModel,
-            messages: [{ role: 'system', content: this.systemPrompt(settings.language) }, ...this.summaryLine(), ...this.window()],
+            messages: [
+              { role: 'system', content: this.systemPrompt(settings.language) },
+              ...this.summaryLine(),
+              ...this.window(),
+              ...(nudgeNext ? [{ role: 'system' as const, content: EMPTY_REPLY_NUDGE }] : []),
+            ],
             tools: definitions,
             maxTokens: CHIEF_MAX_TOKENS,
             temperature: CHIEF_TEMPERATURE,
             signal,
           });
           prefetched = null;
+          nudgeNext = false;
           for await (const event of step) {
             if (event.type === 'delta') {
-              text += event.text;
+              // A step after a tool starts a new sentence: keep it apart from the last one.
+              const piece = text === '' && said !== '' && !/\s$/.test(said) && !/^\s/.test(event.text) ? ` ${event.text}` : event.text;
+              text += piece;
+              said += piece;
               unsaid = text;
               spoke = true;
-              yield { type: 'delta', text: event.text };
+              yield { type: 'delta', text: piece };
             } else if (event.type === 'tool_call') {
               calls.push({ id: event.id, type: 'function', function: { name: event.name, arguments: event.arguments } });
             } else if (event.type === 'usage') {
               yield { type: 'usage', costUsd: event.costUsd };
+            } else if (event.type === 'done') {
+              finishReason = event.finishReason;
             }
           }
         } catch (cause) {
@@ -205,6 +230,15 @@ export class ChiefAgent implements VoiceAgent {
         }
 
         unsaid = '';
+        if (text === '' && calls.length === 0) {
+          // Not kept in the history: an assistant message with nothing in it is not one.
+          logger.warn('chief gave an empty reply', { hop, finishReason, model: settings.chiefModel, retry: said === '' && !nudged });
+          if (said !== '' || nudged) return;
+          nudged = true;
+          nudgeNext = true;
+          continue;
+        }
+        if (text !== '' && finishReason === 'length') logger.warn('chief ran out of tokens mid-reply', { hop, model: settings.chiefModel });
         this.messages.push({ role: 'assistant', content: text === '' ? null : text, ...(calls.length === 0 ? {} : { tool_calls: calls }) });
         if (calls.length === 0) return;
         owed = [...calls];

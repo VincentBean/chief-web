@@ -106,6 +106,7 @@ export const SETTING_KEYS = [
   'voice_secondary_language',
   'voice_keyterms_enabled',
   'voice_tts_model',
+  'voice_tts_speed_percent',
   'voice_voice_id',
   'voice_or_tts_model',
   'voice_or_tts_voice',

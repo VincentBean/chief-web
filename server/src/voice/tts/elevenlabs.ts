@@ -28,6 +28,8 @@ export interface ElevenLabsTtsOptions {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly modelId: string;
+  /** `voice_settings.speed` (0.7–1.2), sent with each turn's first text; the voice's own pace when left out. */
+  readonly speed?: number;
   readonly keepAliveMs?: number;
 }
 
@@ -145,7 +147,11 @@ export class ElevenLabsTts implements TtsProvider {
     });
 
     // The docs want text to end with a single space.
-    if (text !== '') this.send(ws, { text: `${text} `, context_id: contextId });
+    if (text !== '') {
+      // Voice settings only count on a context's first message.
+      const first = !this.opened.has(contextId) && this.opts.speed !== undefined;
+      this.send(ws, { text: `${text} `, context_id: contextId, ...(first ? { voice_settings: { speed: this.opts.speed } } : {}) });
+    }
     this.opened.add(contextId);
     if (seg.last) {
       this.send(ws, { text: '', context_id: contextId, flush: true });

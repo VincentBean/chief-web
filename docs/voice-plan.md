@@ -492,7 +492,8 @@ async *run(userText: string, signal: AbortSignal): AsyncGenerator<ChiefEvent> {
 
 - `window()` keeps the last 30 messages. When over budget, older turns are summarized into one system line by the same model, asynchronously and off the hot path.
 - SSE parsing in `openrouter-client.ts`: read `data:` lines, ignore `: OPENROUTER PROCESSING` comments, accumulate `choices[0].delta.tool_calls[i].function.arguments` fragments by index, stop on `[DONE]`.
-- **Text before tools.** The prompt tells chief to say a short phrase ("Let me check.") *before* calling a slow tool. Deltas are spoken as they arrive, so you hear that phrase while the tool runs.
+- **No text before tools.** Chief first said a short phrase ("Let me check.") before a slow tool, but it announced outcomes it did not have yet ("starting it now", then the tool failed). The prompt now tells it to say nothing before a tool; the acknowledgement earcon covers the wait. Text from separate steps of one turn is joined with a space.
+- **Empty steps.** A step with neither words nor tool calls, while nothing was said yet this turn, is retried once with a nudge (`EMPTY_REPLY_NUDGE`), so a tool result is never left unsaid. Empty steps are logged with their `finish_reason` and never kept in the history.
 - Retries: one retry on 429/5xx with 300 ms backoff. After that, speak "I can't reach my brain right now" (earcon plus text) and stay in the call.
 
 ### 9.2 Tools (`chief/tools.ts`)

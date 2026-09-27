@@ -55,6 +55,7 @@ describe('voice settings (voice US-001)', () => {
       secondaryLanguage: 'en',
       keytermsEnabled: false,
       ttsModel: 'eleven_flash_v2_5',
+      ttsSpeedPercent: 110,
       voiceId: null,
       orTtsModel: DEFAULT_VOICE_OR_TTS_MODEL,
       orTtsVoice: DEFAULT_VOICE_OR_TTS_VOICE,
@@ -96,6 +97,7 @@ describe('voice settings (voice US-001)', () => {
         secondaryLanguage: null,
         voiceId: 'JBFqnCBsd6RMkjVDRZzb',
         vadSilenceMs: 400,
+        ttsSpeedPercent: 120,
         bargeIn: 'off',
         timezone: 'America/New_York',
         pronunciations: {},
@@ -111,6 +113,7 @@ describe('voice settings (voice US-001)', () => {
     assert.equal(saved.secondaryLanguage, null);
     assert.equal(saved.voiceId, 'JBFqnCBsd6RMkjVDRZzb');
     assert.equal(saved.vadSilenceMs, 400);
+    assert.equal(saved.ttsSpeedPercent, 120);
     assert.equal(saved.bargeIn, 'off');
     assert.equal(saved.timezone, 'America/New_York');
     // A cleared map stays cleared: the starter map only fills a missing row.
@@ -210,6 +213,8 @@ describe('parseVoiceSettingsUpdate (voice US-001)', () => {
     rejects({ vadSilenceMs: 399 }, 'invalid_voice_vad_silence_ms');
     rejects({ vadSilenceMs: 2001 }, 'invalid_voice_vad_silence_ms');
     rejects({ vadSilenceMs: 800.5 }, 'invalid_voice_vad_silence_ms');
+    rejects({ ttsSpeedPercent: 69 }, 'invalid_voice_tts_speed_percent');
+    rejects({ ttsSpeedPercent: 121 }, 'invalid_voice_tts_speed_percent');
     rejects({ transcriptRetentionDays: 0 }, 'invalid_voice_transcript_retention_days');
     rejects({ transcriptRetentionDays: 366 }, 'invalid_voice_transcript_retention_days');
     rejects({ transcriptRetentionDays: '30' }, 'invalid_voice_transcript_retention_days');

@@ -152,12 +152,13 @@ beforeEach(() => {
   setSetting(db, 'voice_voice_id', 'voice123');
 });
 
-function el(keepAliveMs?: number): ElevenLabsTts {
+function el(keepAliveMs?: number, speed?: number): ElevenLabsTts {
   return new ElevenLabsTts({
     baseUrl: config.elevenlabsApiUrl,
     apiKey: 'sk_el_test',
     modelId: 'eleven_flash_v2_5',
     ...(keepAliveMs === undefined ? {} : { keepAliveMs }),
+    ...(speed === undefined ? {} : { speed }),
   });
 }
 
@@ -248,6 +249,25 @@ describe('ElevenLabsTts (voice US-006)', () => {
     assert.deepEqual(b.chunks.map((x) => x.length), [960, 960]);
     assert.deepEqual(c.chunks.map((x) => x.length), [480]);
     assert.deepEqual(results, [{ chars: 23 }, { chars: 38 }, { chars: 0 }]);
+  });
+
+  it('sends the speed with the first text of each turn only', async () => {
+    onMessage = speaker;
+    const tts = el(undefined, 1.1);
+    await tts.open({ callId: 'c1', voiceId: 'voice123' });
+    const signal = new AbortController().signal;
+    await Promise.all([
+      tts.speak({ segmentId: 1, turn: 1, text: 'One.', last: false }, signal, collector().onAudio),
+      tts.speak({ segmentId: 2, turn: 1, text: 'Two.', last: true }, signal, collector().onAudio),
+    ]);
+    await tts.speak({ segmentId: 3, turn: 2, text: 'Three.', last: true }, signal, collector().onAudio);
+    await tts.close();
+    const texts = received.map((r) => r.msg).filter((msg) => typeof msg['text'] === 'string' && msg['text'].trim() !== '');
+    assert.deepEqual(texts, [
+      { text: 'One. ', context_id: 't1', voice_settings: { speed: 1.1 } },
+      { text: 'Two. ', context_id: 't1' },
+      { text: 'Three. ', context_id: 't2', voice_settings: { speed: 1.1 } },
+    ]);
   });
 
   it('sends a keep-alive after the configured silence', async () => {

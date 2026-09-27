@@ -13,7 +13,7 @@ import {
   toolReply,
 } from './__fixtures__/scripted-openrouter.js';
 import { tool } from './tools.js';
-import { BRAIN_UNREACHABLE, CHIEF_MAX_TOKENS, CHIEF_TEMPERATURE, ChiefAgent, WINDOW_MESSAGES } from './agent.js';
+import { BRAIN_UNREACHABLE, CHIEF_MAX_TOKENS, CHIEF_TEMPERATURE, ChiefAgent, EMPTY_REPLY_NUDGE, WINDOW_MESSAGES } from './agent.js';
 
 let fake: ScriptedOpenRouter;
 
@@ -145,6 +145,48 @@ describe('chief agent loop (voice US-008)', () => {
     assert.equal(data.ok, true);
     assert.equal(data.name, 'billing-export');
     assert.ok(data.log.summary.length <= 600);
+  });
+
+  it('keeps the text of two steps apart with a space', async () => {
+    const { agent } = setup();
+    fake.replies.push(
+      toolReply([{ id: 'call_1', name: 'build_status', args: '{"session":"the billing export"}' }], 'Even kijken.'),
+      textReply(['Het draait story drie.']),
+    );
+
+    assert.equal(spoken(await turn(agent, 'Hoe gaat billing export?')), 'Even kijken. Het draait story drie.');
+  });
+
+  it('retries an empty step once with a nudge, so a tool result is never left unsaid', async () => {
+    const { agent } = setup();
+    fake.replies.push(
+      toolReply([{ id: 'call_1', name: 'build_status', args: '{"session":"the billing export"}' }]),
+      textReply([]),
+      textReply(['Het draait story drie.']),
+    );
+
+    const events = await turn(agent, 'Hoe gaat billing export?');
+
+    assert.equal(spoken(events), 'Het draait story drie.');
+    assert.equal(fake.requests.length, 3);
+    assert.equal(messagesOf(fake.requests[1]).at(-1)?.role, 'tool');
+    assert.deepEqual(messagesOf(fake.requests[2]).at(-1), { role: 'system', content: EMPTY_REPLY_NUDGE });
+    // The empty step is not in the history, nor is the nudge.
+    assert.deepEqual(
+      agent.history.map((message) => message.role),
+      ['user', 'assistant', 'tool', 'assistant'],
+    );
+  });
+
+  it('gives up after one retry and leaves no empty message in the history', async () => {
+    const { agent } = setup();
+    fake.replies.push(textReply([]), textReply([]));
+
+    const events = await turn(agent, 'Hallo?');
+
+    assert.equal(spoken(events), '');
+    assert.equal(fake.requests.length, 2);
+    assert.deepEqual(agent.history, [{ role: 'user', content: 'Hallo?' }]);
   });
 
   it('runs a changing tool on its first call, with the resolved session id, and hears its result', async () => {

@@ -132,6 +132,8 @@ export interface VoiceSettings {
   secondaryLanguage: string | null;
   keytermsEnabled: boolean;
   ttsModel: (typeof VOICE_TTS_MODELS)[number];
+  /** ElevenLabs speaking speed, 70–120 (percent of the voice's own pace). */
+  ttsSpeedPercent: number;
   /** ElevenLabs voice every agent speaks with; `null` until one is picked. */
   voiceId: string | null;
   orTtsModel: string;

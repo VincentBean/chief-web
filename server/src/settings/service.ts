@@ -650,6 +650,9 @@ export const VOICE_LIVE_CAPTIONS = ['off', 'browser'] as const;
 
 export const MIN_VOICE_VAD_SILENCE_MS = 400;
 export const MAX_VOICE_VAD_SILENCE_MS = 2000;
+/** ElevenLabs' `voice_settings.speed` range (0.7–1.2), as a percentage. */
+export const MIN_VOICE_TTS_SPEED_PERCENT = 70;
+export const MAX_VOICE_TTS_SPEED_PERCENT = 120;
 export const MIN_VOICE_TRANSCRIPT_RETENTION_DAYS = 1;
 export const MAX_VOICE_TRANSCRIPT_RETENTION_DAYS = 365;
 /** PCM sample rates worth playing: telephone quality up to studio. */
@@ -857,6 +860,10 @@ export const VOICE_FIELDS = {
   },
   keytermsEnabled: { key: 'voice_keyterms_enabled', codec: boolCodec(false) },
   ttsModel: { key: 'voice_tts_model', codec: enumCodec(VOICE_TTS_MODELS, 'eleven_flash_v2_5') },
+  ttsSpeedPercent: {
+    key: 'voice_tts_speed_percent',
+    codec: intCodec(MIN_VOICE_TTS_SPEED_PERCENT, MAX_VOICE_TTS_SPEED_PERCENT, 110),
+  },
   voiceId: {
     key: 'voice_voice_id',
     codec: nullableTextCodec(isValidElevenLabsVoiceId, null, 'an ElevenLabs voice id'),

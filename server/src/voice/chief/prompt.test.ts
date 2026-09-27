@@ -20,3 +20,23 @@ describe('chief system prompt on acting (chief acts at once, US-006)', () => {
     assert.match(prompt, /Ask which one only when no session was named/);
   });
 });
+
+describe('chief system prompt on brevity', () => {
+  const prompt = chiefSystemPrompt({ language: 'en', snapshot: '' }).replace(/\s+/g, ' ');
+
+  it('keeps a reply to one point in few words, answering only what was said', () => {
+    assert.match(prompt, /One point per reply, in one or two short sentences of at most about 20 words together/);
+    assert.match(prompt, /Answer only what the operator just said/);
+    assert.match(prompt, /At most one question, at the end, and only when you need the answer/);
+  });
+
+  it('says nothing before a tool and reports only the outcome', () => {
+    assert.match(prompt, /Say nothing before a tool call/);
+    assert.doesNotMatch(prompt, /Let me check/);
+    assert.match(prompt, /When a first try failed and a second worked, say only the outcome/);
+  });
+
+  it('keeps events apart from answers', () => {
+    assert.match(prompt, /Never fold an event into an answer to the operator/);
+  });
+});
