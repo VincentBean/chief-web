@@ -55,6 +55,8 @@ export interface RepositoryView {
    * (US-002); `null` means reviews run with the generic prompt.
    */
   readonly reviewContext: string | null;
+  /** Whether new sessions open a pull request unless unticked (pull-request US-001). */
+  readonly openPullRequestDefault: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -83,6 +85,8 @@ export interface CreateRepositoryRequest {
   readonly sentryProject?: string | null;
   /** Repository-specific review guidance; omitted means none. */
   readonly reviewContext?: string | null;
+  /** Omitted means true: sessions open a pull request by default. */
+  readonly openPullRequestDefault?: boolean;
 }
 
 export interface UpdateRepositoryRequest {
@@ -97,6 +101,8 @@ export interface UpdateRepositoryRequest {
   readonly sentryProject?: string | null;
   /** `null` clears the guidance; omitted leaves the stored text alone. */
   readonly reviewContext?: string | null;
+  /** Omitted leaves the stored default alone. */
+  readonly openPullRequestDefault?: boolean;
 }
 
 interface KeyMaterial {
@@ -120,6 +126,7 @@ export function toRepositoryView(config: Config, repository: Repository): Reposi
     sentryOrg: repository.sentryOrg,
     sentryProject: repository.sentryProject,
     reviewContext: repository.reviewContext,
+    openPullRequestDefault: repository.openPullRequestDefault,
     createdAt: repository.createdAt,
     updatedAt: repository.updatedAt,
   };
@@ -208,6 +215,7 @@ export function createRepositoryWithKey(
       sentryOrg,
       sentryProject,
       reviewContext: request.reviewContext ?? null,
+      openPullRequestDefault: request.openPullRequestDefault ?? true,
     });
   } catch (cause) {
     if (isUniqueNameViolation(cause)) {
@@ -265,6 +273,7 @@ export function updateRepositoryWithKey(
     sentryOrg?: string | null;
     sentryProject?: string | null;
     reviewContext?: string | null;
+    openPullRequestDefault?: boolean;
   } = {};
   if (request.name !== undefined) patch.name = request.name;
   if (request.sshUrl !== undefined) patch.sshUrl = request.sshUrl;
@@ -281,6 +290,9 @@ export function updateRepositoryWithKey(
   if (request.sentryProject !== undefined) patch.sentryProject = request.sentryProject;
 
   if (request.reviewContext !== undefined) patch.reviewContext = request.reviewContext;
+  if (request.openPullRequestDefault !== undefined) {
+    patch.openPullRequestDefault = request.openPullRequestDefault;
+  }
 
   if (request.privateKey !== undefined) {
     const inspected = inspect(request.privateKey);

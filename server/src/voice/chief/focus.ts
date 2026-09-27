@@ -1,3 +1,4 @@
+import { SessionAgentError } from '../session-agent/registry.js';
 import { guarded } from './actions.js';
 import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
 
@@ -6,14 +7,22 @@ import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg
  * Claude Code: it plans a `pending` session and answers questions about any
  * other (the registry's Q&A mode, voice US-025). Everything the registry
  * refuses on (no clone, the usage-limit hold, a container that does not
- * start) comes back as its message for chief to say. An open planning terminal is the one case that
- * asks first: closing it ends a conversation the operator may still want.
+ * start) comes back as its message for chief to say. So does an open planning
+ * terminal: closing it would end a conversation the operator may still want,
+ * so the operator closes it in the browser.
  */
 
-/** What chief asks when the planning terminal is open for the session. */
-export const CLOSE_TERMINAL_PROMPT = 'The planning terminal is open for this session. Should I close it and continue by voice?';
-
 const NAME = 'focus_session';
+const TERMINAL_OPEN = 'session_in_planning_terminal';
+
+/** The refusal for an open planning terminal: nothing is stopped and the focus stays. */
+function terminalOpen(name: string): ToolResult {
+  return {
+    ok: false,
+    data: { error: TERMINAL_OPEN },
+    summary: `The planning terminal is open for ${name}; close it in the browser first, then ask again.`,
+  };
+}
 
 export function focusSessionTool(services: ChiefServices): ChiefTool {
   return {
@@ -29,7 +38,6 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
       guarded('Could not switch to the session', async () => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
-        // Checked before offering to close the terminal, so a yes is never followed by a refusal.
         const holdUntil = services.hold.until();
         if (holdUntil !== null) {
           return {
@@ -38,27 +46,9 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
             summary: `Claude is on a usage-limit hold until ${holdUntil}, so the session agent cannot start`,
           };
         }
-        if (services.planning?.isTerminalRunning(session.id) === true) {
-          const confirmation = ctx.confirmations.request(
-            { tool: NAME, args: { sessionId: session.id, name: session.name }, prompt: CLOSE_TERMINAL_PROMPT },
-            ctx.turn,
-          );
-          return {
-            ok: true,
-            data: { needs_confirmation: true, confirmation_id: confirmation.id, say: confirmation.prompt },
-            summary: `Waiting for confirmation: ${confirmation.prompt}`,
-          };
-        }
+        if (services.planning?.isTerminalRunning(session.id) === true) return terminalOpen(session.name);
         return switchTo(services, { id: session.id, name: session.name }, ctx);
       }),
-    // Only reached through `confirm`, i.e. the terminal was open and the operator said yes.
-    execute: (args, ctx) => {
-      const target = { id: args['sessionId'] as string, name: args['name'] as string };
-      return guarded(`Could not switch to ${target.name}`, async () => {
-        await services.planning?.stop(target.id);
-        return switchTo(services, target, ctx);
-      });
-    },
   };
 }
 
@@ -69,7 +59,13 @@ async function switchTo(services: ChiefServices, target: { id: string; name: str
     return { ok: false, data: { error: 'unavailable' }, summary: 'Session agents are not available here' };
   }
   if (agents.isAlive?.(target.id) === false) ctx.earcon?.('one_sec');
-  await agents.acquire(target.id);
+  try {
+    await agents.acquire(target.id);
+  } catch (cause) {
+    // The registry makes the same check; the terminal may have opened meanwhile.
+    if (cause instanceof SessionAgentError && cause.code === TERMINAL_OPEN) return terminalOpen(target.name);
+    throw cause;
+  }
   ctx.setFocus({ kind: 'session', sessionId: target.id });
   return {
     ok: true,

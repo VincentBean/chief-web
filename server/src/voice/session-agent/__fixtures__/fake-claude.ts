@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { FakeDockerDaemon, FakeExec } from '../../../docker/fake-daemon.js';
-import { OPEN_BROWSER_TOOL } from '../agent.js';
+import { OPEN_BROWSER_TOOL, START_BUILD_TOOL } from '../agent.js';
 
 /** A recorded turn's stdout lines (`<name>.jsonl` next to this file). */
 export function recording(name: string): string[] {
@@ -31,6 +31,8 @@ const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
  * and `#deaf` also ignores the interrupt request (only a signal ends it).
  * `#browser` calls `open_browser_with_operator` and waits, like the real
  * tool, until {@link FakeClaude.finishBrowserTool} hands it the result.
+ * `#build` calls `start_build` (US-008) the same way, until
+ * {@link FakeClaude.finishBuildTool}, and then says the result.
  * {@link FakeClaude.onTurn} sees every user message first.
  */
 export class FakeClaude {
@@ -46,6 +48,10 @@ export class FakeClaude {
   onOpenBrowser: ((containerId: string) => void) | null = null;
   /** The `#browser` turn waiting for its tool result, per exec id. */
   private readonly browserTools = new Map<string, (result: string) => void>();
+  /** Called with the container when `#build` calls `start_build`. */
+  onStartBuild: ((containerId: string) => void) | null = null;
+  /** The `#build` turn waiting for its tool result, per exec id. */
+  private readonly buildTools = new Map<string, (result: string) => void>();
 
   constructor(private readonly daemon: FakeDockerDaemon) {
     daemon.onExec = (exec) => (exec.attachStdin && !exec.tty ? this.agent(exec) : this.signal(exec));
@@ -59,6 +65,14 @@ export class FakeClaude {
   finishBrowserTool(result: string): void {
     for (const [execId, finish] of this.browserTools) {
       this.browserTools.delete(execId);
+      finish(result);
+    }
+  }
+
+  /** The pending `#build` tool call of every agent gets `result`, says it, and its turn ends. */
+  finishBuildTool(result: string): void {
+    for (const [execId, finish] of this.buildTools) {
+      this.buildTools.delete(execId);
       finish(result);
     }
   }
@@ -81,6 +95,7 @@ export class FakeClaude {
         if (entry['type'] === 'control_request') {
           if (deaf) return;
           this.browserTools.delete(exec.id);
+          this.buildTools.delete(exec.id);
           emit({ type: 'control_response', response: { subtype: 'success', request_id: entry['request_id'] } });
           emit({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_streaming', duration_ms: 5, total_cost_usd: 0 });
           return;
@@ -107,6 +122,18 @@ export class FakeClaude {
             const input = { command: `curl -u ${username}:${password} http://localhost:3000/api/me`, username, password };
             emit({ type: 'assistant', message: { id: `${id}s`, content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input }] }, parent_tool_use_id: null });
             emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: `logged in as ${username} with ${password}` }] }, parent_tool_use_id: null });
+          }
+          if (said.includes('#build')) {
+            emit({ type: 'assistant', message: { id: `${id}u`, content: [{ type: 'tool_use', id: 'toolu_4', name: START_BUILD_TOOL, input: {} }] }, parent_tool_use_id: null });
+            this.buildTools.set(exec.id, (result) => {
+              emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_4', content: result }] }, parent_tool_use_id: null });
+              emit({ type: 'stream_event', event: { type: 'message_start', message: { id } }, parent_tool_use_id: null });
+              emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent_tool_use_id: null });
+              emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: result } }, parent_tool_use_id: null });
+              emit({ type: 'result', subtype: 'success', is_error: false, duration_ms: 10, total_cost_usd: 0.01 });
+            });
+            this.onStartBuild?.(exec.containerId);
+            return;
           }
           if (said.includes('#browser')) {
             const input = { hint: 'the checkout page' };

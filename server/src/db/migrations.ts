@@ -1104,6 +1104,111 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_repository_logins_repository ON repository_logins (repository_id);
     `,
   },
+  {
+    id: '0020_repository_open_pull_request_default',
+    sql: `
+      -- Whether a new session of this repository opens a pull request by
+      -- default (pull-request US-001). 1 for every existing repository, so
+      -- nothing changes until an operator turns it off.
+      ALTER TABLE repositories ADD COLUMN open_pull_request_default INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
+  {
+    id: '0021_session_open_pull_request',
+    sql: `
+      -- Whether delivery opens a pull request for this session (pull-request
+      -- US-002). 1 for every existing session: they were all created when
+      -- delivery always opened one.
+      ALTER TABLE sessions ADD COLUMN open_pull_request INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
+  {
+    id: '0022_session_pushed_only',
+    sql: `
+      -- Whether the last delivery pushed the branch and stopped there because
+      -- the pull request was turned off. A recurring-task run that committed
+      -- nothing also finishes with no pull request, and this is what tells
+      -- the two apart. 0 for every existing session: none ended that way.
+      ALTER TABLE sessions ADD COLUMN pushed_only INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    id: '0023_recurring_task_outcome_pushed',
+    sql: `
+      -- A run can now end by pushing its branch with no pull request, which
+      -- is neither \`pr-opened\` nor \`clean\`, so both outcome CHECKs gain
+      -- \`pushed\`.
+      --
+      -- SQLite cannot widen a CHECK in place, and with foreign keys on,
+      -- dropping \`recurring_tasks\` cascades its occurrences away and nulls
+      -- \`sessions.recurring_task_id\`. So all three are set aside first and
+      -- put back inside the migration runner's transaction.
+      CREATE TABLE recurring_tasks_backup AS SELECT * FROM recurring_tasks;
+      CREATE TABLE recurring_task_occurrences_backup AS SELECT * FROM recurring_task_occurrences;
+      CREATE TABLE session_recurring_tasks_backup AS
+        SELECT id, recurring_task_id FROM sessions WHERE recurring_task_id IS NOT NULL;
+
+      DROP TABLE recurring_task_occurrences;
+      DROP TABLE recurring_tasks;
+
+      CREATE TABLE recurring_tasks (
+        id               TEXT PRIMARY KEY,
+        repository_id    TEXT NOT NULL
+                           REFERENCES repositories (id) ON DELETE CASCADE,
+        name             TEXT NOT NULL
+                           CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        prompt           TEXT NOT NULL CHECK (prompt <> ''),
+        cron_expression  TEXT NOT NULL,
+        base_branch      TEXT NOT NULL,
+        pr_target        TEXT NOT NULL CHECK (pr_target IN ('develop', 'main')),
+        run_code_review  INTEGER NOT NULL DEFAULT 0 CHECK (run_code_review IN (0, 1)),
+        paused           INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+        next_run_at      TEXT,
+        last_outcome     TEXT
+                           CHECK (last_outcome IS NULL OR last_outcome IN
+                             ('started', 'skipped', 'fire-failed', 'pr-opened',
+                              'pushed', 'clean', 'failed')),
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        UNIQUE (repository_id, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recurring_tasks_repository
+        ON recurring_tasks (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_recurring_tasks_next_run_at
+        ON recurring_tasks (next_run_at)
+        WHERE next_run_at IS NOT NULL;
+
+      CREATE TABLE recurring_task_occurrences (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        recurring_task_id TEXT NOT NULL
+                            REFERENCES recurring_tasks (id) ON DELETE CASCADE,
+        occurred_at       TEXT NOT NULL,
+        outcome           TEXT NOT NULL
+                            CHECK (outcome IN
+                              ('started', 'skipped', 'fire-failed', 'pr-opened',
+                               'pushed', 'clean', 'failed')),
+        detail            TEXT,
+        session_id        TEXT REFERENCES sessions (id) ON DELETE SET NULL,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recurring_task_occurrences_task
+        ON recurring_task_occurrences (recurring_task_id, occurred_at DESC, id DESC);
+
+      INSERT INTO recurring_tasks SELECT * FROM recurring_tasks_backup;
+      INSERT INTO recurring_task_occurrences SELECT * FROM recurring_task_occurrences_backup;
+      UPDATE sessions
+         SET recurring_task_id = (SELECT recurring_task_id FROM session_recurring_tasks_backup
+                                   WHERE session_recurring_tasks_backup.id = sessions.id)
+       WHERE id IN (SELECT id FROM session_recurring_tasks_backup);
+
+      DROP TABLE recurring_tasks_backup;
+      DROP TABLE recurring_task_occurrences_backup;
+      DROP TABLE session_recurring_tasks_backup;
+    `,
+  },
 ];
 
 /**

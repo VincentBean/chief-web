@@ -235,12 +235,13 @@ export class CallAudio {
     this.pttHeld = true;
     this.player.stop();
     this.sink.json({ type: 'ptt', down: true });
+    // The button decides where the utterance ends, not the VAD.
+    void this.vad?.pause();
     // Scribe and the browser transcribe what they hear; only OpenRouter takes a WAV.
     if (this.sttMode !== 'openrouter') {
       this.scribe?.speechStarted();
       return;
     }
-    void this.vad?.pause();
     this.recorder.start();
   }
 
@@ -248,7 +249,11 @@ export class CallAudio {
     if (this.recorder === null || !this.pttHeld) return;
     this.pttHeld = false;
     this.sink.json({ type: 'ptt', down: false });
-    if (!this.recorder.active) return;
+    if (!this.recorder.active) {
+      this.scribe?.speechEnded();
+      if (!this.closed) void this.vad?.resume();
+      return;
+    }
     const recorder = this.recorder;
     void recorder.stop().then(() => {
       if (!this.closed) void this.vad?.resume();
@@ -348,8 +353,17 @@ export class CallAudio {
         },
         speechCancel: () => {
           if (this.sttMode !== 'elevenlabs-realtime') this.sink.json({ type: 'speech.cancel' });
+          // Pausing the VAD for the talk button lands here after the button started Scribe.
+          else if (!this.pttHeld) this.scribe?.speechCancelled();
         },
-        utterance: (wav) => this.sendUtterance(wav),
+        speechContinue: () => {
+          if (this.sttMode === 'elevenlabs-realtime') this.scribe?.speechStarted({ preRoll: false });
+        },
+        utterance: (wav) => {
+          // Scribe: the VAD's end of speech is the commit.
+          if (this.sttMode === 'elevenlabs-realtime') this.scribe?.speechEnded();
+          this.sendUtterance(wav);
+        },
       },
     });
     if (this.closed || this.mode !== 'hands-free') {

@@ -32,6 +32,7 @@ interface RepositoryBody {
   sentryOrg: string | null;
   sentryProject: string | null;
   reviewContext: string | null;
+  openPullRequestDefault: boolean;
 }
 
 describe('repositories api', () => {
@@ -296,6 +297,73 @@ describe('repositories api', () => {
       await call('PUT', `/api/repositories/${created.id}`, { reviewContext: null })
     ).json()) as RepositoryBody;
     assert.equal(explicitNull.reviewContext, null);
+  });
+
+  it('opens a pull request by default and returns the flag everywhere (pull-request US-001)', async () => {
+    const { body: defaulted } = await create();
+    assert.equal(defaulted.openPullRequestDefault, true);
+
+    const { status, body } = await create({ name: 'no-pr', openPullRequestDefault: false });
+    assert.equal(status, 201);
+    assert.equal(body.openPullRequestDefault, false);
+
+    const fetched = (await (await call('GET', `/api/repositories/${body.id}`)).json()) as RepositoryBody;
+    assert.equal(fetched.openPullRequestDefault, false);
+
+    const listed = (await (await call('GET', '/api/repositories')).json()) as {
+      repositories: RepositoryBody[];
+    };
+    assert.equal(listed.repositories.find((r) => r.id === body.id)?.openPullRequestDefault, false);
+    assert.equal(
+      listed.repositories.find((r) => r.id === defaulted.id)?.openPullRequestDefault,
+      true,
+    );
+  });
+
+  it('sets and preserves the pull request default on edit', async () => {
+    const { body: created } = await create();
+
+    const off = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { openPullRequestDefault: false })
+    ).json()) as RepositoryBody;
+    assert.equal(off.openPullRequestDefault, false);
+
+    const renamed = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { name: 'renamed' })
+    ).json()) as RepositoryBody;
+    assert.equal(renamed.openPullRequestDefault, false);
+
+    const on = (await (
+      await call('PUT', `/api/repositories/${created.id}`, { openPullRequestDefault: true })
+    ).json()) as RepositoryBody;
+    assert.equal(on.openPullRequestDefault, true);
+  });
+
+  it('rejects a pull request default that is not a boolean', async () => {
+    for (const value of ['false', 0, 1, null, 'yes']) {
+      const created = await call('POST', '/api/repositories', {
+        name: 'bad-flag',
+        sshUrl: SSH_URL,
+        openPullRequestDefault: value,
+      });
+      assert.equal(created.status, 400);
+      assert.equal(
+        ((await created.json()) as { error: string }).error,
+        'invalid_open_pull_request_default',
+      );
+    }
+
+    const { body } = await create();
+    const updated = await call('PUT', `/api/repositories/${body.id}`, {
+      openPullRequestDefault: 'false',
+    });
+    assert.equal(updated.status, 400);
+    assert.equal(
+      ((await updated.json()) as { error: string }).error,
+      'invalid_open_pull_request_default',
+    );
+    const unchanged = (await (await call('GET', `/api/repositories/${body.id}`)).json()) as RepositoryBody;
+    assert.equal(unchanged.openPullRequestDefault, true);
   });
 
   it('rejects a review context longer than 10,000 characters', async () => {

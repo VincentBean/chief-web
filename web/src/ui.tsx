@@ -50,6 +50,7 @@ export const RECURRING_OUTCOME_TONE: Record<RecurringTaskOutcome, Tone> = {
   skipped: 'wait',
   'fire-failed': 'danger',
   'pr-opened': 'review',
+  pushed: 'done',
   clean: 'done',
   failed: 'danger',
 };

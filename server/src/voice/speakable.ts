@@ -379,6 +379,11 @@ export function waitingSummary(language: string, sessions: readonly WaitingSessi
   return `${names} ${drafting.length === 1 ? 'is' : 'are'} still drafting.`;
 }
 
+/** What the call says after {@link waitingSummary} when it moves to the one waiting session (US-004). */
+export function switchingOver(language: string, name: string): string {
+  return language === 'nl' ? `Ik verbind je door met ${name}.` : `I'm switching you over to ${name}.`;
+}
+
 /** "a and b", "a, b and c"; whole clauses take a comma before the English "and" too. */
 function joinList(parts: readonly string[], nl: boolean, clauses: boolean): string {
   const and = nl ? 'en' : 'and';

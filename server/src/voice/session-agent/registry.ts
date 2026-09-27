@@ -340,10 +340,11 @@ export class SessionAgentRegistry {
       sessionId,
       sessionName: session.name,
       containerId,
+      planning: mode === 'plan',
       command: {
         model: settings.sessionModel,
         resumeId,
-        systemPrompt: voiceRulesPrompt(settings.language),
+        systemPrompt: voiceRulesPrompt(settings.language, mode === 'plan'),
         ...(mode === 'qa' ? { disallowedTools: QA_DISALLOWED_TOOLS } : {}),
       },
       onInit: (claudeSessionId) => this.remember(sessionId, claudeSessionId, mode),

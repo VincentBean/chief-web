@@ -15,11 +15,12 @@ import type { PullRequestListView, PullRequestView } from '../../pullrequests/in
 import { getGithubToken } from '../../settings/index.js';
 import type { UiAction } from '../protocol.js';
 import { serviceFailure } from './actions.js';
-import { confirmable, type PreparedAction } from './confirm.js';
 import {
+  acting,
   type ChiefServices,
   type ChiefTool,
   missing,
+  type PreparedAction,
   resolveName,
   stringArg,
   tool,
@@ -31,7 +32,7 @@ import {
  * Chief's pull request tools (voice US-013): list the open pull requests, and
  * review one, address its feedback, stop that run, fix its merge conflicts or
  * pass on a change the operator asks for. Everything but the list is
- * `confirmable`, and every one of them drives the same service the Pull
+ * built with `acting`, and every one of them drives the same service the Pull
  * requests page's buttons do.
  *
  * A pull request is named by repository (resolved like a session name) and
@@ -176,15 +177,14 @@ async function guardedResult(fallback: string, run: () => Promise<ToolResult>): 
   }
 }
 
-/** Stored arguments of every confirmed pull request action. */
+/** The resolved arguments every pull request action runs with. */
 function stored(args: Readonly<Record<string, unknown>>): { repositoryId: string; repository: string; number: number } {
   return { repositoryId: args['repositoryId'] as string, repository: args['repository'] as string, number: args['number'] as number };
 }
 
 /**
- * A confirmable action on one pull request: `prepare` resolves the target
- * (refusing a fork when `refuseFork`) and words the prompt; `execute` gets the
- * stored ids only.
+ * An action on one pull request: `prepare` resolves the target (refusing a
+ * fork when `refuseFork`); `execute` gets the resolved ids only.
  */
 function prAction(
   services: ChiefServices,
@@ -199,7 +199,7 @@ function prAction(
   },
 ): ChiefTool {
   const verb = name.replace(/_/g, ' ');
-  return confirmable(name, description, { ...PR_PARAMS, ...steps.extra }, ['repository', 'number', ...(steps.required ?? [])], {
+  return acting(name, description, { ...PR_PARAMS, ...steps.extra }, ['repository', 'number', ...(steps.required ?? [])], {
     prepare: (args) =>
       guarded(`Could not ${verb}`, async () => {
         const target = await targetArg(services, args);
@@ -214,16 +214,10 @@ function prAction(
   });
 }
 
-function prepared(prompt: string, target: Target, extra: Readonly<Record<string, unknown>> = {}): PreparedAction {
+function prepared(target: Target, extra: Readonly<Record<string, unknown>> = {}): PreparedAction {
   return {
-    prompt,
     args: { repositoryId: target.repository.id, repository: target.repository.name, number: target.number, ...extra },
   };
-}
-
-function titled(target: Target): string {
-  const name = label({ repository: target.repository.name, number: target.number });
-  return target.pull === null ? name : `${name}, "${target.pull.title}"`;
 }
 
 /** The pull request tools over `services`. */
@@ -293,7 +287,7 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
     ),
     prAction(services, 'review_pull_request', 'Start a code review of a pull request; the findings are posted on GitHub.', {
       refuseFork: false,
-      prepare: (target) => prepared(`Review ${titled(target)}?`, target),
+      prepare: (target) => prepared(target),
       execute: async (target) => {
         const review = await services.prReviews.start(target.repositoryId, target.number);
         return {
@@ -310,7 +304,7 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
       "Start a run that implements a pull request's unresolved review comments and answers them on GitHub.",
       {
         refuseFork: true,
-        prepare: (target) => prepared(`Address the review feedback on ${titled(target)}?`, target),
+        prepare: (target) => prepared(target),
         execute: async (target) => {
           const run = await services.prFeedback.start(target.repositoryId, target.number);
           return {
@@ -327,12 +321,10 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
       prepare: (target) => {
         const runId = activeRunId(services, target.repository.id, target.number);
         if (runId === null) return noActiveRun(target.repository.name, target.number);
-        return prepared(`Stop the run on ${titled(target)}?`, target, { runId });
+        return prepared(target, { runId });
       },
       execute: async (target, args) => {
-        // Resolved again: the run may have ended between the question and the yes.
-        const runId = activeRunId(services, target.repositoryId, target.number);
-        if (runId === null || runId !== args['runId']) return noActiveRun(target.repository, target.number);
+        const runId = args['runId'] as string;
         const stopping = services.prFeedback.stop(runId);
         const outcome = await Promise.race([
           stopping.then((run) => ({ kind: 'stopped' as const, run })),
@@ -352,7 +344,7 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
     }),
     prAction(services, 'fix_pr_conflicts', "Check a pull request for merge conflicts now and, if it has any, start chief-web's conflict fix.", {
       refuseFork: true,
-      prepare: (target) => prepared(`Fix the merge conflicts on ${titled(target)}?`, target),
+      prepare: (target) => prepared(target),
       execute: async (target) => {
         const result = await services.prConflicts.fixNow(target.repositoryId, target.number);
         if (!result.ok) {
@@ -378,7 +370,7 @@ export function pullRequestTools(services: ChiefServices): ChiefTool[] {
         prepare: (target, args) => {
           const instruction = stringArg(args, 'instruction')?.trim() ?? null;
           if (instruction === null || instruction === '') return missing('instruction');
-          return prepared(`On ${titled(target)}, ask for: "${instruction}"?`, target, { instruction });
+          return prepared(target, { instruction });
         },
         execute: async (target, args) => {
           const instruction = args['instruction'] as string;

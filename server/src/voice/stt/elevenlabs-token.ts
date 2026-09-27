@@ -54,7 +54,7 @@ export async function mintScribeToken(baseUrl: string, apiKey: string, now: Date
 }
 
 /**
- * A sliding-window cap on mints (docs/voice-plan.md §14.3: 10 per hour). Every mint counts,
+ * A sliding-window cap on mints (docs/voice-plan.md §14.3: `SCRIBE_TOKENS_PER_HOUR`). Every mint counts,
  * not only failures: a token is a credential to spend credits with, and a
  * browser stuck in a reconnect loop should hit the wall, not the bill.
  */

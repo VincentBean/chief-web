@@ -27,8 +27,7 @@ import { PlanningError, PlanningService, type PlanningTerminals } from '../../pl
 import type { CreateTerminalInput, TerminalView } from '../../terminal/index.js';
 import { setSetting } from '../../db/index.js';
 import type { AgentEvent } from '../call.js';
-import { ConfirmationGate } from '../chief/confirm.js';
-import { CLOSE_TERMINAL_PROMPT, focusSessionTool } from '../chief/focus.js';
+import { focusSessionTool } from '../chief/focus.js';
 import type { ChiefServices, ToolContext } from '../chief/tools.js';
 import type { CallFocus } from '../protocol.js';
 import { GIVING_UP, RESTARTING, SessionVoiceAgent, toolCardSummary } from './agent.js';
@@ -285,7 +284,11 @@ describe('session voice agents', () => {
                 `/workspace/repo/.chief/prds/mcp-${status}/screenshots`,
               ],
             },
-            chief: { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] },
+            // Only a planning agent's chief server offers start_build (US-008).
+            chief:
+              status === 'pending'
+                ? { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'] }
+                : { type: 'stdio', command: 'node', args: ['/usr/local/lib/chief-web/chief-mcp.js'], env: { CHIEF_MCP_START_BUILD: '0' } },
           },
         });
         assert.equal(flag(argvOf(agent.execId), '--mcp-config'), MCP_CONFIG_FILE);
@@ -312,12 +315,13 @@ describe('session voice agents', () => {
       const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
       assert.ok(exec);
       assert.equal(flag(argvOf(exec.id), '--disallowedTools'), null);
+      assert.match(argvOf(exec.id).at(-1) as string, /call start_build/);
       assert.match(claude.userTexts(exec.id)[0] as string, /VOICE MODE OVERRIDES/);
       assert.equal(getVoiceSessionAgent(db, session.id)?.mode, 'plan');
     });
 
     for (const status of ['ready', 'building', 'finished'] as const) {
-      it(`answers questions about a ${status} session: the A.3 prompt, edit tools disallowed, mode qa`, async () => {
+      it(`answers questions about a ${status} session: the A.3 prompt, edit tools and start_build disallowed, mode qa`, async () => {
         const session = newSession(`qa-${status}`, status);
         const agent = new SessionVoiceAgent({ db, sessionId: session.id, registry, call: controls() });
         const events = await turn(agent, 'what did the build do');
@@ -326,10 +330,12 @@ describe('session voice agents', () => {
         const exec = claude.agentExecs().find((entry) => entry.containerId === `c-${session.id}`);
         assert.ok(exec);
         const argv = argvOf(exec.id);
-        assert.equal(flag(argv, '--disallowedTools'), 'Edit,Write,MultiEdit,NotebookEdit');
+        assert.equal(flag(argv, '--disallowedTools'), 'Edit,Write,MultiEdit,NotebookEdit,mcp__chief__start_build');
         // The variadic flag is never last: another flag always ends its values.
         assert.equal(argv[argv.indexOf('--disallowedTools') + 2], '--append-system-prompt');
         assert.match(argv.at(-1) as string, /You are on a live voice call/);
+        // Nor is it told about building (US-008).
+        assert.doesNotMatch(argv.at(-1) as string, /start_build/);
         const [opening] = claude.userTexts(exec.id);
         assert.match(
           opening as string,
@@ -556,25 +562,19 @@ describe('session voice agents', () => {
   });
 
   describe('focus_session', () => {
-    const context = (gate: ConfirmationGate, focus: CallFocus[], turnNo = 1): ToolContext => ({
+    const context = (focus: CallFocus[]): ToolContext => ({
       signal: new AbortController().signal,
-      turn: turnNo,
+      turn: 1,
       focus: { kind: 'chief' },
       endCall: () => undefined,
-      confirmations: gate,
       setFocus: (next) => focus.push(next),
     });
-    const newGate = (): ConfirmationGate => {
-      const holder = { pendingConfirmation: null };
-      let id = 0;
-      return new ConfirmationGate({ holder, now: () => Date.now(), send: () => undefined, newId: () => `confirm-${String(++id)}` });
-    };
 
     it('hands a finished session to its Q&A agent (voice US-025)', async () => {
       const session = newSession('done-already', 'finished');
       const focus: CallFocus[] = [];
       const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
-      const result = await tool.handler({ session: session.name }, context(newGate(), focus));
+      const result = await tool.handler({ session: session.name }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
       assert.equal(registry.isAlive(session.id), true);
@@ -584,13 +584,13 @@ describe('session voice agents', () => {
       const session = newSession('talk-it-through');
       const focus: CallFocus[] = [];
       const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
-      const result = await tool.handler({ session: 'talk it through' }, context(newGate(), focus));
+      const result = await tool.handler({ session: 'talk it through' }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
       assert.equal(registry.isAlive(session.id), true);
     });
 
-    it('asks before closing an open planning terminal, then closes it through PlanningService.stop', async () => {
+    it('refuses while the planning terminal is open: nothing is stopped and the focus stays', async () => {
       const session = newSession('terminal-first');
       terminalRunning.add(session.id);
       const stopped: string[] = [];
@@ -603,18 +603,33 @@ describe('session voice agents', () => {
         },
       };
       const focus: CallFocus[] = [];
-      const gate = newGate();
       const tool = focusSessionTool({ db, sessionAgents: registry, planning, hold: { until: () => null } } as unknown as ChiefServices);
-      const asked = await tool.handler({ session: session.name }, context(gate, focus));
-      assert.equal((asked.data as { say: string }).say, CLOSE_TERMINAL_PROMPT);
+      const result = await tool.handler({ session: session.name }, context(focus));
+      assert.deepEqual(result, {
+        ok: false,
+        data: { error: 'session_in_planning_terminal' },
+        summary: 'The planning terminal is open for terminal-first; close it in the browser first, then ask again.',
+      });
+      assert.deepEqual(stopped, []);
+      assert.equal(terminalRunning.has(session.id), true);
       assert.deepEqual(focus, []);
+      assert.equal(registry.isAlive(session.id), false);
+    });
 
-      const confirmation = gate.take((asked.data as { confirmation_id: string }).confirmation_id, 2);
-      assert.equal(confirmation.kind, 'ok');
-      const done = await tool.execute?.(confirmation.kind === 'ok' ? confirmation.confirmation.args : {}, context(gate, focus, 2));
-      assert.equal(done?.ok, true);
-      assert.deepEqual(stopped, [session.id]);
-      assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
+    it('gives the same refusal when only the registry sees the open terminal', async () => {
+      const session = newSession('terminal-late');
+      terminalRunning.add(session.id);
+      const focus: CallFocus[] = [];
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const result = await tool.handler({ session: session.name }, context(focus));
+      assert.deepEqual(result, {
+        ok: false,
+        data: { error: 'session_in_planning_terminal' },
+        summary: 'The planning terminal is open for terminal-late; close it in the browser first, then ask again.',
+      });
+      assert.equal(terminalRunning.has(session.id), true);
+      assert.deepEqual(focus, []);
+      assert.equal(registry.isAlive(session.id), false);
     });
   });
 
@@ -747,7 +762,6 @@ describe('session voice agents', () => {
         turn: 1,
         focus: { kind: 'chief' },
         endCall: () => undefined,
-        confirmations: new ConfirmationGate({ holder: { pendingConfirmation: null }, now: () => Date.now(), send: () => undefined, newId: () => 'confirm-1' }),
         setFocus: (next) => focus.push(next),
       });
       assert.equal(result.ok, false);
@@ -840,6 +854,7 @@ describe('session voice agents', () => {
     assert.equal(toolCardSummary('Read', { file_path: '/workspace/repo/server/src/auth/service.ts' }), 'Reading server/src/auth/service.ts');
     assert.equal(toolCardSummary('Grep', { pattern: 'invoice' }), 'Searching for "invoice"');
     assert.equal(toolCardSummary('Mystery', {}), 'Using Mystery');
+    assert.equal(toolCardSummary('mcp__chief__start_build', {}), 'Starting the build');
   });
 
   it('describes browser tool uses for their cards (voice feedback US-006)', () => {

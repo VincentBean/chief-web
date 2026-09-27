@@ -289,6 +289,25 @@ function parseReviewContext(
   return { reviewContext };
 }
 
+/**
+ * Reads whether sessions of this repository open a pull request by default
+ * (pull-request US-001). Optional, but when present it has to be a real
+ * boolean: `"false"` or `0` is rejected rather than guessed at.
+ */
+function parseOpenPullRequestDefault(
+  input: Record<string, unknown>,
+): { openPullRequestDefault?: boolean } | Invalid {
+  const raw = input.openPullRequestDefault;
+  if (raw === undefined) return {};
+  if (typeof raw !== 'boolean') {
+    return {
+      error: 'invalid_open_pull_request_default',
+      message: 'openPullRequestDefault must be true or false.',
+    };
+  }
+  return { openPullRequestDefault: raw };
+}
+
 function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -334,6 +353,9 @@ function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
   const review = parseReviewContext(input);
   if ('error' in review) return review;
 
+  const pullRequest = parseOpenPullRequestDefault(input);
+  if ('error' in pullRequest) return pullRequest;
+
   return {
     name,
     sshUrl,
@@ -341,6 +363,7 @@ function parseCreate(body: unknown): CreateRepositoryRequest | Invalid {
     defaultBaseBranch,
     ...sentry,
     ...review,
+    ...pullRequest,
     // Omitted (not `undefined`) so `exactOptionalPropertyTypes` is satisfied
     // and the service can generate a keypair instead.
     ...(privateKey === undefined ? {} : { privateKey }),
@@ -361,6 +384,7 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
     sentryOrg?: string | null;
     sentryProject?: string | null;
     reviewContext?: string | null;
+    openPullRequestDefault?: boolean;
   } = {};
 
   const name = optionalString(input, 'name', 'invalid_name');
@@ -407,6 +431,12 @@ function parseUpdate(body: unknown): UpdateRepositoryRequest | Invalid {
   const review = parseReviewContext(input);
   if ('error' in review) return review;
   if (review.reviewContext !== undefined) update.reviewContext = review.reviewContext;
+
+  const pullRequest = parseOpenPullRequestDefault(input);
+  if ('error' in pullRequest) return pullRequest;
+  if (pullRequest.openPullRequestDefault !== undefined) {
+    update.openPullRequestDefault = pullRequest.openPullRequestDefault;
+  }
 
   return update;
 }

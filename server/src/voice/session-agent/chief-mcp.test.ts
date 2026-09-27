@@ -144,6 +144,7 @@ const textOf = (reply: Record<string, unknown>): string => {
 describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
   const dirs: string[] = [];
   let dir: string;
+  let buildDir: string;
   let client: McpClient;
   let cdp: FakeCdp;
 
@@ -153,7 +154,7 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     const script = path.join(path.dirname(dir), 'chief-mcp.js');
     fs.copyFileSync(SCRIPT, script);
     const child = spawn(process.execPath, [script], {
-      env: { ...process.env, CHIEF_MCP_BROWSER_DIR: dir, CHIEF_MCP_ANSWER_TIMEOUT_MS: String(timeoutMs), CHIEF_MCP_POLL_MS: '10',
+      env: { ...process.env, CHIEF_MCP_BROWSER_DIR: dir, CHIEF_MCP_BUILD_DIR: buildDir, CHIEF_MCP_ANSWER_TIMEOUT_MS: String(timeoutMs), CHIEF_MCP_POLL_MS: '10',
         CHIEF_MCP_CDP_URL: cdp.url,
         CHIEF_MCP_FORM_WAIT_MS: '100',
         CHIEF_MCP_LOGIN_WAIT_MS: '2000',
@@ -182,6 +183,7 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-mcp-'));
     dirs.push(base);
     dir = path.join(base, 'browser');
+    buildDir = path.join(base, 'build');
   });
 
   afterEach(async () => {
@@ -193,7 +195,7 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     for (const base of dirs) fs.rmSync(base, { recursive: true, force: true });
   });
 
-  it('answers initialize and lists one tool with an optional hint', async () => {
+  it('answers initialize and lists the browser tool with an optional hint, and start_build (US-008)', async () => {
     start();
     client.send({ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
     const init = await client.reply(1);
@@ -206,9 +208,12 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     client.send({ id: 2, method: 'tools/list' });
     const list = await client.reply(2);
     const tools = (list['result'] as { tools: { name: string; inputSchema: { properties: object; required?: unknown } }[] }).tools;
-    assert.deepEqual(tools.map((tool) => tool.name), ['open_browser_with_operator']);
+    assert.deepEqual(tools.map((tool) => tool.name), ['open_browser_with_operator', 'start_build']);
     assert.deepEqual(Object.keys(tools[0]?.inputSchema.properties ?? {}), ['hint']);
     assert.equal(tools[0]?.inputSchema.required, undefined);
+    assert.deepEqual(Object.keys(tools[1]?.inputSchema.properties ?? {}), [], 'start_build takes no arguments');
+    const description = (tools[1] as unknown as { description: string }).description;
+    assert.match(description, /^Mark this session ready and start its build\. Call it only when the operator asks to build/);
     assert.equal(client.messages.length, 2, 'a notification gets no reply');
   });
 
@@ -327,5 +332,82 @@ describe('runner/chief-mcp.js (voice feedback US-007, US-009)', () => {
     client.send({ method: 'notifications/cancelled', params: { requestId: 7, reason: 'interrupted' } });
     await client.reply(7);
     assert.deepEqual(requestFiles(), []);
+  });
+
+  describe('start_build (US-008)', () => {
+    const buildRequestFiles = (): string[] => (fs.existsSync(buildDir) ? fs.readdirSync(buildDir).filter((f) => f.endsWith('.request')) : []);
+
+    /** Calls start_build and returns the request the server wrote. */
+    const build = async (id: number): Promise<Record<string, unknown>> => {
+      client.send({ id, method: 'tools/call', params: { name: 'start_build', arguments: {} } });
+      await until(() => buildRequestFiles().length === 1);
+      return JSON.parse(fs.readFileSync(path.join(buildDir, buildRequestFiles()[0] as string), 'utf8')) as Record<string, unknown>;
+    };
+
+    const answerBuild = (requestId: string, content: Record<string, unknown>): void => {
+      fs.writeFileSync(path.join(buildDir, `${requestId}.answer`), JSON.stringify({ id: requestId, ...content }), { mode: 0o600 });
+    };
+
+    it('writes a request in its own directory, waits for the answer, and says the build started', async () => {
+      start();
+      const request = await build(1);
+      assert.deepEqual(Object.keys(request).sort(), ['createdAt', 'id']);
+      assert.match(String(request['id']), /^[0-9a-f-]{36}$/);
+      assert.deepEqual(requestFiles(), [], 'not in the browser directory');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(client.messages.length, 0, 'the tool blocks until the answer');
+      answerBuild(String(request['id']), { started: true, queued: false });
+      const reply = await client.reply(1);
+      assert.equal((reply['result'] as { isError?: boolean }).isError, undefined);
+      assert.equal(textOf(reply), 'The session is ready and its build started. Chief has the call back and tells the operator: say nothing more.');
+      assert.deepEqual(fs.readdirSync(buildDir), [], 'both files are gone');
+    });
+
+    it('says a queued build is queued', async () => {
+      start();
+      const request = await build(2);
+      answerBuild(String(request['id']), { started: true, queued: true });
+      assert.match(textOf(await client.reply(2)), /^The session is ready and its build is queued behind the others\./);
+    });
+
+    it('returns the parse errors as an error for the agent to say and fix', async () => {
+      start();
+      const request = await build(3);
+      answerBuild(String(request['id']), { started: false, errors: ['line 12: US-002 has no acceptance criteria.', 'line 30: US-004 has no title'] });
+      const reply = await client.reply(3);
+      assert.equal((reply['result'] as { isError?: boolean }).isError, true);
+      assert.equal(
+        textOf(reply),
+        'The PRD does not parse yet, so nothing was built: line 12: US-002 has no acceptance criteria; line 30: US-004 has no title. Tell the operator in one sentence, then fix the PRD.',
+      );
+    });
+
+    it('returns a refusal as an error', async () => {
+      start();
+      const request = await build(4);
+      answerBuild(String(request['id']), { started: false, reason: 'Builds are on hold until 18:00.' });
+      const reply = await client.reply(4);
+      assert.equal((reply['result'] as { isError?: boolean }).isError, true);
+      assert.equal(textOf(reply), 'The build did not start: Builds are on hold until 18:00. Tell the operator why in one sentence.');
+    });
+
+    it('gives up after its timeout without building', async () => {
+      start(5_000, { CHIEF_MCP_BUILD_TIMEOUT_MS: '100' });
+      await build(5);
+      const reply = await client.reply(5);
+      assert.equal((reply['result'] as { isError?: boolean }).isError, true);
+      assert.match(textOf(reply), /did not answer, so the build did not start/);
+      assert.deepEqual(buildRequestFiles(), []);
+    });
+
+    it('is neither listed nor callable with CHIEF_MCP_START_BUILD=0, as a Q&A agent\'s server runs', async () => {
+      start(5_000, { CHIEF_MCP_START_BUILD: '0' });
+      client.send({ id: 6, method: 'tools/list' });
+      const tools = ((await client.reply(6))['result'] as { tools: { name: string }[] }).tools;
+      assert.deepEqual(tools.map((tool) => tool.name), ['open_browser_with_operator']);
+      client.send({ id: 7, method: 'tools/call', params: { name: 'start_build', arguments: {} } });
+      assert.deepEqual((await client.reply(7))['error'], { code: -32602, message: 'Unknown tool: start_build' });
+      assert.deepEqual(buildRequestFiles(), []);
+    });
   });
 });
