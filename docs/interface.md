@@ -38,8 +38,7 @@ lately:
 
 - **Start a call** — a large button at the top, shown only when
   [voice](voice.md) is on. It opens the full-screen call view and starts a call
-  with chief; while a call is running it reads **Return to call** and brings
-  that call back instead. The call covers the whole app until you press
+  with chief. The call covers the whole app until you press
   **Hang up** ([Making a call](voice.md#making-a-call)).
 - **Get set up** — shown until Claude Code is signed in, a repository with a
   deploy key exists and a session has been created; each step links to where it

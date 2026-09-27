@@ -317,25 +317,19 @@ export function Overview() {
 }
 
 /**
- * The one-click way into a call. Idle or ended, it opens the call view and
- * starts a call, synchronously in the click as the call’s audio needs; while a
- * call runs it only brings the call view back, so it never starts a second one.
+ * The one-click way into a call: it opens the call view, which starts a call
+ * synchronously in the click as the call’s audio needs. A running call covers
+ * the whole app, so this button is only ever seen with no call in progress.
  */
 function StartCallButton() {
   const call = useCall();
   if (!call.enabled) return null;
-  const inCall = call.status === 'connecting' || call.status === 'live' || call.status === 'reconnecting';
-
-  const onClick = (): void => {
-    call.open();
-    if (!inCall) call.start();
-  };
 
   return (
     <div className="start-call">
-      <button type="button" className="button button--primary button--large" onClick={onClick}>
+      <button type="button" className="button button--primary button--large" onClick={call.open}>
         <Icon name="broadcast" />
-        {inCall ? 'Return to call' : 'Start a call'}
+        Start a call
       </button>
     </div>
   );

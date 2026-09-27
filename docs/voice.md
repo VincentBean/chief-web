@@ -139,9 +139,7 @@ While the call is connecting, live or reconnecting, the view cannot be hidden:
 **Hang up** ends the call and closes the view in one step. A call that ended
 any other way (chief said goodbye, it was taken over in another tab, or the
 connection dropped for good) leaves the view open with **Call ended:** and the
-reason, a close button, and **Call again** in place of **Hang up**. On the
-home page the start button reads **Return to call** while a call is running,
-and brings the call view back without starting a new one.
+reason, a close button, and **Call again** in place of **Hang up**.
 
 - **Hands-free** (default): just talk. A pause of **End of speech after** ends
   your turn.
