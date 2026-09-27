@@ -108,7 +108,7 @@ next to everything above. Voice is off until you switch it on in Settings.
   sentence must not start a build. Every chief tool that changes something (a
   session, a build, a pull request run or review, a recurring task) does nothing
   on its first call except park the exact action and read it back. It runs only
-  on a *later* turn, from a new "yes", the panel's **Confirm** button, or chief
+  on a *later* turn, from a new "yes", the call view's **Confirm** button, or chief
   confirming after you spoke, and then with the arguments the server stored,
   not whatever the model sends. The model cannot confirm in the turn it asked,
   and a confirmation expires after 60 seconds. Nothing is deletable by voice at
@@ -160,7 +160,7 @@ next to everything above. Voice is off until you switch it on in Settings.
 - **The call socket** uses the same cookie check as every other WebSocket, and
   when `PUBLIC_URL` is set it also refuses a browser whose `Origin` is not that
   address (`4403`).
-- **The microphone** is only open during a call; the panel shows a red dot and
+- **The microphone** is only open during a call; the call view shows a red dot and
   the browser its own indicator. Browsers only allow it over HTTPS or on
   `localhost`, so a remote chief-web needs the reverse proxy mentioned above.
 - **Audio is never stored.** Transcripts are, in SQLite, until the retention in

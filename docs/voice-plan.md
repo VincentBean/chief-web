@@ -45,7 +45,7 @@
 
 ```
 ┌───────────────────────────── browser ─────────────────────────────┐
-│  CallPanel (docked in AppShell, survives navigation)               │
+│  CallPanel (full-screen call view, survives navigation)            │
 │   mic ─► AudioWorklet(16 kHz PCM16) ─► VAD ─► utterance WAV ──┐    │
 │   (Scribe mode: PCM ─► wss://api.elevenlabs.io STT directly)  │    │
 │   speaker ◄─ AudioPlayer(queue of PCM segments) ◄──┐          │    │
@@ -701,7 +701,7 @@ New directory `web/src/voice/`:
 ```
 web/src/voice/
   CallProvider.tsx     React context: socket, state, transcript, actions (start/hangup/ptt/focus/text)
-  CallPanel.tsx        docked panel UI
+  CallPanel.tsx        full-screen call view
   CallButton.tsx       sidebar button + "Talk it through" button on Session page
   protocol.ts          message types (copy of server/src/voice/protocol.ts)
   mic.ts               getUserMedia + AudioWorklet capture
@@ -717,7 +717,7 @@ web/public/voice/vad/…  (silero model + onnxruntime wasm, copied at build)
 ### 13.1 Where it lives
 
 - `CallProvider` wraps the app in `main.tsx` inside the authenticated area, so the call survives page changes (the router is client-side).
-- `AppShell.tsx` gets a **Call** item in the sidebar with the key chord `v` (added to `useKeyChords`). It renders `<CallPanel/>` fixed bottom-right (desktop) or as a bottom sheet (below `lg`).
+- `AppShell.tsx` gets a **Call** item in the sidebar with the key chord `v` (added to `useKeyChords`). It renders `<CallPanel/>` as a full-screen call view over the whole app, on every screen size.
 - `pages/Session.tsx` gets **Talk it through** next to **Start planning** for pending sessions. It starts a call with `focus=session:<id>`, or switches focus if a call is already active.
 - `ui.navigate` events call the existing `navigate()` from `router.tsx`. `ui.highlight` sets a transient `data-voice-highlight` attribute that CSS pulses (`styles/feedback.css`).
 
@@ -1260,7 +1260,7 @@ The full design is in docs/voice-plan.md.
 **Description:** As the operator, I want a call panel that is always available so that I can talk to chief from any page.
 
 **Acceptance Criteria:**
-- [ ] CallProvider wraps the authenticated app; CallPanel is docked in AppShell and survives navigation
+- [ ] CallProvider wraps the authenticated app; CallPanel is rendered by AppShell as a full-screen call view and survives navigation
 - [ ] Sidebar Call item with key chord v; secure-context check with explanation
 - [ ] Silero VAD (vad-web) sends WAV utterances; push-to-talk with Space works; assets are served from /voice/vad/
 - [ ] AudioPlayer plays PCM segments gaplessly, reports playback.progress and stops instantly on tts.stop
