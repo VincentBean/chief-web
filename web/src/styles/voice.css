@@ -806,4 +806,20 @@
     padding: 1.5rem 0.75rem;
     text-align: center;
   }
+
+  /* The home page’s start-call button: full width on a phone, sized to its label above that. */
+  .start-call {
+    display: flex;
+  }
+
+  .start-call .button {
+    width: 100%;
+  }
+
+  @variant sm {
+    .start-call .button {
+      min-width: 16rem;
+      width: auto;
+    }
+  }
 }

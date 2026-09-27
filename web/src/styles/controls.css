@@ -119,6 +119,15 @@
     padding: 0.25rem 0.625rem;
   }
 
+  /* The home page’s one call to action (the start-call button). */
+  .button--large {
+    border-radius: var(--radius-md);
+    font-size: var(--text-base);
+    gap: 0.5rem;
+    min-height: 3.5rem;
+    padding: 0.75rem 1.5rem;
+  }
+
   .button--icon {
     padding-inline: 0.375rem;
   }
