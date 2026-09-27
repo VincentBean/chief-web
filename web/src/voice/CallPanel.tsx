@@ -22,6 +22,7 @@ import {
   type PlanningSessionView,
   type ToolStatus,
 } from './protocol.ts';
+import { CallPlan } from './CallPlan.tsx';
 import { PageView } from './PageView.tsx';
 import { bindHoldToTalkButton } from './ptt.ts';
 import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, totalMs } from './latency.ts';
@@ -30,7 +31,8 @@ import { formatMs, LATENCY_TARGET_MS, lastTimedTurn, latencyStages, sttMs, total
  * The call view (calling-interface US-003): a full-screen column over the
  * whole app, like a phone call. The header says who is listening and what they
  * are doing, the main area in the middle is the live transcript with tool
- * cards and confirmation pills, and the footer holds every control, with the
+ * cards and confirmation pills (under the focused session's plan, US-005),
+ * and the footer holds every control, with the
  * hang-up button as the last thing on the screen. All of it reads
  * {@link useCall}.
  *
@@ -157,6 +159,18 @@ export function CallPanel() {
     if (list === null) return;
     list.scrollTop = list.scrollHeight;
   }, [call.transcript, call.caption, call.panelOpen]);
+
+  // A smaller box keeps it there too: the plan of a focused session (US-005)
+  // taking the top of the main area, or the window shrinking.
+  useEffect(() => {
+    const list = body.current;
+    if (list === null) return;
+    const observer = new ResizeObserver(() => {
+      list.scrollTop = list.scrollHeight;
+    });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [call.panelOpen]);
 
   const { ptt } = call;
   useEffect(() => {
@@ -363,7 +377,7 @@ export function CallPanel() {
         </span>
       </header>
 
-      <div className="call-panel__main">
+      <div className={focused.kind === 'session' ? 'call-panel__main call-panel__main--plan' : 'call-panel__main'}>
         {call.problem !== null && (
           <div className="call-panel__problem" role="alert">
             <Icon name="alert" />
@@ -392,6 +406,17 @@ export function CallPanel() {
 
         {call.pageView !== null && (
           <PageView key={call.pageView.sessionId} sessionId={call.pageView.sessionId} onClose={call.closePageView} />
+        )}
+
+        {/* The plan of the focused session (US-005), reloaded when its planning state or story count moves. */}
+        {focused.kind === 'session' && (
+          <CallPlan
+            key={focused.sessionId}
+            sessionId={focused.sessionId}
+            name={planningOf.get(focused.sessionId)?.name ?? focusName}
+            state={planningOf.get(focused.sessionId)?.state}
+            stories={planningOf.get(focused.sessionId)?.stories}
+          />
         )}
 
         <ol className="call-transcript" ref={body} aria-label="Transcript">
