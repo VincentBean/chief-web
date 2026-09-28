@@ -279,6 +279,72 @@ describe('sessions api', () => {
     assert.equal(started.length, 0);
   });
 
+  it('sets and clears the thinking effort of an existing session', async () => {
+    const { body } = await create();
+    assert.equal(body.session.effort, null);
+
+    const set = await call('PUT', `/api/sessions/${body.session.id}/effort`, { effort: 'high' });
+    assert.equal(set.status, 200);
+    assert.equal(((await set.json()) as SessionView).effort, 'high');
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'high');
+
+    const cleared = await call('PUT', `/api/sessions/${body.session.id}/effort`, { effort: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(((await cleared.json()) as SessionView).effort, null);
+    const refetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await refetched.json()) as SessionView).effort, null);
+  });
+
+  it('rejects a missing or unknown effort and changes nothing', async () => {
+    const { body } = await create({ effort: 'low' });
+
+    for (const payload of [{}, { effort: 'ultra' }, { effort: 'High' }, { effort: 3 }, []]) {
+      const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, payload);
+
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.equal(((await response.json()) as ErrorBody).error, 'invalid_effort');
+    }
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'low');
+  });
+
+  it('answers 404 for the effort of an unknown session', async () => {
+    const response = await call('PUT', '/api/sessions/nope/effort', { effort: 'high' });
+
+    assert.equal(response.status, 404);
+  });
+
+  it('changes the effort in every status before the session finishes', async () => {
+    const { body } = await create();
+    for (const status of ['pending', 'ready', 'building', 'waiting', 'failed'] as const) {
+      updateSession(db, body.session.id, { status, effort: null });
+
+      const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, {
+        effort: 'max',
+      });
+
+      assert.equal(response.status, 200, status);
+      assert.equal(((await response.json()) as SessionView).effort, 'max', status);
+    }
+  });
+
+  it('refuses to change the effort of a finished session', async () => {
+    const { body } = await create({ effort: 'medium' });
+    updateSession(db, body.session.id, { status: 'finished' });
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, {
+      effort: 'high',
+    });
+
+    assert.equal(response.status, 409);
+    const error = (await response.json()) as ErrorBody;
+    assert.equal(error.error, 'effort_locked');
+    assert.match(error.message ?? '', /finished/);
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'medium');
+  });
+
   it('rejects feedback that is not a string', async () => {
     const { status, body } = await create({ feedback: 42 });
 

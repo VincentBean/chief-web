@@ -152,6 +152,22 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // Sets or clears the session's thinking effort (US-005). `effort: null`
+  // follows the global default again; omitting it is a mistake. Refused once
+  // the session is finished.
+  router.put('/sessions/:id/effort', (req, res) => {
+    const parsed = parseSetEffort(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setEffort(req.params.id, parsed.effort));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   // "Back to planning": the same transition in reverse.
   router.delete('/sessions/:id/ready', (req, res) => {
     try {
@@ -295,6 +311,19 @@ function parseSetOpenPullRequest(body: unknown): { openPullRequest: boolean } | 
     return { error: 'invalid_open_pull_request', message: 'openPullRequest is required.' };
   }
   return { openPullRequest: parsed.openPullRequest };
+}
+
+/** The body of `PUT /sessions/:id/effort`: the field is required, `null` included. */
+function parseSetEffort(body: unknown): { effort: EffortLevel | null } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return { ...badBody, error: 'invalid_effort' };
+
+  const parsed = parseEffort(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.effort === undefined) {
+    return { error: 'invalid_effort', message: 'effort is required.' };
+  }
+  return { effort: parsed.effort };
 }
 
 /** `undefined` when the field is absent; an `Invalid` when it is not a boolean. */
