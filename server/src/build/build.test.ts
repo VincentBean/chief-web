@@ -13,6 +13,7 @@ import {
   createRepository,
   createSession,
   type Database,
+  type EffortLevel,
   failSession,
   enqueueBuild,
   getQueuedBuild,
@@ -237,6 +238,29 @@ describe('the agent command', () => {
     assert.equal(agentCommand('p', 'sonnet').includes('--advisor'), false);
     assert.equal(agentCommand('p').includes('--advisor'), false);
     assert.deepEqual(agentCommand('p', null, 'opus').slice(0, 3), ['claude', '--advisor', 'opus']);
+  });
+
+  it('passes the effort right after the model and advisor, and nothing when there is none (US-003)', () => {
+    assert.deepEqual(agentCommand('p', 'sonnet', 'opus', 'high'), [
+      'claude',
+      '--model',
+      'sonnet',
+      '--advisor',
+      'opus',
+      '--effort',
+      'high',
+      '--dangerously-skip-permissions',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '-p',
+      'p',
+    ]);
+    // No effort is exactly today's argv: never a bare flag, never an empty value.
+    assert.deepEqual(agentCommand('p', 'sonnet', 'opus', null), agentCommand('p', 'sonnet', 'opus'));
+    assert.equal(agentCommand('p', 'sonnet', null, null).includes('--effort'), false);
+    assert.equal(agentCommand('p', null, null, '').includes('--effort'), false);
+    assert.deepEqual(agentCommand('p', null, null, 'low').slice(0, 3), ['claude', '--effort', 'low']);
   });
 
   it('records the agent pid before exec-ing it, under a file of its own', () => {
@@ -730,6 +754,66 @@ describe('the build loop', () => {
     await after.start(world.session.id);
     await after.whenIdle(world.session.id);
     assert.equal(world.runner.invocations.at(-1)?.model, null);
+  });
+
+  it('launches with the session effort, else the global default, else none (US-003)', async () => {
+    const logFile = (world: World): string => path.join(world.repoDir, '.chief/prds/add-login/agent.log');
+    const launch = async (sessionEffort: EffortLevel | null, defaultEffort: EffortLevel | null) => {
+      const world = new World();
+      world.runner.result = { exitCode: 1, output: '', timedOut: false };
+      updateSession(world.db, world.session.id, { effort: sessionEffort });
+      if (defaultEffort !== null) setSetting(world.db, 'default_effort', defaultEffort);
+      setSetting(world.db, 'build_model', 'sonnet');
+      const builds = serviceFor(world);
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+      const invocation = world.runner.invocations[0];
+      return {
+        argv: agentCommand('p', invocation?.model, invocation?.advisor, invocation?.effort),
+        log: fs.readFileSync(logFile(world), 'utf8'),
+      };
+    };
+
+    const own = await launch('high', null);
+    assert.deepEqual(own.argv.slice(0, 5), ['claude', '--model', 'sonnet', '--effort', 'high']);
+    assert.match(own.log, /^Thinking effort: high \(session\)$/m);
+
+    const inherited = await launch(null, 'medium');
+    assert.deepEqual(inherited.argv.slice(0, 5), ['claude', '--model', 'sonnet', '--effort', 'medium']);
+    assert.match(inherited.log, /^Thinking effort: medium \(default\)$/m);
+
+    // Neither: exactly today's argv, and no line in the log.
+    const none = await launch(null, null);
+    assert.deepEqual(none.argv, agentCommand('p', 'sonnet', null));
+    assert.equal(none.argv.includes('--effort'), false);
+    assert.equal(none.log.includes('Thinking effort'), false);
+
+    // The session's own choice beats a different global default.
+    const override = await launch('max', 'low');
+    assert.deepEqual(override.argv.slice(0, 5), ['claude', '--model', 'sonnet', '--effort', 'max']);
+    assert.match(override.log, /^Thinking effort: max \(session\)$/m);
+    assert.equal(override.log.includes('low'), false);
+  });
+
+  it('re-reads the session effort before every iteration (US-003)', async () => {
+    const world = new World();
+    world.runner.result = { exitCode: 1, output: '', timedOut: false };
+    updateSession(world.db, world.session.id, { effort: 'low' });
+    // Changed while the first iteration runs, as the session page would.
+    world.runner.behaviour = (_invocation, index) => {
+      if (index === 0) updateSession(world.db, world.session.id, { effort: 'xhigh' });
+    };
+
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.ok(world.runner.invocations.length >= 2);
+    const [first, second] = world.runner.invocations;
+    assert.equal(first?.effort, 'low');
+    assert.equal(second?.effort, 'xhigh');
+    const argv = agentCommand(second?.prompt ?? '', second?.model, second?.advisor, second?.effort);
+    assert.deepEqual(argv.slice(argv.indexOf('--effort'), argv.indexOf('--effort') + 2), ['--effort', 'xhigh']);
   });
 
   it('drops an advisor the CLI would refuse, and runs the iteration anyway (US-007)', async () => {

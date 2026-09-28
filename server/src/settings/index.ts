@@ -13,6 +13,8 @@ export {
   DEFAULT_SENTRY_PLANS_PER_TICK,
   DEFAULT_SENTRY_POLL_INTERVAL_MINUTES,
   EFFORT_LEVELS,
+  type EffortChoice,
+  effortFor,
   type EffortLevel,
   getAdvisorModel,
   getAgentTimeoutMs,

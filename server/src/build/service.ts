@@ -56,6 +56,7 @@ import {
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
+  effortFor,
   getAgentTimeoutMs,
   getBuildModel,
   getMaxConcurrentSessions,
@@ -1103,6 +1104,10 @@ export class BuildService {
     const buildModel = getBuildModel(this.db);
     const advisor = advisorFor(this.db);
     if (advisor.dropped !== null) log.write(`${advisor.dropped}\n`);
+    // The effort is resolved on the same line and from a fresh read of the
+    // session row, so an effort changed mid-build lands at the next iteration.
+    const effort = effortFor(this.db, getSession(this.db, session.id) ?? session);
+    if (effort !== null) log.write(`Thinking effort: ${effort.level} (${effort.source})\n`);
     // Read per iteration, so a timeout changed on the settings page applies to
     // the next one without a restart (US-019). The agent is told the same
     // number it is held to: it is the only one of the two that can decide not
@@ -1124,6 +1129,7 @@ export class BuildService {
         timeoutMs,
         model: buildModel,
         advisor: advisor.model,
+        effort: effort?.level ?? null,
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {

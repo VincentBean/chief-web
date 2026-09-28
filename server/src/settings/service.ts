@@ -7,6 +7,7 @@ import {
   getSettingNumber,
   isEffortLevel,
   setSetting,
+  type Session,
   type SettingKey,
   setSettingNumber,
   withTransaction,
@@ -562,6 +563,25 @@ export function getStoredAdvisorModel(db: Database): string | null {
 export function getDefaultEffort(db: Database): EffortLevel | null {
   const stored = getSetting(db, 'default_effort');
   return stored !== null && isEffortLevel(stored) ? stored : null;
+}
+
+/** The thinking effort a run launches with, and where it came from. */
+export interface EffortChoice {
+  readonly level: EffortLevel;
+  /** `session` when the session chose it, `default` when the global setting did. */
+  readonly source: 'session' | 'default';
+}
+
+/**
+ * The effective thinking effort for a session: its own `effort` when it has
+ * one, otherwise {@link getDefaultEffort}, otherwise `null` — no `--effort` at
+ * all, which leaves the choice to the CLI. Read at launch rather than stored at
+ * creation, so a changed default reaches every session that has none of its own.
+ */
+export function effortFor(db: Database, session: Pick<Session, 'effort'>): EffortChoice | null {
+  if (session.effort !== null) return { level: session.effort, source: 'session' };
+  const fallback = getDefaultEffort(db);
+  return fallback === null ? null : { level: fallback, source: 'default' };
 }
 
 function readModel(
