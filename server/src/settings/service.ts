@@ -2,8 +2,10 @@ import type { Config } from '../config.js';
 import {
   type Database,
   deleteSetting,
+  type EffortLevel,
   getSetting,
   getSettingNumber,
+  isEffortLevel,
   setSetting,
   type SettingKey,
   setSettingNumber,
@@ -114,14 +116,8 @@ export function isAdvisorModel(value: string): value is AdvisorModel {
   return (ADVISOR_MODELS as readonly string[]).includes(value);
 }
 
-/** Thinking efforts Claude Code accepts as `--effort`, lowest first. */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-export type EffortLevel = (typeof EFFORT_LEVELS)[number];
-
-export function isEffortLevel(value: string): value is EffortLevel {
-  return (EFFORT_LEVELS as readonly string[]).includes(value);
-}
+// The effort levels live in the db layer, because a session stores one too.
+export { EFFORT_LEVELS, type EffortLevel, isEffortLevel } from '../db/index.js';
 
 /**
  * Which model plans a Sentry issue — the one call that triages it and writes

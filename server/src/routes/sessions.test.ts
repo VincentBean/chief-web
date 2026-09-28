@@ -243,6 +243,42 @@ describe('sessions api', () => {
     assert.equal(started.length, 2);
   });
 
+  it('stores a thinking effort on create and returns it from get and list', async () => {
+    const { status, body } = await create({ effort: 'xhigh' });
+
+    assert.equal(status, 201);
+    assert.equal(body.session.effort, 'xhigh');
+
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'xhigh');
+
+    const listed = (await (await call('GET', '/api/sessions')).json()) as {
+      sessions: SessionView[];
+    };
+    assert.equal(listed.sessions[0]?.effort, 'xhigh');
+  });
+
+  it('creates a session without an effort as null, explicit null included', async () => {
+    const without = await create();
+    assert.equal(without.status, 201);
+    assert.equal(without.body.session.effort, null);
+
+    const explicit = await create({ name: 'null-effort', effort: null });
+    assert.equal(explicit.status, 201);
+    assert.equal(explicit.body.session.effort, null);
+  });
+
+  it('rejects an effort outside the five levels and creates nothing', async () => {
+    for (const effort of ['ultra', 'High', '', 3]) {
+      const { status, body } = await create({ effort });
+      assert.equal(status, 400);
+      assert.equal(body.error, 'invalid_effort');
+      assert.match(body.message ?? '', /low, medium, high, xhigh, max/);
+    }
+    assert.equal(listSessions(db).length, 0);
+    assert.equal(started.length, 0);
+  });
+
   it('rejects feedback that is not a string', async () => {
     const { status, body } = await create({ feedback: 42 });
 

@@ -8,6 +8,7 @@ import {
   createSession,
   type Database,
   deleteSession,
+  type EffortLevel,
   type FailureStage,
   featureBranchFor,
   getQueuedBuild,
@@ -169,6 +170,11 @@ export interface SessionView {
    */
   readonly feedback: string | null;
   /**
+   * The thinking effort this session launches at (thinking effort US-002), or
+   * `null` to follow the global default.
+   */
+  readonly effort: EffortLevel | null;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -251,6 +257,8 @@ export interface CreateSessionRequest {
   readonly recurringTaskId?: string | null;
   /** The feedback the session is started from; already trimmed and bounded. */
   readonly feedback?: string | null;
+  /** The thinking effort; omitted or null follows the global default. */
+  readonly effort?: EffortLevel | null;
 }
 
 /** The longest feedback a session is started from (voice feedback US-001), after trimming. */
@@ -363,6 +371,7 @@ export class SessionService {
         openPullRequest: request.openPullRequest ?? repository.openPullRequestDefault,
         recurringTaskId: request.recurringTaskId ?? null,
         feedback: request.feedback ?? null,
+        effort: request.effort ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -822,6 +831,7 @@ export class SessionService {
       openPullRequest: session.openPullRequest,
       pushedOnly: session.pushedOnly,
       feedback: session.feedback,
+      effort: session.effort,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

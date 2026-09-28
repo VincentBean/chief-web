@@ -1,6 +1,13 @@
 import { type Response, Router } from 'express';
 
-import { PR_TARGET_BRANCHES, type PrTargetBranch, SESSION_NAME_PATTERN } from '../db/index.js';
+import {
+  EFFORT_LEVELS,
+  type EffortLevel,
+  isEffortLevel,
+  PR_TARGET_BRANCHES,
+  type PrTargetBranch,
+  SESSION_NAME_PATTERN,
+} from '../db/index.js';
 import {
   type CreateSessionRequest,
   MAX_FEEDBACK_LENGTH,
@@ -318,6 +325,20 @@ function parseOpenPullRequest(
   return { openPullRequest: raw };
 }
 
+/** Absent and `null` both mean "follow the global default"; anything else must be a level. */
+function parseEffort(input: Record<string, unknown>): { effort?: EffortLevel | null } | Invalid {
+  const raw = input.effort;
+  if (raw === undefined) return {};
+  if (raw === null) return { effort: null };
+  if (typeof raw !== 'string' || !isEffortLevel(raw)) {
+    return {
+      error: 'invalid_effort',
+      message: `The thinking effort must be one of: ${EFFORT_LEVELS.join(', ')}.`,
+    };
+  }
+  return { effort: raw };
+}
+
 function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
@@ -381,6 +402,9 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     };
   }
 
+  const effort = parseEffort(input);
+  if ('error' in effort) return effort;
+
   return {
     repositoryId,
     name,
@@ -393,6 +417,7 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     ...pullRequest,
     ...(baseBranch === undefined ? {} : { baseBranch }),
     ...(feedback === undefined ? {} : { feedback }),
+    ...effort,
   };
 }
 

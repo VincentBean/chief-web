@@ -1209,6 +1209,15 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP TABLE session_recurring_tasks_backup;
     `,
   },
+  {
+    id: '0024_session_effort',
+    sql: `
+      -- The thinking effort a session launches Claude Code at (thinking effort
+      -- US-002). NULL for every existing session: it follows the global
+      -- default, which is what it did before it could choose.
+      ALTER TABLE sessions ADD COLUMN effort TEXT;
+    `,
+  },
 ];
 
 /**
