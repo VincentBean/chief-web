@@ -111,6 +111,45 @@ review on new sessions**) and can be changed from the session page at any time
 until the session is finished. What the review does, what it posts and what
 happens when it fails is [its own page](code-review.md).
 
+## Thinking effort
+
+A session can also carry a **thinking effort**: how hard Claude Code thinks
+before it answers, passed to the CLI as `--effort <level>`. There are five
+levels, from least to most: **`low`**, **`medium`**, **`high`**, **`xhigh`**
+and **`max`**. More effort means more thinking tokens per turn, so it costs
+more usage and time.
+
+The effort applies to the two places chief-web launches Claude Code for a
+session: the [planning terminal](#planning) and every
+[build iteration](build-loop.md). Nothing else changes. The
+[code review](code-review.md) pass, pull request feedback runs and
+[merge conflict fix](merge-conflicts.md) runs always launch without
+`--effort`, whatever the session or the setting says.
+
+The effort a launch uses is resolved in this order:
+
+1. **The session's own effort**, if it has one. Set it on the new-session form
+   or in the **Thinking effort** card on the session page.
+2. **The global default**, **Settings → Default thinking effort**, for a
+   session left at **Default**.
+3. **Claude Code's own default**, when neither is set. In that case no
+   `--effort` is passed at all.
+
+A session left at **Default** stores no level of its own, so a later change to
+the global default reaches it too. Sessions created by a
+[recurring task](#sessions-a-recurring-task-started), a Sentry fix or a voice
+action always start at **Default**.
+
+**A change applies from the next launch.** Nothing is restarted. The planning
+terminal reads the effort when it is opened, so a terminal that is already
+open keeps its effort until you close it and open a new one. A build reads it
+at the start of every iteration, so a change made while a session is
+**building** applies from the next iteration, and the story that is running
+finishes at the old effort. Each iteration writes the effort it uses to the
+build log as `Thinking effort: <level> (session)` or `(default)`. Once a session
+is **finished** its effort can no longer be changed, because no agent will run
+for it again.
+
 ## Planning
 
 Each session has a page of its own at `/sessions/<id>`, and while the session is

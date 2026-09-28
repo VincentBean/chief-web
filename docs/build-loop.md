@@ -13,7 +13,14 @@ the [FIFO queue](scheduling.md#concurrency-and-the-build-queue). One iteration i
    in `/workspace/repo` inside the session container, with `--model` in front
    when a build model is set (**Settings → Build model**), and `--advisor`
    after it when an advisor model is set (**Settings → Advisor**; see
-   [The advisor](#the-advisor)). The prompt is chief's `embed/prompt.txt`,
+   [The advisor](#the-advisor)), and `--effort <level>` after those when the
+   session has a [thinking effort](sessions.md#thinking-effort) of its own or
+   **Settings → Default thinking effort** is set. The effort is re-read from
+   the session row at every iteration, so a change made mid-build applies from
+   the next story attempt. It is written to the log as
+   `Thinking effort: <level> (session)` or `(default)`. With neither set, no
+   `--effort` is passed. The code review, PR feedback and merge conflict fix
+   runs never get the flag. The prompt is chief's `embed/prompt.txt`,
    ported verbatim into `server/src/build/templates.ts`,
    with the story inlined as JSON plus a chief-web addendum carrying the PRD's
    own context, the current `progress.md`, and what the agent has to leave
