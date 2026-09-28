@@ -979,6 +979,18 @@ export async function setSessionCodeReview(id: string, codeReview: boolean): Pro
 }
 
 /**
+ * Sets this session’s thinking effort, or `null` to follow the global
+ * default (US-005). A running build picks it up from its next iteration;
+ * refused once the session is finished.
+ */
+export async function setSessionEffort(id: string, effort: EffortLevel | null): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/effort`, {
+    method: 'PUT',
+    body: JSON.stringify({ effort }),
+  });
+}
+
+/**
  * Turns opening a pull request for this session on or off (US-008). Refused
  * once the pull request exists or the delivery is over.
  */

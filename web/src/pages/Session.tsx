@@ -6,12 +6,15 @@ import {
   type Build,
   clearUsageLimitHold,
   deleteSession,
+  EFFORT_LEVELS,
+  type EffortLevel,
   type FailureStage,
   failureStageLabel,
   isDeliveryStage,
   fetchBuild,
   fetchPlanning,
   fetchSession,
+  fetchSettings,
   leaveQueue,
   markSessionReady,
   type Planning,
@@ -23,6 +26,7 @@ import {
   retrySessionSetup,
   type Session as SessionData,
   setSessionCodeReview,
+  setSessionEffort,
   setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
@@ -575,6 +579,8 @@ export function Session() {
           <OpenPullRequestPanel session={session} busy={busy} onToggle={onOpenPullRequest} />
 
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
+
+          <EffortPanel session={session} onSaved={setSession} />
         </aside>
       </div>
 
@@ -1373,6 +1379,108 @@ function CodeReviewPanel({
           ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: ${locked}`
           : 'The review runs automatically after the pull request is created and posts its comments to GitHub.'}
       </p>
+    </Panel>
+  );
+}
+
+/* ------------------------------------------------------- thinking effort */
+
+/**
+ * Why the effort is frozen, per status — the mirror of the server's
+ * `EFFORT_LOCKED` (US-005): no agent runs for these sessions again.
+ */
+const EFFORT_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  finished: 'this session has finished, so no agent will run for it again.',
+  merged: 'the pull request has been merged, so no agent will run for this session again.',
+};
+
+/**
+ * The thinking effort this session's planning and build run at (US-008). The
+ * select saves on change; the badge shows what actually applies — the
+ * session's own level, else the Settings default, else Claude Code's own.
+ */
+function EffortPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  /** `undefined` while the Settings default is loading or could not be read; `null` when there is none. */
+  const [defaultEffort, setDefaultEffort] = useState<EffortLevel | null | undefined>(undefined);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchSettings(controller.signal)
+      .then((settings) => setDefaultEffort(settings.defaultEffort))
+      .catch(() => {
+        // Without the default the badge just says "default"; nothing to report.
+      });
+    return () => controller.abort();
+  }, []);
+
+  const locked = EFFORT_LOCKED[session.status];
+  const effective = session.effort ?? (defaultEffort === undefined ? 'default' : (defaultEffort ?? 'CLI default'));
+
+  const onChange = (value: EffortLevel | ''): void => {
+    const effort = value === '' ? null : value;
+    setSaving(true);
+    setMessage(null);
+    setError(null);
+    setSessionEffort(session.id, effort)
+      .then((next) => {
+        onSaved(next);
+        setMessage(
+          next.effort === null
+            ? 'Saved: this session now follows the default from Settings.'
+            : `Saved: this session now runs at ${next.effort} effort.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setError(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel title="Thinking effort" icon="zap" meta={<Badge tone={session.effort === null ? 'neutral' : 'ready'}>{effective}</Badge>}>
+      <div className="field">
+        <label className="field__label" htmlFor="session-page-effort">
+          Effort for planning and build
+        </label>
+        <select
+          id="session-page-effort"
+          className="field__input"
+          value={session.effort ?? ''}
+          disabled={locked !== undefined || saving}
+          onChange={(event) => onChange(event.target.value as EffortLevel | '')}
+        >
+          <option value="">
+            {defaultEffort === undefined ? 'Default' : `Default (${defaultEffort ?? 'CLI default'})`}
+          </option>
+          {EFFORT_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The effort can no longer be changed: ${locked}`
+            : session.effort === null
+              ? 'Following the default from Settings.'
+              : 'Set for this session; choose Default to follow the setting on the Settings page again.'}
+          {locked === undefined && session.status === 'building'
+            ? ' A build is running: a change applies from its next iteration.'
+            : ''}
+        </p>
+      </div>
+      {message !== null && <Notice kind="ok">{message}</Notice>}
+      {error !== null && <Notice kind="error">{error}</Notice>}
     </Panel>
   );
 }
