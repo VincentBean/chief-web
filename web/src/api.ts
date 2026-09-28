@@ -628,6 +628,8 @@ export interface Session {
   pushedOnly: boolean;
   /** The feedback the session was started from; null when it was not. */
   feedback: string | null;
+  /** The session's own thinking effort; null follows the global default. */
+  effort: EffortLevel | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -691,6 +693,8 @@ export interface SessionInput {
    * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
    */
   feedback?: string;
+  /** Omit or null to follow the global default thinking effort. */
+  effort?: EffortLevel | null;
 }
 
 /** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */

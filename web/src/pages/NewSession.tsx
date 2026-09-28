@@ -2,6 +2,8 @@ import { type FormEvent, useEffect, useState } from 'react';
 
 import {
   createSession,
+  EFFORT_LEVELS,
+  type EffortLevel,
   featureBranchFor,
   fetchSettings,
   MAX_FEEDBACK_LENGTH,
@@ -41,6 +43,10 @@ export function NewSession() {
   const [codeReview, setCodeReview] = useState<boolean | null>(null);
   /** null until the operator ticks or unticks it: it then follows the repository. */
   const [openPullRequest, setOpenPullRequest] = useState<boolean | null>(null);
+  /** `''` follows the global default, which the server resolves at launch. */
+  const [effort, setEffort] = useState<EffortLevel | ''>('');
+  /** The global default for the "Default" label; undefined until it has loaded. */
+  const [defaultEffort, setDefaultEffort] = useState<EffortLevel | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [stderr, setStderr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -50,7 +56,10 @@ export function NewSession() {
   useEffect(() => {
     const controller = new AbortController();
     fetchSettings(controller.signal)
-      .then((settings) => setCodeReview((current) => current ?? settings.codeReviewDefault))
+      .then((settings) => {
+        setCodeReview((current) => current ?? settings.codeReviewDefault);
+        setDefaultEffort(settings.defaultEffort);
+      })
       .catch(() => {
         // A convenience, not a requirement: an unreadable setting leaves it off
         // here and the server resolves the default itself.
@@ -93,6 +102,7 @@ export function NewSession() {
     if (!effectiveOpenPullRequest) input.codeReview = false;
     // Still loading: say nothing and let the server apply the global default.
     else if (codeReview !== null) input.codeReview = codeReview;
+    if (effort !== '') input.effort = effort;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
     if (feedbackTooLong) {
       setError(`Feedback can be at most ${MAX_FEEDBACK_LENGTH.toLocaleString()} characters.`);
@@ -235,6 +245,30 @@ export function NewSession() {
                     </select>
                     <p className="field__hint">Opened when the last story is done.</p>
                   </div>
+                </div>
+
+                <div className="field">
+                  <label className="field__label" htmlFor="session-effort">
+                    Thinking effort
+                  </label>
+                  <select
+                    id="session-effort"
+                    className="field__input"
+                    value={effort}
+                    onChange={(event) => setEffort(event.target.value as EffortLevel | '')}
+                  >
+                    <option value="">
+                      {defaultEffort === undefined
+                        ? 'Default'
+                        : `Default (${defaultEffort ?? 'CLI default'})`}
+                    </option>
+                    {EFFORT_LEVELS.map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="field__hint">For planning and build. Default follows the setting on the Settings page.</p>
                 </div>
 
                 <div className="field">
