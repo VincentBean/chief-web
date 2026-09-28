@@ -12,6 +12,7 @@ import {
   closeDatabase,
   type Database,
   deleteSetting,
+  getSetting,
   IN_MEMORY,
   openDatabase,
   setSetting,
@@ -84,6 +85,7 @@ describe('settings api', () => {
     deleteSetting(db, 'git_author_email');
     deleteSetting(db, 'review_model');
     deleteSetting(db, 'advisor_model');
+    deleteSetting(db, 'default_effort');
     deleteSetting(db, 'code_review_default');
     deleteSetting(db, 'sentry_token');
     deleteSetting(db, 'sentry_poll_interval_minutes');
@@ -262,6 +264,7 @@ describe('settings api', () => {
       buildModel: null,
       reviewModel: null,
       advisorModel: null,
+      defaultEffort: null,
       codeReviewDefault: false,
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
@@ -290,6 +293,7 @@ describe('settings api', () => {
       buildModel: null,
       reviewModel: null,
       advisorModel: null,
+      defaultEffort: null,
       codeReviewDefault: false,
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
@@ -335,6 +339,7 @@ describe('settings api', () => {
       buildModel: null,
       reviewModel: null,
       advisorModel: null,
+      defaultEffort: null,
       codeReviewDefault: false,
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
@@ -364,6 +369,7 @@ describe('settings api', () => {
       buildModel: null,
       reviewModel: null,
       advisorModel: null,
+      defaultEffort: null,
       codeReviewDefault: false,
       planningQuestions: [...DEFAULT_PLANNING_QUESTIONS],
       gitAuthorName: 'chief-web',
@@ -546,6 +552,43 @@ describe('settings api', () => {
     };
     assert.equal(kept.buildModel, 'sonnet');
     assert.equal(kept.advisorModel, 'opus');
+  });
+
+  it('persists the default thinking effort and rejects unknown levels', async () => {
+    type Body = { defaultEffort: string | null; buildModel: string | null };
+    const read = async (): Promise<Body> => (await (await get()).json()) as Body;
+
+    // Absent until the operator picks one: no --effort flag is the status quo.
+    assert.equal((await read()).defaultEffort, null);
+
+    assert.equal((await put({ defaultEffort: 'high' })).status, 200);
+    assert.equal((await read()).defaultEffort, 'high');
+    assert.equal(getSetting(db, 'default_effort'), 'high');
+
+    for (const value of ['ultra', 'High', '', 3, true, ['low']]) {
+      const response = await put({ defaultEffort: value });
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(value)}`);
+      const body = (await response.json()) as { error: string; message: string };
+      assert.equal(body.error, 'invalid_default_effort');
+      assert.match(body.message, /low, medium, high, xhigh, max/);
+    }
+
+    // A rejected write stores nothing, even alongside a valid field.
+    const buildModelBefore = (await read()).buildModel;
+    assert.equal((await put({ buildModel: 'haiku', defaultEffort: 'ultra' })).status, 400);
+    assert.equal(getSetting(db, 'default_effort'), 'high');
+    assert.equal((await read()).buildModel, buildModelBefore);
+
+    // An update that omits the field leaves the stored level alone.
+    assert.equal((await put({ buildModel: 'sonnet' })).status, 200);
+    assert.equal((await read()).defaultEffort, 'high');
+
+    // null removes the row, and clearing it disturbs nothing else.
+    assert.equal((await put({ defaultEffort: null })).status, 200);
+    assert.equal(getSetting(db, 'default_effort'), null);
+    const cleared = await read();
+    assert.equal(cleared.defaultEffort, null);
+    assert.equal(cleared.buildModel, 'sonnet');
   });
 
   it('persists the agent timeout and rejects out-of-range values (US-019)', async () => {

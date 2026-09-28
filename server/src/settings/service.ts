@@ -2,9 +2,12 @@ import type { Config } from '../config.js';
 import {
   type Database,
   deleteSetting,
+  type EffortLevel,
   getSetting,
   getSettingNumber,
+  isEffortLevel,
   setSetting,
+  type Session,
   type SettingKey,
   setSettingNumber,
   withTransaction,
@@ -114,6 +117,9 @@ export function isAdvisorModel(value: string): value is AdvisorModel {
   return (ADVISOR_MODELS as readonly string[]).includes(value);
 }
 
+// The effort levels live in the db layer, because a session stores one too.
+export { EFFORT_LEVELS, type EffortLevel, isEffortLevel } from '../db/index.js';
+
 /**
  * Which model plans a Sentry issue — the one call that triages it and writes
  * its proposed fix plan (US-002, presented as the *planning model* since
@@ -216,6 +222,8 @@ export interface AppSettings {
   readonly reviewModel: AgentModel | null;
   /** Model advising each build iteration; `null` means no advisor at all. */
   readonly advisorModel: AdvisorModel | null;
+  /** Thinking effort for sessions without their own; `null` passes no `--effort`. */
+  readonly defaultEffort: EffortLevel | null;
   /** Whether new sessions are created with the code-review flag already on. */
   readonly codeReviewDefault: boolean;
   /** Standard questions offered in the planning terminal; never absent. */
@@ -254,6 +262,8 @@ export interface AppSettingsUpdate {
   readonly reviewModel?: AgentModel | null;
   /** `null` means no advisor at all; omitted leaves the stored value. */
   readonly advisorModel?: AdvisorModel | null;
+  /** `null` means no `--effort` flag; omitted leaves the stored value. */
+  readonly defaultEffort?: EffortLevel | null;
   readonly codeReviewDefault?: boolean;
   /** `null` restores the default questions; omitted leaves the stored list. */
   readonly planningQuestions?: string[] | null;
@@ -540,6 +550,38 @@ export function getAdvisorModel(db: Database): AdvisorModel | null {
  */
 export function getStoredAdvisorModel(db: Database): string | null {
   return getSetting(db, 'advisor_model');
+}
+
+/**
+ * The thinking effort a session launches with when it has no effort of its
+ * own, or `null` to pass no `--effort` at all and let the CLI apply its default.
+ *
+ * Read with the same fail-safe as {@link getPlanningModel}: a stored value that
+ * is not in {@link EFFORT_LEVELS} — a hand-edited `ultra`, say — reads as
+ * `null` rather than being handed to a CLI that might refuse it.
+ */
+export function getDefaultEffort(db: Database): EffortLevel | null {
+  const stored = getSetting(db, 'default_effort');
+  return stored !== null && isEffortLevel(stored) ? stored : null;
+}
+
+/** The thinking effort a run launches with, and where it came from. */
+export interface EffortChoice {
+  readonly level: EffortLevel;
+  /** `session` when the session chose it, `default` when the global setting did. */
+  readonly source: 'session' | 'default';
+}
+
+/**
+ * The effective thinking effort for a session: its own `effort` when it has
+ * one, otherwise {@link getDefaultEffort}, otherwise `null` — no `--effort` at
+ * all, which leaves the choice to the CLI. Read at launch rather than stored at
+ * creation, so a changed default reaches every session that has none of its own.
+ */
+export function effortFor(db: Database, session: Pick<Session, 'effort'>): EffortChoice | null {
+  if (session.effort !== null) return { level: session.effort, source: 'session' };
+  const fallback = getDefaultEffort(db);
+  return fallback === null ? null : { level: fallback, source: 'default' };
 }
 
 function readModel(
@@ -1049,6 +1091,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
     advisorModel: getAdvisorModel(db),
+    defaultEffort: getDefaultEffort(db),
     codeReviewDefault: getCodeReviewDefault(db),
     planningQuestions: getPlanningQuestions(db),
     gitAuthorName: identity.name,
@@ -1129,6 +1172,12 @@ export function updateAppSettings(
     if (update.advisorModel === null) deleteSetting(db, 'advisor_model');
     else if (update.advisorModel !== undefined) {
       setSetting(db, 'advisor_model', update.advisorModel);
+    }
+
+    // A cleared row is "no --effort flag", the CLI's own default.
+    if (update.defaultEffort === null) deleteSetting(db, 'default_effort');
+    else if (update.defaultEffort !== undefined) {
+      setSetting(db, 'default_effort', update.defaultEffort);
     }
 
     if (update.codeReviewDefault !== undefined) {

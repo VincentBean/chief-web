@@ -86,7 +86,10 @@ overview and the list at once; a hidden tab polls nothing.
 
 **New session** (`/sessions/new`) is its own page: repository, name, base
 branch, pull request target, an optional scheduled start and a **Code review**
-checkbox (seeded from the [global default](#settings)), and an optional
+checkbox (seeded from the [global default](#settings)), a **Thinking effort**
+select (**Default** or one of the five levels; the Default option names the
+effort it currently resolves to, such as *Default (high)*, see
+[Thinking effort](sessions.md#thinking-effort)), and an optional
 **Feedback** box, with what happens next explained beside it. Feedback makes it
 a [feedback session](sessions.md#feedback-sessions); the box counts characters
 up to the 4000 allowed and the form refuses to submit past them. A successful create lands on the session page; a
@@ -104,7 +107,12 @@ attempt counters and the story list while building, the failure reason and what
 a retry will do when failed. The side column carries the facts (branches, pull
 request, timestamps), the PRD's parse state, the schedule, and the
 [code review](code-review.md) toggle, which stays changeable until the session
-is finished. A feedback session shows its feedback in a **Feedback** panel at
+is finished. Below it, a **Thinking effort** card shows the effort the session's
+next launch will use as a badge: its own level, else the Settings default, else
+*CLI default*. The card's select changes it (Default or one of the five
+levels) and saves on change. While a build runs, the card notes that the change
+applies from the next iteration. On a finished session the select is disabled.
+See [Thinking effort](sessions.md#thinking-effort). A feedback session shows its feedback in a **Feedback** panel at
 the top of the main column, whatever its stage. The agent log runs full width underneath and follows live output
 while the loop runs.
 
@@ -255,6 +263,13 @@ the `settings` table so it can be changed without a restart:
   rates, uncached, so it is billed **in addition to** the build model. The
   feature is experimental. See [The advisor](build-loop.md#the-advisor) and
   [Claude Code's advisor docs](https://code.claude.com/docs/en/advisor).
+- **Default thinking effort** — the `--effort` level for sessions that have no
+  effort of their own: **CLI default** (no flag; the default) or `low`,
+  `medium`, `high`, `xhigh`, `max`. It applies to the planning terminal and
+  build iterations only, never to code review, PR feedback or merge-conflict
+  fixes. A change reaches every session left at **Default** from its next
+  launch: the next terminal opened, or the next build iteration. See
+  [Thinking effort](sessions.md#thinking-effort).
 - **Planning questions** — the [quick question buttons](sessions.md#planning)
   above the planning terminal, edited one question per line. The defaults are
   *Any open questions?* and *Re-check the entire PRD for issues, gaps and other

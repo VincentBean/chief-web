@@ -74,6 +74,9 @@ const RECURRING_OUTCOME_PUSHED_MIGRATION = '0023_recurring_task_outcome_pushed';
 /** The migration under test in 'adds `feedback` to existing sessions'. */
 const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 
+/** The migration under test in 'adds `effort` to existing sessions'. */
+const SESSION_EFFORT_MIGRATION = '0024_session_effort';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -596,6 +599,50 @@ describe('session feedback migration', () => {
   });
 });
 
+describe('session effort migration', () => {
+  it('adds `effort` to existing sessions as NULL', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex((migration) => migration.id === SESSION_EFFORT_MIGRATION);
+    assert.ok(index > 0, `${SESSION_EFFORT_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-09-28T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-09-28T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'ready', 'develop', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(SESSION_EFFORT_MIGRATION));
+
+    const migrated = getSession(db, id);
+    assert.equal(migrated?.name, 'add-login');
+    assert.equal(migrated?.effort, null);
+    assert.equal(
+      db.prepare('SELECT effort FROM sessions WHERE id = ?').get(id)?.effort,
+      null,
+    );
+
+    assert.equal(updateSession(db, id, { effort: 'high' })?.effort, 'high');
+    assert.equal(updateSession(db, id, { status: 'pending' })?.effort, 'high');
+    assert.equal(updateSession(db, id, { effort: null })?.effort, null);
+
+    closeDatabase(db);
+  });
+});
+
 describe('session open pull request migration', () => {
   it('adds `open_pull_request` to existing sessions as true', () => {
     const db = new DatabaseSync(IN_MEMORY) as Database;
@@ -833,6 +880,31 @@ describe('sessions', () => {
     assert.equal(fromFeedback.feedback, feedback);
     assert.equal(getSession(db, fromFeedback.id)?.feedback, feedback);
     assert.equal(listSessions(db).find((s) => s.id === fromFeedback.id)?.feedback, feedback);
+  });
+
+  it('stores a thinking effort, null without one, and reads an unknown one as null', () => {
+    const plain = createSession(db, {
+      repositoryId: repository.id,
+      name: 'no-effort',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+    });
+    const thinking = createSession(db, {
+      repositoryId: repository.id,
+      name: 'with-effort',
+      baseBranch: 'develop',
+      prTargetBranch: 'main',
+      effort: 'xhigh',
+    });
+
+    assert.equal(plain.effort, null);
+    assert.equal(getSession(db, plain.id)?.effort, null);
+    assert.equal(thinking.effort, 'xhigh');
+    assert.equal(getSession(db, thinking.id)?.effort, 'xhigh');
+
+    // A hand-edited or retired level is not passed through.
+    db.prepare('UPDATE sessions SET effort = ? WHERE id = ?').run('ultra', thinking.id);
+    assert.equal(getSession(db, thinking.id)?.effort, null);
   });
 
   it('round-trips the code review flag', () => {
