@@ -16,7 +16,7 @@ import {
   type SessionContainers,
   sessionPrdFile,
 } from '../sessions/index.js';
-import { getPlanningModel } from '../settings/index.js';
+import { effortFor, getPlanningModel } from '../settings/index.js';
 import { TerminalError } from '../terminal/index.js';
 import type { CreateTerminalInput, TerminalView } from '../terminal/index.js';
 import {
@@ -279,9 +279,14 @@ export class PlanningService {
     try {
       terminal = await this.terminals.create({
         container: containerId,
-        // Read here rather than cached, so a model chosen on the settings page
-        // applies to the next planning terminal without a restart.
-        command: planningCommand(prompt, getPlanningModel(this.db), resumeId),
+        // Read here rather than cached, so a model or effort chosen on the
+        // settings page applies to the next planning terminal without a restart.
+        command: planningCommand(
+          prompt,
+          getPlanningModel(this.db),
+          resumeId,
+          effortFor(this.db, session)?.level ?? null,
+        ),
         cwd: CONTAINER_REPO_DIR,
       });
     } catch (cause) {
