@@ -15,10 +15,12 @@ import {
   ADVISOR_MODELS,
   AGENT_MODELS,
   DEFAULT_PLANNING_QUESTIONS,
+  EFFORT_LEVELS,
   getAdvisorModel,
   getBuildModel,
   getCodeReviewDefault,
   getConflictFixEnabled,
+  getDefaultEffort,
   getPlanningModel,
   getPlanningQuestions,
   getPrConflictIntervalMs,
@@ -31,6 +33,7 @@ import {
   getSentryToken,
   isAdvisorModel,
   isAgentModel,
+  isEffortLevel,
   isValidSentryBaseUrl,
   isValidSentryPlansPerTick,
   isValidSentryPollIntervalMinutes,
@@ -161,6 +164,56 @@ describe('planning questions setting (US-001)', () => {
     getPlanningQuestions(db).push('Mutated?');
 
     assert.equal(DEFAULT_PLANNING_QUESTIONS.length, 2);
+  });
+});
+
+describe('default effort setting (thinking effort US-001)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    deleteSetting(db, 'default_effort');
+  });
+
+  it('offers the five levels --effort accepts, lowest first', () => {
+    assert.deepEqual([...EFFORT_LEVELS], ['low', 'medium', 'high', 'xhigh', 'max']);
+    for (const level of EFFORT_LEVELS) assert.equal(isEffortLevel(level), true);
+    assert.equal(isEffortLevel('ultra'), false);
+    assert.equal(isEffortLevel('High'), false);
+    assert.equal(isEffortLevel(''), false);
+  });
+
+  it('reads as null until one is stored, which is "no --effort flag"', () => {
+    assert.equal(getDefaultEffort(db), null);
+    assert.equal(readAppSettings(db, config).defaultEffort, null);
+  });
+
+  it('reads a stored level back', () => {
+    setSetting(db, 'default_effort', 'xhigh');
+
+    assert.equal(getDefaultEffort(db), 'xhigh');
+    assert.equal(readAppSettings(db, config).defaultEffort, 'xhigh');
+  });
+
+  it('reads a hand-edited level the CLI does not know as null', () => {
+    setSetting(db, 'default_effort', 'ultra');
+
+    assert.equal(getDefaultEffort(db), null);
+    assert.equal(readAppSettings(db, config).defaultEffort, null);
+  });
+
+  it('writes the row, clears it on null and keeps it when omitted', () => {
+    assert.equal(updateAppSettings(db, config, { defaultEffort: 'high' }).defaultEffort, 'high');
+    assert.equal(getSetting(db, 'default_effort'), 'high');
+
+    assert.equal(updateAppSettings(db, config, { maxConcurrentSessions: 4 }).defaultEffort, 'high');
+
+    assert.equal(updateAppSettings(db, config, { defaultEffort: null }).defaultEffort, null);
+    assert.equal(getSetting(db, 'default_effort'), null);
   });
 });
 

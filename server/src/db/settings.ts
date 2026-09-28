@@ -35,6 +35,12 @@ export const SETTING_KEYS = [
    */
   'advisor_model',
   /**
+   * `--effort` for every launch of a session that has no thinking effort of its
+   * own. An absent row means "no `--effort` flag", so the CLI applies its own
+   * default — there is no value here standing for that default.
+   */
+  'default_effort',
+  /**
    * Whether a new session gets its code-review flag set when the request does
    * not say (US-004). Stored as `1`/`0`; an absent row means off.
    */

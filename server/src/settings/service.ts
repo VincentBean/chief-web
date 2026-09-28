@@ -114,6 +114,15 @@ export function isAdvisorModel(value: string): value is AdvisorModel {
   return (ADVISOR_MODELS as readonly string[]).includes(value);
 }
 
+/** Thinking efforts Claude Code accepts as `--effort`, lowest first. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export function isEffortLevel(value: string): value is EffortLevel {
+  return (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 /**
  * Which model plans a Sentry issue — the one call that triages it and writes
  * its proposed fix plan (US-002, presented as the *planning model* since
@@ -216,6 +225,8 @@ export interface AppSettings {
   readonly reviewModel: AgentModel | null;
   /** Model advising each build iteration; `null` means no advisor at all. */
   readonly advisorModel: AdvisorModel | null;
+  /** Thinking effort for sessions without their own; `null` passes no `--effort`. */
+  readonly defaultEffort: EffortLevel | null;
   /** Whether new sessions are created with the code-review flag already on. */
   readonly codeReviewDefault: boolean;
   /** Standard questions offered in the planning terminal; never absent. */
@@ -254,6 +265,8 @@ export interface AppSettingsUpdate {
   readonly reviewModel?: AgentModel | null;
   /** `null` means no advisor at all; omitted leaves the stored value. */
   readonly advisorModel?: AdvisorModel | null;
+  /** `null` means no `--effort` flag; omitted leaves the stored value. */
+  readonly defaultEffort?: EffortLevel | null;
   readonly codeReviewDefault?: boolean;
   /** `null` restores the default questions; omitted leaves the stored list. */
   readonly planningQuestions?: string[] | null;
@@ -540,6 +553,19 @@ export function getAdvisorModel(db: Database): AdvisorModel | null {
  */
 export function getStoredAdvisorModel(db: Database): string | null {
   return getSetting(db, 'advisor_model');
+}
+
+/**
+ * The thinking effort a session launches with when it has no effort of its
+ * own, or `null` to pass no `--effort` at all and let the CLI apply its default.
+ *
+ * Read with the same fail-safe as {@link getPlanningModel}: a stored value that
+ * is not in {@link EFFORT_LEVELS} — a hand-edited `ultra`, say — reads as
+ * `null` rather than being handed to a CLI that might refuse it.
+ */
+export function getDefaultEffort(db: Database): EffortLevel | null {
+  const stored = getSetting(db, 'default_effort');
+  return stored !== null && isEffortLevel(stored) ? stored : null;
 }
 
 function readModel(
@@ -1049,6 +1075,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
     advisorModel: getAdvisorModel(db),
+    defaultEffort: getDefaultEffort(db),
     codeReviewDefault: getCodeReviewDefault(db),
     planningQuestions: getPlanningQuestions(db),
     gitAuthorName: identity.name,
@@ -1129,6 +1156,12 @@ export function updateAppSettings(
     if (update.advisorModel === null) deleteSetting(db, 'advisor_model');
     else if (update.advisorModel !== undefined) {
       setSetting(db, 'advisor_model', update.advisorModel);
+    }
+
+    // A cleared row is "no --effort flag", the CLI's own default.
+    if (update.defaultEffort === null) deleteSetting(db, 'default_effort');
+    else if (update.defaultEffort !== undefined) {
+      setSetting(db, 'default_effort', update.defaultEffort);
     }
 
     if (update.codeReviewDefault !== undefined) {
