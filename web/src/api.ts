@@ -68,6 +68,15 @@ export const ADVISOR_MODELS = ['opus', 'sonnet', 'fable'] as const;
 
 export type AdvisorModel = (typeof ADVISOR_MODELS)[number];
 
+/**
+ * Thinking effort levels Claude Code accepts as `--effort`, mirroring the
+ * server's `EFFORT_LEVELS`. The `<select>` uses `''` for "CLI default", which
+ * is sent as `null`.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
@@ -98,6 +107,8 @@ export interface Settings {
   reviewModel: AgentModel | null;
   /** Second model advising each build iteration; `null` means no advisor. */
   advisorModel: AdvisorModel | null;
+  /** Thinking effort for planning and build when a session has none; `null` leaves it to Claude Code. */
+  defaultEffort: EffortLevel | null;
   /** Whether new sessions start with their code-review flag on (US-004). */
   codeReviewDefault: boolean;
   /** One-click questions offered in the planning terminal; `[]` shows none. */
@@ -175,6 +186,8 @@ export interface SettingsUpdate {
   reviewModel?: AgentModel | null;
   /** `null` turns the advisor off again; it is off unless chosen. */
   advisorModel?: AdvisorModel | null;
+  /** `null` hands the effort back to Claude Code's own default. */
+  defaultEffort?: EffortLevel | null;
   codeReviewDefault?: boolean;
   /** Trimmed and blank entries dropped by the server; `null` restores the defaults. */
   planningQuestions?: string[] | null;

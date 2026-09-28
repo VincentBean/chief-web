@@ -6,6 +6,8 @@ import {
   AGENT_MODELS,
   type AgentModel,
   ApiError,
+  EFFORT_LEVELS,
+  type EffortLevel,
   checkElevenLabsKey,
   checkOpenRouterKey,
   type ElevenLabsVoice,
@@ -49,6 +51,8 @@ const MODEL_LABELS: Record<AgentModel, string> = {
 
 const asModel = (value: string): AgentModel | null => (value === '' ? null : (value as AgentModel));
 
+const asEffort = (value: string): EffortLevel | null => (value === '' ? null : (value as EffortLevel));
+
 const asAdvisor = (value: string): AdvisorModel | null => (value === '' ? null : (value as AdvisorModel));
 
 /** Mirrors the server's `DEFAULT_PLANNING_QUESTIONS`, for the Restore defaults button. */
@@ -84,6 +88,7 @@ export function Settings() {
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
   const [advisorModel, setAdvisorModel] = useState('');
+  const [defaultEffort, setDefaultEffort] = useState('');
   /**
    * The server's own words for an advisor Claude Code would refuse at launch
    * (US-006), shown under the advisor select. A toast is the wrong home for it:
@@ -156,6 +161,7 @@ export function Settings() {
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
     setAdvisorModel(loaded.advisorModel ?? '');
+    setDefaultEffort(loaded.defaultEffort ?? '');
     setPlanningQuestions(loaded.planningQuestions.join('\n'));
     setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
@@ -242,6 +248,7 @@ export function Settings() {
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
       advisorModel: asAdvisor(advisorModel),
+      defaultEffort: asEffort(defaultEffort),
       planningQuestions: toQuestions(planningQuestions),
       codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
@@ -423,6 +430,7 @@ export function Settings() {
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
     advisorModel !== (settings.advisorModel ?? '') ||
+    defaultEffort !== (settings.defaultEffort ?? '') ||
     planningQuestions !== settings.planningQuestions.join('\n') ||
     codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
@@ -664,6 +672,20 @@ export function Settings() {
                 A second model consulted during build runs only — planning, review and Sentry never use it. It spends extra tokens at the advisor model's own
                 rates, and it is an experimental Claude Code feature.
               </p>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="default-effort">
+                Default thinking effort
+              </label>
+              <select id="default-effort" name="default-effort" value={defaultEffort} onChange={(event) => setDefaultEffort(event.target.value)} className="field__input">
+                <option value="">CLI default</option>
+                {EFFORT_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">Applies to planning and build. A session can override it with its own effort.</p>
             </div>
           </div>
 
