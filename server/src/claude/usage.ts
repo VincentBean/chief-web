@@ -35,7 +35,11 @@ export const CLAUDE_REFRESH_LABEL = 'chief-web.role=claude-token-refresh';
 export const CLAUDE_REFRESH_MODEL = 'haiku';
 /** Tokens expiring within this window are refreshed by the background sweep. */
 export const CLAUDE_REFRESH_AHEAD_MS = 10 * 60_000;
-/** After a refresh that did not help, the same account is not probed again for this long. */
+/**
+ * After a refresh that left an expired token expired, the same account is not
+ * probed again for this long; the background sweep of a token that has not
+ * expired yet is throttled to one probe per this long as well.
+ */
 export const CLAUDE_REFRESH_COOLDOWN_MS = 60_000;
 /** How often the background ticker looks at every account; matches the 5-second stats poll. */
 export const CLAUDE_USAGE_TICK_MS = 5_000;
@@ -230,8 +234,10 @@ export class ClaudeUsageService {
   private readonly cached = new Map<string, ClaudeUsage>();
   private readonly fetching = new Map<string, Promise<ClaudeUsage>>();
   private readonly refreshing = new Map<string, Promise<void>>();
-  /** When a refresh that left the token as it was last ran, per account. */
+  /** When a refresh last left an *expired* token expired, per account. */
   private readonly lastFailedRefresh = new Map<string, number>();
+  /** When the sweep last probed a token that had not expired yet, per account. */
+  private readonly lastSweep = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private ticking: Promise<void> | null = null;
 
@@ -292,8 +298,8 @@ export class ClaudeUsageService {
     const ids = listClaudeAccounts(this.db).map((account) => account.id);
     const known = new Set(ids);
     for (const id of [...this.cached.keys()]) if (!known.has(id)) this.cached.delete(id);
-    for (const id of [...this.lastFailedRefresh.keys()]) {
-      if (!known.has(id)) this.lastFailedRefresh.delete(id);
+    for (const map of [this.lastFailedRefresh, this.lastSweep]) {
+      for (const id of [...map.keys()]) if (!known.has(id)) map.delete(id);
     }
     await Promise.all(
       ids.map(async (id) => {
@@ -312,6 +318,13 @@ export class ClaudeUsageService {
     if (credentials.expiresAt > now + CLAUDE_REFRESH_AHEAD_MS) return;
     if (expired(credentials.refreshTokenExpiresAt, now)) return;
     if (this.coolingDown(accountId)) return;
+    // The CLI only refreshes inside its own buffer, so a token with minutes
+    // left may come back unchanged; ask again a minute later, no sooner.
+    if (!expired(credentials.expiresAt, now)) {
+      const last = this.lastSweep.get(accountId);
+      if (last !== undefined && now - last < CLAUDE_REFRESH_COOLDOWN_MS) return;
+      this.lastSweep.set(accountId, now);
+    }
     await this.refreshToken(accountId);
   }
 
@@ -364,8 +377,9 @@ export class ClaudeUsageService {
    * The refresh probe: lets the CLI refresh its own token in a `--rm` runner
    * container mounting the account's directory. `claude auth status` first;
    * when the file is still expired afterwards, one cheap `claude -p`, which
-   * cannot run without a valid token. Shared per account; a refresh that
-   * leaves the token as it was starts a cooldown. Never throws.
+   * cannot run without a valid token. Shared per account; only a refresh that
+   * leaves an expired token expired starts the cooldown — a token that had
+   * not expired yet and came back unchanged is not a failure. Never throws.
    */
   private refreshToken(accountId: string): Promise<void> {
     const inFlight = this.refreshing.get(accountId);
@@ -385,15 +399,19 @@ export class ClaudeUsageService {
     const file = claudeCredentialsPath(this.config, accountId);
     const before = expiryOf(readClaudeCredentials(file));
     await this.runCli(accountId, CLAUDE_REFRESH_STATUS_ARGS, this.config.claudeProbeTimeoutMs);
-    if (expired(expiryOf(readClaudeCredentials(file)), this.now())) {
-      await this.runCli(
-        accountId,
-        CLAUDE_REFRESH_PROMPT_ARGS,
-        Math.max(this.config.claudeProbeTimeoutMs, PROMPT_REFRESH_MIN_TIMEOUT_MS),
-      );
+    if (!expired(expiryOf(readClaudeCredentials(file)), this.now())) {
+      if (expiryOf(readClaudeCredentials(file)) !== before) {
+        this.lastFailedRefresh.delete(accountId);
+        logger.info('claude token refreshed', { accountId });
+      }
+      return;
     }
-    const after = expiryOf(readClaudeCredentials(file));
-    if (after === before || expired(after, this.now())) {
+    await this.runCli(
+      accountId,
+      CLAUDE_REFRESH_PROMPT_ARGS,
+      Math.max(this.config.claudeProbeTimeoutMs, PROMPT_REFRESH_MIN_TIMEOUT_MS),
+    );
+    if (expired(expiryOf(readClaudeCredentials(file)), this.now())) {
       this.lastFailedRefresh.set(accountId, this.now());
     } else {
       this.lastFailedRefresh.delete(accountId);

@@ -242,6 +242,32 @@ describe('claude usage', () => {
     assert.equal(requests.length, asked);
   });
 
+  it('a sweep that left a near-expiry token unchanged does not block the refresh once it expires', async () => {
+    let clock = Date.now();
+    const id = account();
+    writeCredentials(id, { accessToken: 'old', expiresAt: clock + 5 * 60_000 });
+    answers.set('new', { status: 200, body: { five_hour: { utilization: 3, resets_at: null } } });
+    const paths = new HostPaths(config, {
+      inspectVolume: (name) => Promise.resolve({ name, mountpoint: dataDir }),
+    });
+    const usages = new ClaudeUsageService(config, db, paths, run, fetch, () => clock);
+    // Not expired yet: the CLI leaves the token alone, no `-p`.
+    await usages.tick();
+    assert.deepEqual(probes, [['auth', 'status', '--json']]);
+
+    clock += 6 * 60_000;
+    onProbe = (accountId, cli) => {
+      if (cli[0] === '-p') {
+        writeCredentials(accountId, { accessToken: 'new', expiresAt: clock + HOUR });
+      }
+    };
+    const usage = await usages.refresh(id);
+
+    assert.equal(usage.error, null);
+    assert.equal(usage.fiveHour?.utilization, 3);
+    assert.deepEqual(probes.at(-1), ['-p', 'ok', '--max-turns', '1', '--model', CLAUDE_REFRESH_MODEL]);
+  });
+
   it('runs the refresh probe in a --rm runner container mounting the account', async () => {
     const id = account();
     writeCredentials(id, { accessToken: 'old', expiresAt: Date.now() - 1000 });
