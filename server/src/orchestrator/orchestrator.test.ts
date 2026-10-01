@@ -27,7 +27,7 @@ import {
   type ListContainersOptions,
   type VolumeDetails,
 } from '../docker/index.js';
-import { addClaudeAccount, removeClaudeAccount } from '../claude/index.js';
+import { addClaudeAccount, removeClaudeAccount, setDefaultClaudeAccount } from '../claude/index.js';
 import {
   claudeAccountDir,
   RUNNER_CLAUDE_DIR,
@@ -574,13 +574,49 @@ describe('session container lifecycle', () => {
     assert.equal(fs.readFileSync(sessionKeyPath(env.config, session.id), 'utf8').trim(), PRIVATE_KEY);
   });
 
-  it('mounts the account it is asked for instead of the default', async () => {
+  it("mounts the session's own account instead of the default", async () => {
     const other = addClaudeAccount(env.config, env.db).id;
-    const view = await orchestrator.start(env.session(), other);
+    const session = env.session();
+    updateSession(env.db, session.id, { claudeAccountId: other });
+    // The row is read again: a caller holding the pre-PATCH session still gets it.
+    const view = await orchestrator.start(session);
 
     const created = daemon.container(view.id);
     assert.equal(created?.labels[CLAUDE_ACCOUNT_LABEL], other);
     assert.equal(created?.binds[0], `${claudeAccountDir(env.config, other)}:${RUNNER_CLAUDE_DIR}`);
+  });
+
+  it('recreates a running container on another account only to launch agent work', async () => {
+    const session = env.session();
+    const first = await orchestrator.start(session);
+    const other = addClaudeAccount(env.config, env.db).id;
+    updateSession(env.db, session.id, { claudeAccountId: other });
+
+    // A push or a browser next to a running iteration keeps the container.
+    const reused = await orchestrator.start(session);
+    assert.equal(reused.id, first.id);
+    assert.equal(daemon.container(first.id)?.running, true);
+
+    const recreated = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(recreated.id, first.id);
+    assert.equal(daemon.container(first.id), undefined);
+    assert.equal(daemon.container(recreated.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
+    assert.equal(getSession(env.db, session.id)?.containerId, recreated.id);
+
+    // Back on the same account, agent work reuses it.
+    const again = await orchestrator.start(session, { agentWork: true });
+    assert.equal(again.id, recreated.id);
+  });
+
+  it('follows a default change for a session that has no account of its own', async () => {
+    const session = env.session();
+    const first = await orchestrator.start(session);
+    const other = addClaudeAccount(env.config, env.db).id;
+    setDefaultClaudeAccount(env.db, other);
+
+    const recreated = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(recreated.id, first.id);
+    assert.equal(daemon.container(recreated.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
   });
 
   it('starts nothing while no Claude account is connected', async () => {

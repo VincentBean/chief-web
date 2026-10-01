@@ -82,6 +82,20 @@ session workspaces. The legacy `claude-auth` volume of an install from before
 multiple accounts is mounted read-only into the server and imported once as the
 first account; nothing else uses it.
 
+**Which account a session runs on.** A session stores `claudeAccountId`
+(`null` = follow the default); `GET /api/sessions[/<id>]` also returns
+`effectiveClaudeAccountId`, the account its next container mounts. `POST
+/api/sessions` and `PATCH /api/sessions/<id>/account { claudeAccountId }`
+answer `400 claude_account_unknown` for an id that names no account and `409
+claude_account_not_authenticated` for one that is not signed in; the PATCH is
+refused (`409 claude_account_locked`) once the session is finished or merged,
+like the thinking effort. Session containers carry the label
+`chief-web.claude-account=<id>`. When a session's effective account changes
+(a PATCH, or a new default for a session that follows it) its running container
+is left alone until the next launch of agent work — a build iteration, a
+planning terminal, a review or a description — which recreates it on the new
+account; the iteration already running is never interrupted.
+
 **Plan usage and token refresh.** Every account's 5-hour and 7-day usage is
 read from Anthropic's usage endpoint (`GET /api/oauth/usage`) with the OAuth
 access token in the account's `.credentials.json`, by a background ticker

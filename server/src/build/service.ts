@@ -851,7 +851,7 @@ export class BuildService {
     try {
       let containerId: string;
       try {
-        containerId = (await this.containers.start(session)).id;
+        containerId = (await this.containers.start(session, { agentWork: true })).id;
       } catch (cause) {
         throw new BuildError(
           502,
@@ -1077,7 +1077,7 @@ export class BuildService {
     snapshot: PrdSnapshot,
     state: RunState,
   ): Promise<boolean> {
-    state.containerId = (await this.containers.start(session)).id;
+    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
 
     // chief marks the story in-progress before invoking the agent, and so does
     // this: the status the loop leaves behind is what the *next* read is

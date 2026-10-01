@@ -249,7 +249,7 @@ export class PlanningService {
     // a failed step can have removed it; starting it again is idempotent.
     let containerId: string;
     try {
-      containerId = (await this.containers.start(session)).id;
+      containerId = (await this.containers.start(session, { agentWork: true })).id;
     } catch (cause) {
       throw new PlanningError(
         502,

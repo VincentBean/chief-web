@@ -178,23 +178,12 @@ export interface ClaudeAccountBindings {
   readonly recurringTasks: number;
 }
 
-/**
- * Tables whose `claude_account_id` column names the account a row runs on.
- * The column arrives with US-009; until a table has it, nothing in it can be
- * bound and it is skipped.
- */
+/** Tables whose `claude_account_id` column names the account a row runs on. */
 const BOUND_TABLES = { sessions: 'sessions', recurringTasks: 'recurring_tasks' } as const;
 const ACCOUNT_COLUMN = 'claude_account_id';
 
-function hasAccountColumn(db: Database, table: string): boolean {
-  return db
-    .prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`)
-    .get(table, ACCOUNT_COLUMN) !== undefined;
-}
-
 export function claudeAccountBindings(db: Database, id: string): ClaudeAccountBindings {
   const count = (table: string): number => {
-    if (!hasAccountColumn(db, table)) return 0;
     const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${ACCOUNT_COLUMN} = ?`).get(id);
     return row ? integer(row, 'n') : 0;
   };
@@ -210,7 +199,6 @@ export function claudeAccountBindings(db: Database, id: string): ClaudeAccountBi
 export function deleteClaudeAccountAndReferences(db: Database, id: string): boolean {
   return withTransaction(db, () => {
     for (const table of Object.values(BOUND_TABLES)) {
-      if (!hasAccountColumn(db, table)) continue;
       db.prepare(`UPDATE ${table} SET ${ACCOUNT_COLUMN} = NULL WHERE ${ACCOUNT_COLUMN} = ?`).run(id);
     }
     for (const key of CLAUDE_ACCOUNT_SETTING_KEYS) {

@@ -781,6 +781,10 @@ export interface Session {
   feedback: string | null;
   /** The session's own thinking effort; null follows the global default. */
   effort: EffortLevel | null;
+  /** The session's own Claude account; null follows the default account. */
+  claudeAccountId: string | null;
+  /** The account its next container mounts; null only with no account at all. */
+  effectiveClaudeAccountId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -846,6 +850,8 @@ export interface SessionInput {
   feedback?: string;
   /** Omit or null to follow the global default thinking effort. */
   effort?: EffortLevel | null;
+  /** Omit or null to run on the default Claude account. */
+  claudeAccountId?: string | null;
 }
 
 /** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */

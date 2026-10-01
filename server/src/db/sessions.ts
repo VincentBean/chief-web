@@ -203,6 +203,11 @@ export interface Session {
    * US-002), or null to follow the global default.
    */
   readonly effort: EffortLevel | null;
+  /**
+   * The Claude account every container of this session mounts (multiple
+   * accounts US-009), or null to follow the default account.
+   */
+  readonly claudeAccountId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -226,6 +231,8 @@ export interface CreateSessionInput {
   readonly feedback?: string | null;
   /** The thinking effort; defaults to null, the global default. */
   readonly effort?: EffortLevel | null;
+  /** The Claude account; defaults to null, the default account. */
+  readonly claudeAccountId?: string | null;
 }
 
 export interface UpdateSessionInput {
@@ -247,6 +254,7 @@ export interface UpdateSessionInput {
   readonly prDescription?: string | null;
   readonly feedback?: string | null;
   readonly effort?: EffortLevel | null;
+  readonly claudeAccountId?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -273,6 +281,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   prDescription: 'pr_description',
   feedback: 'feedback',
   effort: 'effort',
+  claudeAccountId: 'claude_account_id',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -337,6 +346,7 @@ export function mapSession(row: Row): Session {
     prDescription: nullableText(row, 'pr_description'),
     feedback: nullableText(row, 'feedback'),
     effort: effortOf(row),
+    claudeAccountId: nullableText(row, 'claude_account_id'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -367,6 +377,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     prDescription: null,
     feedback: input.feedback ?? null,
     effort: input.effort ?? null,
+    claudeAccountId: input.claudeAccountId ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -376,8 +387,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
         waiting_until, code_review, open_pull_request, recurring_task_id, feedback,
-        effort, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        effort, claude_account_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -397,6 +408,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.recurringTaskId,
     session.feedback,
     session.effort,
+    session.claudeAccountId,
     session.createdAt,
     session.updatedAt,
   );

@@ -1237,6 +1237,16 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    id: '0026_claude_account_bindings',
+    sql: `
+      -- The Claude account a session, or every run of a recurring task, runs
+      -- on (multiple accounts US-009). NULL follows the default account, which
+      -- is what every existing row did before it could choose.
+      ALTER TABLE sessions ADD COLUMN claude_account_id TEXT;
+      ALTER TABLE recurring_tasks ADD COLUMN claude_account_id TEXT;
+    `,
+  },
 ];
 
 /**

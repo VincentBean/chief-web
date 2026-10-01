@@ -148,9 +148,6 @@ describe('claude accounts', () => {
     it('counts and clears the sessions and recurring tasks bound to an account', () => {
       const own = openDatabase(IN_MEMORY);
       try {
-        // The columns US-009 adds; until then the helpers skip the tables.
-        own.exec('ALTER TABLE sessions ADD COLUMN claude_account_id TEXT');
-        own.exec('ALTER TABLE recurring_tasks ADD COLUMN claude_account_id TEXT');
         const account = createClaudeAccount(own);
         const other = createClaudeAccount(own);
         const repository = createRepository(own, {
@@ -168,13 +165,13 @@ describe('claude accounts', () => {
           prTarget: 'develop',
         });
         const bound = (name: string, accountId: string): void => {
-          const session = createSession(own, {
+          createSession(own, {
             repositoryId: repository.id,
             name,
             baseBranch: 'develop',
             prTargetBranch: 'develop',
+            claudeAccountId: accountId,
           });
-          own.prepare('UPDATE sessions SET claude_account_id = ? WHERE id = ?').run(accountId, session.id);
         };
         bound('one', account.id);
         bound('two', account.id);

@@ -28,6 +28,7 @@ export {
   type SessionContainerView,
   type SessionDocker,
   SessionOrchestrator,
+  type SessionStartOptions,
 } from './service.js';
 export {
   ensureSessionWorkspace,

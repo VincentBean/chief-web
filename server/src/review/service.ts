@@ -96,7 +96,7 @@ export class ReviewService {
     // finished session's container may have been stopped since the build.
     let containerId: string;
     try {
-      containerId = (await this.containers.start(session)).id;
+      containerId = (await this.containers.start(session, { agentWork: true })).id;
     } catch (cause) {
       return this.failed(session.id, session.name, 'container_unavailable', {
         message: `The review could not be started: ${describe(cause)}`,

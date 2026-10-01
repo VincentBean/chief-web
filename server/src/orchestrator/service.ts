@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import {
   type Database,
+  getSession,
   listSessions,
   type Session,
   updateSession,
@@ -20,6 +21,7 @@ import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
 import { getGitIdentity } from '../settings/index.js';
 import {
+  CLAUDE_ACCOUNT_LABEL,
   type PrRunIdentity,
   prRunContainerName,
   prRunContainerSpec,
@@ -73,6 +75,18 @@ export interface SessionContainerView {
   readonly state: string;
 }
 
+/** How {@link SessionOrchestrator.start} is asked for a container. */
+export interface SessionStartOptions {
+  /**
+   * The caller is about to launch agent work — a build iteration, a planning
+   * terminal, a review or a description (multiple accounts US-009). Only then
+   * is a running container on the wrong Claude account recreated: anything
+   * else (a push, a browser, a voice agent) may run next to an agent and must
+   * not pull its container out from under it.
+   */
+  readonly agentWork?: boolean;
+}
+
 /**
  * Per-session containers (US-009).
  *
@@ -97,13 +111,34 @@ export class SessionOrchestrator {
   /**
    * Ensures `session` has a running container and returns it. An existing
    * running container is reused; a stopped or duplicate one is replaced.
+   *
+   * The container mounts the session's effective Claude account (multiple
+   * accounts US-009): its own `claudeAccountId`, else the default. The row is
+   * read again for it, because callers hold a `Session` from before a
+   * `PATCH`. When that account is no longer the one a running container
+   * mounts — the session was moved, or the default changed under a session
+   * that follows it — the container is recreated, but only for
+   * {@link SessionStartOptions.agentWork}: an agent iteration already running
+   * keeps its container until the next one launches.
    */
-  async start(session: Session, accountId?: string): Promise<SessionContainerView> {
+  async start(session: Session, options: SessionStartOptions = {}): Promise<SessionContainerView> {
+    const current = getSession(this.db, session.id) ?? session;
+    const wanted = current.claudeAccountId ?? defaultClaudeAccountId(this.db);
     const existing = await this.containersFor(session.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) {
-      this.recordContainer(session, running.id);
-      return toView(running);
+      const mounted = running.labels[CLAUDE_ACCOUNT_LABEL];
+      if (options.agentWork !== true || wanted === null || mounted === wanted) {
+        this.recordContainer(session, running.id);
+        return toView(running);
+      }
+      logger.info('session container is on another claude account; recreating it', {
+        session: session.id,
+        container: running.id,
+        mounted: mounted ?? null,
+        account: wanted,
+      });
+      await this.notifyStopping(session.id);
     }
 
     // The workspace is created before the container so the bind mount does not
@@ -113,7 +148,7 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, session.id, privateKey);
 
-    const account = this.accountFor(accountId);
+    const account = this.accountFor(wanted);
     const spec = sessionContainerSpec({
       session,
       accountId: account,
@@ -147,6 +182,7 @@ export class SessionOrchestrator {
       container: containerId,
       name,
       workspace: workspaceDir,
+      account,
     });
     return { id: containerId, name, running: true, state: 'running' };
   }
@@ -267,6 +303,7 @@ export class SessionOrchestrator {
       container: containerId,
       name,
       workspace: workspaceDir,
+      account,
     });
     return { id: containerId, name, running: true, state: 'running' };
   }
@@ -353,7 +390,7 @@ export class SessionOrchestrator {
    * default. With no account connected there are no credentials to mount, so
    * nothing is started.
    */
-  private accountFor(accountId: string | undefined): string {
+  private accountFor(accountId: string | null | undefined): string {
     const resolved = accountId ?? defaultClaudeAccountId(this.db);
     if (resolved === null) {
       throw new OrchestratorError(

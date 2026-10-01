@@ -168,6 +168,22 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
   });
 
+  // Binds the session to a Claude account (multiple accounts US-009), or with
+  // `claudeAccountId: null` back to the default. Locked like the effort; the
+  // service checks the account exists and is signed in.
+  router.patch('/sessions/:id/account', (req, res) => {
+    const parsed = parseSetClaudeAccount(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setClaudeAccount(req.params.id, parsed.claudeAccountId));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
   // "Back to planning": the same transition in reverse.
   router.delete('/sessions/:id/ready', (req, res) => {
     try {
@@ -326,6 +342,35 @@ function parseSetEffort(body: unknown): { effort: EffortLevel | null } | Invalid
   return { effort: parsed.effort };
 }
 
+/** The body of `PATCH /sessions/:id/account`: the field is required, `null` included. */
+function parseSetClaudeAccount(body: unknown): { claudeAccountId: string | null } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return { ...badBody, error: 'invalid_claude_account_id' };
+
+  const parsed = parseClaudeAccountId(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.claudeAccountId === undefined) {
+    return { error: 'invalid_claude_account_id', message: 'claudeAccountId is required.' };
+  }
+  return { claudeAccountId: parsed.claudeAccountId };
+}
+
+/** Absent and `null` both mean "use the default account"; anything else must be a string id. */
+function parseClaudeAccountId(
+  input: Record<string, unknown>,
+): { claudeAccountId?: string | null } | Invalid {
+  const raw = input.claudeAccountId;
+  if (raw === undefined) return {};
+  if (raw === null) return { claudeAccountId: null };
+  if (typeof raw !== 'string' || raw === '') {
+    return {
+      error: 'invalid_claude_account_id',
+      message: 'claudeAccountId must be an account id or null.',
+    };
+  }
+  return { claudeAccountId: raw };
+}
+
 /** `undefined` when the field is absent; an `Invalid` when it is not a boolean. */
 function optionalBoolean(
   input: Record<string, unknown>,
@@ -434,6 +479,9 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const effort = parseEffort(input);
   if ('error' in effort) return effort;
 
+  const claudeAccount = parseClaudeAccountId(input);
+  if ('error' in claudeAccount) return claudeAccount;
+
   return {
     repositoryId,
     name,
@@ -447,6 +495,7 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     ...(baseBranch === undefined ? {} : { baseBranch }),
     ...(feedback === undefined ? {} : { feedback }),
     ...effort,
+    ...claudeAccount,
   };
 }
 
