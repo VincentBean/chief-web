@@ -35,8 +35,8 @@ repository, generate a new keypair, and add the new public key on GitHub.
 
 The indicator on **Settings → Claude Code** is the verdict of a real
 `claude auth status` run in a container, so it is the truth, not a cached guess.
-Session creation, planning and any retry that runs an agent are blocked while it
-says this — deliberately, so you find out here instead of two hours into a
+Session creation, planning and any retry that runs an agent are blocked while
+no account is signed in — deliberately, so you find out here instead of two hours into a
 build.
 
 - **Credentials expired**, or you signed the account out elsewhere: press **Set

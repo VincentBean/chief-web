@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { describeBuildSlots, logout } from './api.ts';
+import { claudeSignedIn, describeBuildSlots, logout } from './api.ts';
 import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
@@ -201,14 +201,14 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
         )}
       </div>
       <Link
-        className={`status-row status-row--link ${claude === null ? '' : claude.status.authenticated ? 'status-row--ok' : 'status-row--danger'}`}
+        className={`status-row status-row--link ${claude === null ? '' : claudeSignedIn(claude) ? 'status-row--ok' : 'status-row--danger'}`}
         href="/settings#claude"
-        title={claude?.status.account ?? 'Claude Code sign-in'}
+        title={claude?.accounts.find((account) => account.authenticated)?.email ?? 'Claude Code sign-in'}
       >
-        <span className={`dot ${claude === null ? 'dot--neutral' : claude.status.authenticated ? 'dot--done' : 'dot--danger'}`} />
+        <span className={`dot ${claude === null ? 'dot--neutral' : claudeSignedIn(claude) ? 'dot--done' : 'dot--danger'}`} />
         <span className="status-row__label">Claude</span>
         <span className="status-row__value">
-          {claude === null ? 'checking…' : claude.status.authenticated ? 'signed in' : 'not signed in'}
+          {claude === null ? 'checking…' : claudeSignedIn(claude) ? 'signed in' : 'not signed in'}
         </span>
       </Link>
     </div>

@@ -3,6 +3,7 @@ import {
   type ClaudeAccount,
   type Database,
   getClaudeAccount,
+  listClaudeAccounts,
   updateClaudeAccount,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
@@ -17,7 +18,7 @@ import {
   removeContainerArgs,
 } from './login.js';
 import { addClaudeAccount, defaultClaudeAccountId, removeClaudeAccount } from './accounts.js';
-import { type ClaudeAuthStatus, failedClaudeStatus, probeClaudeAuth } from './status.js';
+import { type ClaudeAuthStatus, probeClaudeAuth } from './status.js';
 
 /** A failure with an HTTP status the route can hand straight back. */
 export class ClaudeError extends Error {
@@ -36,6 +37,9 @@ export class ClaudeError extends Error {
 /** How long a `docker run --detach` / `docker rm -f` may take. */
 const CONTAINER_COMMAND_TIMEOUT_MS = 60_000;
 
+/** At most this many probe containers run at once when every account is checked. */
+export const CLAUDE_STATUS_PROBE_CONCURRENCY = 3;
+
 export interface ClaudeLoginView {
   /** True while a login terminal is open and its process still running. */
   readonly active: boolean;
@@ -47,10 +51,30 @@ export interface ClaudeLoginView {
   readonly containerName: string | null;
 }
 
+/**
+ * One account and what its last probe said (multiple accounts US-004). The
+ * profile fields come off the row, which every successful probe updates, so
+ * an account that is signed out still shows who it was.
+ */
+export interface ClaudeAccountStatusView {
+  readonly id: string;
+  readonly nickname: string | null;
+  readonly email: string | null;
+  readonly organization: string | null;
+  readonly subscription: string | null;
+  readonly authenticated: boolean;
+  /** Why the probe could not answer, or `null` when it did. */
+  readonly error: string | null;
+  readonly checkedAt: string;
+  /** The account's plan usage; filled in by US-005. */
+  readonly usage: null;
+}
+
 /** Everything the settings page needs in one response. */
 export interface ClaudeStateView {
-  readonly status: ClaudeAuthStatus;
-  /** The account `status` describes, or null when none is connected. */
+  /** Every account in display order. */
+  readonly accounts: readonly ClaudeAccountStatusView[];
+  /** The account a launch uses unless told otherwise, or null when none exist. */
   readonly defaultAccountId: string | null;
   readonly login: ClaudeLoginView;
 }
@@ -81,20 +105,20 @@ interface OpenLogin {
 /**
  * Claude Code authentication (US-008).
  *
- * Owns two things: the cached answer to "is Claude signed in?" (a probe
- * container, see `status.ts`) and the temporary container the interactive
- * `claude auth login` of one account runs in (multiple accounts US-003). At
- * most one login is open at a time.
+ * Owns two things: the cached answer to "is this account signed in?" (a probe
+ * container per account, see `status.ts`; multiple accounts US-004) and the
+ * temporary container the interactive `claude auth login` of one account runs
+ * in (multiple accounts US-003). At most one login is open at a time.
  *
- * The probe result is cached because it costs a container start (~1.5s) and is
- * read on every settings page load and every session creation. Anything that
- * could have changed the credentials — starting or ending a login — clears the
- * cache, so the status indicator reflects a finished login immediately and
- * without a server restart.
+ * Probe results are cached per account because each costs a container start
+ * (~1.5s) and is read on every settings page load and every session creation.
+ * Starting or ending an account's login clears that account's entry, so the
+ * status indicator reflects a finished login immediately and without a server
+ * restart.
  */
 export class ClaudeService {
-  private cached: ClaudeAuthStatus | null = null;
-  private probing: Promise<ClaudeAuthStatus> | null = null;
+  private readonly cached = new Map<string, ClaudeAuthStatus>();
+  private readonly probing = new Map<string, Promise<ClaudeAuthStatus>>();
   private login: OpenLogin | null = null;
 
   constructor(
@@ -106,36 +130,77 @@ export class ClaudeService {
   ) {}
 
   /**
-   * Cached unless `force`, or unless the cached answer is older than
-   * `CLAUDE_STATUS_CACHE_MS`. Concurrent callers share one probe container.
+   * One account's status: cached unless `force`, or unless the cached answer
+   * is older than `CLAUDE_STATUS_CACHE_MS`. Concurrent callers for the same
+   * account share one probe container.
    */
-  async status(force = false): Promise<ClaudeAuthStatus> {
-    if (!force && this.cached !== null && this.isFresh(this.cached)) return this.cached;
-    this.probing ??= this.probe().finally(() => {
-      this.probing = null;
-    });
-    const status = await this.probing;
-    this.cached = status;
-    return status;
+  async status(accountId: string, force = false): Promise<ClaudeAuthStatus> {
+    this.requireAccount(accountId);
+    const cached = this.cached.get(accountId);
+    if (!force && cached !== undefined && this.isFresh(cached)) return cached;
+    let probing = this.probing.get(accountId);
+    if (probing === undefined) {
+      const started = this.probe(accountId).then((status) => {
+        // An entry invalidated while this probe ran is not refilled by it.
+        if (this.probing.get(accountId) === started) {
+          this.probing.delete(accountId);
+          this.cached.set(accountId, status);
+        }
+        return status;
+      });
+      probing = started;
+      this.probing.set(accountId, started);
+    }
+    return probing;
   }
 
   /**
-   * Probes the default account. Until per-account status (US-004) there is one
-   * answer, and with no account at all it is "not signed in", without a probe.
+   * Every account's status in display order, probing in parallel with at most
+   * `CLAUDE_STATUS_PROBE_CONCURRENCY` probe containers at once.
    */
-  private probe(): Promise<ClaudeAuthStatus> {
-    const accountId = defaultClaudeAccountId(this.db);
-    if (accountId === null) {
-      return Promise.resolve(
-        failedClaudeStatus('No Claude account is connected yet. Use Set up Claude to sign one in.'),
-      );
+  async statuses(force = false): Promise<ClaudeAccountStatusView[]> {
+    const accounts = listClaudeAccounts(this.db);
+    const statuses = await mapWithConcurrency(
+      accounts,
+      CLAUDE_STATUS_PROBE_CONCURRENCY,
+      (account) => this.status(account.id, force).catch(() => null),
+    );
+    const views: ClaudeAccountStatusView[] = [];
+    accounts.forEach((account, index) => {
+      const status = statuses[index];
+      // Removed while it was being probed.
+      if (status === null || status === undefined) return;
+      views.push(accountStatusView(getClaudeAccount(this.db, account.id) ?? account, status));
+    });
+    return views;
+  }
+
+  /**
+   * Runs the probe and, when the CLI says the account is signed in, writes the
+   * profile it reported onto the row so lists can show it without a probe.
+   */
+  private async probe(accountId: string): Promise<ClaudeAuthStatus> {
+    const status = await probeClaudeAuth(this.config, this.run, this.paths, accountId);
+    if (status.authenticated) {
+      updateClaudeAccount(this.db, accountId, {
+        email: status.account,
+        organization: status.organization,
+        subscription: status.subscription,
+        authMethod: status.authMethod,
+      });
     }
-    return probeClaudeAuth(this.config, this.run, this.paths, accountId);
+    return status;
+  }
+
+  /** Forgets an account's cached status, and any probe of it still running. */
+  private invalidate(accountId: string): void {
+    this.cached.delete(accountId);
+    this.probing.delete(accountId);
   }
 
   async state(force = false): Promise<ClaudeStateView> {
-    const status = await this.status(force);
-    return { status, defaultAccountId: defaultClaudeAccountId(this.db), login: this.loginView() };
+    const accounts = await this.statuses(force);
+    return { accounts, defaultAccountId: defaultClaudeAccountId(this.db), login: this.loginView() };
   }
 
   /**
@@ -179,20 +244,14 @@ export class ClaudeService {
     const open = this.login?.accountId === accountId ? this.login : null;
     if (open !== null) await this.discardLogin();
     await this.removeContainer(claudeLoginContainerName(accountId));
-    this.cached = null;
+    this.invalidate(accountId);
 
-    const status = await probeClaudeAuth(this.config, this.run, this.paths, accountId);
-    let account = this.requireAccount(accountId);
-    if (status.authenticated) {
-      account =
-        updateClaudeAccount(this.db, accountId, {
-          email: status.account,
-          organization: status.organization,
-          subscription: status.subscription,
-          authMethod: status.authMethod,
-        }) ?? account;
-    } else if (open?.createdByLogin === true && neverAuthenticated(account)) {
+    // A successful probe has already written the profile onto the row.
+    const status = await this.status(accountId, true);
+    const account = this.requireAccount(accountId);
+    if (!status.authenticated && open?.createdByLogin === true && neverAuthenticated(account)) {
       removeClaudeAccount(this.config, this.db, accountId);
+      this.invalidate(accountId);
       logger.info('removed the account of an abandoned claude login', { accountId });
       return { account: null, status, login: this.loginView() };
     }
@@ -273,8 +332,8 @@ export class ClaudeService {
     }
 
     this.login = { accountId, terminalId, containerId, createdByLogin };
-    // The login is about to change the credentials; nothing cached survives it.
-    this.cached = null;
+    // The login is about to change this account's credentials.
+    this.invalidate(accountId);
     logger.info('claude login terminal opened', {
       accountId,
       terminal: terminalId,
@@ -335,6 +394,41 @@ export class ClaudeService {
     const age = Date.now() - Date.parse(status.checkedAt);
     return Number.isFinite(age) && age >= 0 && age < this.config.claudeStatusCacheMs;
   }
+}
+
+function accountStatusView(
+  account: ClaudeAccount,
+  status: ClaudeAuthStatus,
+): ClaudeAccountStatusView {
+  return {
+    id: account.id,
+    nickname: account.nickname,
+    email: account.email,
+    organization: account.organization,
+    subscription: account.subscription,
+    authenticated: status.authenticated,
+    error: status.error,
+    checkedAt: status.checkedAt,
+    usage: null,
+  };
+}
+
+/** `items.map(fn)` with at most `limit` calls in flight; results keep their order. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 /** No probe has ever written a profile onto the row. */

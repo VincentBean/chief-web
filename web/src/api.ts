@@ -417,11 +417,41 @@ export interface ClaudeLogin {
   containerName: string | null;
 }
 
+/** Mirrors the server's `ClaudeAccountStatusView` (multiple accounts US-004). */
+export interface ClaudeAccountStatus {
+  id: string;
+  nickname: string | null;
+  /** The last probed profile; kept while the account is signed out. */
+  email: string | null;
+  organization: string | null;
+  subscription: string | null;
+  authenticated: boolean;
+  /** Why the check could not run; `authenticated` is then always false. */
+  error: string | null;
+  checkedAt: string;
+  /** Plan usage, filled in by US-005. */
+  usage: null;
+}
+
 export interface ClaudeState {
-  status: ClaudeAuthStatus;
-  /** The account `status` describes; null when none is connected. */
+  /** Every account in display order. */
+  accounts: ClaudeAccountStatus[];
+  /** The account a launch uses unless told otherwise; null when none exist. */
   defaultAccountId: string | null;
   login: ClaudeLogin;
+}
+
+/** Sessions can launch once any account is signed in. */
+export function claudeSignedIn(state: ClaudeState): boolean {
+  return state.accounts.some((account) => account.authenticated);
+}
+
+/** One account's entry in the state, or null when it is not listed. */
+export function claudeAccountStatus(
+  state: ClaudeState,
+  accountId: string | null,
+): ClaudeAccountStatus | null {
+  return state.accounts.find((account) => account.id === accountId) ?? null;
 }
 
 /** Mirrors the server's `ClaudeAccount` row. */

@@ -21,6 +21,8 @@ export {
 export {
   ClaudeError,
   type ClaudeAccountLoginView,
+  type ClaudeAccountStatusView,
+  CLAUDE_STATUS_PROBE_CONCURRENCY,
   type ClaudeLoginView,
   ClaudeService,
   type ClaudeStateView,

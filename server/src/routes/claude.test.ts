@@ -29,13 +29,21 @@ const PASSWORD = 'correct horse battery staple';
 /** Id the fake `docker run` reports, registered in the fake daemon below. */
 const LOGIN_CONTAINER = 'login-container-id';
 
+interface AccountStatus {
+  id: string;
+  nickname: string | null;
+  email: string | null;
+  organization: string | null;
+  subscription: string | null;
+  authenticated: boolean;
+  error: string | null;
+  checkedAt: string;
+  usage: null;
+}
+
 interface StateBody {
-  status: {
-    authenticated: boolean;
-    account: string | null;
-    subscription: string | null;
-    error: string | null;
-  };
+  accounts: AccountStatus[];
+  defaultAccountId: string | null;
   login: LoginState;
 }
 
@@ -175,11 +183,20 @@ describe('claude api', () => {
     assert.equal(response.status, 401);
   });
 
+  /** The entry of the account every test shares. */
+  const own = (body: StateBody): AccountStatus => {
+    const entry = body.accounts.find((account) => account.id === accountId);
+    assert.ok(entry, 'the account should be listed');
+    return entry;
+  };
+
   it('probes a container with the account directory mounted', async () => {
     const body = await state();
 
-    assert.equal(body.status.authenticated, false);
-    assert.equal(body.status.error, null);
+    assert.equal(own(body).authenticated, false);
+    assert.equal(own(body).error, null);
+    assert.equal(own(body).usage, null);
+    assert.equal(body.defaultAccountId, accountId);
     const probe = commands.find((args) => args.includes('status'));
     assert.ok(probe, 'a probe container should have been started');
     assert.ok(probe.includes('--rm'));
@@ -191,9 +208,11 @@ describe('claude api', () => {
 
     const body = await state();
 
-    assert.equal(body.status.authenticated, true);
-    assert.equal(body.status.account, 'dev@example.com');
-    assert.equal(body.status.subscription, 'max');
+    assert.equal(own(body).authenticated, true);
+    assert.equal(own(body).email, 'dev@example.com');
+    assert.equal(own(body).subscription, 'max');
+    // Written back, so a list can show it without a probe.
+    assert.equal(getClaudeAccount(db, accountId)?.email, 'dev@example.com');
   });
 
   it('fails closed when Docker cannot answer', async () => {
@@ -201,8 +220,8 @@ describe('claude api', () => {
 
     const body = await state();
 
-    assert.equal(body.status.authenticated, false);
-    assert.match(body.status.error ?? '', /Cannot connect to the Docker daemon/);
+    assert.equal(own(body).authenticated, false);
+    assert.match(own(body).error ?? '', /Cannot connect to the Docker daemon/);
   });
 
   it('blocks session creation while Claude is not authenticated', async () => {
@@ -211,7 +230,7 @@ describe('claude api', () => {
 
     assert.equal(response.status, 409);
     assert.equal(body.error, 'claude_not_authenticated');
-    assert.match(body.message, /Set up Claude/);
+    assert.match(body.message, /Add an account in Settings/);
   });
 
   it('lets session creation through once Claude is authenticated', async () => {

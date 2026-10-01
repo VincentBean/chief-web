@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useState } from 'react';
 
 import {
+  claudeSignedIn,
   createSession,
   EFFORT_LEVELS,
   type EffortLevel,
@@ -137,7 +138,7 @@ export function NewSession() {
       .finally(() => setBusy(false));
   };
 
-  const blocked = claude !== null && !claude.status.authenticated;
+  const blocked = claude !== null && !claudeSignedIn(claude);
 
   return (
     <div className="page page--narrow">

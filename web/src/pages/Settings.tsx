@@ -7,6 +7,8 @@ import {
   type AgentModel,
   addClaudeAccount,
   ApiError,
+  claudeAccountStatus,
+  claudeSignedIn,
   EFFORT_LEVELS,
   type EffortLevel,
   checkElevenLabsKey,
@@ -358,7 +360,7 @@ export function Settings() {
       // none, or one already signed in, a new account is added (US-003).
       const defaultAccountId = claude?.defaultAccountId ?? null;
       const started =
-        defaultAccountId !== null && claude?.status.authenticated !== true
+        defaultAccountId !== null && (claude === null || claudeAccountStatus(claude, defaultAccountId)?.authenticated !== true)
           ? await startClaudeLogin(defaultAccountId)
           : await addClaudeAccount();
       setClaude(await fetchClaudeState());
@@ -374,7 +376,7 @@ export function Settings() {
       const state = await fetchClaudeState({ refresh: stopped === null });
       setClaude(state);
       setLoginTerminal(null);
-      return (stopped?.status ?? state.status).authenticated
+      return (stopped?.status ?? claudeAccountStatus(state, accountId))?.authenticated === true
         ? { ok: true, text: 'Claude Code is signed in.' }
         : { ok: false, text: 'Claude Code is still not signed in.' };
     });
@@ -384,9 +386,10 @@ export function Settings() {
     fetchClaudeState({ refresh: true })
       .then((state) => {
         setClaude(state);
+        const signedIn = claudeAccountStatus(state, state.login.accountId)?.authenticated === true;
         toast.push(
-          state.status.authenticated ? 'ok' : 'error',
-          state.status.authenticated
+          signedIn ? 'ok' : 'error',
+          signedIn
             ? 'Claude Code is signed in. Close the terminal to clean up.'
             : 'The login ended without signing in. Close the terminal and try again.',
         );
@@ -398,9 +401,12 @@ export function Settings() {
     runClaude('check', async () => {
       const state = await fetchClaudeState({ refresh: true });
       setClaude(state);
-      return state.status.authenticated
+      return claudeSignedIn(state)
         ? { ok: true, text: 'Claude Code is signed in.' }
-        : { ok: false, text: state.status.error ?? 'Claude Code is not signed in.' };
+        : {
+            ok: false,
+            text: state.accounts.find((account) => account.error !== null)?.error ?? 'Claude Code is not signed in.',
+          };
     });
   };
 
@@ -452,7 +458,8 @@ export function Settings() {
     openrouterKey.trim() !== '' ||
     elevenlabsKey.trim() !== '' ||
     JSON.stringify(voiceForm) !== JSON.stringify(toVoiceForm(settings.voice));
-  const claudeStatus = claude?.status ?? null;
+  // One account until the account list lands (US-006): the default one.
+  const claudeStatus = claude === null ? null : claudeAccountStatus(claude, claude.defaultAccountId);
 
   return (
     <div className="page page--narrow">
@@ -488,7 +495,7 @@ export function Settings() {
           {claudeStatus === null
             ? 'Probing the shared credentials volume…'
             : claudeStatus.authenticated
-              ? `Signed in${claudeStatus.account === null ? '' : ` as ${claudeStatus.account}`}${claudeStatus.subscription === null ? '' : ` (${claudeStatus.subscription})`}. Every session container shares these credentials.`
+              ? `Signed in${claudeStatus.email === null ? '' : ` as ${claudeStatus.email}`}${claudeStatus.subscription === null ? '' : ` (${claudeStatus.subscription})`}. Every session container shares these credentials.`
               : 'Sessions cannot be created until Claude Code is signed in. It is a one-time browser login; the credentials are kept on a volume that survives restarts.'}
         </p>
         {claudeStatus?.error != null && <p className="field__hint">Status check: {claudeStatus.error}</p>}

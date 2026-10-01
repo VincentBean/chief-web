@@ -11,11 +11,17 @@ database, and there is no API key to configure.
 From **Settings → Claude Code**:
 
 - The indicator says **Authenticated** or **Not authenticated**. It is the
-  verdict of a non-interactive probe: `POST`/`GET /api/claude` runs a `--rm`
-  runner container with the account directory mounted and reads
-  `claude auth status --json`. Asking the CLI beats parsing its credential file,
-  which is an internal format. The answer is cached for `CLAUDE_STATUS_CACHE_MS`
-  (15s) because it costs a container start.
+  verdict of a non-interactive probe: `GET /api/claude` runs, for every
+  account, a `--rm` runner container with that account's directory mounted and
+  reads `claude auth status --json` (at most 3 probe containers at once).
+  Asking the CLI beats parsing its credential file, which is an internal format.
+  Each account's answer is cached for `CLAUDE_STATUS_CACHE_MS` (15s) because it
+  costs a container start, and a successful probe writes the account's email,
+  organization, subscription and auth method onto its row. The response is
+  `{ accounts: [{ id, nickname, email, organization, subscription,
+  authenticated, error, checkedAt, usage }], defaultAccountId, login }`.
+- Sessions are blocked (409 `claude_not_authenticated`) only while **no**
+  account is signed in.
 - **Add account** (`POST /api/claude/accounts`) creates an account and its
   directory, starts a temporary container named
   `chief-web-claude-login-<account id>` with only that directory mounted, opens
