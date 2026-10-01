@@ -119,3 +119,15 @@ refresh it itself in a `--rm` runner container (`claude auth status --json`,
 then one `claude -p "ok" --model haiku` if the token is still expired). Only
 when the refresh token is gone, or the refresh leaves the token expired, does
 the account read “sign in again” in Settings and the sidebar.
+
+**Usage-limit holds are per account.** A refusal for Claude's usage limit holds
+only the account the refused run was on (setting `claude_limit_until:<account
+id>`, `server/src/limits/hold.ts`) for an hour; a 5-hour or 7-day window
+reported at 100% holds it until that window's `resetsAt`. Builds, PR runs,
+schedules, recurring tasks and the queue skip only work whose effective account
+is held, so sessions on other accounts keep building. `GET /api/stats` reports
+`hold.until` (the sidebar's hold clock) only while **every** signed-in account
+is held — as the earliest expiry — and each account's own expiry as
+`accounts[].holdUntil`. `GET /api/limits/hold` returns `{ until, accounts:
+[{ accountId, until }] }`; `POST /api/limits/hold/clear` takes an optional
+`{ accountId }` and lifts every hold when it is omitted.

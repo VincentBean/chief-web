@@ -92,12 +92,6 @@ export const SETTING_KEYS = [
    */
   'sentry_base_url',
   /**
-   * ISO timestamp until which agent work is held after a Claude usage-limit
-   * refusal (US-002). Written and read through `limits/hold.ts`; a value in
-   * the past means no hold, so nothing has to sweep the row.
-   */
-  'claude_limit_until',
-  /**
    * Voice calls (voice US-001). Both provider keys are write-only over the
    * API, exactly like `github_token`; every `voice_*` row is read through
    * `VOICE_FIELDS` in `settings/service.ts`, where an absent or unreadable
@@ -157,7 +151,21 @@ export const SETTING_KEYS = [
   'sentry_claude_account_id',
 ] as const;
 
-export type SettingKey = (typeof SETTING_KEYS)[number];
+/**
+ * ISO timestamp until which one Claude account's work is held after a
+ * usage-limit refusal or a capped usage window (US-002, multiple accounts
+ * US-014), keyed by account id. Written and read through `limits/hold.ts`; a
+ * value in the past means no hold, so nothing has to sweep the row. The old
+ * global `claude_limit_until` row is deleted by migration 0027.
+ */
+export type ClaudeLimitKey = `claude_limit_until:${string}`;
+
+export type SettingKey = (typeof SETTING_KEYS)[number] | ClaudeLimitKey;
+
+/** The setting holding `accountId`'s usage-limit hold expiry. */
+export function claudeLimitKey(accountId: string): ClaudeLimitKey {
+  return `claude_limit_until:${accountId}`;
+}
 
 /**
  * Settings whose value is a Claude account id. Removing an account deletes

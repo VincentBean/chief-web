@@ -33,7 +33,7 @@ import type {
 } from '../review/index.js';
 import { GithubReviewPublisher } from '../review/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { getGithubToken } from '../settings/index.js';
+import { getGithubToken, prRunClaudeAccountId } from '../settings/index.js';
 import { pullRequestOutcome, type VoiceEventSink } from '../voice/events.js';
 
 /**
@@ -223,7 +223,8 @@ export class PrReviewService {
       return this.view(existing);
     }
 
-    const held = this.hold.until();
+    // The account the review's container would mount (US-014).
+    const held = this.hold.until(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new PrReviewError(
         409,
@@ -365,6 +366,9 @@ export class PrReviewService {
         const review = this.queuedReview(entry);
         return review !== null && this.live.has(review.id);
       },
+      // PR runs launch on the PR automation account (US-013), so that is the
+      // hold the queue checks (US-014).
+      accountId: () => prRunClaudeAccountId(this.db),
       start: async (entry) => {
         const ref = this.reference(entry);
         if (ref === null) {
@@ -546,7 +550,8 @@ export class PrReviewService {
         // The account is out, not the pull request: the next attempt walks
         // straight back into the same wall, so hold the whole server, as a
         // feedback run does, and leave this one to be started again after.
-        const until = this.hold.arm();
+        const account = prRunClaudeAccountId(this.db);
+        const until = this.hold.arm(account);
         reasons.push(`Attempt ${String(attempt)}: ${pass.message}`);
         this.fail(
           review.id,
@@ -555,7 +560,7 @@ export class PrReviewService {
             `finish and agent work is held until ${until}. Nothing was posted — start the ` +
             `review again once the hold lifts.\n\n${reasons.join('\n')}`,
         );
-        await this.slots.holdAll(until);
+        await this.slots.holdAll(account, until);
         return;
       }
       if (!pass.ok || pass.report === null) {

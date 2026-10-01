@@ -170,6 +170,17 @@ function clonesInto(config: Config, db: Database): (exec: FakeExec) => ExecScrip
 }
 
 describe('firing a recurring task', () => {
+  it('leaves a task due when the held predicate says its account is held (US-014)', async () => {
+    const f = await fixture();
+    const held = f.task({});
+    const now = new Date(Date.UTC(2026, 8, 5, 3, 0)).toISOString();
+
+    assert.equal(await f.runner.fireDue(now, (task) => task.id === held.id), 0);
+    assert.deepEqual(listSessions(f.db, {}), []);
+
+    assert.equal(await f.runner.fireDue(now, () => false), 1);
+  });
+
   it('turns a due task into a queued session with a generated PRD', async () => {
     const f = await fixture();
     const task = f.task({ runCodeReview: true, prTarget: 'main' });

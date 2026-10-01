@@ -4,6 +4,7 @@ import { after, describe, it } from 'node:test';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   createSession,
   createVoiceCall,
@@ -98,6 +99,8 @@ class FakeRecurringTasks implements SchedulerRecurringTasks {
 interface World {
   readonly config: Config;
   readonly db: Database;
+  /** The one signed-in Claude account, the default every session follows. */
+  readonly accountId: string;
   readonly builds: FakeBuilds;
   readonly tasks: FakeRecurringTasks;
   readonly scheduler: SchedulerService;
@@ -108,6 +111,7 @@ function world(env: Record<string, string> = {}): World {
   const config = loadConfig(env);
   const db = openDatabase(IN_MEMORY);
   databases.push(db);
+  const accountId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
   const repository = createRepository(db, {
     name: 'demo',
     sshUrl: 'git@github.com:acme/demo.git',
@@ -120,6 +124,7 @@ function world(env: Record<string, string> = {}): World {
   return {
     config,
     db,
+    accountId,
     builds,
     tasks,
     scheduler: new SchedulerService(config, db, builds, new UsageLimitHold(db), tasks),
@@ -173,7 +178,7 @@ describe('the session scheduler', () => {
     const w = world();
     const due = w.session({ at: PAST });
     const hold = new UsageLimitHold(w.db);
-    hold.arm();
+    hold.arm(w.accountId);
 
     // Nothing is started, and — the point of the story — nothing is spent: a
     // start now would only be refused, and the schedule would be gone.
@@ -186,10 +191,23 @@ describe('the session scheduler', () => {
     assert.equal(await w.scheduler.fire(due.id), false);
 
     // It is simply still due when the hold lifts.
-    hold.clear();
+    hold.clear(w.accountId);
     assert.equal(await w.scheduler.tick(), 1);
     assert.deepEqual(w.builds.started, [due.id]);
     assert.equal(getSession(w.db, due.id)?.status, 'building');
+  });
+
+  it('fires a due schedule on an account that is not held (US-014)', async () => {
+    const w = world();
+    const other = createClaudeAccount(w.db, { authMethod: 'claude.ai' }).id;
+    const onHeld = w.session({ at: PAST, name: 'on-held' });
+    const onFree = w.session({ at: PAST, name: 'on-free' });
+    updateSession(w.db, onFree.id, { claudeAccountId: other });
+    new UsageLimitHold(w.db).arm(w.accountId);
+
+    assert.equal(await w.scheduler.tick(), 1);
+    assert.deepEqual(w.builds.started, [onFree.id]);
+    assert.equal(getSession(w.db, onHeld.id)?.scheduledStartAt, PAST);
   });
 
   it('leaves a pending session alone: a missed schedule is not a start', async () => {
@@ -315,7 +333,7 @@ describe('the session scheduler', () => {
   it('leaves due recurring tasks due while the usage-limit hold is on (US-004)', async () => {
     const w = world();
     const hold = new UsageLimitHold(w.db);
-    hold.arm();
+    hold.arm(w.accountId);
 
     await w.scheduler.tick('2026-09-05T03:00:00.000Z');
 
@@ -324,7 +342,7 @@ describe('the session scheduler', () => {
     assert.deepEqual(w.tasks.fired, []);
     assert.equal(w.tasks.settled, 1);
 
-    hold.clear();
+    hold.clear(w.accountId);
     await w.scheduler.tick('2026-09-05T04:00:00.000Z');
     assert.deepEqual(w.tasks.fired, ['2026-09-05T04:00:00.000Z']);
   });

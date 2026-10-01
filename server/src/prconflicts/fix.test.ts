@@ -15,6 +15,7 @@ import {
   type BuildQueueEntry,
   type BuildQueueKind,
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   type Database,
   findPrConflictFix,
@@ -149,7 +150,7 @@ class StubSlots implements BuildSlots {
     return Promise.resolve();
   }
 
-  holdAll(until: string): Promise<void> {
+  holdAll(_accountId: string | null, until: string): Promise<void> {
     this.heldUntil.push(until);
     return Promise.resolve();
   }
@@ -191,6 +192,8 @@ describe('resolving a pull request’s merge conflicts', () => {
   let runner: MockRunner;
   let slots: StubSlots;
   let hold: UsageLimitHold;
+  /** The one signed-in Claude account: the default every PR run launches on. */
+  let accountId: string;
   let containersStarted: string[];
   let containersRemoved: string[];
   let seq = 0;
@@ -215,6 +218,7 @@ describe('resolving a pull request’s merge conflicts', () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-prconflictfix-'));
     config = loadConfig({ DATA_DIR: dataDir });
     db = openDatabase(IN_MEMORY);
+    accountId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
   });
 
   after(() => {
@@ -240,7 +244,7 @@ describe('resolving a pull request’s merge conflicts', () => {
     // The hold lives in a settings row on the shared database, so it outlives
     // the test that armed it unless it is lifted here.
     hold = new UsageLimitHold(db);
-    hold.clear();
+    hold.clearAll();
   });
 
   const conflicted = (overrides: Partial<ConflictedPullRequest> = {}): ConflictedPullRequest => ({
@@ -539,7 +543,7 @@ describe('resolving a pull request’s merge conflicts', () => {
   });
 
   it('refuses to start while Claude’s usage limit is held', async () => {
-    hold.arm();
+    hold.arm(accountId);
 
     await assert.rejects(
       () => service().start(conflicted()),
@@ -568,7 +572,7 @@ describe('resolving a pull request’s merge conflicts', () => {
     // The remaining attempts would walk into the same wall, so none is spent.
     assert.equal(runner.invocations.length, 1);
     assert.equal(slots.heldUntil.length, 1);
-    assert.notEqual(hold.until(), null);
+    assert.notEqual(hold.until(accountId), null);
     assert.deepEqual(runner.reaps, [started]);
     assert.ok(exec.steps.includes('abort'));
     assert.ok(!exec.steps.includes('push'));

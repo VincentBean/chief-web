@@ -10,6 +10,7 @@ import {
   createPrConflictFix,
   createPrReview,
   createPrRun,
+  createClaudeAccount,
   createRepository,
   createSession,
   type Database,
@@ -389,6 +390,8 @@ class World {
   readonly db: Database;
   readonly repositoryId: string;
   readonly session: Session;
+  /** The one signed-in Claude account, and so the default every session runs on. */
+  readonly accountId: string;
   readonly containers: SessionContainers;
   readonly runner: MockRunner;
   /** Every container start, in order: `docker` as the loop used it. */
@@ -399,6 +402,7 @@ class World {
     tempDirs.push(dir);
     this.config = loadConfig({ DATA_DIR: dir });
     this.db = openDatabase(IN_MEMORY);
+    this.accountId = createClaudeAccount(this.db, { authMethod: 'claude.ai' }).id;
 
     this.repositoryId = createRepository(this.db, {
       name: 'demo',
@@ -1196,7 +1200,7 @@ describe('the build loop', () => {
     assert.ok(until >= before + USAGE_LIMIT_HOLD_MS);
     assert.ok(until <= Date.now() + USAGE_LIMIT_HOLD_MS);
     // The hold is global, not a timer this run keeps to itself.
-    assert.equal(new UsageLimitHold(world.db).until(), session?.waitingUntil);
+    assert.equal(new UsageLimitHold(world.db).until(world.accountId), session?.waitingUntil);
 
     // The story is left exactly where the loop put it before the agent ran:
     // nothing is rolled back to todo, because nothing was attempted.
@@ -1279,7 +1283,7 @@ describe('the build loop', () => {
     assert.equal(byId.get('US-002')?.status, 'done');
     assert.equal(byId.get('US-002')?.commitSha, 'sha-1');
     // The hold itself stands: it is the account's, not this session's.
-    assert.equal(new UsageLimitHold(world.db).active(), true);
+    assert.equal(new UsageLimitHold(world.db).active(world.accountId), true);
   });
 
   it('leaves a plain stall exactly as it was: no hold, no waiting (US-004)', async () => {
@@ -1300,7 +1304,7 @@ describe('the build loop', () => {
     assert.equal(world.status(), 'failed');
     assert.equal(getSession(world.db, world.session.id)?.failureStage, 'agent');
     assert.equal(getSession(world.db, world.session.id)?.waitingUntil, null);
-    assert.equal(new UsageLimitHold(world.db).active(), false);
+    assert.equal(new UsageLimitHold(world.db).active(world.accountId), false);
     assert.match(world.error() ?? '', /no commit was made/);
   });
 
@@ -1344,7 +1348,7 @@ describe('the build loop', () => {
     assert.equal(world.runner.invocations.length, 2);
 
     // …and now it is.
-    new UsageLimitHold(world.db).clear();
+    new UsageLimitHold(world.db).clear(world.accountId);
     updateSession(world.db, world.session.id, { waitingUntil: '2026-08-29T09:00:00.000Z' });
     assert.equal(await builds.resumeHeld(), 1);
     await builds.whenIdle(world.session.id);
@@ -1877,6 +1881,59 @@ describe('concurrency and the build queue', () => {
     await fleet.finish(search);
   });
 
+  it('parks only the sessions on the refused account; another account keeps building (US-014)', async () => {
+    const fleet = new Fleet(3, ['add-billing', 'add-payments', 'add-search']);
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const payments = fleet.named('add-payments');
+    // payments runs on a second signed-in account; the others follow the default.
+    const other = createClaudeAccount(fleet.world.db, { authMethod: 'claude.ai' }).id;
+    updateSession(fleet.world.db, payments.id, { claudeAccountId: other });
+
+    fleet.world.runner.behaviour = async (invocation): Promise<void> => {
+      fleet.entered.push(invocation.sessionId);
+      if (invocation.sessionId === login.id) {
+        fleet.world.runner.result = {
+          exitCode: 1,
+          output: 'Claude AI usage limit reached|1756700000',
+          timedOut: false,
+        };
+        return;
+      }
+      await fleet.gate(invocation.sessionId).promise;
+      fleet.world.runner.result = { exitCode: 143, output: 'terminated', timedOut: false };
+    };
+    fleet.world.runner.stop = (sessionId: string): Promise<void> => {
+      fleet.world.runner.stops.push(sessionId);
+      fleet.gate(sessionId).release();
+      return Promise.resolve();
+    };
+
+    await fleet.builds.start(billing.id);
+    await fleet.builds.start(payments.id);
+    await until('both other agents are running', () => fleet.entered.length === 2);
+    await fleet.builds.start(login.id);
+    await fleet.builds.whenIdle(login.id);
+    await fleet.builds.whenIdle(billing.id);
+
+    const hold = new UsageLimitHold(fleet.world.db);
+    assert.notEqual(hold.until(fleet.world.accountId), null);
+    assert.equal(hold.until(other), null);
+    assert.equal(fleet.session(login.id).status, 'waiting');
+    assert.equal(fleet.session(billing.id).status, 'waiting');
+    // The session on the other account was never signalled and is still building.
+    assert.equal(fleet.session(payments.id).status, 'building');
+    assert.deepEqual(fleet.world.runner.stops, [billing.id]);
+
+    // A start on the held account queues; one on the free account does not.
+    const search = fleet.named('add-search');
+    updateSession(fleet.world.db, search.id, { claudeAccountId: other });
+    await fleet.builds.stop(payments.id);
+    await fleet.builds.start(search.id);
+    assert.equal(fleet.session(search.id).status, 'building');
+    await fleet.builds.stop(search.id);
+  });
+
   it('parks every building session when one of them is refused (US-005)', async () => {
     const fleet = new Fleet(3, ['add-billing', 'add-payments']);
     const login = fleet.named('add-login');
@@ -1920,7 +1977,7 @@ describe('concurrency and the build queue', () => {
       held.map((session) => session.status),
       ['waiting', 'waiting', 'waiting'],
     );
-    const shared = new UsageLimitHold(fleet.world.db).until();
+    const shared = new UsageLimitHold(fleet.world.db).until(fleet.world.accountId);
     assert.notEqual(shared, null);
     for (const session of held) assert.equal(session.waitingUntil, shared);
     assert.ok(Date.parse(shared ?? '') >= before + USAGE_LIMIT_HOLD_MS);
@@ -1975,7 +2032,7 @@ describe('concurrency and the build queue', () => {
     const fleet = new Fleet(3, []);
     const login = fleet.named('add-login');
     const hold = new UsageLimitHold(fleet.world.db);
-    const until_ = hold.arm();
+    const until_ = hold.arm(fleet.world.accountId);
 
     await assert.rejects(
       () => fleet.builds.start(login.id),
@@ -2001,7 +2058,7 @@ describe('concurrency and the build queue', () => {
     assert.deepEqual(fleet.queue(), ['add-login']);
 
     // Once the hold lifts, the queue it was put on is what starts it.
-    hold.clear();
+    hold.clear(fleet.world.accountId);
     await fleet.builds.pump();
     assert.deepEqual(fleet.building(), ['add-login']);
     await fleet.finish(login);

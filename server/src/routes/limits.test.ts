@@ -13,6 +13,7 @@ import type { AgentResult, AgentRunner } from '../build/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   createSession,
   deleteSession,
@@ -49,6 +50,7 @@ const PRD = `# PRD: Demo
 
 interface HoldBody {
   until: string | null;
+  accounts: { accountId: string; until: string | null }[];
 }
 
 interface ClearBody {
@@ -66,10 +68,17 @@ describe('usage limit api', () => {
   let db: Database;
   let server: http.Server;
   let hold: UsageLimitHold;
+  /** The default (first) signed-in account, and a second one. */
+  let accountId: string;
+  let otherId: string;
   let repositoryId: string;
 
-  const call = (method: string, target: string): Promise<Response> =>
-    fetch(`${baseUrl}${target}`, { method, headers: { cookie } });
+  const call = (method: string, target: string, body?: unknown): Promise<Response> =>
+    fetch(`${baseUrl}${target}`, {
+      method,
+      headers: { cookie, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
 
   // The agent never answers, so a resumed session stays `building` for as long
   // as the test looks at it. What is being tested is who was started, not what
@@ -113,6 +122,8 @@ describe('usage limit api', () => {
 
     db = openDatabase(IN_MEMORY);
     hold = new UsageLimitHold(db);
+    accountId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
+    otherId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
     const repository = createRepository(db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',
@@ -166,7 +177,7 @@ describe('usage limit api', () => {
   // every test in the file. The sessions of the previous test go too: the agent
   // never returns, so one left `building` would still be holding a slot.
   beforeEach(() => {
-    hold.clear();
+    hold.clearAll();
     deleteSetting(db, 'max_concurrent_sessions');
     for (const session of listSessions(db)) deleteSession(db, session.id);
   });
@@ -187,14 +198,85 @@ describe('usage limit api', () => {
     assert.equal(body.until, null);
   });
 
-  it('reports the expiry of an active hold', async () => {
-    const until = hold.arm();
+  it('lists every account’s hold; `until` only once every account is held (US-014)', async () => {
+    const until = hold.arm(accountId);
 
-    const response = await call('GET', '/api/limits/hold');
-    const body = (await response.json()) as HoldBody;
+    let response = await call('GET', '/api/limits/hold');
+    let body = (await response.json()) as HoldBody;
+    assert.equal(response.status, 200);
+    // One account can still work, so there is no global hold.
+    assert.equal(body.until, null);
+    assert.deepEqual(body.accounts, [
+      { accountId, until },
+      { accountId: otherId, until: null },
+    ]);
+
+    const later = hold.arm(otherId, new Date(Date.now() + 10 * 60_000));
+    response = await call('GET', '/api/limits/hold');
+    body = (await response.json()) as HoldBody;
+    // Every account is held: the global hold lifts with the first of them.
+    assert.equal(body.until, until < later ? until : later);
+    assert.deepEqual(body.accounts, [
+      { accountId, until },
+      { accountId: otherId, until: later },
+    ]);
+  });
+
+  it('stats report the global hold only when every account is held, per account always (US-014)', async () => {
+    const until = hold.arm(accountId);
+
+    let body = (await (await call('GET', '/api/stats')).json()) as {
+      hold: { until: string | null };
+      accounts: { id: string; holdUntil: string | null }[];
+    };
+    assert.equal(body.hold.until, null);
+    assert.deepEqual(
+      body.accounts.map((a) => [a.id, a.holdUntil]),
+      [
+        [accountId, until],
+        [otherId, null],
+      ],
+    );
+
+    const other = hold.arm(otherId);
+    body = (await (await call('GET', '/api/stats')).json()) as typeof body;
+    assert.equal(body.hold.until, until < other ? until : other);
+  });
+
+  it('clears one account’s hold, resuming only the sessions on it (US-014)', async () => {
+    const onDefault = seed('clear-one-default');
+    const onOther = seed('clear-one-other');
+    updateSession(db, onOther.id, { claudeAccountId: otherId });
+    const until = hold.arm(accountId);
+    const otherUntil = hold.arm(otherId);
+    updateSession(db, onDefault.id, { status: 'waiting', waitingUntil: until });
+    updateSession(db, onOther.id, { status: 'waiting', waitingUntil: otherUntil });
+
+    const response = await call('POST', '/api/limits/hold/clear', { accountId: otherId });
+    const body = (await response.json()) as ClearBody;
 
     assert.equal(response.status, 200);
-    assert.equal(body.until, until);
+    assert.equal(body.resumed, 1);
+    assert.equal(hold.until(otherId), null);
+    assert.equal(hold.until(accountId), until);
+    assert.equal(getSession(db, onOther.id)?.status, 'building');
+    assert.equal(getSession(db, onDefault.id)?.status, 'waiting');
+  });
+
+  it('refuses a clear naming an unknown, malformed or unheld account', async () => {
+    let response = await call('POST', '/api/limits/hold/clear', { accountId: 'feedfacefeedface' });
+    assert.equal(response.status, 404);
+    assert.equal(((await response.json()) as ClearBody).error, 'claude_account_not_found');
+
+    response = await call('POST', '/api/limits/hold/clear', { accountId: 42 });
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as ClearBody).error, 'invalid_account_id');
+
+    hold.arm(accountId);
+    response = await call('POST', '/api/limits/hold/clear', { accountId: otherId });
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ClearBody).error, 'no_usage_limit_hold');
+    assert.notEqual(hold.until(accountId), null);
   });
 
   it('exposes when a held session may resume', async () => {
@@ -210,7 +292,7 @@ describe('usage limit api', () => {
 
   it('clears the hold and resumes every waiting session', async () => {
     const held = [seed('resume-one'), seed('resume-two')];
-    const until = hold.arm();
+    const until = hold.arm(accountId);
     for (const session of held) {
       updateSession(db, session.id, { status: 'waiting', waitingUntil: until });
     }
@@ -222,7 +304,7 @@ describe('usage limit api', () => {
     assert.equal(body.ok, true);
     assert.equal(body.resumed, 2);
     // The hold is gone, so nothing parks these sessions again.
-    assert.equal(hold.until(), null);
+    assert.equal(hold.until(accountId), null);
     for (const session of held) {
       const resumed = getSession(db, session.id);
       assert.equal(resumed?.status, 'building');
@@ -233,7 +315,7 @@ describe('usage limit api', () => {
   it('queues the held sessions that do not fit under the cap', async () => {
     setSettingNumber(db, 'max_concurrent_sessions', 1);
     const held = [seed('capped-one'), seed('capped-two')];
-    const until = hold.arm();
+    const until = hold.arm(accountId);
     for (const session of held) {
       updateSession(db, session.id, { status: 'waiting', waitingUntil: until });
     }

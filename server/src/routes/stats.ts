@@ -126,7 +126,10 @@ export function createStatsRouter(
         slots: pool.slots,
         queue: pool.queue,
       },
-      hold: { until: hold.until() },
+      // The global hold the sidebar's HoldClock shows (US-002): only while
+      // every signed-in account is held, until the first of them lifts.
+      // Per-account expiries are on `accounts` (multiple accounts US-014).
+      hold: { until: hold.allHeldUntil() },
       host: readHostLoad(),
       voice: readVoiceMonth(db, new Date()),
       sentry: {
@@ -136,7 +139,7 @@ export function createStatsRouter(
       accounts: listClaudeAccounts(db).map((account) => ({
         id: account.id,
         usage: usage.usage(account.id),
-        holdUntil: hold.until(),
+        holdUntil: hold.until(account.id),
       })),
     };
     res.status(200).json(view);

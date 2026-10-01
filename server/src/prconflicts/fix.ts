@@ -21,7 +21,7 @@ import type { SessionContainerView } from '../orchestrator/index.js';
 import type { BuildSlots, PrRunContainers } from '../prfeedback/index.js';
 import { runPrCheckout } from '../prfeedback/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { getAgentTimeoutMs, getBuildModel } from '../settings/index.js';
+import { getAgentTimeoutMs, getBuildModel, prRunClaudeAccountId } from '../settings/index.js';
 import { abortMerge, isNonFastForward, runBaseMerge, verifyResolution } from './merge.js';
 import { conflictResolutionPrompt } from './prompts.js';
 import type { ConflictedPullRequest, ConflictFixStarter } from './service.js';
@@ -199,7 +199,8 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
         'Every build slot is in use, so the conflict fix waits for the next scan.',
       );
     }
-    const held = this.hold.until();
+    // The account the fix's container would mount (US-014).
+    const held = this.hold.until(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new ConflictFixError(
         'usage_limit_hold',
@@ -557,13 +558,14 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       // — and the run ends without a standing failure, because a standing
       // failure would keep the scan off this pull request until one of its two
       // SHAs moved, long after the hold had lifted.
-      const until = this.hold.arm();
+      const account = prRunClaudeAccountId(this.db);
+      const until = this.hold.arm(account);
       await this.runner.reap(fix.id, containerId);
       await abortMerge(this.exec, containerId, {
         baseBranch: fix.baseBranch,
         timeoutMs: this.config.sessionSetupTimeoutMs,
       });
-      await this.slots.holdAll(until);
+      await this.slots.holdAll(account, until);
       return {
         code: 'held',
         message:

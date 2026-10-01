@@ -295,6 +295,10 @@ export function createApp(
   // every instance reads the same one; sharing this one also means a hold that
   // begins is reported on the bus once, whoever armed it.
   const hold = new UsageLimitHold(db, events);
+  // A window at 100% holds its account until the window resets (US-014).
+  claudeUsage.onUsage((accountId, usage) => {
+    hold.armForUsage(accountId, usage);
+  });
   // Session voice agents (voice US-018) and the planning terminal lock each
   // other out; the thunk lets the registry ask the service built after it.
   const sessionAgents: SessionAgentRegistry = new SessionAgentRegistry({
@@ -506,7 +510,7 @@ export function createApp(
   api.use(createBuildRouter(builds));
   // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early
   // (US-008), on the shared hold built above.
-  api.use(createLimitsRouter(hold, builds));
+  api.use(createLimitsRouter(db, hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
   api.use(createStatsRouter(db, hold, builds, claudeUsage));
   // Voice (voice US-001): the provider checks and the voice picker's proxy;

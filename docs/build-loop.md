@@ -191,8 +191,8 @@ request; they live as long as the session's workspace does.
 
 Claude's usage limit is on the **account**, not on a session. When it is
 reached, every agent chief-web could start is refused, and the only useful
-response is to stop asking for a while. That pause is the **hold**, and it is
-one thing for the whole server.
+response is to stop asking for a while. That pause is the **hold**, and there
+is one per Claude account: work on other accounts carries on.
 
 **How a refusal is recognised.** The loop asks `isUsageLimitRefusal(result)`
 (`server/src/limits/detect.ts`) about the agent run before anything else looks
@@ -213,21 +213,25 @@ waiting to happen, and being wrong in the optimistic direction means resuming
 straight back into the limit. An hour is simple, always safe, and at worst costs
 some idle time an operator can end with one click.
 
-**The hold is global.** It is a single `claude_limit_until` row in `settings`,
-not a field on the refused session, so:
+**The hold is per account.** It is a `claude_limit_until:<account id>` row in
+`settings` (multiple accounts US-014), not a field on the refused session, and
+it holds the account the refused run was on. A 5-hour or 7-day usage window
+reported at 100% also holds its account, until that window's `resetsAt`. So:
 
 - the refused session is parked at **waiting**, with `waiting_until` carrying
   the moment it may resume;
-- every *other* `building` session is unwound the same way — its loop is told to
-  stop, its agent is reaped, and it is parked on the same expiry — because they
-  are all spending the same account;
+- every *other* `building` session on the same account is unwound the same
+  way — its loop is told to stop, its agent is reaped, and it is parked on the
+  same expiry — because they are all spending that account; sessions on other
+  accounts keep building;
 - a PR-feedback run is refused up front with `409 usage_limit_hold`, before it
   costs a container, a checkout or a GitHub call; one refused mid-run arms the
-  hold and parks the builds too;
-- **Start build** during a hold enqueues the session and answers
+  hold and parks the builds on its account too;
+- **Start build** on a held account enqueues the session and answers
   `429 usage_limit_hold`; the
-  [queue](scheduling.md#concurrency-and-the-build-queue) is not pumped while the
-  hold is on, so its order is kept rather than spent;
+  [queue](scheduling.md#concurrency-and-the-build-queue) skips entries whose
+  account is held (and is not pumped at all while every account is), so their
+  order is kept rather than spent;
 - the row is on disk, so a server restarted mid-hold picks the hold back up
   instead of resuming every session straight into the limit.
 

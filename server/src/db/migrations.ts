@@ -1247,6 +1247,15 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE recurring_tasks ADD COLUMN claude_account_id TEXT;
     `,
   },
+  {
+    id: '0027_claude_limit_per_account',
+    sql: `
+      -- The usage-limit hold is per account now (multiple accounts US-014),
+      -- stored as claude_limit_until:<account id>. The old global row names
+      -- no account, so it is dropped rather than guessed onto one.
+      DELETE FROM settings WHERE key = 'claude_limit_until';
+    `,
+  },
 ];
 
 /**

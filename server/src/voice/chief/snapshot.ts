@@ -131,7 +131,7 @@ export function buildSnapshot(services: ChiefServices, input: SnapshotInput): st
   lines.push(
     `QUEUE: ${pool.queued} queued${queued.length === 0 ? '' : ` (${queued.join(', ')})`}  SLOTS: ${pool.active}/${pool.max} busy${pool.slots.length === 0 ? '' : ` (${pool.slots.map((slot) => slot.label).join(', ')})`}`,
   );
-  const hold = services.hold.until();
+  const hold = services.hold.allHeldUntil();
   if (hold !== null) lines.push(`USAGE LIMIT: Claude is on hold, builds resume at ${when(hold, now, timeZone)}`);
 
   lines.push(`NEEDS YOU: ${needsYou(services, sessions).join(', ') || 'nothing'}`);

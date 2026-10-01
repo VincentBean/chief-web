@@ -80,7 +80,11 @@ export interface ChiefServices {
   readonly github: VoiceReviewGateway;
   /** Fires a recurring task by hand; the definitions themselves are read and written straight off `db`. */
   readonly recurringTasks: Pick<RecurringTaskRunner, 'fireNow'>;
-  readonly hold: { until(): string | null };
+  /**
+   * Claude's usage-limit hold (multiple accounts US-014): `until` for one
+   * account, `allHeldUntil` for "is every account held" (the overview).
+   */
+  readonly hold: { until(accountId: string | null): string | null; allHeldUntil(): string | null };
   /** The planning terminal; `focus_session` refuses while it is open for the session. */
   readonly planning?: { isTerminalRunning(sessionId: string): boolean };
   /** The session voice agents `focus_session` starts; without them it refuses. */
@@ -468,7 +472,7 @@ export function createChiefTools(services: ChiefServices): ReadonlyMap<string, C
       const pool = services.builds.pool();
       const byStatus: Partial<Record<SessionStatus, number>> = {};
       for (const session of listSessions(db)) byStatus[session.status] = (byStatus[session.status] ?? 0) + 1;
-      const hold = services.hold.until();
+      const hold = services.hold.allHeldUntil();
       return {
         ok: true,
         data: {

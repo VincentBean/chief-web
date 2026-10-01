@@ -240,6 +240,8 @@ export class ClaudeUsageService {
   private readonly lastSweep = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private ticking: Promise<void> | null = null;
+  /** Told about every fetched answer; see {@link onUsage}. */
+  private readonly listeners: ((accountId: string, usage: ClaudeUsage) => void)[] = [];
 
   constructor(
     private readonly config: Config,
@@ -329,6 +331,16 @@ export class ClaudeUsageService {
   }
 
   /**
+   * Calls `listener` with every usage answer this service caches — how a
+   * capped window arms the usage-limit hold (multiple accounts US-014)
+   * without `claude/` knowing about the hold. A listener that throws is
+   * logged and ignored.
+   */
+  onUsage(listener: (accountId: string, usage: ClaudeUsage) => void): void {
+    this.listeners.push(listener);
+  }
+
+  /**
    * Fetches an account's usage now and caches it. Concurrent callers for the
    * same account share one request. Never throws.
    */
@@ -338,7 +350,16 @@ export class ClaudeUsageService {
     const started = this.read(accountId)
       .catch((cause: unknown) => failedClaudeUsage(`The usage could not be read: ${describe(cause)}`))
       .then((usage) => {
-        if (this.fetching.get(accountId) === started) this.cached.set(accountId, usage);
+        if (this.fetching.get(accountId) === started) {
+          this.cached.set(accountId, usage);
+          for (const listener of this.listeners) {
+            try {
+              listener(accountId, usage);
+            } catch (cause) {
+              logger.warn('a Claude usage listener failed', { account: accountId, error: describe(cause) });
+            }
+          }
+        }
         return usage;
       })
       .finally(() => {

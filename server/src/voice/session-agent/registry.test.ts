@@ -131,7 +131,7 @@ describe('session voice agents', () => {
       db,
       docker,
       containers,
-      hold: { active: () => holdActive, until: () => (holdActive ? '2026-09-25T20:00:00.000Z' : null) },
+      hold: { until: () => (holdActive ? '2026-09-25T20:00:00.000Z' : null) },
       planning: () => ({ isTerminalRunning: (id) => terminalRunning.has(id) }),
       browsers: () => ({
         stop: (sessionId) => {

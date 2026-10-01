@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
-import { CLAUDE_ACCOUNT_SETTING_KEYS } from './settings.js';
+import { CLAUDE_ACCOUNT_SETTING_KEYS, claudeLimitKey, deleteSetting } from './settings.js';
 import {
   changeCount,
   type Database,
@@ -204,6 +204,8 @@ export function deleteClaudeAccountAndReferences(db: Database, id: string): bool
     for (const key of CLAUDE_ACCOUNT_SETTING_KEYS) {
       db.prepare('DELETE FROM settings WHERE key = ? AND value = ?').run(key, id);
     }
+    // The account's usage-limit hold (US-014) carries its id in the key.
+    deleteSetting(db, claudeLimitKey(id));
     return deleteClaudeAccount(db, id);
   });
 }

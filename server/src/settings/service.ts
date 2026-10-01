@@ -364,6 +364,28 @@ export function getDefaultClaudeAccount(db: Database): DefaultClaudeAccount | nu
 }
 
 /**
+ * The account a session — or a recurring task's run — launches on (multiple
+ * accounts US-009): its own choice, else the default. The one definition the
+ * orchestrator, the session views and the usage-limit hold (US-014) share.
+ */
+export function effectiveClaudeAccountId(
+  db: Database,
+  owner: { readonly claudeAccountId: string | null },
+): string | null {
+  return owner.claudeAccountId ?? getDefaultClaudeAccount(db)?.id ?? null;
+}
+
+/**
+ * The account a PR automation run (review, feedback, conflict fix) launches on
+ * when the caller names none (US-013): the PR automation choice, else the
+ * default. `SessionOrchestrator.startPrRun` resolves exactly this way, so the
+ * hold checked before a run is the hold of the account it will run on.
+ */
+export function prRunClaudeAccountId(db: Database): string | null {
+  return getPrAutomationClaudeAccountId(db) ?? getDefaultClaudeAccount(db)?.id ?? null;
+}
+
+/**
  * `git commit` refuses a name containing `<`, `>` or a line break, and an empty
  * one leaves the commit unattributable — reject both here so the problem shows
  * up on the settings page instead of halfway through a build.

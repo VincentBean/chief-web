@@ -12,6 +12,7 @@ import {
   buildQueuePosition,
   closeDatabase,
   countActivePrReviews,
+  createClaudeAccount,
   createRepository,
   type Database,
   enqueueBuild,
@@ -153,7 +154,7 @@ class StubSlots implements BuildSlots {
     return Promise.resolve();
   }
 
-  holdAll(until: string): Promise<void> {
+  holdAll(_accountId: string | null, until: string): Promise<void> {
     this.heldUntil.push(until);
     return Promise.resolve();
   }
@@ -192,6 +193,8 @@ describe('reviewing an open pull request by hand', () => {
   let solver: StubSolver;
   let slots: StubSlots;
   let hold: UsageLimitHold;
+  /** The one signed-in Claude account: the default every PR run launches on. */
+  let accountId: string;
   let execs: ExecSpec[];
   let checkoutSha: string;
   let containersStarted: string[];
@@ -231,6 +234,7 @@ describe('reviewing an open pull request by hand', () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-prreview-'));
     config = loadConfig({ DATA_DIR: dataDir });
     db = openDatabase(IN_MEMORY);
+    accountId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
   });
 
   after(() => {
@@ -258,7 +262,7 @@ describe('reviewing an open pull request by hand', () => {
     containersStarted = [];
     containersRemoved = [];
     hold = new UsageLimitHold(db);
-    hold.clear();
+    hold.clearAll();
     // The database outlives each test, and so would anything one of them left
     // waiting for a slot.
     for (const entry of listBuildQueue(db)) removeQueuedBuild(db, entry.kind, entry.refId);
@@ -493,12 +497,12 @@ describe('reviewing an open pull request by hand', () => {
     // The remaining attempts are not spent on the same wall.
     assert.equal(reviewer.subjects.length, 1);
     assert.equal(slots.heldUntil.length, 1);
-    assert.ok(hold.active());
+    assert.ok(hold.active(accountId));
     assert.equal(publisher.published.length, 0);
   });
 
   it('refuses to start during a usage-limit hold', async () => {
-    hold.arm();
+    hold.arm(accountId);
     const error = await refusal(serviceWith().start(repository.id, 61));
     assert.equal(error.code, 'usage_limit_hold');
     assert.equal(findPrReview(db, repository.id, 61), null);
