@@ -8,8 +8,8 @@ import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
 import {
   claudeLoginContainerArgs,
+  claudeLoginContainerName,
   CLAUDE_LOGIN_COMMAND,
-  CLAUDE_LOGIN_CONTAINER_NAME,
 } from './login.js';
 import { claudeProbeArgs, parseStatusJson, probeClaudeAuth } from './status.js';
 
@@ -126,12 +126,13 @@ describe('claude auth probe', () => {
 });
 
 describe('claude login container', () => {
-  it('runs detached under a fixed name with only the account directory', async () => {
+  it('runs detached under the account\'s own name with only its directory', async () => {
     const config = configWith(IN_DOCKER);
     const args = await claudeLoginContainerArgs(config, hostPaths(config), ACCOUNT);
 
     assert.ok(args.includes('--detach'));
-    assert.deepEqual(args.slice(2, 4), ['--name', CLAUDE_LOGIN_CONTAINER_NAME]);
+    assert.deepEqual(args.slice(2, 4), ['--name', `chief-web-claude-login-${ACCOUNT}`]);
+    assert.equal(claudeLoginContainerName(ACCOUNT), `chief-web-claude-login-${ACCOUNT}`);
     const volume = args.indexOf('--volume');
     assert.deepEqual(args.slice(volume, volume + 2), [
       '--volume',

@@ -16,15 +16,22 @@ From **Settings → Claude Code**:
   `claude auth status --json`. Asking the CLI beats parsing its credential file,
   which is an internal format. The answer is cached for `CLAUDE_STATUS_CACHE_MS`
   (15s) because it costs a container start.
-- **Set up Claude** (`POST /api/claude/login`) starts a temporary container named
-  `chief-web-claude-login` with only that directory mounted, opens a browser
-  terminal in it running `claude auth login`, and shows it inline. Follow the
-  URL it prints, approve the request, and paste the code back (Ctrl+Shift+V).
-- **Close login terminal** (`DELETE /api/claude/login`) kills the terminal,
-  removes the container, and re-probes — so the indicator reflects the result
-  immediately, with no server restart. The credentials stay in the account
-  directory and survive `docker compose down`.
-- Signing in again later (token expiry, another account) is the same button.
+- **Add account** (`POST /api/claude/accounts`) creates an account and its
+  directory, starts a temporary container named
+  `chief-web-claude-login-<account id>` with only that directory mounted, opens
+  a browser terminal in it running `claude auth login`, and shows it inline.
+  Follow the URL it prints, approve the request, and paste the code back
+  (Ctrl+Shift+V).
+- **Sign in** again later (token expiry, another email behind the account) is
+  `POST /api/claude/accounts/<id>/login`: the same flow on the existing account.
+- **Close login terminal** (`DELETE /api/claude/accounts/<id>/login`) kills the
+  terminal, removes the container, and re-probes that account — so the
+  indicator reflects the result immediately, with no server restart. The
+  credentials stay in the account directory and survive `docker compose down`.
+  An account added by this login that never got signed in is deleted again, so
+  an abandoned login leaves nothing behind.
+- One login terminal is open at a time; starting another answers
+  `409 claude_login_in_progress` with the `accountId` whose login is open.
 
 **Session creation is blocked while this says Not authenticated** — `POST
 /api/sessions` answers `409 claude_not_authenticated` with what to do about it,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import type http from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,9 +8,17 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
-import { addClaudeAccount, CLAUDE_LOGIN_CONTAINER_NAME } from '../claude/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
-import { closeDatabase, type Database, IN_MEMORY, openDatabase } from '../db/index.js';
+import {
+  closeDatabase,
+  type Database,
+  getClaudeAccount,
+  IN_MEMORY,
+  listClaudeAccounts,
+  openDatabase,
+  updateClaudeAccount,
+} from '../db/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { DockerApi } from '../docker/index.js';
 import { claudeAccountDir, RUNNER_CLAUDE_DIR } from '../runner/index.js';
@@ -28,7 +36,22 @@ interface StateBody {
     subscription: string | null;
     error: string | null;
   };
-  login: { active: boolean; terminalId: string | null; containerName: string };
+  login: LoginState;
+}
+
+interface LoginState {
+  active: boolean;
+  accountId: string | null;
+  terminalId: string | null;
+  containerId: string | null;
+  containerName: string | null;
+}
+
+/** What starting or ending an account's login answers. */
+interface LoginBody {
+  account: { id: string; email: string | null } | null;
+  status: { authenticated: boolean } | null;
+  login: LoginState;
 }
 
 describe('claude api', () => {
@@ -105,7 +128,7 @@ describe('claude api', () => {
 
   before(async () => {
     daemon = await FakeDockerDaemon.start();
-    daemon.addContainer({ id: LOGIN_CONTAINER, name: CLAUDE_LOGIN_CONTAINER_NAME });
+    daemon.addContainer({ id: LOGIN_CONTAINER, name: 'chief-web-claude-login-fake' });
 
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'chief-claude-api-'));
     config = loadConfig({
@@ -137,7 +160,10 @@ describe('claude api', () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Only one login may be open; close whatever the previous test left.
+    const open = (await state()).login.accountId;
+    if (open !== null) await call('DELETE', `/api/claude/accounts/${open}/login`);
     commands = [];
     probeResult = {};
     loggedOut();
@@ -199,18 +225,34 @@ describe('claude api', () => {
     assert.equal(((await response.json()) as { error: string }).error, 'invalid_repository_id');
   });
 
-  it('opens a login terminal in a temporary container', async () => {
-    const response = await call('POST', '/api/claude/login');
-    const body = (await response.json()) as StateBody;
+  /** `POST /api/claude/accounts`: a new account and its login terminal. */
+  const addAccount = async (): Promise<{ response: Response; body: LoginBody }> => {
+    const response = await call('POST', '/api/claude/accounts');
+    return { response, body: (await response.json()) as LoginBody };
+  };
+
+  it('adds an account and opens its login terminal in a container of its own', async () => {
+    const { response, body } = await addAccount();
 
     assert.equal(response.status, 201);
+    const account = body.account;
+    assert.ok(account, 'the new account should be returned');
+    assert.notEqual(account.id, accountId);
+    assert.ok(getClaudeAccount(db, account.id), 'the account row should exist');
+    assert.ok(existsSync(claudeAccountDir(config, account.id)), 'its directory should exist');
+
     assert.equal(body.login.active, true);
-    assert.equal(body.login.containerName, CLAUDE_LOGIN_CONTAINER_NAME);
+    assert.equal(body.login.accountId, account.id);
+    assert.equal(body.login.containerId, LOGIN_CONTAINER);
+    assert.equal(body.login.containerName, `chief-web-claude-login-${account.id}`);
     assert.ok(body.login.terminalId);
 
     const run = loginRuns()[0];
     assert.ok(run, 'the login container should have been started');
-    assert.ok(run.includes(accountBind()));
+    assert.deepEqual(run.slice(2, 4), ['--name', `chief-web-claude-login-${account.id}`]);
+    // Only the new account's directory: never another account's login.
+    assert.ok(run.includes(`${claudeAccountDir(config, account.id)}:${RUNNER_CLAUDE_DIR}`));
+    assert.equal(run.filter((arg) => arg === '--volume').length, 1);
 
     const exec = daemon.execFor(body.login.terminalId ?? '');
     assert.ok(exec, 'the terminal should be an exec in the login container');
@@ -218,68 +260,150 @@ describe('claude api', () => {
     assert.match(exec.cmd.join(' '), /claude auth login/);
   });
 
-  it('returns the same terminal instead of starting a second login', async () => {
-    const first = (await (await call('POST', '/api/claude/login')).json()) as StateBody;
+  it('refuses a second login while one is open, naming its account', async () => {
+    const { body: first } = await addAccount();
+    const openId = first.account?.id ?? '';
     commands = [];
 
-    const second = (await (await call('POST', '/api/claude/login')).json()) as StateBody;
+    const second = await call('POST', '/api/claude/accounts');
+    const refused = (await second.json()) as { error: string; message: string; accountId: string };
+    const relogin = await call('POST', `/api/claude/accounts/${accountId}/login`);
 
-    assert.equal(second.login.terminalId, first.login.terminalId);
+    assert.equal(second.status, 409);
+    assert.equal(refused.error, 'claude_login_in_progress');
+    assert.equal(refused.accountId, openId);
+    assert.match(refused.message, new RegExp(openId));
+    assert.equal(relogin.status, 409);
     assert.equal(loginRuns().length, 0, 'no second container should be started');
+    assert.equal(
+      (await state()).login.terminalId,
+      first.login.terminalId,
+      'the open login should be untouched',
+    );
   });
 
   it('reports the login in progress to a page that reloads', async () => {
-    const started = (await (await call('POST', '/api/claude/login')).json()) as StateBody;
+    const { body: started } = await addAccount();
 
     const reloaded = await state();
 
     assert.equal(reloaded.login.active, true);
+    assert.equal(reloaded.login.accountId, started.account?.id);
     assert.equal(reloaded.login.terminalId, started.login.terminalId);
   });
 
-  it('closes the terminal, removes the container and re-checks the status', async () => {
-    const started = (await (await call('POST', '/api/claude/login')).json()) as StateBody;
+  it('signs an existing account in again', async () => {
+    const response = await call('POST', `/api/claude/accounts/${accountId}/login`);
+    const body = (await response.json()) as LoginBody;
+
+    assert.equal(response.status, 201);
+    assert.equal(body.account?.id, accountId);
+    assert.equal(body.login.accountId, accountId);
+    assert.ok(body.login.terminalId);
+    const run = loginRuns()[0];
+    assert.ok(run, 'the login container should have been started');
+    assert.deepEqual(run.slice(2, 4), ['--name', `chief-web-claude-login-${accountId}`]);
+    assert.ok(run.includes(accountBind()));
+  });
+
+  it('answers 404 for an account that does not exist', async () => {
+    const start = await call('POST', '/api/claude/accounts/ffffffffffffffff/login');
+    const stop = await call('DELETE', '/api/claude/accounts/ffffffffffffffff/login');
+
+    assert.equal(start.status, 404);
+    assert.equal(stop.status, 404);
+    assert.equal(loginRuns().length, 0);
+  });
+
+  it('closes the terminal, removes the container and re-probes that account', async () => {
+    const { body: started } = await addAccount();
+    const id = started.account?.id ?? '';
     const terminalId = started.login.terminalId ?? '';
-    // The operator signs in; the credentials now live in the shared volume.
+    // The operator signs in; the credentials now live in the account directory.
     loggedIn();
     commands = [];
 
-    const response = await call('DELETE', '/api/claude/login');
-    const body = (await response.json()) as StateBody;
+    const response = await call('DELETE', `/api/claude/accounts/${id}/login`);
+    const body = (await response.json()) as LoginBody;
 
     assert.equal(response.status, 200);
-    assert.equal(body.status.authenticated, true);
+    assert.equal(body.status?.authenticated, true);
+    assert.equal(body.account?.id, id);
+    assert.equal(body.account?.email, 'dev@example.com', 'the probed email is kept on the row');
+    assert.equal(getClaudeAccount(db, id)?.email, 'dev@example.com');
     assert.equal(body.login.active, false);
     assert.equal(body.login.terminalId, null);
     assert.equal(manager.get(terminalId), undefined, 'the terminal should be gone');
-    const removed = commands.find((args) => args[0] === 'rm');
-    assert.ok(removed, 'the login container should have been removed');
-    assert.deepEqual(removed, ['rm', '--force', CLAUDE_LOGIN_CONTAINER_NAME]);
-    assert.ok(commands.some((args) => args.includes('status')), 'the status should be re-checked');
+    assert.ok(
+      commands.some((args) => args.join(' ') === `rm --force chief-web-claude-login-${id}`),
+      'the login container should have been removed',
+    );
+    const probe = commands.find((args) => args.includes('status'));
+    assert.ok(probe, 'the status should be re-checked');
+    assert.ok(probe.includes(`${claudeAccountDir(config, id)}:${RUNNER_CLAUDE_DIR}`));
   });
 
-  it('replaces a login container left behind by a previous attempt', async () => {
-    await call('POST', '/api/claude/login');
-    const first = await state();
-    // Model a server restart: the terminal registry is empty but the named
-    // container still exists.
+  it('deletes the account of an abandoned login that never signed in', async () => {
+    const { body: started } = await addAccount();
+    const id = started.account?.id ?? '';
+
+    const response = await call('DELETE', `/api/claude/accounts/${id}/login`);
+    const body = (await response.json()) as LoginBody;
+
+    assert.equal(response.status, 200);
+    assert.equal(body.account, null);
+    assert.equal(body.status?.authenticated, false);
+    assert.equal(getClaudeAccount(db, id), null, 'the row should be gone');
+    assert.equal(existsSync(claudeAccountDir(config, id)), false, 'the directory should be gone');
+  });
+
+  it('keeps an existing account whose re-login was abandoned', async () => {
+    await call('POST', `/api/claude/accounts/${accountId}/login`);
+
+    const response = await call('DELETE', `/api/claude/accounts/${accountId}/login`);
+    const body = (await response.json()) as LoginBody;
+
+    assert.equal(response.status, 200);
+    assert.equal(body.status?.authenticated, false);
+    assert.equal(body.account?.id, accountId);
+    assert.ok(getClaudeAccount(db, accountId));
+    assert.ok(existsSync(claudeAccountDir(config, accountId)));
+  });
+
+  it('keeps an account created by a login that was once authenticated', async () => {
+    const { body: started } = await addAccount();
+    const id = started.account?.id ?? '';
+    // A previous probe saw it signed in; this login signed it out again.
+    updateClaudeAccount(db, id, { email: 'old@example.com', authMethod: 'claude.ai' });
+
+    const body = (await (await call('DELETE', `/api/claude/accounts/${id}/login`)).json()) as LoginBody;
+
+    assert.equal(body.status?.authenticated, false);
+    assert.equal(body.account?.id, id);
+    assert.ok(getClaudeAccount(db, id));
+  });
+
+  it('starts a new login once the open terminal was closed elsewhere', async () => {
+    const { body: first } = await addAccount();
+    // Model a server restart or the terminal page: the terminal is gone, the
+    // container is not.
     await manager.remove(first.login.terminalId ?? '');
     commands = [];
 
-    const response = await call('POST', '/api/claude/login');
-    const body = (await response.json()) as StateBody;
+    const response = await call('POST', `/api/claude/accounts/${accountId}/login`);
+    const body = (await response.json()) as LoginBody;
 
     assert.equal(response.status, 201);
     assert.notEqual(body.login.terminalId, first.login.terminalId);
+    const removed = commands.filter((args) => args[0] === 'rm').map((args) => args[2]);
+    assert.ok(removed.includes(`chief-web-claude-login-${first.account?.id ?? ''}`));
     assert.ok(
-      commands.some((args) => args[0] === 'rm' && args.includes(CLAUDE_LOGIN_CONTAINER_NAME)),
-      'the stale container should be removed before the new one starts',
+      removed.includes(`chief-web-claude-login-${accountId}`),
+      'a stale container of this account is cleared before the new one starts',
     );
-
-    await call('DELETE', '/api/claude/login');
   });
 
-  it('reports a login container that could not be started', async () => {
+  it('removes the account again when its login container cannot be started', async () => {
     const failing: string[][] = [];
     const brokenServer = createApp(config, createAuthService(config, db), db, {
       terminals: manager,
@@ -298,8 +422,9 @@ describe('claude api', () => {
     }).listen(0, '127.0.0.1');
     await new Promise((resolve) => brokenServer.once('listening', resolve));
     const port = (brokenServer.address() as AddressInfo).port;
+    const before = listClaudeAccounts(db).length;
 
-    const response = await fetch(`http://127.0.0.1:${port}/api/claude/login`, {
+    const response = await fetch(`http://127.0.0.1:${port}/api/claude/accounts`, {
       method: 'POST',
       headers: { cookie },
     });
@@ -308,7 +433,13 @@ describe('claude api', () => {
     assert.equal(response.status, 502);
     assert.equal(body.error, 'claude_login_container_failed');
     assert.match(body.message, /Unable to find image/);
+    assert.equal(listClaudeAccounts(db).length, before, 'no account should be left behind');
 
     await new Promise((resolve) => brokenServer.close(resolve));
+  });
+
+  it('no longer serves the single-account login routes', async () => {
+    assert.equal((await call('POST', '/api/claude/login')).status, 404);
+    assert.equal((await call('DELETE', '/api/claude/login')).status, 404);
   });
 });

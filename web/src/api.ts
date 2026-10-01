@@ -410,13 +410,40 @@ export interface ClaudeAuthStatus {
 /** The temporary `claude auth login` container and its terminal, if running. */
 export interface ClaudeLogin {
   active: boolean;
+  /** The account being signed in; null when no login is open. */
+  accountId: string | null;
   terminalId: string | null;
   containerId: string | null;
-  containerName: string;
+  containerName: string | null;
 }
 
 export interface ClaudeState {
   status: ClaudeAuthStatus;
+  /** The account `status` describes; null when none is connected. */
+  defaultAccountId: string | null;
+  login: ClaudeLogin;
+}
+
+/** Mirrors the server's `ClaudeAccount` row. */
+export interface ClaudeAccount {
+  id: string;
+  nickname: string | null;
+  email: string | null;
+  organization: string | null;
+  subscription: string | null;
+  authMethod: string | null;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Starting or ending one account's login. `account` is null when closing an
+ * abandoned "add account" login deleted the account it had created.
+ */
+export interface ClaudeAccountLogin {
+  account: ClaudeAccount | null;
+  status: ClaudeAuthStatus | null;
   login: ClaudeLogin;
 }
 
@@ -431,14 +458,23 @@ export async function fetchClaudeState(
   return api<ClaudeState>(path, options.signal ? { signal: options.signal } : {});
 }
 
-/** Spawns the login container and opens the terminal running the login flow. */
-export async function startClaudeLogin(): Promise<ClaudeState> {
-  return api<ClaudeState>('/api/claude/login', { method: 'POST' });
+/** Adds a Claude account and opens the terminal that signs it in. */
+export async function addClaudeAccount(): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>('/api/claude/accounts', { method: 'POST' });
 }
 
-/** Closes the login terminal, removes the container, and re-checks the status. */
-export async function stopClaudeLogin(): Promise<ClaudeState> {
-  return api<ClaudeState>('/api/claude/login', { method: 'DELETE' });
+/** Opens the login terminal of an existing account, to sign it in again. */
+export async function startClaudeLogin(accountId: string): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>(`/api/claude/accounts/${encodeURIComponent(accountId)}/login`, {
+    method: 'POST',
+  });
+}
+
+/** Closes an account's login terminal, removes the container, and re-probes it. */
+export async function stopClaudeLogin(accountId: string): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>(`/api/claude/accounts/${encodeURIComponent(accountId)}/login`, {
+    method: 'DELETE',
+  });
 }
 
 /** Mirrors the server's `RepositoryView`: the private key is never included. */

@@ -5,6 +5,7 @@ import {
   type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
+  addClaudeAccount,
   ApiError,
   EFFORT_LEVELS,
   type EffortLevel,
@@ -353,19 +354,27 @@ export function Settings() {
 
   const onSetUpClaude = (): void => {
     runClaude('start', async () => {
-      const state = await startClaudeLogin();
-      setClaude(state);
-      setLoginTerminal(state.login.terminalId);
+      // A connected but signed-out default account is signed in again; with
+      // none, or one already signed in, a new account is added (US-003).
+      const defaultAccountId = claude?.defaultAccountId ?? null;
+      const started =
+        defaultAccountId !== null && claude?.status.authenticated !== true
+          ? await startClaudeLogin(defaultAccountId)
+          : await addClaudeAccount();
+      setClaude(await fetchClaudeState());
+      setLoginTerminal(started.login.terminalId);
       return { ok: true, text: 'Login terminal ready. Open the URL it prints, then paste the code back.' };
     });
   };
 
   const onCloseLogin = (): void => {
     runClaude('stop', async () => {
-      const state = await stopClaudeLogin();
+      const accountId = claude?.login.accountId ?? null;
+      const stopped = accountId === null ? null : await stopClaudeLogin(accountId);
+      const state = await fetchClaudeState({ refresh: stopped === null });
       setClaude(state);
       setLoginTerminal(null);
-      return state.status.authenticated
+      return (stopped?.status ?? state.status).authenticated
         ? { ok: true, text: 'Claude Code is signed in.' }
         : { ok: false, text: 'Claude Code is still not signed in.' };
     });

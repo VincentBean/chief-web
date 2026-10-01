@@ -12,14 +12,15 @@ export {
 } from './guard.js';
 export {
   CLAUDE_LOGIN_COMMAND,
-  CLAUDE_LOGIN_CONTAINER_NAME,
   CLAUDE_LOGIN_CWD,
   CLAUDE_LOGIN_LABEL,
   claudeLoginContainerArgs,
+  claudeLoginContainerName,
   removeContainerArgs,
 } from './login.js';
 export {
   ClaudeError,
+  type ClaudeAccountLoginView,
   type ClaudeLoginView,
   ClaudeService,
   type ClaudeStateView,

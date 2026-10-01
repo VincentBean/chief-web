@@ -20,10 +20,12 @@ import { CONTAINER_REPO_DIR } from '../sessions/index.js';
  */
 
 /**
- * Fixed name so a container left behind by a server restart is found and
- * replaced rather than duplicated.
+ * Fixed per account, so a container left behind by a server restart is found
+ * and replaced rather than duplicated.
  */
-export const CLAUDE_LOGIN_CONTAINER_NAME = 'chief-web-claude-login';
+export function claudeLoginContainerName(accountId: string): string {
+  return `chief-web-claude-login-${accountId}`;
+}
 
 export const CLAUDE_LOGIN_LABEL = 'chief-web.role=claude-login';
 
@@ -103,7 +105,7 @@ export async function claudeLoginContainerArgs(
     'run',
     '--detach',
     '--name',
-    CLAUDE_LOGIN_CONTAINER_NAME,
+    claudeLoginContainerName(accountId),
     '--label',
     CLAUDE_LOGIN_LABEL,
     '--volume',
