@@ -40,6 +40,13 @@ export interface Config {
   readonly claudeProbeTimeoutMs: number;
   /** How long a probe result is reused before another container is spawned. */
   readonly claudeStatusCacheMs: number;
+  /**
+   * Base URL of the plan-usage endpoint (`/api/oauth/usage` is appended).
+   * Only tests point it anywhere else (multiple accounts US-005).
+   */
+  readonly claudeUsageUrl: string;
+  /** How long an account's fetched plan usage is reused before it is asked again. */
+  readonly claudeUsageCacheMs: number;
   /** Docker socket used to spawn session containers. */
   readonly dockerSocket: string;
   /** Docker CLI binary used to spawn short-lived helper containers. */
@@ -266,6 +273,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
     claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 30_000),
     claudeStatusCacheMs: int('CLAUDE_STATUS_CACHE_MS', 15_000),
+    claudeUsageUrl: str('CLAUDE_USAGE_URL', 'https://api.anthropic.com'),
+    claudeUsageCacheMs: int('CLAUDE_USAGE_CACHE_MS', 60_000),
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),

@@ -16,7 +16,13 @@ import {
   createBuildLogStore,
   createBuildService,
 } from './build/index.js';
-import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
+import {
+  type ClaudeService,
+  type ClaudeUsageService,
+  createClaudeService,
+  createClaudeUsageService,
+  requireClaudeAuth,
+} from './claude/index.js';
 import { BrowserService } from './browser/index.js';
 import type { Config } from './config.js';
 import { type Database, getSession } from './db/index.js';
@@ -102,6 +108,12 @@ export interface AppDependencies {
    * shared credentials volume with a real container.
    */
   readonly claude?: ClaudeService;
+  /**
+   * Every Claude account's 5-hour and 7-day usage and the sweep that keeps
+   * their tokens fresh (multiple accounts US-005). Started here; tests may
+   * pass one over a fake usage endpoint.
+   */
+  readonly claudeUsage?: ClaudeUsageService;
   /**
    * Open pull requests and their review feedback (US-021). Defaults to a
    * service that talks to GitHub; tests pass one built on a stub gateway so
@@ -239,9 +251,15 @@ export function createApp(
   // request — so one instance serves the Claude containers, the orchestrator
   // and the setup commands, and either can be replaced independently.
   const docker = new DockerApi(config.dockerSocket);
+  const hostPaths = new HostPaths(config, docker);
+  // Background ticker (US-005): usage is cached per account and refreshed off
+  // the request path, so `/api/stats` and `/api/claude` never wait on it.
+  const claudeUsage =
+    deps.claudeUsage ?? createClaudeUsageService(config, db, hostPaths, deps.runCommand);
+  claudeUsage.start();
   const claude =
     deps.claude ??
-    createClaudeService(config, db, terminals, new HostPaths(config, docker), deps.runCommand);
+    createClaudeService(config, db, terminals, hostPaths, deps.runCommand, claudeUsage);
   api.use(createClaudeRouter(claude));
 
   // Mounted ahead of the sessions router so creating a session — and retrying
@@ -490,7 +508,7 @@ export function createApp(
   // (US-008), on the shared hold built above.
   api.use(createLimitsRouter(hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
-  api.use(createStatsRouter(db, hold, builds));
+  api.use(createStatsRouter(db, hold, builds, claudeUsage));
   // Voice (voice US-001): the provider checks and the voice picker's proxy;
   // since US-007 also the call socket, on the gateway's cookie check. Built
   // this late because chief (US-008) reads the build pool, the build logs,

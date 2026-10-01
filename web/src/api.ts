@@ -429,8 +429,40 @@ export interface ClaudeAccountStatus {
   /** Why the check could not run; `authenticated` is then always false. */
   error: string | null;
   checkedAt: string;
-  /** Plan usage, filled in by US-005. */
-  usage: null;
+  /** 5-hour and 7-day plan usage as last fetched (US-005); null before the first fetch. */
+  usage: ClaudeUsage | null;
+}
+
+/** One rolling limit window (multiple accounts US-005). */
+export interface ClaudeUsageWindow {
+  /** Percentage used, 0–100. */
+  utilization: number;
+  /** When it resets; null when nothing has been used in it yet. */
+  resetsAt: string | null;
+}
+
+/** Mirrors the server's `ClaudeUsage`. A window is null when the account has none (API-key logins). */
+export interface ClaudeUsage {
+  fiveHour: ClaudeUsageWindow | null;
+  sevenDay: ClaudeUsageWindow | null;
+  fetchedAt: string;
+  error: string | null;
+}
+
+/** The usage error that means only a new login helps; the refresh token is gone. */
+export const CLAUDE_SIGN_IN_AGAIN = 'sign in again';
+
+export function claudeNeedsSignIn(usage: ClaudeUsage | null | undefined): boolean {
+  return usage?.error === CLAUDE_SIGN_IN_AGAIN;
+}
+
+/** "5h 42% · 7d 10%", leaving out a window the account does not have; null when there is neither. */
+export function describeClaudeUsage(usage: ClaudeUsage | null | undefined): string | null {
+  if (usage == null) return null;
+  const parts: string[] = [];
+  if (usage.fiveHour !== null) parts.push(`5h ${String(Math.round(usage.fiveHour.utilization))}%`);
+  if (usage.sevenDay !== null) parts.push(`7d ${String(Math.round(usage.sevenDay.utilization))}%`);
+  return parts.length === 0 ? null : parts.join(' · ');
 }
 
 export interface ClaudeState {
@@ -1239,6 +1271,8 @@ export interface Stats {
    * plan waiting on the operator.
    */
   sentry: { configured: boolean; awaitingDecision: number };
+  /** Every Claude account's cached usage and hold, in display order (multiple accounts US-005). */
+  accounts: { id: string; usage: ClaudeUsage | null; holdUntil: string | null }[];
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];

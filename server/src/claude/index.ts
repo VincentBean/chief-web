@@ -26,6 +26,7 @@ export {
   type ClaudeLoginView,
   ClaudeService,
   type ClaudeStateView,
+  type ClaudeUsageReader,
   createClaudeService,
 } from './service.js';
 export {
@@ -36,3 +37,12 @@ export {
   parseStatusJson,
   probeClaudeAuth,
 } from './status.js';
+export {
+  CLAUDE_SIGN_IN_AGAIN,
+  type ClaudeUsage,
+  ClaudeUsageService,
+  type ClaudeUsageWindow,
+  createClaudeUsageService,
+  fetchClaudeUsage,
+  readClaudeCredentials,
+} from './usage.js';

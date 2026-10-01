@@ -19,6 +19,15 @@ import {
 } from './login.js';
 import { addClaudeAccount, defaultClaudeAccountId, removeClaudeAccount } from './accounts.js';
 import { type ClaudeAuthStatus, probeClaudeAuth } from './status.js';
+import type { ClaudeUsage } from './usage.js';
+
+/** Where the account views read each account's cached plan usage from (US-005). */
+export interface ClaudeUsageReader {
+  /** The cached usage, or `null` before the first fetch. Must never wait. */
+  usage(accountId: string): ClaudeUsage | null;
+}
+
+const NO_USAGE: ClaudeUsageReader = { usage: () => null };
 
 /** A failure with an HTTP status the route can hand straight back. */
 export class ClaudeError extends Error {
@@ -66,8 +75,12 @@ export interface ClaudeAccountStatusView {
   /** Why the probe could not answer, or `null` when it did. */
   readonly error: string | null;
   readonly checkedAt: string;
-  /** The account's plan usage; filled in by US-005. */
-  readonly usage: null;
+  /**
+   * The account's 5-hour and 7-day usage as last fetched (US-005), or `null`
+   * before the first fetch. `usage.error === 'sign in again'` means only a
+   * new login helps.
+   */
+  readonly usage: ClaudeUsage | null;
 }
 
 /** Everything the settings page needs in one response. */
@@ -127,6 +140,7 @@ export class ClaudeService {
     private readonly terminals: TerminalManager,
     private readonly paths: HostPathTranslator,
     private readonly run: CommandRunner = spawnCommand,
+    private readonly usage: ClaudeUsageReader = NO_USAGE,
   ) {}
 
   /**
@@ -172,7 +186,13 @@ export class ClaudeService {
       const status = statuses[index];
       // Removed while it was being probed.
       if (status === null || status === undefined) return;
-      views.push(accountStatusView(getClaudeAccount(this.db, account.id) ?? account, status));
+      views.push(
+        accountStatusView(
+          getClaudeAccount(this.db, account.id) ?? account,
+          status,
+          this.usage.usage(account.id),
+        ),
+      );
     });
     return views;
   }
@@ -401,6 +421,7 @@ export class ClaudeService {
 function accountStatusView(
   account: ClaudeAccount,
   status: ClaudeAuthStatus,
+  usage: ClaudeUsage | null,
 ): ClaudeAccountStatusView {
   return {
     id: account.id,
@@ -411,7 +432,7 @@ function accountStatusView(
     authenticated: status.authenticated,
     error: status.error,
     checkedAt: status.checkedAt,
-    usage: null,
+    usage,
   };
 }
 
@@ -444,8 +465,9 @@ export function createClaudeService(
   terminals: TerminalManager,
   paths: HostPathTranslator,
   run: CommandRunner = spawnCommand,
+  usage: ClaudeUsageReader = NO_USAGE,
 ): ClaudeService {
-  return new ClaudeService(config, db, terminals, paths, run);
+  return new ClaudeService(config, db, terminals, paths, run, usage);
 }
 
 function describeFailure(stderr: string, timedOut: boolean): string {

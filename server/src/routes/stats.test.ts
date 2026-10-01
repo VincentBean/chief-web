@@ -17,6 +17,8 @@ import {
   type Database,
   enqueueBuild,
   featureBranchFor,
+  createClaudeAccount,
+  deleteClaudeAccount,
   IN_MEMORY,
   listSessions,
   openDatabase,
@@ -145,6 +147,21 @@ describe('stats api', () => {
     assert.equal(body.repositories[0]?.finished, 1);
     assert.equal(body.repositories[0]?.failed, 1);
     assert.equal(body.repositories[0]?.active, 1);
+  });
+
+  it('carries every Claude account with its usage and hold', async () => {
+    const account = createClaudeAccount(db);
+    try {
+      const response = await fetch(`${baseUrl}/api/stats`, { headers: { cookie } });
+      const body = (await response.json()) as StatsView;
+      const entry = body.accounts.find((candidate) => candidate.id === account.id);
+      assert.ok(entry !== undefined);
+      assert.equal(entry.holdUntil, null);
+      // Filled in by the background ticker, never awaited by the route.
+      assert.ok(entry.usage === null || entry.usage.error !== null);
+    } finally {
+      deleteClaudeAccount(db, account.id);
+    }
   });
 
   it('clamps the window', async () => {

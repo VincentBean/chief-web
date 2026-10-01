@@ -8,6 +8,8 @@ import {
   addClaudeAccount,
   ApiError,
   claudeAccountStatus,
+  claudeNeedsSignIn,
+  describeClaudeUsage,
   claudeSignedIn,
   EFFORT_LEVELS,
   type EffortLevel,
@@ -472,6 +474,8 @@ export function Settings() {
         meta={
           claudeStatus === null ? (
             <Badge>checking…</Badge>
+          ) : claudeNeedsSignIn(claudeStatus.usage) ? (
+            <Badge tone="danger">sign in again</Badge>
           ) : claudeStatus.authenticated ? (
             <Badge tone="done">signed in</Badge>
           ) : (
@@ -499,6 +503,13 @@ export function Settings() {
               : 'Sessions cannot be created until Claude Code is signed in. It is a one-time browser login; the credentials are kept on a volume that survives restarts.'}
         </p>
         {claudeStatus?.error != null && <p className="field__hint">Status check: {claudeStatus.error}</p>}
+        {claudeNeedsSignIn(claudeStatus?.usage) ? (
+          <p className="field__hint">The login has expired and could not be refreshed: sign in again.</p>
+        ) : (
+          describeClaudeUsage(claudeStatus?.usage) !== null && (
+            <p className="field__hint">Plan usage: {describeClaudeUsage(claudeStatus?.usage)}</p>
+          )
+        )}
 
         {loginTerminal !== null && (
           <div className="stack stack--tight">

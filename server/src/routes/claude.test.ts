@@ -38,7 +38,7 @@ interface AccountStatus {
   authenticated: boolean;
   error: string | null;
   checkedAt: string;
-  usage: null;
+  usage: unknown;
 }
 
 interface StateBody {
@@ -195,7 +195,9 @@ describe('claude api', () => {
 
     assert.equal(own(body).authenticated, false);
     assert.equal(own(body).error, null);
-    assert.equal(own(body).usage, null);
+    // The usage ticker read the account: it has no credentials file yet (US-005).
+    const usage = own(body).usage as { error: string | null } | null;
+    assert.ok(usage === null || /no credentials file/.test(usage.error ?? ""));
     assert.equal(body.defaultAccountId, accountId);
     const probe = commands.find((args) => args.includes('status'));
     assert.ok(probe, 'a probe container should have been started');

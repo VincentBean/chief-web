@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { claudeSignedIn, describeBuildSlots, logout } from './api.ts';
+import { claudeNeedsSignIn, claudeSignedIn, describeBuildSlots, logout } from './api.ts';
 import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
@@ -56,6 +56,8 @@ function isCurrent(item: NavItem, pathname: string): boolean {
 export function AppShell({ children }: { readonly children: ReactNode }) {
   const { pathname } = useLocation();
   const { sessions, stats, claude } = useAppData();
+  // An account whose refresh token is gone (US-005); the 5-second stats poll carries it.
+  const signInAgain = stats?.accounts.some((account) => claudeNeedsSignIn(account.usage)) === true;
   const [open, setOpen] = useState(false);
   const call = useCall();
   const inCall = call.status === 'connecting' || call.status === 'live' || call.status === 'reconnecting';
@@ -201,14 +203,18 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
         )}
       </div>
       <Link
-        className={`status-row status-row--link ${claude === null ? '' : claudeSignedIn(claude) ? 'status-row--ok' : 'status-row--danger'}`}
+        className={`status-row status-row--link ${claude === null ? '' : claudeSignedIn(claude) && !signInAgain ? 'status-row--ok' : 'status-row--danger'}`}
         href="/settings#claude"
-        title={claude?.accounts.find((account) => account.authenticated)?.email ?? 'Claude Code sign-in'}
+        title={
+          signInAgain
+            ? 'A Claude account’s login has expired; sign it in again in Settings'
+            : (claude?.accounts.find((account) => account.authenticated)?.email ?? 'Claude Code sign-in')
+        }
       >
-        <span className={`dot ${claude === null ? 'dot--neutral' : claudeSignedIn(claude) ? 'dot--done' : 'dot--danger'}`} />
+        <span className={`dot ${claude === null ? 'dot--neutral' : claudeSignedIn(claude) && !signInAgain ? 'dot--done' : 'dot--danger'}`} />
         <span className="status-row__label">Claude</span>
         <span className="status-row__value">
-          {claude === null ? 'checking…' : claudeSignedIn(claude) ? 'signed in' : 'not signed in'}
+          {claude === null ? 'checking…' : signInAgain ? 'sign in again' : claudeSignedIn(claude) ? 'signed in' : 'not signed in'}
         </span>
       </Link>
     </div>

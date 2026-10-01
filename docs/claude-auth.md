@@ -53,3 +53,16 @@ volume's host mountpoint and appends the relative path, exactly as it does for
 session workspaces. The legacy `claude-auth` volume of an install from before
 multiple accounts is mounted read-only into the server and imported once as the
 first account; nothing else uses it.
+
+**Plan usage and token refresh.** Every account's 5-hour and 7-day usage is
+read from Anthropic's usage endpoint (`GET /api/oauth/usage`) with the OAuth
+access token in the account's `.credentials.json`, by a background ticker
+(`server/src/claude/usage.ts`) that caches each answer for
+`CLAUDE_USAGE_CACHE_MS` (default 60 s). `GET /api/claude` carries it per
+account and `GET /api/stats` as `accounts: [{ id, usage, holdUntil }]`. An
+API-key or console login has no plan windows; those read as `null`. The same
+ticker refreshes any token that expires within ten minutes by letting the CLI
+refresh it itself in a `--rm` runner container (`claude auth status --json`,
+then one `claude -p "ok" --model haiku` if the token is still expired). Only
+when the refresh token is gone, or the refresh leaves the token expired, does
+the account read “sign in again” in Settings and the sidebar.
