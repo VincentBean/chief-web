@@ -11,6 +11,7 @@ import {
   closeDatabase,
   type Database,
   deleteClaudeAccount,
+  deleteSetting,
   getClaudeAccount,
   IN_MEMORY,
   listClaudeAccounts,
@@ -264,6 +265,33 @@ describe('claude service: per-account status', () => {
     const result = await guard();
 
     assert.equal(result.passed, true);
+  });
+
+  it('resolves the implicit default to the first signed-in account, and follows a sign-out (US-007)', async () => {
+    service = fresh(0);
+    const a = addClaudeAccount(config, db);
+    const b = addClaudeAccount(config, db);
+    signedIn.set(a.id, 'a@example.com');
+    signedIn.set(b.id, 'b@example.com');
+
+    let state = await service.state();
+    assert.equal(state.defaultAccountId, a.id);
+    assert.equal(state.defaultIsExplicit, false);
+
+    // The CLI now says `a` is signed out: the default moves on to `b`.
+    signedIn.delete(a.id);
+    state = await service.state();
+    assert.equal(state.defaultAccountId, b.id);
+    assert.equal(state.defaultIsExplicit, false);
+    assert.equal(getClaudeAccount(db, a.id)?.authMethod, null);
+    // The profile stays for display.
+    assert.equal(getClaudeAccount(db, a.id)?.email, 'a@example.com');
+
+    service.makeDefault(a.id);
+    state = await service.state();
+    assert.equal(state.defaultAccountId, a.id);
+    assert.equal(state.defaultIsExplicit, true);
+    deleteSetting(db, 'default_claude_account_id');
   });
 
   it('removes the last account even though it is the default (US-006)', async () => {

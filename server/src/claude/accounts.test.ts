@@ -14,6 +14,7 @@ import {
   openDatabase,
 } from '../db/index.js';
 import { claudeAccountDir } from '../runner/index.js';
+import { getDefaultClaudeAccount } from '../settings/index.js';
 import { addClaudeAccount, importLegacyClaudeAuth, removeClaudeAccount } from './accounts.js';
 
 const CREDENTIALS = JSON.stringify({ claudeAiOauth: { accessToken: 'token' } });
@@ -102,6 +103,8 @@ describe('claude account directories', () => {
       assert.equal(account.nickname, null);
       assert.equal(account.position, 1);
       assert.deepEqual(listClaudeAccounts(db), [account]);
+      // It is the login every launch used until now: the explicit default.
+      assert.deepEqual(getDefaultClaudeAccount(db), { id: account.id, explicit: true });
 
       const dir = claudeAccountDir(config, account.id);
       assert.equal(modeOf(dir), 0o700);

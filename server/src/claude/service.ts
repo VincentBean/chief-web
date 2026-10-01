@@ -10,6 +10,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { CLAUDE_ACCOUNT_LABEL, type HostPathTranslator } from '../runner/index.js';
+import { getDefaultClaudeAccount } from '../settings/index.js';
 import { type CommandRunner, spawnCommand } from '../ssh/index.js';
 import { TerminalError, type TerminalManager } from '../terminal/index.js';
 import {
@@ -96,6 +97,11 @@ export interface ClaudeStateView {
   readonly accounts: readonly ClaudeAccountStatusView[];
   /** The account a launch uses unless told otherwise, or null when none exist. */
   readonly defaultAccountId: string | null;
+  /**
+   * Whether the operator chose `defaultAccountId`; false when it is the
+   * implicit fallback, the signed-in account with the lowest position (US-007).
+   */
+  readonly defaultIsExplicit: boolean;
   readonly login: ClaudeLoginView;
 }
 
@@ -207,6 +213,9 @@ export class ClaudeService {
   /**
    * Runs the probe and, when the CLI says the account is signed in, writes the
    * profile it reported onto the row so lists can show it without a probe.
+   * When the CLI answers that it is signed *out*, the auth method is cleared
+   * (the profile stays for display), so the implicit default (US-007) moves
+   * on to a signed-in account. A probe that failed proves nothing either way.
    */
   private async probe(accountId: string): Promise<ClaudeAuthStatus> {
     const status = await probeClaudeAuth(this.config, this.run, this.paths, accountId);
@@ -217,6 +226,8 @@ export class ClaudeService {
         subscription: status.subscription,
         authMethod: status.authMethod,
       });
+    } else if (status.error === null) {
+      updateClaudeAccount(this.db, accountId, { authMethod: null });
     }
     return status;
   }
@@ -229,7 +240,14 @@ export class ClaudeService {
 
   async state(force = false): Promise<ClaudeStateView> {
     const accounts = await this.statuses(force);
-    return { accounts, defaultAccountId: defaultClaudeAccountId(this.db), login: this.loginView() };
+    // Resolved after the probes, which are what record who is signed in.
+    const resolved = getDefaultClaudeAccount(this.db);
+    return {
+      accounts,
+      defaultAccountId: resolved?.id ?? null,
+      defaultIsExplicit: resolved?.explicit ?? false,
+      login: this.loginView(),
+    };
   }
 
   /**

@@ -9,8 +9,6 @@ import {
   type Database,
   deleteClaudeAccount,
   deleteClaudeAccountAndReferences,
-  getClaudeAccount,
-  getSetting,
   listClaudeAccounts,
   setSetting,
 } from '../db/index.js';
@@ -21,6 +19,7 @@ import {
   createClaudeAccountDir,
   removeClaudeAccountDir,
 } from '../runner/index.js';
+import { getDefaultClaudeAccount } from '../settings/index.js';
 
 /** The file whose presence means a directory holds a Claude Code login. */
 export const CLAUDE_CREDENTIALS_FILE = '.credentials.json';
@@ -46,15 +45,11 @@ export function addClaudeAccount(
 }
 
 /**
- * The account a launch runs on when nothing more specific was chosen: the one
- * the operator made default (`default_claude_account_id`, US-006), else the
- * first account in display order, or null when none is connected. US-007
- * refines the fallback to the first *signed-in* account.
+ * The account a launch runs on when nothing more specific was chosen; see
+ * {@link getDefaultClaudeAccount} for how it resolves (US-007).
  */
 export function defaultClaudeAccountId(db: Database): string | null {
-  const chosen = getSetting(db, 'default_claude_account_id');
-  if (chosen !== null && getClaudeAccount(db, chosen) !== null) return chosen;
-  return listClaudeAccounts(db)[0]?.id ?? null;
+  return getDefaultClaudeAccount(db)?.id ?? null;
 }
 
 /** Makes an existing account the default ("Make default", US-006). */
@@ -90,7 +85,9 @@ export function removeClaudeAccount(
  *
  * A copy that fails half-way removes the account again: a row left behind
  * would make the next start skip the import, and the operator would have to
- * sign in after all. Returns the imported account, or null when nothing ran.
+ * sign in after all. The imported account becomes the explicit default
+ * (US-007): it is the login every launch used until now. Returns the imported
+ * account, or null when nothing ran.
  */
 export function importLegacyClaudeAuth(
   config: Pick<Config, 'dataDir' | 'claudeAuthDir'>,
@@ -105,6 +102,7 @@ export function importLegacyClaudeAuth(
     const dir = claudeAccountDir(config, account.id);
     fs.cpSync(config.claudeAuthDir, dir, { recursive: true, preserveTimestamps: true });
     chownToRunner(dir);
+    setDefaultClaudeAccount(db, account.id);
   } catch (error) {
     if (account !== null) removeClaudeAccount(config, db, account.id);
     logger.error('could not import the existing Claude login as an account', {

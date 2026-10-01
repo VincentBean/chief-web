@@ -179,7 +179,7 @@ export function ClaudeAccountsPanel() {
   const onMakeDefault = (account: ClaudeAccountStatus): void => {
     run('default', account.id, async () => {
       const { defaultAccountId } = await makeDefaultClaudeAccount(account.id);
-      if (claude !== null) setClaude({ ...claude, defaultAccountId });
+      if (claude !== null) setClaude({ ...claude, defaultAccountId, defaultIsExplicit: true });
       return { ok: true, text: `${claudeAccountName(account)} is now the default account.` };
     });
   };
@@ -327,7 +327,7 @@ export function ClaudeAccountsPanel() {
                     ) : (
                       <span className="row__title">
                         {name}
-                        {isDefault && <Badge tone="active">Default</Badge>}
+                        {isDefault && <Badge tone="active">{claude?.defaultIsExplicit === true ? 'Default' : 'Default (automatic)'}</Badge>}
                         {!account.authenticated && account.error === null && <Badge tone="danger">not signed in</Badge>}
                         {expired && <Badge tone="danger">sign in again</Badge>}
                       </span>
@@ -353,7 +353,7 @@ export function ClaudeAccountsPanel() {
                       <Icon name="key" />
                       {isBusy('login', account.id) ? 'Starting…' : 'Sign in again'}
                     </button>
-                    {!isDefault && (
+                    {(!isDefault || claude?.defaultIsExplicit === false) && (
                       <button
                         type="button"
                         className="button button--small"

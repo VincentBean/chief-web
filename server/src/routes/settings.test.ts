@@ -10,6 +10,7 @@ import { createAuthService } from '../auth/index.js';
 import { loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   type Database,
   deleteSetting,
   getSetting,
@@ -113,6 +114,39 @@ describe('settings api', () => {
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
+
+  it('sets, refuses and clears the default Claude account over PATCH (multiple accounts US-007)', async () => {
+    const patch = async (body: unknown): Promise<Response> =>
+      fetch(`${baseUrl}/api/settings`, {
+        method: 'PATCH',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const account = createClaudeAccount(db);
+    try {
+      assert.equal(((await (await get()).json()) as Record<string, unknown>)['defaultClaudeAccountId'], null);
+
+      const set = await patch({ defaultClaudeAccountId: account.id });
+      assert.equal(set.status, 200);
+      assert.equal(((await set.json()) as Record<string, unknown>)['defaultClaudeAccountId'], account.id);
+      assert.equal(getSetting(db, 'default_claude_account_id'), account.id);
+
+      const unknown = await patch({ defaultClaudeAccountId: 'ffffffffffffffff' });
+      assert.equal(unknown.status, 400);
+      assert.equal(((await unknown.json()) as Record<string, unknown>)['error'], 'claude_account_not_found');
+      const wrongType = await patch({ defaultClaudeAccountId: 7 });
+      assert.equal(wrongType.status, 400);
+      assert.equal(getSetting(db, 'default_claude_account_id'), account.id);
+
+      const cleared = await patch({ defaultClaudeAccountId: null });
+      assert.equal(cleared.status, 200);
+      assert.equal(((await cleared.json()) as Record<string, unknown>)['defaultClaudeAccountId'], null);
+      assert.equal(getSetting(db, 'default_claude_account_id'), null);
+    } finally {
+      db.exec('DELETE FROM claude_accounts');
+      deleteSetting(db, 'default_claude_account_id');
+    }
+  });
 
   it('reports the default commit identity when none is stored', async () => {
     const response = await get();
@@ -270,6 +304,7 @@ describe('settings api', () => {
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
       ...voiceDefaults(db),
+      defaultClaudeAccountId: null,
     });
   });
 
@@ -299,6 +334,7 @@ describe('settings api', () => {
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
       ...voiceDefaults(db),
+      defaultClaudeAccountId: null,
     });
   });
 
@@ -345,6 +381,7 @@ describe('settings api', () => {
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
       ...voiceDefaults(db),
+      defaultClaudeAccountId: null,
     });
   });
 
@@ -375,6 +412,7 @@ describe('settings api', () => {
       gitAuthorName: 'chief-web',
       gitAuthorEmail: 'chief-web@localhost',
       ...voiceDefaults(db),
+      defaultClaudeAccountId: null,
     });
   });
 

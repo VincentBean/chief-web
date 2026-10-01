@@ -1,11 +1,14 @@
 import type { Config } from '../config.js';
 import {
+  type ClaudeAccount,
   type Database,
   deleteSetting,
+  getClaudeAccount,
   type EffortLevel,
   getSetting,
   getSettingNumber,
   isEffortLevel,
+  listClaudeAccounts,
   setSetting,
   type Session,
   type SettingKey,
@@ -238,6 +241,12 @@ export interface AppSettings {
   readonly voice: VoiceSettings;
   /** Read-only: Scribe's measured credits per minute, null before a Scribe call (US-023). */
   readonly voiceScribeCreditsPerMin: number | null;
+  /**
+   * The Claude account the operator made the default, or `null` when none is
+   * chosen and the implicit fallback applies (multiple accounts US-007).
+   * `GET /api/claude` reports the account that actually resolves.
+   */
+  readonly defaultClaudeAccountId: string | null;
 }
 
 export interface AppSettingsUpdate {
@@ -274,6 +283,56 @@ export interface AppSettingsUpdate {
   readonly openrouterApiKey?: string | null;
   readonly elevenlabsApiKey?: string | null;
   readonly voice?: VoiceSettingsUpdate;
+  /** An existing account id, or `null` for the implicit fallback. */
+  readonly defaultClaudeAccountId?: string | null;
+}
+
+/** An update the request body was fine with but the stored state refuses. */
+export class SettingsError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SettingsError';
+  }
+}
+
+/** The default Claude account and whether the operator chose it (US-007). */
+export interface DefaultClaudeAccount {
+  readonly id: string;
+  readonly explicit: boolean;
+}
+
+/**
+ * Whether the row records a signed-in account: the status probe writes the
+ * auth method on every successful probe and clears it again when the CLI
+ * says the account is signed out, so this needs neither Docker nor a cache.
+ */
+export function claudeAccountSignedIn(account: ClaudeAccount): boolean {
+  return account.authMethod !== null;
+}
+
+/** The stored default account id, or null when unset or naming no account. */
+export function getExplicitDefaultClaudeAccountId(db: Database): string | null {
+  const chosen = getSetting(db, 'default_claude_account_id');
+  return chosen !== null && getClaudeAccount(db, chosen) !== null ? chosen : null;
+}
+
+/**
+ * The account a launch runs on when nothing more specific was chosen (US-007):
+ * the operator's choice when there is one, otherwise the signed-in account
+ * with the lowest position. With nobody signed in it is the first account all
+ * the same, so "Sign in" and the launch guard have an account to talk about;
+ * null only when there are no accounts at all.
+ */
+export function getDefaultClaudeAccount(db: Database): DefaultClaudeAccount | null {
+  const chosen = getExplicitDefaultClaudeAccountId(db);
+  if (chosen !== null) return { id: chosen, explicit: true };
+  const accounts = listClaudeAccounts(db);
+  const fallback = accounts.find(claudeAccountSignedIn) ?? accounts[0];
+  return fallback === undefined ? null : { id: fallback.id, explicit: false };
 }
 
 /**
@@ -1100,6 +1159,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     elevenlabsApiKey: masked(getElevenLabsApiKey(db)),
     voice: getVoiceSettings(db),
     voiceScribeCreditsPerMin: getVoiceScribeCreditsPerMin(db),
+    defaultClaudeAccountId: getExplicitDefaultClaudeAccountId(db),
   };
 }
 
@@ -1108,6 +1168,15 @@ export function updateAppSettings(
   config: Config,
   update: AppSettingsUpdate,
 ): AppSettings {
+  const chosenAccount = update.defaultClaudeAccountId;
+  if (typeof chosenAccount === 'string' && getClaudeAccount(db, chosenAccount) === null) {
+    throw new SettingsError(
+      400,
+      'claude_account_not_found',
+      `No Claude account has the id ${chosenAccount}.`,
+    );
+  }
+
   withTransaction(db, () => {
     if (update.githubToken === null) deleteSetting(db, 'github_token');
     else if (update.githubToken !== undefined) setSetting(db, 'github_token', update.githubToken);
@@ -1213,6 +1282,12 @@ export function updateAppSettings(
     }
 
     if (update.voice !== undefined) writeVoiceSettings(db, update.voice);
+
+    // `null` clears the row, which hands the choice to the implicit fallback.
+    if (chosenAccount === null) deleteSetting(db, 'default_claude_account_id');
+    else if (chosenAccount !== undefined) {
+      setSetting(db, 'default_claude_account_id', chosenAccount);
+    }
   });
 
   return readAppSettings(db, config);

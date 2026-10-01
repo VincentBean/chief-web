@@ -122,6 +122,8 @@ export interface Settings {
   voice: VoiceSettings;
   /** Scribe's credits per minute, measured after a Scribe call (voice US-023); null before one. */
   voiceScribeCreditsPerMin: number | null;
+  /** The account the operator made the default; null when the fallback applies. */
+  defaultClaudeAccountId: string | null;
 }
 
 /** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
@@ -198,6 +200,8 @@ export interface SettingsUpdate {
   openrouterApiKey?: string | null;
   elevenlabsApiKey?: string | null;
   voice?: Partial<VoiceSettings>;
+  /** An existing account id; `null` hands the choice to the fallback. */
+  defaultClaudeAccountId?: string | null;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {
@@ -470,6 +474,8 @@ export interface ClaudeState {
   accounts: ClaudeAccountStatus[];
   /** The account a launch uses unless told otherwise; null when none exist. */
   defaultAccountId: string | null;
+  /** False when nobody chose it: the signed-in account with the lowest position. */
+  defaultIsExplicit: boolean;
   login: ClaudeLogin;
 }
 

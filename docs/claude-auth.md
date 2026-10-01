@@ -17,9 +17,11 @@ From **Settings → Claude Code**:
   Asking the CLI beats parsing its credential file, which is an internal format.
   Each account's answer is cached for `CLAUDE_STATUS_CACHE_MS` (15s) because it
   costs a container start, and a successful probe writes the account's email,
-  organization, subscription and auth method onto its row. The response is
+  organization, subscription and auth method onto its row (a probe that says
+  "signed out" clears the auth method again). The response is
   `{ accounts: [{ id, nickname, email, organization, subscription,
-  authenticated, error, checkedAt, usage }], defaultAccountId, login }`.
+  authenticated, error, checkedAt, usage }], defaultAccountId,
+  defaultIsExplicit, login }`.
 - Sessions are blocked (409 `claude_not_authenticated`) only while **no**
   account is signed in.
 - **Add account** (`POST /api/claude/accounts`) creates an account and its
@@ -48,8 +50,13 @@ error and **Check again**. Per row:
 - **Rename** — `PATCH /api/claude/accounts/<id> { nickname }`; blank clears the
   nickname, so the email shows again.
 - **Make default** — `POST /api/claude/accounts/<id>/default` stores the
-  `default_claude_account_id` setting. Without it the first account is the
-  default.
+  `default_claude_account_id` setting, also readable and writable as
+  `defaultClaudeAccountId` on `GET/PATCH /api/settings` (an id that is no
+  account → `400 claude_account_not_found`; `null` clears it). Without it the
+  default is the signed-in account with the lowest position (else the first
+  account), shown as **Default (automatic)**; `defaultIsExplicit` on
+  `GET /api/claude` says which. The account imported from the legacy volume
+  is made the explicit default.
 - **Check again** — `POST /api/claude/accounts/<id>/check` re-probes one account.
 - **Remove** — asks first, naming how many sessions and recurring tasks are
   bound to the account (`GET /api/claude/accounts/<id>/bindings`), then
