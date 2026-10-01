@@ -1,9 +1,11 @@
 import { type FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
   ApiError,
   backToPlanning,
   type Build,
+  claudeAccountName,
   clearUsageLimitHold,
   deleteSession,
   EFFORT_LEVELS,
@@ -25,6 +27,7 @@ import {
   retrySession,
   retrySessionSetup,
   type Session as SessionData,
+  setSessionClaudeAccount,
   setSessionCodeReview,
   setSessionEffort,
   setSessionOpenPullRequest,
@@ -581,6 +584,8 @@ export function Session() {
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
 
           <EffortPanel session={session} onSaved={setSession} />
+
+          <AccountPanel session={session} onSaved={setSession} />
         </aside>
       </div>
 
@@ -1480,6 +1485,104 @@ function EffortPanel({
         </p>
       </div>
       {message !== null && <Notice kind="ok">{message}</Notice>}
+      {error !== null && <Notice kind="error">{error}</Notice>}
+    </Panel>
+  );
+}
+
+/* --------------------------------------------------------- claude account */
+
+/**
+ * The Claude account this session's containers mount (multiple accounts
+ * US-012). The picker saves on change and shares the effort's lock: once no
+ * agent runs for the session again, its account no longer matters. The badge
+ * names the account the session actually runs on.
+ */
+function AccountPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  const { claude, stats } = useAppData();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const locked = EFFORT_LOCKED[session.status];
+  const nameOf = (id: string): string => {
+    const account = claude?.accounts.find((candidate) => candidate.id === id);
+    return account === undefined ? `Account ${id.slice(0, 8)}` : claudeAccountName(account);
+  };
+
+  const failover = session.failoverClaudeAccountId ?? null;
+  const effective = session.effectiveClaudeAccountId;
+  const runningOn = failover ?? effective;
+  const heldUntil =
+    failover !== null && effective !== null
+      ? (stats?.accounts.find((account) => account.id === effective)?.holdUntil ?? null)
+      : null;
+
+  const onChange = (claudeAccountId: string | null): void => {
+    const hadContainer = session.containerId !== null;
+    setSaving(true);
+    setError(null);
+    setSessionClaudeAccount(session.id, claudeAccountId)
+      .then((next) => {
+        onSaved(next);
+        const name = next.effectiveClaudeAccountId === null ? 'the default account' : nameOf(next.effectiveClaudeAccountId);
+        toast.ok(
+          hadContainer
+            ? `Saved: ${name} is used from the next agent run; the current container is restarted first.`
+            : `Saved: this session now runs on ${name}.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setError(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel
+      title="Claude account"
+      icon="key"
+      meta={
+        runningOn === null ? (
+          <Badge tone="danger">no account</Badge>
+        ) : (
+          <Badge tone={failover !== null ? 'wait' : session.claudeAccountId === null ? 'neutral' : 'ready'}>{nameOf(runningOn)}</Badge>
+        )
+      }
+    >
+      <div className="field">
+        <label className="field__label" htmlFor="session-page-claude-account">
+          Account for planning and build
+        </label>
+        <AccountPicker
+          id="session-page-claude-account"
+          value={session.claudeAccountId}
+          onChange={onChange}
+          accounts={claude?.accounts ?? []}
+          defaultAccountId={claude?.defaultAccountId ?? null}
+          disabled={locked !== undefined || saving || claude === null}
+        />
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The account can no longer be changed: ${locked}`
+            : session.claudeAccountId === null
+              ? 'Following the default account from Settings.'
+              : 'Set for this session; choose Default to follow the default account from Settings again.'}
+        </p>
+      </div>
+      {failover !== null && effective !== null && (
+        <p className="muted">
+          Running on {nameOf(failover)} while {nameOf(effective)} is on hold
+          {heldUntil === null ? '.' : ` until ${localTime(heldUntil)}.`}
+        </p>
+      )}
       {error !== null && <Notice kind="error">{error}</Notice>}
     </Panel>
   );

@@ -785,6 +785,11 @@ export interface Session {
   claudeAccountId: string | null;
   /** The account its next container mounts; null only with no account at all. */
   effectiveClaudeAccountId: string | null;
+  /**
+   * The account the session runs on while its own is on hold (failover,
+   * US-015); absent or null when it runs on its own account.
+   */
+  failoverClaudeAccountId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1144,6 +1149,17 @@ export async function setSessionEffort(id: string, effort: EffortLevel | null): 
   return api<Session>(`/api/sessions/${encodeURIComponent(id)}/effort`, {
     method: 'PUT',
     body: JSON.stringify({ effort }),
+  });
+}
+
+/**
+ * Binds the session to a Claude account, or with `null` back to the default
+ * account (multiple accounts US-012). Refused once no agent runs again.
+ */
+export async function setSessionClaudeAccount(id: string, claudeAccountId: string | null): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/account`, {
+    method: 'PATCH',
+    body: JSON.stringify({ claudeAccountId }),
   });
 }
 
