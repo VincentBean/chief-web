@@ -97,6 +97,11 @@ export interface RecurringTask {
   readonly runCodeReview: boolean;
   readonly paused: boolean;
   /**
+   * The Claude account every run is created on (multiple accounts US-013), or
+   * null to follow the default account. Removing the account nulls it.
+   */
+  readonly claudeAccountId: string | null;
+  /**
    * UTC ISO moment the next occurrence is due, and null when nothing is
    * scheduled — where pausing leaves a task until it is resumed.
    */
@@ -122,6 +127,8 @@ export interface CreateRecurringTaskInput {
   readonly runCodeReview?: boolean;
   /** Defaults to false; a task created paused simply never comes due. */
   readonly paused?: boolean;
+  /** Defaults to null: runs follow the default account. */
+  readonly claudeAccountId?: string | null;
   /** The first occurrence, computed from the cron expression by the caller. */
   readonly nextRunAt?: string | null;
 }
@@ -134,6 +141,7 @@ export interface UpdateRecurringTaskInput {
   readonly prTarget?: PrTargetBranch;
   readonly runCodeReview?: boolean;
   readonly paused?: boolean;
+  readonly claudeAccountId?: string | null;
   readonly nextRunAt?: string | null;
 }
 
@@ -150,6 +158,7 @@ const TASK_COLUMNS: Record<keyof UpdateRecurringTaskInput, string> = {
   prTarget: 'pr_target',
   runCodeReview: 'run_code_review',
   paused: 'paused',
+  claudeAccountId: 'claude_account_id',
   nextRunAt: 'next_run_at',
 };
 
@@ -178,6 +187,7 @@ export function mapRecurringTask(row: Row): RecurringTask {
     prTarget: enumeration(row, 'pr_target', PR_TARGET_BRANCHES),
     runCodeReview: integer(row, 'run_code_review') === 1,
     paused: integer(row, 'paused') === 1,
+    claudeAccountId: nullableText(row, 'claude_account_id'),
     nextRunAt: nullableText(row, 'next_run_at'),
     lastOutcome: outcomeOf(row, 'last_outcome'),
     createdAt: text(row, 'created_at'),
@@ -202,6 +212,7 @@ export function createRecurringTask(
     prTarget: input.prTarget,
     runCodeReview: input.runCodeReview ?? false,
     paused: input.paused ?? false,
+    claudeAccountId: input.claudeAccountId ?? null,
     nextRunAt: input.nextRunAt ?? null,
     lastOutcome: null,
     createdAt: now,
@@ -211,8 +222,9 @@ export function createRecurringTask(
   db.prepare(
     `INSERT INTO recurring_tasks
        (id, repository_id, name, prompt, cron_expression, base_branch, pr_target,
-        run_code_review, paused, next_run_at, last_outcome, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        run_code_review, paused, claude_account_id, next_run_at, last_outcome, created_at,
+        updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     task.id,
     task.repositoryId,
@@ -223,6 +235,7 @@ export function createRecurringTask(
     task.prTarget,
     sqlBoolean(task.runCodeReview),
     sqlBoolean(task.paused),
+    task.claudeAccountId,
     task.nextRunAt,
     task.lastOutcome,
     task.createdAt,

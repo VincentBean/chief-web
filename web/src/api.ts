@@ -124,6 +124,10 @@ export interface Settings {
   voiceScribeCreditsPerMin: number | null;
   /** The account the operator made the default; null when the fallback applies. */
   defaultClaudeAccountId: string | null;
+  /** The account PR review, feedback and conflict fixes run on; null follows the default. */
+  prAutomationClaudeAccountId: string | null;
+  /** The account Sentry plans and fixes run on; null follows the default. */
+  sentryClaudeAccountId: string | null;
 }
 
 /** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
@@ -202,6 +206,9 @@ export interface SettingsUpdate {
   voice?: Partial<VoiceSettings>;
   /** An existing account id; `null` hands the choice to the fallback. */
   defaultClaudeAccountId?: string | null;
+  /** An existing account id; `null` follows the default account. */
+  prAutomationClaudeAccountId?: string | null;
+  sentryClaudeAccountId?: string | null;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {
@@ -1501,6 +1508,8 @@ export interface RecurringTask {
   prTarget: PrTargetBranch;
   runCodeReview: boolean;
   paused: boolean;
+  /** The account every run is created on; null follows the default account. */
+  claudeAccountId: string | null;
   /** UTC ISO-8601 of the next occurrence; null while the task is paused. */
   nextRunAt: string | null;
   lastOutcome: RecurringTaskOutcome | null;
@@ -1523,6 +1532,8 @@ export interface RecurringTaskInput {
   prTarget?: PrTargetBranch;
   runCodeReview?: boolean;
   paused?: boolean;
+  /** `null` hands the task back to the default account. */
+  claudeAccountId?: string | null;
 }
 
 export async function fetchRecurringTasks(signal?: AbortSignal): Promise<RecurringTask[]> {
@@ -1562,6 +1573,7 @@ export interface CreateRecurringTaskInput {
   prTarget?: PrTargetBranch;
   runCodeReview?: boolean;
   paused?: boolean;
+  claudeAccountId?: string | null;
 }
 
 export async function createRecurringTask(input: CreateRecurringTaskInput): Promise<RecurringTask> {

@@ -19,7 +19,7 @@ import { logger } from '../lib/logger.js';
 import { defaultClaudeAccountId } from '../claude/accounts.js';
 import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
-import { getGitIdentity } from '../settings/index.js';
+import { getGitIdentity, getPrAutomationClaudeAccountId } from '../settings/index.js';
 import {
   CLAUDE_ACCOUNT_LABEL,
   type PrRunIdentity,
@@ -271,7 +271,9 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
 
-    const account = this.accountFor(accountId);
+    // Settings → GitHub's account for PR review, feedback and conflict fixes
+    // (US-013), else the default account.
+    const account = this.accountFor(accountId ?? getPrAutomationClaudeAccountId(this.db));
     const spec = prRunContainerSpec({
       run,
       accountId: account,

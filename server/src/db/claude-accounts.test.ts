@@ -14,10 +14,12 @@ import {
   getSetting,
   setSetting,
   getClaudeAccount,
+  getRecurringTask,
   IN_MEMORY,
   listClaudeAccounts,
   openDatabase,
   updateClaudeAccount,
+  updateRecurringTask,
 } from './index.js';
 
 describe('claude accounts', () => {
@@ -138,11 +140,15 @@ describe('claude accounts', () => {
     it('counts nothing and deletes cleanly before sessions can name an account', () => {
       const account = createClaudeAccount(db);
       setSetting(db, 'default_claude_account_id', account.id);
+      setSetting(db, 'pr_automation_claude_account_id', account.id);
+      setSetting(db, 'sentry_claude_account_id', account.id);
 
       assert.deepEqual(claudeAccountBindings(db, account.id), { sessions: 0, recurringTasks: 0 });
       assert.equal(deleteClaudeAccountAndReferences(db, account.id), true);
       assert.equal(getClaudeAccount(db, account.id), null);
       assert.equal(getSetting(db, 'default_claude_account_id'), null);
+      assert.equal(getSetting(db, 'pr_automation_claude_account_id'), null);
+      assert.equal(getSetting(db, 'sentry_claude_account_id'), null);
     });
 
     it('counts and clears the sessions and recurring tasks bound to an account', () => {
@@ -176,7 +182,7 @@ describe('claude accounts', () => {
         bound('one', account.id);
         bound('two', account.id);
         bound('three', other.id);
-        own.prepare('UPDATE recurring_tasks SET claude_account_id = ? WHERE id = ?').run(account.id, task.id);
+        updateRecurringTask(own, task.id, { claudeAccountId: account.id });
         setSetting(own, 'default_claude_account_id', other.id);
 
         assert.deepEqual(claudeAccountBindings(own, account.id), { sessions: 2, recurringTasks: 1 });
@@ -184,6 +190,7 @@ describe('claude accounts', () => {
         assert.equal(deleteClaudeAccountAndReferences(own, account.id), true);
 
         assert.deepEqual(claudeAccountBindings(own, account.id), { sessions: 0, recurringTasks: 0 });
+        assert.equal(getRecurringTask(own, task.id)?.claudeAccountId, null);
         assert.deepEqual(claudeAccountBindings(own, other.id), { sessions: 1, recurringTasks: 0 });
         // A setting naming another account is left alone.
         assert.equal(getSetting(own, 'default_claude_account_id'), other.id);

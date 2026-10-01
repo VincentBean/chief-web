@@ -180,6 +180,8 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     elevenlabsApiKey?: string | null;
     voice?: VoiceSettingsUpdate;
     defaultClaudeAccountId?: string | null;
+    prAutomationClaudeAccountId?: string | null;
+    sentryClaudeAccountId?: string | null;
   } = {};
 
   if ('githubToken' in input && input['githubToken'] !== undefined) {
@@ -438,6 +440,28 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
       };
     }
     update.defaultClaudeAccountId = raw;
+  }
+
+  if ('prAutomationClaudeAccountId' in input && input['prAutomationClaudeAccountId'] !== undefined) {
+    const raw = input['prAutomationClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_pr_automation_claude_account_id',
+        message: 'The pull request automation account must be an account id, or null for the default.',
+      };
+    }
+    update.prAutomationClaudeAccountId = raw;
+  }
+
+  if ('sentryClaudeAccountId' in input && input['sentryClaudeAccountId'] !== undefined) {
+    const raw = input['sentryClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_sentry_claude_account_id',
+        message: 'The Sentry account must be an account id, or null for the default.',
+      };
+    }
+    update.sentryClaudeAccountId = raw;
   }
 
   return update;

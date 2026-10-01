@@ -247,6 +247,13 @@ export interface AppSettings {
    * `GET /api/claude` reports the account that actually resolves.
    */
   readonly defaultClaudeAccountId: string | null;
+  /**
+   * The account PR review, feedback and conflict fixes run on, or `null` for
+   * the default (US-013). Like the default, an id naming no account reads null.
+   */
+  readonly prAutomationClaudeAccountId: string | null;
+  /** The account Sentry plans and fixes run on, or `null` for the default (US-013). */
+  readonly sentryClaudeAccountId: string | null;
 }
 
 export interface AppSettingsUpdate {
@@ -285,6 +292,9 @@ export interface AppSettingsUpdate {
   readonly voice?: VoiceSettingsUpdate;
   /** An existing account id, or `null` for the implicit fallback. */
   readonly defaultClaudeAccountId?: string | null;
+  /** The same rules as `defaultClaudeAccountId`; `null` follows the default. */
+  readonly prAutomationClaudeAccountId?: string | null;
+  readonly sentryClaudeAccountId?: string | null;
 }
 
 /** An update the request body was fine with but the stored state refuses. */
@@ -314,10 +324,28 @@ export function claudeAccountSignedIn(account: ClaudeAccount): boolean {
   return account.authMethod !== null;
 }
 
+/** A stored account id setting, or null when unset or naming no account. */
+function storedClaudeAccountId(db: Database, key: SettingKey): string | null {
+  const chosen = getSetting(db, key);
+  return chosen !== null && getClaudeAccount(db, chosen) !== null ? chosen : null;
+}
+
 /** The stored default account id, or null when unset or naming no account. */
 export function getExplicitDefaultClaudeAccountId(db: Database): string | null {
-  const chosen = getSetting(db, 'default_claude_account_id');
-  return chosen !== null && getClaudeAccount(db, chosen) !== null ? chosen : null;
+  return storedClaudeAccountId(db, 'default_claude_account_id');
+}
+
+/**
+ * The account chosen for PR review, PR feedback and conflict fixes (US-013),
+ * or null when those follow the default account.
+ */
+export function getPrAutomationClaudeAccountId(db: Database): string | null {
+  return storedClaudeAccountId(db, 'pr_automation_claude_account_id');
+}
+
+/** The account chosen for Sentry plans and fixes (US-013), or null for the default. */
+export function getSentryClaudeAccountId(db: Database): string | null {
+  return storedClaudeAccountId(db, 'sentry_claude_account_id');
 }
 
 /**
@@ -1160,6 +1188,8 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     voice: getVoiceSettings(db),
     voiceScribeCreditsPerMin: getVoiceScribeCreditsPerMin(db),
     defaultClaudeAccountId: getExplicitDefaultClaudeAccountId(db),
+    prAutomationClaudeAccountId: getPrAutomationClaudeAccountId(db),
+    sentryClaudeAccountId: getSentryClaudeAccountId(db),
   };
 }
 
@@ -1168,13 +1198,15 @@ export function updateAppSettings(
   config: Config,
   update: AppSettingsUpdate,
 ): AppSettings {
-  const chosenAccount = update.defaultClaudeAccountId;
-  if (typeof chosenAccount === 'string' && getClaudeAccount(db, chosenAccount) === null) {
-    throw new SettingsError(
-      400,
-      'claude_account_not_found',
-      `No Claude account has the id ${chosenAccount}.`,
-    );
+  const accountChoices: readonly [SettingKey, string | null | undefined][] = [
+    ['default_claude_account_id', update.defaultClaudeAccountId],
+    ['pr_automation_claude_account_id', update.prAutomationClaudeAccountId],
+    ['sentry_claude_account_id', update.sentryClaudeAccountId],
+  ];
+  for (const [, chosen] of accountChoices) {
+    if (typeof chosen === 'string' && getClaudeAccount(db, chosen) === null) {
+      throw new SettingsError(400, 'claude_account_not_found', `No Claude account has the id ${chosen}.`);
+    }
   }
 
   withTransaction(db, () => {
@@ -1283,10 +1315,11 @@ export function updateAppSettings(
 
     if (update.voice !== undefined) writeVoiceSettings(db, update.voice);
 
-    // `null` clears the row, which hands the choice to the implicit fallback.
-    if (chosenAccount === null) deleteSetting(db, 'default_claude_account_id');
-    else if (chosenAccount !== undefined) {
-      setSetting(db, 'default_claude_account_id', chosenAccount);
+    // `null` clears the row: the default falls back to the implicit choice,
+    // the other two to the default account.
+    for (const [key, chosen] of accountChoices) {
+      if (chosen === null) deleteSetting(db, key);
+      else if (chosen !== undefined) setSetting(db, key, chosen);
     }
   });
 

@@ -11,6 +11,7 @@ import { createAuthService } from '../auth/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   createSession,
   type Database,
@@ -282,6 +283,35 @@ describe('recurring tasks api', () => {
     assert.equal(body.runCodeReview, true);
     // The schedule did not change, so neither did the occurrence it points at.
     assert.equal(body.nextRunAt, task.nextRunAt);
+  });
+
+  it('stores, refuses and clears the Claude account (multiple accounts US-013)', async () => {
+    const account = createClaudeAccount(db);
+    try {
+      const unknown = await create({ claudeAccountId: 'ffffffffffffffff' });
+      assert.equal(unknown.status, 400);
+      assert.equal(unknown.body.error, 'claude_account_unknown');
+      const wrongType = await create({ claudeAccountId: 7 });
+      assert.equal(wrongType.status, 400);
+      assert.equal(wrongType.body.error, 'invalid_claude_account_id');
+
+      const { status, body: task } = await create({ claudeAccountId: account.id });
+      assert.equal(status, 201);
+      assert.equal(task.claudeAccountId, account.id);
+
+      const cleared = await call('PUT', `/api/recurring-tasks/${task.id}`, { claudeAccountId: null });
+      assert.equal(cleared.status, 200);
+      assert.equal(((await cleared.json()) as RecurringTaskView).claudeAccountId, null);
+
+      const set = await call('PUT', `/api/recurring-tasks/${task.id}`, { claudeAccountId: account.id });
+      assert.equal(((await set.json()) as RecurringTaskView).claudeAccountId, account.id);
+      const refused = await call('PUT', `/api/recurring-tasks/${task.id}`, {
+        claudeAccountId: 'ffffffffffffffff',
+      });
+      assert.equal(refused.status, 400);
+    } finally {
+      db.exec('DELETE FROM claude_accounts');
+    }
   });
 
   it('recomputes the next run when the cron expression changes', async () => {

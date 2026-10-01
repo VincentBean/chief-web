@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
@@ -27,7 +28,7 @@ import {
   VOICE_TTS_MODELS,
   type VoiceSettings,
 } from '../api.ts';
-import { describeError, redirectIfUnauthorised } from '../data.tsx';
+import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
@@ -71,6 +72,7 @@ const toQuestions = (text: string): string[] =>
  */
 export function Settings() {
   const toast = useToast();
+  const { claude } = useAppData();
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState('');
@@ -79,6 +81,9 @@ export function Settings() {
   const [prSyncInterval, setPrSyncInterval] = useState('15');
   const [conflictInterval, setConflictInterval] = useState('30');
   const [conflictFixEnabled, setConflictFixEnabled] = useState(true);
+  /** null = follow the default account (US-013), for both pickers. */
+  const [prAutomationAccount, setPrAutomationAccount] = useState<string | null>(null);
+  const [sentryAccount, setSentryAccount] = useState<string | null>(null);
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
@@ -134,6 +139,8 @@ export function Settings() {
     setPrSyncInterval(String(loaded.prSyncIntervalMinutes));
     setConflictInterval(String(loaded.prConflictIntervalMinutes));
     setConflictFixEnabled(loaded.conflictFixEnabled);
+    setPrAutomationAccount(loaded.prAutomationClaudeAccountId);
+    setSentryAccount(loaded.sentryClaudeAccountId);
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
@@ -207,12 +214,18 @@ export function Settings() {
       toast.error(voice.error);
       return;
     }
+    // An account removed in the panel above since the page loaded: the server
+    // already cleared it, and sending the id back would only be refused.
+    const stillListed = (id: string | null): string | null =>
+      id !== null && claude !== null && !claude.accounts.some((account) => account.id === id) ? null : id;
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
       prSyncIntervalMinutes: syncInterval,
       prConflictIntervalMinutes: conflictScan,
       conflictFixEnabled,
+      prAutomationClaudeAccountId: stillListed(prAutomationAccount),
+      sentryClaudeAccountId: stillListed(sentryAccount),
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
@@ -351,6 +364,8 @@ export function Settings() {
     prSyncInterval !== String(settings.prSyncIntervalMinutes) ||
     conflictInterval !== String(settings.prConflictIntervalMinutes) ||
     conflictFixEnabled !== settings.conflictFixEnabled ||
+    prAutomationAccount !== settings.prAutomationClaudeAccountId ||
+    sentryAccount !== settings.sentryClaudeAccountId ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
@@ -433,6 +448,21 @@ export function Settings() {
               Fix merge conflicts automatically
             </label>
             <p className="field__hint">Off means no scan and no agent: nothing is pushed to your pull requests, and no API budget is spent on looking. A fix already running is left to finish.</p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="pr-automation-claude-account">
+              Account for PR review, feedback and conflict fixes
+            </label>
+            <AccountPicker
+              id="pr-automation-claude-account"
+              value={prAutomationAccount}
+              onChange={setPrAutomationAccount}
+              accounts={claude?.accounts ?? []}
+              defaultAccountId={claude?.defaultAccountId ?? null}
+              disabled={claude === null}
+            />
+            <p className="field__hint">The Claude account automatic code reviews, PR feedback runs and merge-conflict fixes run on. Applies from the next run; Default follows the default account.</p>
           </div>
         </Panel>
 
@@ -647,6 +677,21 @@ export function Settings() {
             </label>
             <input id="sentry-base-url" name="sentry-base-url" type="text" autoComplete="off" spellCheck={false} placeholder="https://sentry.io/api/0/" value={sentryBaseUrl} onChange={(event) => setSentryBaseUrl(event.target.value)} className="field__input mono" />
             <p className="field__hint">Only for self-hosted Sentry. Blank restores the hosted API.</p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="sentry-claude-account">
+              Account for Sentry fixes
+            </label>
+            <AccountPicker
+              id="sentry-claude-account"
+              value={sentryAccount}
+              onChange={setSentryAccount}
+              accounts={claude?.accounts ?? []}
+              defaultAccountId={claude?.defaultAccountId ?? null}
+              disabled={claude === null}
+            />
+            <p className="field__hint">The Claude account issue plans and fix sessions run on. A fix session keeps the account it was created with; Default follows the default account.</p>
           </div>
         </Panel>
 

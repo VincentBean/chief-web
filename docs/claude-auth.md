@@ -96,6 +96,17 @@ is left alone until the next launch of agent work — a build iteration, a
 planning terminal, a review or a description — which recreates it on the new
 account; the iteration already running is never interrupted.
 
+**Automated work.** Every other launcher has its own choice, `null` meaning
+the default account: a recurring task stores `claudeAccountId` (passed to each
+run it creates); Settings → GitHub's “Account for PR review, feedback and
+conflict fixes” (`prAutomationClaudeAccountId`, setting
+`pr_automation_claude_account_id`) is what PR review, PR feedback and conflict
+fix containers mount; Settings → Sentry's “Account for Sentry fixes”
+(`sentryClaudeAccountId`, setting `sentry_claude_account_id`) is passed to the
+fix sessions and also used for the Sentry planning container. Sessions created
+by voice name no account and follow the default. Removing an account clears
+every task and setting that named it, so that work falls back to the default.
+
 **Plan usage and token refresh.** Every account's 5-hour and 7-day usage is
 read from Anthropic's usage endpoint (`GET /api/oauth/usage`) with the OAuth
 access token in the account's `.credentials.json`, by a background ticker

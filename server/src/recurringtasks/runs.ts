@@ -233,6 +233,9 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
         prTargetBranch: task.prTarget,
         codeReview: task.runCodeReview,
         recurringTaskId: task.id,
+        // Omitted when unset, so the run follows the default account rather
+        // than being pinned to whichever account is the default today.
+        ...(task.claudeAccountId === null ? {} : { claudeAccountId: task.claudeAccountId }),
       });
     } catch (cause) {
       return this.fireFailed(task, now, describe(cause), null);

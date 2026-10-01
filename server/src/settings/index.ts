@@ -26,6 +26,8 @@ export {
   getDefaultClaudeAccount,
   getDefaultEffort,
   getExplicitDefaultClaudeAccountId,
+  getPrAutomationClaudeAccountId,
+  getSentryClaudeAccountId,
   getGitIdentity,
   getGithubToken,
   getMaxConcurrentSessions,

@@ -15,7 +15,12 @@ import type { SessionContainerView } from '../orchestrator/index.js';
 import type { PrRunContainers } from '../prfeedback/index.js';
 import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import { CONTAINER_REPO_DIR, type SessionExecutor } from '../sessions/index.js';
-import { getSentryModel, getSentryPlansPerTick } from '../settings/index.js';
+import {
+  getDefaultClaudeAccount,
+  getSentryClaudeAccountId,
+  getSentryModel,
+  getSentryPlansPerTick,
+} from '../settings/index.js';
 
 import { createSentryClient, SentryApiError, type SentryIssueDetails } from './client.js';
 import { classificationPrompt, type Classification, parseClassification } from './prompts.js';
@@ -192,7 +197,14 @@ export class SentryClassifyService implements SentryClassifier {
 
     let container: SessionContainerView;
     try {
-      container = await this.containers.startPrRun({ id: runId, prNumber: 0, repositoryId });
+      // Planning is Sentry work too, so it runs on the Sentry account; unset
+      // means the default account, not the PR automation one.
+      const account =
+        getSentryClaudeAccountId(this.db) ?? getDefaultClaudeAccount(this.db)?.id ?? undefined;
+      container = await this.containers.startPrRun(
+        { id: runId, prNumber: 0, repositoryId },
+        account,
+      );
     } catch (cause) {
       // Nothing was asked of Claude and nothing was written; every issue in
       // the batch simply spends an attempt and waits for the next tick.

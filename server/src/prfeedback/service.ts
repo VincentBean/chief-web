@@ -148,11 +148,15 @@ export interface BuildSlots {
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
 export interface PrRunContainers {
-  startPrRun(run: {
-    id: string;
-    prNumber: number;
-    repositoryId: string;
-  }): Promise<SessionContainerView>;
+  /** `accountId` omitted: Settings → GitHub's PR automation account, else the default. */
+  startPrRun(
+    run: {
+      id: string;
+      prNumber: number;
+      repositoryId: string;
+    },
+    accountId?: string,
+  ): Promise<SessionContainerView>;
   removePrRun(runId: string): Promise<void>;
 }
 

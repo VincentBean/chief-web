@@ -16,6 +16,7 @@ import {
   type Session,
   type SessionStatus,
   updateSession,
+  setSetting,
 } from '../db/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import {
@@ -527,6 +528,67 @@ describe('reconciliation against a mocked Docker client', () => {
 
     await assert.rejects(() => orchestrator.reconcile(), /ENOENT/);
     assert.equal(getSession(env.db, session.id)?.status, 'building');
+  });
+});
+
+describe('the account a pull request run mounts (multiple accounts US-013)', () => {
+  let daemon: FakeDockerDaemon;
+  let env: Fixture;
+  let orchestrator: SessionOrchestrator;
+
+  before(async () => {
+    daemon = await FakeDockerDaemon.start();
+  });
+
+  after(async () => {
+    await daemon.close();
+  });
+
+  beforeEach(() => {
+    env = fixture();
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath));
+  });
+
+  const startRun = async (id: string): Promise<string | undefined> => {
+    const view = await orchestrator.startPrRun({
+      id,
+      prNumber: 7,
+      repositoryId: env.session().repositoryId,
+    });
+    return daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL];
+  };
+
+  it('runs on the PR automation account when one is chosen', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+
+    assert.equal(await startRun('run-explicit'), chosen);
+  });
+
+  it('runs on the default account when none is chosen', async () => {
+    addClaudeAccount(env.config, env.db);
+
+    assert.equal(await startRun('run-unset'), env.accountId);
+  });
+
+  it('falls back to the default account once the chosen one is removed', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+    removeClaudeAccount(env.config, env.db, chosen);
+
+    assert.equal(await startRun('run-removed'), env.accountId);
+  });
+
+  it('lets a caller name the account outright', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    const other = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+
+    const view = await orchestrator.startPrRun(
+      { id: 'run-named', prNumber: 0, repositoryId: env.session().repositoryId },
+      other,
+    );
+    assert.equal(daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
   });
 });
 

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { addClaudeAccount } from '../claude/index.js';
+import { addClaudeAccount, defaultClaudeAccountId, removeClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   type CreateRecurringTaskInput,
@@ -29,7 +29,7 @@ import {
 } from '../db/index.js';
 import { type ExecScript, FakeDockerDaemon, type FakeExec } from '../docker/fake-daemon.js';
 import { DockerApi } from '../docker/index.js';
-import { SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
+import { CLAUDE_ACCOUNT_LABEL, SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
 import { parsePrd, prdParses, prdPathFor } from '../prd/index.js';
 import { SessionService } from '../sessions/index.js';
 import { writePrivateKey } from '../ssh/index.js';
@@ -598,6 +598,51 @@ describe('settling a recurring task run', () => {
     assert.equal(occurrence?.outcome, 'failed');
     assert.equal(occurrence?.detail, 'The agent stalled three times on US-001.');
     assert.equal(getRecurringTask(f.db, task.id)?.lastOutcome, 'failed');
+  });
+});
+
+describe('the Claude account a run is created on (multiple accounts US-013)', () => {
+  /** The run the firing created, and the account its container mounts. */
+  async function fire(f: Fixture): Promise<{ run: Session; label: string | undefined }> {
+    assert.equal(await f.runner.fireDue(), 1);
+    const [run] = listSessions(f.db, {});
+    assert.ok(run);
+    return { run, label: f.daemon.listContainers()[0]?.labels[CLAUDE_ACCOUNT_LABEL] };
+  }
+
+  it('creates the run on the account the task names', async () => {
+    const f = await fixture();
+    const chosen = addClaudeAccount(f.config, f.db, { authMethod: 'claude.ai' });
+    f.task({ claudeAccountId: chosen.id });
+
+    const { run, label } = await fire(f);
+    assert.equal(run.claudeAccountId, chosen.id);
+    assert.equal(label, chosen.id);
+  });
+
+  it('leaves the run on the default account when the task names none', async () => {
+    const f = await fixture();
+    const task = f.task();
+    assert.equal(task.claudeAccountId, null);
+
+    const { run, label } = await fire(f);
+    // Not pinned: the run keeps following the default if it changes later.
+    assert.equal(run.claudeAccountId, null);
+    assert.equal(label, defaultClaudeAccountId(f.db));
+  });
+
+  it('falls back to the default account once the chosen one is removed', async () => {
+    const f = await fixture();
+    const chosen = addClaudeAccount(f.config, f.db, { authMethod: 'claude.ai' });
+    const task = f.task({ claudeAccountId: chosen.id });
+
+    assert.equal(removeClaudeAccount(f.config, f.db, chosen.id), true);
+    assert.equal(getRecurringTask(f.db, task.id)?.claudeAccountId, null);
+
+    const { run, label } = await fire(f);
+    assert.equal(run.claudeAccountId, null);
+    assert.ok(label !== undefined && label !== chosen.id);
+    assert.equal(label, defaultClaudeAccountId(f.db));
   });
 });
 

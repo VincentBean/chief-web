@@ -148,6 +148,13 @@ export const SETTING_KEYS = [
    * means "unset"; removing an account clears it anyway.
    */
   'default_claude_account_id',
+  /**
+   * The Claude account PR review, PR feedback and merge-conflict fixes run on
+   * (US-013); unset means the default account.
+   */
+  'pr_automation_claude_account_id',
+  /** The Claude account Sentry plans and fix sessions run on (US-013); unset means the default. */
+  'sentry_claude_account_id',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -156,7 +163,11 @@ export type SettingKey = (typeof SETTING_KEYS)[number];
  * Settings whose value is a Claude account id. Removing an account deletes
  * every one of these that names it, so they fall back to the default.
  */
-export const CLAUDE_ACCOUNT_SETTING_KEYS: readonly SettingKey[] = ['default_claude_account_id'];
+export const CLAUDE_ACCOUNT_SETTING_KEYS: readonly SettingKey[] = [
+  'default_claude_account_id',
+  'pr_automation_claude_account_id',
+  'sentry_claude_account_id',
+];
 
 export function getSetting(db: Database, key: SettingKey): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
