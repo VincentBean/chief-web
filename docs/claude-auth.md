@@ -28,7 +28,7 @@ From **Settings → Claude Code**:
   a browser terminal in it running `claude auth login`, and shows it inline.
   Follow the URL it prints, approve the request, and paste the code back
   (Ctrl+Shift+V).
-- **Sign in** again later (token expiry, another email behind the account) is
+- **Sign in again** later (token expiry, another email behind the account) is
   `POST /api/claude/accounts/<id>/login`: the same flow on the existing account.
 - **Close login terminal** (`DELETE /api/claude/accounts/<id>/login`) kills the
   terminal, removes the container, and re-probes that account — so the
@@ -38,6 +38,27 @@ From **Settings → Claude Code**:
   an abandoned login leaves nothing behind.
 - One login terminal is open at a time; starting another answers
   `409 claude_login_in_progress` with the `accountId` whose login is open.
+
+The panel lists one row per account: a status dot, the nickname (or the email),
+email, organization and subscription, the 5-hour and 7-day usage with when each
+resets, and a **Default** badge on the default account. An account that is not
+signed in stays listed until it is removed; one whose probe failed shows the
+error and **Check again**. Per row:
+
+- **Rename** — `PATCH /api/claude/accounts/<id> { nickname }`; blank clears the
+  nickname, so the email shows again.
+- **Make default** — `POST /api/claude/accounts/<id>/default` stores the
+  `default_claude_account_id` setting. Without it the first account is the
+  default.
+- **Check again** — `POST /api/claude/accounts/<id>/check` re-probes one account.
+- **Remove** — asks first, naming how many sessions and recurring tasks are
+  bound to the account (`GET /api/claude/accounts/<id>/bindings`), then
+  `DELETE /api/claude/accounts/<id>`: `409 account_is_default` while it is the
+  default and another account exists (make another one the default first; the
+  last account can always go), `409 account_in_use` while a session or PR-run
+  container labelled `chief-web.claude-account=<id>` is running, otherwise the
+  row, its directory and every reference to it (sessions, recurring tasks,
+  account settings, which fall back to the default) are deleted → `204`.
 
 **Session creation is blocked while this says Not authenticated** — `POST
 /api/sessions` answers `409 claude_not_authenticated` with what to do about it,

@@ -539,6 +539,48 @@ export async function stopClaudeLogin(accountId: string): Promise<ClaudeAccountL
   });
 }
 
+/** Sets or clears (`null`, show the email) an account's nickname (US-006). */
+export async function renameClaudeAccount(accountId: string, nickname: string | null): Promise<ClaudeAccount> {
+  return api<ClaudeAccount>(`/api/claude/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ nickname }),
+  });
+}
+
+/** Makes an account the one launches use unless told otherwise. */
+export async function makeDefaultClaudeAccount(accountId: string): Promise<{ defaultAccountId: string | null }> {
+  return api<{ defaultAccountId: string | null }>(
+    `/api/claude/accounts/${encodeURIComponent(accountId)}/default`,
+    { method: 'POST' },
+  );
+}
+
+/** Re-probes one account, skipping the cached status. */
+export async function checkClaudeAccount(accountId: string): Promise<ClaudeAccountStatus> {
+  return api<ClaudeAccountStatus>(`/api/claude/accounts/${encodeURIComponent(accountId)}/check`, {
+    method: 'POST',
+  });
+}
+
+/** How many sessions and recurring tasks name the account explicitly. */
+export interface ClaudeAccountBindings {
+  sessions: number;
+  recurringTasks: number;
+}
+
+export async function fetchClaudeAccountBindings(accountId: string): Promise<ClaudeAccountBindings> {
+  return api<ClaudeAccountBindings>(`/api/claude/accounts/${encodeURIComponent(accountId)}/bindings`);
+}
+
+/**
+ * Removes an account and its credentials. Refused with 409 `account_is_default`
+ * while it is the default and others exist, and `account_in_use` while a
+ * container mounting it runs.
+ */
+export async function removeClaudeAccount(accountId: string): Promise<void> {
+  await api<void>(`/api/claude/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+}
+
 /** Mirrors the server's `RepositoryView`: the private key is never included. */
 export interface Repository {
   id: string;

@@ -236,7 +236,7 @@ Do this once per repository. Each one gets its own key.
 
 ### 6. Sign in to Claude Code
 
-Go to **Settings → Claude Code** and press **Set up Claude**. A terminal
+Go to **Settings → Claude Code** and press **Add account**. A terminal
 appears and asks you to log in:
 
 1. Copy the URL it prints with **Ctrl+Shift+C** and open it in a new tab.
@@ -244,9 +244,10 @@ appears and asks you to log in:
 3. Paste it back into the terminal with **Ctrl+Shift+V** and press Enter.
 4. Press **Close login terminal**.
 
-It should now say **Authenticated**. You only do this once — the login is kept
-in a Docker volume, shared by every session, and survives restarts and
-`docker compose down`.
+The account is now listed as signed in, with its 5-hour and 7-day plan usage.
+You only do this once per account — the login is kept on the data volume and
+survives restarts and `docker compose down`. Add more accounts the same way;
+see [Claude authentication](docs/claude-auth.md).
 
 Until this says Authenticated you cannot create or plan a session. That is
 deliberate: an agent that cannot log in would fail on its first run, a long way

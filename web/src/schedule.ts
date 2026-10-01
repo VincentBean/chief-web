@@ -160,6 +160,13 @@ export function since(iso: string, now: number = Date.now()): string {
   return ms < 60_000 ? 'just now' : `${formatDuration(ms)} ago`;
 }
 
+/** "resets in 3 h 12 min" for a usage window (multiple accounts US-006). */
+export function resetsIn(iso: string, now: number = Date.now()): string {
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms)) return 'reset time unknown';
+  return ms <= 0 ? 'resetting now' : `resets in ${formatDuration(ms)}`;
+}
+
 function formatDuration(ms: number): string {
   const total = Math.floor(ms / 1000);
   if (total < MINUTE) return `${String(total)} s`;

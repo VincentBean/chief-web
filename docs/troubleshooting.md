@@ -50,16 +50,17 @@ build.
   not found`, a timeout): the *probe* could not run. chief-web fails closed — an
   unanswerable check is not a pass. Usually the runner image is missing
   (`docker compose build runner`) or the Docker socket is unreachable. Fix that
-  and press **Re-check**.
+  and press **Check again** on the account.
 - **The login terminal shows nothing**: the login container did not start. Check
   `docker compose logs server` and that `RUNNER_IMAGE` exists locally
   (`docker image ls chief-web-runner`).
 - The status is cached for 15 seconds (`CLAUDE_STATUS_CACHE_MS`) because each
-  probe costs a container start; **Re-check** ignores the cache.
+  probe costs a container start; **Check again** and **Re-check all** ignore the
+  cache.
 
 The credentials survive `docker compose down` and restarts: each account's
 login lives in its own directory on the data volume. To sign an account in
-afresh, use **Set up Claude** again.
+afresh, use **Sign in again** on its row.
 
 ## Recovering a failed session
 

@@ -1,30 +1,22 @@
-import { type FormEvent, lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
-  addClaudeAccount,
   ApiError,
-  claudeAccountStatus,
-  claudeNeedsSignIn,
-  describeClaudeUsage,
-  claudeSignedIn,
   EFFORT_LEVELS,
   type EffortLevel,
   checkElevenLabsKey,
   checkOpenRouterKey,
   type ElevenLabsVoice,
-  fetchClaudeState,
   fetchSettings,
   fetchVoiceVoices,
   type OpenRouterSlugs,
   saveSettings,
   type Settings as SettingsData,
   type SettingsUpdate,
-  startClaudeLogin,
-  stopClaudeLogin,
   testSpeechToText,
   testTextToSpeech,
   validateGithubToken,
@@ -35,11 +27,12 @@ import {
   VOICE_TTS_MODELS,
   type VoiceSettings,
 } from '../api.ts';
-import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
+import { describeError, redirectIfUnauthorised } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { ClaudeAccountsPanel } from './ClaudeAccounts.tsx';
 import { playPcm16 } from '../voice/pcm.ts';
 import { recordWav } from '../voice/wav.ts';
 
@@ -70,17 +63,14 @@ const toQuestions = (text: string): string[] =>
     .map((line) => line.trim())
     .filter((line) => line !== '');
 
-// xterm.js only matters once an operator actually signs Claude in.
-const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
-
 /**
  * Global settings (US-004): the GitHub token, the build cap and timeout, the
- * models, the commit identity, and Claude Code's one-time sign-in. One form;
- * the save bar appears when something has changed.
+ * models, the commit identity, and the Claude accounts (`ClaudeAccountsPanel`,
+ * multiple accounts US-006). One form; the save bar appears when something
+ * has changed.
  */
 export function Settings() {
   const toast = useToast();
-  const { claude, setClaude } = useAppData();
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState('');
@@ -118,14 +108,6 @@ export function Settings() {
   /** OpenRouter's verdict on each model name, shown under its field. */
   const [slugProblems, setSlugProblems] = useState<Partial<Record<keyof OpenRouterSlugs, string>>>({});
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | 'remove-voice-key' | null>(null);
-  const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
-  // Kept apart from `claude.login.active` so the pane stays on screen (and
-  // readable) after the login process itself has exited.
-  const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
-  // Below `lg` the login terminal is not rendered at all: mounting it would
-  // open a WebSocket onto a PTY too narrow to read and impossible to paste
-  // a code into. The login itself keeps running on the server.
-  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -136,18 +118,8 @@ export function Settings() {
         if (redirectIfUnauthorised(error)) return;
         setLoadError(describeError(error));
       });
-    // A login terminal survives a page reload, so an in-progress one is picked
-    // back up rather than started again.
-    fetchClaudeState({ signal: controller.signal })
-      .then((state) => {
-        setClaude(state);
-        if (state.login.terminalId !== null) setLoginTerminal(state.login.terminalId);
-      })
-      .catch(() => {
-        // The status line below says "checking" until it can say more.
-      });
     return () => controller.abort();
-  }, [setClaude]);
+  }, []);
 
   // `/settings#claude` from the sidebar or the overview lands on that panel.
   useEffect(() => {
@@ -187,14 +159,6 @@ export function Settings() {
       })
       .catch((error: unknown) => toast.error(describeError(error)))
       .finally(() => setBusy(null));
-  };
-
-  const runClaude = (kind: NonNullable<typeof claudeBusy>, action: () => Promise<{ ok: boolean; text: string }>): void => {
-    setClaudeBusy(kind);
-    action()
-      .then((result) => toast.push(result.ok ? 'ok' : 'error', result.text))
-      .catch((error: unknown) => toast.error(describeError(error)))
-      .finally(() => setClaudeBusy(null));
   };
 
   const onSubmit = (event: FormEvent): void => {
@@ -356,62 +320,6 @@ export function Settings() {
     });
   };
 
-  const onSetUpClaude = (): void => {
-    runClaude('start', async () => {
-      // A connected but signed-out default account is signed in again; with
-      // none, or one already signed in, a new account is added (US-003).
-      const defaultAccountId = claude?.defaultAccountId ?? null;
-      const started =
-        defaultAccountId !== null && (claude === null || claudeAccountStatus(claude, defaultAccountId)?.authenticated !== true)
-          ? await startClaudeLogin(defaultAccountId)
-          : await addClaudeAccount();
-      setClaude(await fetchClaudeState());
-      setLoginTerminal(started.login.terminalId);
-      return { ok: true, text: 'Login terminal ready. Open the URL it prints, then paste the code back.' };
-    });
-  };
-
-  const onCloseLogin = (): void => {
-    runClaude('stop', async () => {
-      const accountId = claude?.login.accountId ?? null;
-      const stopped = accountId === null ? null : await stopClaudeLogin(accountId);
-      const state = await fetchClaudeState({ refresh: stopped === null });
-      setClaude(state);
-      setLoginTerminal(null);
-      return (stopped?.status ?? claudeAccountStatus(state, accountId))?.authenticated === true
-        ? { ok: true, text: 'Claude Code is signed in.' }
-        : { ok: false, text: 'Claude Code is still not signed in.' };
-    });
-  };
-
-  const onLoginExit = (): void => {
-    fetchClaudeState({ refresh: true })
-      .then((state) => {
-        setClaude(state);
-        const signedIn = claudeAccountStatus(state, state.login.accountId)?.authenticated === true;
-        toast.push(
-          signedIn ? 'ok' : 'error',
-          signedIn
-            ? 'Claude Code is signed in. Close the terminal to clean up.'
-            : 'The login ended without signing in. Close the terminal and try again.',
-        );
-      })
-      .catch((error: unknown) => toast.error(describeError(error)));
-  };
-
-  const onCheckClaude = (): void => {
-    runClaude('check', async () => {
-      const state = await fetchClaudeState({ refresh: true });
-      setClaude(state);
-      return claudeSignedIn(state)
-        ? { ok: true, text: 'Claude Code is signed in.' }
-        : {
-            ok: false,
-            text: state.accounts.find((account) => account.error !== null)?.error ?? 'Claude Code is not signed in.',
-          };
-    });
-  };
-
   if (loadError !== null) {
     return (
       <div className="page page--narrow">
@@ -460,98 +368,11 @@ export function Settings() {
     openrouterKey.trim() !== '' ||
     elevenlabsKey.trim() !== '' ||
     JSON.stringify(voiceForm) !== JSON.stringify(toVoiceForm(settings.voice));
-  // One account until the account list lands (US-006): the default one.
-  const claudeStatus = claude === null ? null : claudeAccountStatus(claude, claude.defaultAccountId);
-
   return (
     <div className="page page--narrow">
       <PageHeader title="Settings" subtitle="Applies to every repository and session. Changes take effect at the next iteration; nothing running is interrupted." />
 
-      <Panel
-        title="Claude Code"
-        icon="zap"
-        id="claude"
-        meta={
-          claudeStatus === null ? (
-            <Badge>checking…</Badge>
-          ) : claudeNeedsSignIn(claudeStatus.usage) ? (
-            <Badge tone="danger">sign in again</Badge>
-          ) : claudeStatus.authenticated ? (
-            <Badge tone="done">signed in</Badge>
-          ) : (
-            <Badge tone="danger">not signed in</Badge>
-          )
-        }
-        actions={
-          <>
-            <button type="button" className={claudeStatus?.authenticated === true ? 'button button--small' : 'button button--small button--primary'} onClick={onSetUpClaude} disabled={claudeBusy !== null || loginTerminal !== null}>
-              <Icon name="key" />
-              {claudeBusy === 'start' ? 'Starting…' : claudeStatus?.authenticated === true ? 'Sign in again' : 'Sign in'}
-            </button>
-            <button type="button" className="button button--small button--quiet" onClick={onCheckClaude} disabled={claudeBusy !== null}>
-              <Icon name="sync" />
-              {claudeBusy === 'check' ? 'Checking…' : 'Re-check'}
-            </button>
-          </>
-        }
-      >
-        <p className={claudeStatus?.authenticated === true ? undefined : 'muted'}>
-          {claudeStatus === null
-            ? 'Probing the shared credentials volume…'
-            : claudeStatus.authenticated
-              ? `Signed in${claudeStatus.email === null ? '' : ` as ${claudeStatus.email}`}${claudeStatus.subscription === null ? '' : ` (${claudeStatus.subscription})`}. Every session container shares these credentials.`
-              : 'Sessions cannot be created until Claude Code is signed in. It is a one-time browser login; the credentials are kept on a volume that survives restarts.'}
-        </p>
-        {claudeStatus?.error != null && <p className="field__hint">Status check: {claudeStatus.error}</p>}
-        {claudeNeedsSignIn(claudeStatus?.usage) ? (
-          <p className="field__hint">The login has expired and could not be refreshed: sign in again.</p>
-        ) : (
-          describeClaudeUsage(claudeStatus?.usage) !== null && (
-            <p className="field__hint">Plan usage: {describeClaudeUsage(claudeStatus?.usage)}</p>
-          )
-        )}
-
-        {loginTerminal !== null && (
-          <div className="stack stack--tight">
-            <div className="row__line">
-              <span className="mono muted">{claude?.login.containerName ?? 'claude login'}</span>
-              <span className="toolbar__spacer" />
-              <button type="button" className="button button--small button--danger" onClick={onCloseLogin} disabled={claudeBusy !== null}>
-                <Icon name="x" />
-                {claudeBusy === 'stop' ? 'Closing…' : 'Close login terminal'}
-              </button>
-            </div>
-            {desktop ? (
-              <>
-                <Suspense fallback={<Skeleton lines={6} />}>
-                  <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
-                </Suspense>
-                <ol className="steps steps--plain steps--compact">
-                  <li className="step">
-                    <span className="step__marker">1</span>
-                    <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
-                  </li>
-                  <li className="step">
-                    <span className="step__marker">2</span>
-                    <span className="step__body">Approve the request and copy the code Claude gives back.</span>
-                  </li>
-                  <li className="step">
-                    <span className="step__marker">3</span>
-                    <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
-                  </li>
-                </ol>
-              </>
-            ) : (
-              <Notice kind="info">
-                <strong>Finish this sign-in on a desktop.</strong> The login is an interactive terminal: it prints a URL to
-                open and waits for the code you get back, which needs a keyboard and a wider screen. The terminal is already
-                running on the server, so opening this page on a desktop picks it up where it is — or close it here and start
-                again there.
-              </Notice>
-            )}
-          </div>
-        )}
-      </Panel>
+      <ClaudeAccountsPanel />
 
       <form onSubmit={onSubmit} className="stack">
         <Panel
