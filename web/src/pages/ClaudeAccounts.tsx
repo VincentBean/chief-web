@@ -6,6 +6,7 @@ import {
   type ClaudeAccountBindings,
   type ClaudeAccountStatus,
   claudeAccountStatus,
+  claudeAccountName,
   claudeNeedsSignIn,
   type ClaudeState,
   type ClaudeUsageWindow,
@@ -39,11 +40,6 @@ interface Busy {
 interface Removing {
   readonly account: ClaudeAccountStatus;
   readonly bindings: ClaudeAccountBindings | null;
-}
-
-/** The nickname, else the email, else the bare id of an account never signed in. */
-export function claudeAccountName(account: Pick<ClaudeAccountStatus, 'id' | 'nickname' | 'email'>): string {
-  return account.nickname ?? account.email ?? `Account ${account.id.slice(0, 8)}`;
 }
 
 function plural(count: number, noun: string): string {

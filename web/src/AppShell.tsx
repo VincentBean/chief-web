@@ -1,10 +1,18 @@
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { claudeNeedsSignIn, claudeSignedIn, describeBuildSlots, logout } from './api.ts';
+import {
+  type ClaudeAccountStatus,
+  type ClaudeUsage,
+  type ClaudeUsageWindow,
+  claudeAccountName,
+  claudeNeedsSignIn,
+  describeBuildSlots,
+  logout,
+} from './api.ts';
 import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
-import { countdown } from './schedule.ts';
+import { countdown, resetsAtShort, shortDuration } from './schedule.ts';
 import { Gauge, Kbd, Meter } from './ui.tsx';
 import { CallPanel } from './voice/CallPanel.tsx';
 import { useCall } from './voice/CallProvider.tsx';
@@ -56,8 +64,6 @@ function isCurrent(item: NavItem, pathname: string): boolean {
 export function AppShell({ children }: { readonly children: ReactNode }) {
   const { pathname } = useLocation();
   const { sessions, stats, claude } = useAppData();
-  // An account whose refresh token is gone (US-005); the 5-second stats poll carries it.
-  const signInAgain = stats?.accounts.some((account) => claudeNeedsSignIn(account.usage)) === true;
   const [open, setOpen] = useState(false);
   const call = useCall();
   const inCall = call.status === 'connecting' || call.status === 'live' || call.status === 'reconnecting';
@@ -202,21 +208,7 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
           <Gauge value={stats.host.memory.used / stats.host.memory.total} label="Host memory" />
         )}
       </div>
-      <Link
-        className={`status-row status-row--link ${claude === null ? '' : claudeSignedIn(claude) && !signInAgain ? 'status-row--ok' : 'status-row--danger'}`}
-        href="/settings#claude"
-        title={
-          signInAgain
-            ? 'A Claude account’s login has expired; sign it in again in Settings'
-            : (claude?.accounts.find((account) => account.authenticated)?.email ?? 'Claude Code sign-in')
-        }
-      >
-        <span className={`dot ${claude === null ? 'dot--neutral' : claudeSignedIn(claude) && !signInAgain ? 'dot--done' : 'dot--danger'}`} />
-        <span className="status-row__label">Claude</span>
-        <span className="status-row__value">
-          {claude === null ? 'checking…' : signInAgain ? 'sign in again' : claudeSignedIn(claude) ? 'signed in' : 'not signed in'}
-        </span>
-      </Link>
+      <ClaudeAccountRows stats={stats?.accounts ?? null} claude={claude?.accounts ?? null} />
     </div>
   );
 
@@ -276,6 +268,148 @@ export function AppShell({ children }: { readonly children: ReactNode }) {
 
       <CallPanel />
     </div>
+  );
+}
+
+/** One sidebar row's worth of an account: who it is, and its live usage and hold. */
+interface AccountRowData {
+  readonly id: string;
+  /** The account as `GET /api/claude` last described it; null while that is unknown. */
+  readonly status: ClaudeAccountStatus | null;
+  readonly usage: ClaudeUsage | null;
+  readonly holdUntil: string | null;
+}
+
+/**
+ * Every Claude account's 5h and 7d usage, one row each in position order
+ * (multiple accounts US-008). The numbers ride the 5-second `/api/stats` poll;
+ * names and sign-in state come from the Claude state the app already holds.
+ */
+function ClaudeAccountRows({
+  stats,
+  claude,
+}: {
+  readonly stats: readonly { id: string; usage: ClaudeUsage | null; holdUntil: string | null }[] | null;
+  readonly claude: readonly ClaudeAccountStatus[] | null;
+}) {
+  const rows: readonly AccountRowData[] | null =
+    stats !== null
+      ? stats.map((entry) => ({ ...entry, status: claude?.find((account) => account.id === entry.id) ?? null }))
+      : claude !== null
+        ? claude.map((account) => ({ id: account.id, status: account, usage: null, holdUntil: null }))
+        : null;
+
+  if (rows === null) {
+    return (
+      <Link className="status-row status-row--link" href="/settings#claude" title="Claude Code accounts">
+        <span className="dot dot--neutral" />
+        <span className="status-row__label">Claude</span>
+        <span className="status-row__value">checking…</span>
+      </Link>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <Link className="status-row status-row--link status-row--danger" href="/settings#claude" title="Add a Claude account in Settings">
+        <span className="dot dot--danger" />
+        <span className="status-row__label status-row__value">Claude: no account</span>
+      </Link>
+    );
+  }
+  return rows.map((row) => <ClaudeAccountRow key={row.id} row={row} />);
+}
+
+/** A window's bar turns amber from 80% and red from 95%: past that, a session may stop mid-iteration. */
+function usageTone(utilization: number): 'active' | 'wait' | 'danger' {
+  return utilization >= 95 ? 'danger' : utilization >= 80 ? 'wait' : 'active';
+}
+
+/** "5h 42% (resets in 1h 12m)", or "5h –" when the window is unknown. */
+function describeWindow(label: string, window: ClaudeUsageWindow | null, now: number): string {
+  if (window === null) return `${label} –`;
+  const percent = `${label} ${String(Math.round(window.utilization))}%`;
+  return window.resetsAt === null ? percent : `${percent} (${resetsAtShort(window.resetsAt, now)})`;
+}
+
+function ClaudeAccountRow({ row }: { readonly row: AccountRowData }) {
+  // A held account re-renders every second, counting down like `HoldClock`;
+  // the rest follow the 5-second stats poll, so the clock is read at render.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (row.holdUntil === null) return undefined;
+    const timer = window.setInterval(() => tick((count) => count + 1), 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [row.holdUntil]);
+  const now = Date.now();
+
+  const { status, usage } = row;
+  const name = status === null ? `Account ${row.id.slice(0, 8)}` : claudeAccountName(status);
+  const who = status?.nickname != null && status.email !== null ? `${status.nickname} (${status.email})` : name;
+  const signedOut = status !== null && !status.authenticated;
+  const signInAgain = claudeNeedsSignIn(usage);
+  const holdMs = row.holdUntil === null ? 0 : new Date(row.holdUntil).getTime() - now;
+  const held = !signedOut && !signInAgain && holdMs > 0;
+
+  const dot = status === null ? 'dot--neutral' : signedOut || signInAgain ? 'dot--danger' : 'dot--done';
+  const title = [
+    who,
+    ...(signedOut
+      ? ['not signed in']
+      : signInAgain
+        ? ['login expired, sign in again']
+        : [
+            ...(held ? [`on hold, resumes in ${shortDuration(holdMs)}`] : []),
+            describeWindow('5h', usage?.fiveHour ?? null, now),
+            describeWindow('7d', usage?.sevenDay ?? null, now),
+          ]),
+  ].join(' · ');
+
+  const bar = (label: string, window: ClaudeUsageWindow | null) => (
+    <span className="status-row__window">
+      <span className="status-row__window-label">{label}</span>
+      {window === null ? (
+        <span className="status-row__window-value">–</span>
+      ) : (
+        <>
+          <Gauge
+            value={window.utilization / 100}
+            label={`${name} ${label} usage`}
+            tone={usageTone(window.utilization)}
+          />
+          <span className="status-row__window-value">{`${String(Math.round(window.utilization))}%`}</span>
+        </>
+      )}
+    </span>
+  );
+
+  return (
+    <Link
+      className={`status-row status-row--link status-row--account${signedOut || signInAgain ? ' status-row--danger' : held ? ' status-row--wait' : ''}`}
+      href="/settings#claude"
+      title={title}
+    >
+      <span className={`dot ${dot}`} />
+      <span className="status-row__name">{name}</span>
+      <span className="status-row__usage">
+        {signedOut ? (
+          <span className="status-row__value">not signed in</span>
+        ) : signInAgain ? (
+          <span className="status-row__value">sign in again</span>
+        ) : held ? (
+          <span className="status-row__window">
+            <Icon name="hourglass" />
+            <span className="status-row__value">{`on hold · ${shortDuration(holdMs)}`}</span>
+          </span>
+        ) : (
+          <>
+            {bar('5h', usage?.fiveHour ?? null)}
+            {bar('7d', usage?.sevenDay ?? null)}
+          </>
+        )}
+      </span>
+    </Link>
   );
 }
 

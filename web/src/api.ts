@@ -479,6 +479,11 @@ export interface ClaudeState {
   login: ClaudeLogin;
 }
 
+/** The nickname, else the email, else the bare id of an account never signed in. */
+export function claudeAccountName(account: Pick<ClaudeAccountStatus, 'id' | 'nickname' | 'email'>): string {
+  return account.nickname ?? account.email ?? `Account ${account.id.slice(0, 8)}`;
+}
+
 /** Sessions can launch once any account is signed in. */
 export function claudeSignedIn(state: ClaudeState): boolean {
   return state.accounts.some((account) => account.authenticated);

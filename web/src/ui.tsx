@@ -209,11 +209,20 @@ export function Progress({
  * is the one for a ratio that sits at the end of a status row, where the number
  * beside it is already spelled out.
  */
-export function Gauge({ value, label }: { readonly value: number; readonly label: string }) {
+export function Gauge({
+  value,
+  label,
+  tone: forced,
+}: {
+  readonly value: number;
+  readonly label: string;
+  /** Overrides the default thresholds, for a ratio whose danger zone sits elsewhere. */
+  readonly tone?: Tone;
+}) {
   const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
   // The colour is the warning: quiet while there is room, amber as it fills,
   // red once the machine has nothing left to give.
-  const tone: Tone = percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active';
+  const tone: Tone = forced ?? (percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active');
   return (
     <div
       className={`gauge gauge--${tone}`}

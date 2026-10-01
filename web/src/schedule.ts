@@ -182,3 +182,34 @@ function formatDuration(ms: number): string {
   const hours = Math.floor((total % DAY) / HOUR);
   return hours === 0 ? `${String(days)} d` : `${String(days)} d ${String(hours)} h`;
 }
+
+/** "1h 12m", "37m", "45s", "2d 3h": a span short enough for the sidebar. */
+export function shortDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < MINUTE) return `${String(total)}s`;
+  // Rounded up, so a hold with 36 min 20 s left reads "37m" and never "0m".
+  if (total < HOUR) return `${String(Math.ceil(total / MINUTE))}m`;
+  if (total < DAY) {
+    const hours = Math.floor(total / HOUR);
+    const minutes = Math.floor((total % HOUR) / MINUTE);
+    return minutes === 0 ? `${String(hours)}h` : `${String(hours)}h ${String(minutes)}m`;
+  }
+  const days = Math.floor(total / DAY);
+  const hours = Math.floor((total % DAY) / HOUR);
+  return hours === 0 ? `${String(days)}d` : `${String(days)}d ${String(hours)}h`;
+}
+
+/**
+ * When a usage window resets, compactly (multiple accounts US-008): "resets in
+ * 1h 12m" within a day, else the local weekday and time, "resets Thu 09:00".
+ */
+export function resetsAtShort(iso: string, now: number = Date.now()): string {
+  const at = new Date(iso);
+  const ms = at.getTime() - now;
+  if (Number.isNaN(ms)) return 'reset time unknown';
+  if (ms <= 0) return 'resetting now';
+  if (ms < DAY * 1000) return `resets in ${shortDuration(ms)}`;
+  const weekday = at.toLocaleDateString('en-GB', { weekday: 'short' });
+  const time = at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `resets ${weekday} ${time}`;
+}
