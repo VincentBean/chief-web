@@ -140,14 +140,16 @@ export class ClaudeService {
     if (!force && cached !== undefined && this.isFresh(cached)) return cached;
     let probing = this.probing.get(accountId);
     if (probing === undefined) {
-      const started = this.probe(accountId).then((status) => {
-        // An entry invalidated while this probe ran is not refilled by it.
-        if (this.probing.get(accountId) === started) {
-          this.probing.delete(accountId);
-          this.cached.set(accountId, status);
-        }
-        return status;
-      });
+      // An entry invalidated while this probe ran is not refilled by it.
+      const current = (): boolean => this.probing.get(accountId) === started;
+      const started: Promise<ClaudeAuthStatus> = this.probe(accountId)
+        .then((status) => {
+          if (current()) this.cached.set(accountId, status);
+          return status;
+        })
+        .finally(() => {
+          if (current()) this.probing.delete(accountId);
+        });
       probing = started;
       this.probing.set(accountId, started);
     }
