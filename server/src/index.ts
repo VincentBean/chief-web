@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createAuthService } from './auth/index.js';
 import { createBuildLogSocketRoute, createBuildLogStore } from './build/index.js';
+import { importLegacyClaudeAuth } from './claude/index.js';
 import { loadConfig } from './config.js';
 import {
   clearInterruptedPrConflictFixes,
@@ -35,6 +36,11 @@ async function main(): Promise<void> {
   // Resolves the shared password: `CHIEF_WEB_PASSWORD` if set, otherwise the
   // hash in settings — generating and logging one on first boot.
   const auth = createAuthService(config, db);
+
+  // An install from before multiple accounts keeps its one login in the
+  // legacy `claude-auth` directory; it becomes the first account here, once.
+  // Needs no Docker daemon, so it stays outside the reconcile below.
+  importLegacyClaudeAuth(config, db);
 
   // Outside the reconcile below: it needs no Docker daemon, and must not be
   // skipped when one cannot be reached.

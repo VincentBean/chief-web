@@ -13,3 +13,11 @@ export {
   type RunnerMounts,
   runnerMountArgs,
 } from './image.js';
+export {
+  CLAUDE_ACCOUNT_DIR_MODE,
+  chownToRunner,
+  claudeAccountDir,
+  claudeAccountsDir,
+  createClaudeAccountDir,
+  removeClaudeAccountDir,
+} from './accounts.js';

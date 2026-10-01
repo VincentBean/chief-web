@@ -1,4 +1,10 @@
 export {
+  addClaudeAccount,
+  CLAUDE_CREDENTIALS_FILE,
+  importLegacyClaudeAuth,
+  removeClaudeAccount,
+} from './accounts.js';
+export {
   CLAUDE_NOT_AUTHENTICATED,
   CLAUDE_NOT_AUTHENTICATED_MESSAGE,
   requireClaudeAuth,

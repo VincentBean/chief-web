@@ -1218,6 +1218,25 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN effort TEXT;
     `,
   },
+  {
+    id: '0025_claude_accounts',
+    sql: `
+      -- The Claude Code logins chief-web can run on (multiple accounts US-001).
+      -- Each row owns a credentials directory under the data volume, named by
+      -- its id; the profile columns are what the last status probe reported.
+      CREATE TABLE claude_accounts (
+        id           TEXT PRIMARY KEY,
+        nickname     TEXT,
+        email        TEXT,
+        organization TEXT,
+        subscription TEXT,
+        auth_method  TEXT,
+        position     INTEGER NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /**
