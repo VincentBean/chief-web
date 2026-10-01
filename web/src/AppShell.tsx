@@ -13,7 +13,7 @@ import { isActive, needsAttention, useAppData, useKeyChords } from './data.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Link, navigate, useLocation } from './router.tsx';
 import { countdown, resetsAtShort, shortDuration } from './schedule.ts';
-import { Gauge, Kbd, Meter } from './ui.tsx';
+import { claudeUsageTone, Gauge, Kbd, Meter } from './ui.tsx';
 import { CallPanel } from './voice/CallPanel.tsx';
 import { useCall } from './voice/CallProvider.tsx';
 
@@ -319,11 +319,6 @@ function ClaudeAccountRows({
   return rows.map((row) => <ClaudeAccountRow key={row.id} row={row} />);
 }
 
-/** A window's bar turns amber from 80% and red from 95%: past that, a session may stop mid-iteration. */
-function usageTone(utilization: number): 'active' | 'wait' | 'danger' {
-  return utilization >= 95 ? 'danger' : utilization >= 80 ? 'wait' : 'active';
-}
-
 /** "5h 42% (resets in 1h 12m)", or "5h –" when the window is unknown. */
 function describeWindow(label: string, window: ClaudeUsageWindow | null, now: number): string {
   if (window === null) return `${label} –`;
@@ -376,7 +371,7 @@ function ClaudeAccountRow({ row }: { readonly row: AccountRowData }) {
           <Gauge
             value={window.utilization / 100}
             label={`${name} ${label} usage`}
-            tone={usageTone(window.utilization)}
+            tone={claudeUsageTone(window.utilization)}
           />
           <span className="status-row__window-value">{`${String(Math.round(window.utilization))}%`}</span>
         </>

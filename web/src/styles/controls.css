@@ -740,4 +740,151 @@
       flex: 1 1 auto;
     }
   }
+
+  /* -------------------------------------------------------- account picker
+   * A `field__input`-looking button over a listbox of Claude accounts
+   * (AccountPicker.tsx). The popover is fixed to the viewport and placed by
+   * script: left, top or bottom, width and max-height are inline styles.
+   */
+  .account-picker {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    gap: 0.5rem;
+    text-align: left;
+  }
+
+  .account-picker[aria-expanded='true'] {
+    border-color: var(--color-accent-hover);
+  }
+
+  .account-picker__value {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .account-picker__chevron {
+    color: var(--color-fg-muted);
+    flex: none;
+  }
+
+  .account-picker__popover {
+    background-color: var(--color-surface-overlay);
+    border: 1px solid var(--color-line-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-e3);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.25rem;
+    position: fixed;
+    z-index: var(--z-dropdown);
+  }
+
+  .account-picker__popover:focus-visible {
+    outline: none;
+  }
+
+  .account-picker__option {
+    align-items: center;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    font-size: var(--text-sm);
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+  }
+
+  /* Not --color-surface-control: that is the gauge track, and the bars
+   * would lose their empty part on the highlighted row. */
+  .account-picker__option--active {
+    background-color: --alpha(var(--color-accent-solid) / 14%);
+  }
+
+  .account-picker__popover:focus-visible .account-picker__option--active {
+    box-shadow: inset 0 0 0 1px var(--color-accent-hover);
+  }
+
+  .account-picker__option[aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+
+  .account-picker__option[aria-disabled='true'] .account-picker__label,
+  .account-picker__option[aria-disabled='true'] .account-picker__usage {
+    opacity: 0.55;
+  }
+
+  .account-picker__check {
+    color: var(--color-accent-fg);
+    flex: none;
+  }
+
+  /* Dot, name and badge on the first row; the two bars under the name. */
+  .account-picker__choice {
+    align-items: center;
+    column-gap: 0.5rem;
+    display: grid;
+    flex: 1;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    min-width: 0;
+    row-gap: 0.25rem;
+  }
+
+  .account-picker__name {
+    color: var(--color-fg-default);
+    column-gap: 0.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .account-picker__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .account-picker__muted {
+    color: var(--color-fg-subtle);
+  }
+
+  .account-picker__email {
+    flex-basis: 100%;
+    font-size: var(--text-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .account-picker__usage {
+    display: flex;
+    grid-column: 2 / -1;
+    gap: 0.75rem;
+    font-size: var(--text-xs);
+  }
+
+  .account-picker__window {
+    align-items: center;
+    display: inline-flex;
+    gap: 0.3125rem;
+  }
+
+  .account-picker__window .gauge {
+    width: 2.25rem;
+  }
+
+  .account-picker__percent {
+    color: var(--color-fg-default);
+    font-variant-numeric: tabular-nums;
+    min-width: 3ch;
+    text-align: right;
+  }
+
+  @media (pointer: coarse) {
+    .account-picker__option {
+      min-height: 2.5rem;
+    }
+  }
 }

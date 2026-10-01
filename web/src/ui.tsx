@@ -237,6 +237,15 @@ export function Gauge({
   );
 }
 
+/**
+ * A Claude usage window's bar turns amber from 80% and red from 95%: past
+ * that, a session may stop mid-iteration. Shared by the sidebar and the
+ * account picker so both colour the same number the same way.
+ */
+export function claudeUsageTone(utilization: number): Tone {
+  return utilization >= 95 ? 'danger' : utilization >= 80 ? 'wait' : 'active';
+}
+
 /** Build slots as one cell per slot. */
 export function Meter({
   value,
