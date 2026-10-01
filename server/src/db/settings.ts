@@ -142,9 +142,21 @@ export const SETTING_KEYS = [
    * array, means `DEFAULT_PLANNING_QUESTIONS`.
    */
   'planning_questions',
+  /**
+   * The Claude account a launch runs on when nothing more specific was chosen
+   * (multiple accounts US-006/US-007). An id that names no account any more
+   * means "unset"; removing an account clears it anyway.
+   */
+  'default_claude_account_id',
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
+
+/**
+ * Settings whose value is a Claude account id. Removing an account deletes
+ * every one of these that names it, so they fall back to the default.
+ */
+export const CLAUDE_ACCOUNT_SETTING_KEYS: readonly SettingKey[] = ['default_claude_account_id'];
 
 export function getSetting(db: Database, key: SettingKey): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

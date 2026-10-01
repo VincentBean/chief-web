@@ -4,6 +4,7 @@ export {
   defaultClaudeAccountId,
   importLegacyClaudeAuth,
   removeClaudeAccount,
+  setDefaultClaudeAccount,
 } from './accounts.js';
 export {
   CLAUDE_NOT_AUTHENTICATED,

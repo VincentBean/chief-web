@@ -2,10 +2,17 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import {
+  claudeAccountBindings,
   closeDatabase,
   createClaudeAccount,
+  createRecurringTask,
+  createRepository,
+  createSession,
   type Database,
   deleteClaudeAccount,
+  deleteClaudeAccountAndReferences,
+  getSetting,
+  setSetting,
   getClaudeAccount,
   IN_MEMORY,
   listClaudeAccounts,
@@ -125,5 +132,67 @@ describe('claude accounts', () => {
     assert.equal(deleteClaudeAccount(db, account.id), true);
     assert.equal(getClaudeAccount(db, account.id), null);
     assert.equal(deleteClaudeAccount(db, account.id), false);
+  });
+
+  describe('references (US-006)', () => {
+    it('counts nothing and deletes cleanly before sessions can name an account', () => {
+      const account = createClaudeAccount(db);
+      setSetting(db, 'default_claude_account_id', account.id);
+
+      assert.deepEqual(claudeAccountBindings(db, account.id), { sessions: 0, recurringTasks: 0 });
+      assert.equal(deleteClaudeAccountAndReferences(db, account.id), true);
+      assert.equal(getClaudeAccount(db, account.id), null);
+      assert.equal(getSetting(db, 'default_claude_account_id'), null);
+    });
+
+    it('counts and clears the sessions and recurring tasks bound to an account', () => {
+      const own = openDatabase(IN_MEMORY);
+      try {
+        // The columns US-009 adds; until then the helpers skip the tables.
+        own.exec('ALTER TABLE sessions ADD COLUMN claude_account_id TEXT');
+        own.exec('ALTER TABLE recurring_tasks ADD COLUMN claude_account_id TEXT');
+        const account = createClaudeAccount(own);
+        const other = createClaudeAccount(own);
+        const repository = createRepository(own, {
+          name: 'leo',
+          sshUrl: 'git@github.com:VincentBean/leo.git',
+          githubSlug: 'VincentBean/leo',
+          defaultBaseBranch: 'develop',
+        });
+        const task = createRecurringTask(own, {
+          repositoryId: repository.id,
+          name: 'rector',
+          prompt: 'run rector',
+          cronExpression: '0 3 * * *',
+          baseBranch: 'develop',
+          prTarget: 'develop',
+        });
+        const bound = (name: string, accountId: string): void => {
+          const session = createSession(own, {
+            repositoryId: repository.id,
+            name,
+            baseBranch: 'develop',
+            prTargetBranch: 'develop',
+          });
+          own.prepare('UPDATE sessions SET claude_account_id = ? WHERE id = ?').run(accountId, session.id);
+        };
+        bound('one', account.id);
+        bound('two', account.id);
+        bound('three', other.id);
+        own.prepare('UPDATE recurring_tasks SET claude_account_id = ? WHERE id = ?').run(account.id, task.id);
+        setSetting(own, 'default_claude_account_id', other.id);
+
+        assert.deepEqual(claudeAccountBindings(own, account.id), { sessions: 2, recurringTasks: 1 });
+
+        assert.equal(deleteClaudeAccountAndReferences(own, account.id), true);
+
+        assert.deepEqual(claudeAccountBindings(own, account.id), { sessions: 0, recurringTasks: 0 });
+        assert.deepEqual(claudeAccountBindings(own, other.id), { sessions: 1, recurringTasks: 0 });
+        // A setting naming another account is left alone.
+        assert.equal(getSetting(own, 'default_claude_account_id'), other.id);
+      } finally {
+        closeDatabase(own);
+      }
+    });
   });
 });

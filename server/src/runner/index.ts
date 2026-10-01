@@ -14,6 +14,7 @@ export {
 } from './image.js';
 export {
   CLAUDE_ACCOUNT_DIR_MODE,
+  CLAUDE_ACCOUNT_LABEL,
   chownToRunner,
   claudeAccountBind,
   claudeAccountDir,

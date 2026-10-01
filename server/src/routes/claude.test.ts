@@ -8,15 +8,18 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
-import { addClaudeAccount } from '../claude/index.js';
+import { addClaudeAccount, removeClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
   type Database,
+  deleteSetting,
+  getSetting,
   getClaudeAccount,
   IN_MEMORY,
   listClaudeAccounts,
   openDatabase,
+  setSetting,
   updateClaudeAccount,
 } from '../db/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
@@ -80,6 +83,8 @@ describe('claude api', () => {
   /** What the probe container prints; swapped per test to model a login. */
   let probeStdout = '';
   let probeResult: Partial<CommandResult> = {};
+  /** What `docker ps` lists: the containers mounting an account. */
+  let psStdout = '';
 
   const runCommand: CommandRunner = (_command, args) => {
     commands.push([...args]);
@@ -91,6 +96,9 @@ describe('claude api', () => {
         timedOut: false,
         ...probeResult,
       });
+    }
+    if (args[0] === 'ps') {
+      return Promise.resolve({ code: 0, stdout: psStdout, stderr: '', timedOut: false });
     }
     if (args[0] === 'run') {
       return Promise.resolve({
@@ -174,6 +182,7 @@ describe('claude api', () => {
     if (open !== null) await call('DELETE', `/api/claude/accounts/${open}/login`);
     commands = [];
     probeResult = {};
+    psStdout = '';
     loggedOut();
   });
 
@@ -462,5 +471,107 @@ describe('claude api', () => {
   it('no longer serves the single-account login routes', async () => {
     assert.equal((await call('POST', '/api/claude/login')).status, 404);
     assert.equal((await call('DELETE', '/api/claude/login')).status, 404);
+  });
+
+  describe('the accounts panel (US-006)', () => {
+    it('renames an account, trimming, and clears the name with a blank', async () => {
+      const renamed = await call('PATCH', `/api/claude/accounts/${accountId}`, { nickname: '  Work  ' });
+      assert.equal(renamed.status, 200);
+      assert.equal(((await renamed.json()) as { nickname: string }).nickname, 'Work');
+      assert.equal(own(await state()).nickname, 'Work');
+
+      const cleared = await call('PATCH', `/api/claude/accounts/${accountId}`, { nickname: ' ' });
+      assert.equal(cleared.status, 200);
+      assert.equal(getClaudeAccount(db, accountId)?.nickname, null);
+    });
+
+    it('rejects a nickname that is not a string, and an unknown account', async () => {
+      const invalid = await call('PATCH', `/api/claude/accounts/${accountId}`, { nickname: 42 });
+      assert.equal(invalid.status, 400);
+      const tooLong = await call('PATCH', `/api/claude/accounts/${accountId}`, { nickname: 'x'.repeat(101) });
+      assert.equal(tooLong.status, 400);
+      const unknown = await call('PATCH', '/api/claude/accounts/0000000000000000', { nickname: 'x' });
+      assert.equal(unknown.status, 404);
+    });
+
+    it('checks one account again', async () => {
+      loggedIn();
+      const response = await call('POST', `/api/claude/accounts/${accountId}/check`);
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as AccountStatus;
+      assert.equal(body.id, accountId);
+      assert.equal(body.authenticated, true);
+      assert.ok(commands.some((args) => args.includes('status')));
+    });
+
+    it('makes another account the default, after which the old default can go', async () => {
+      const other = addClaudeAccount(config, db).id;
+      try {
+        const refused = await call('DELETE', `/api/claude/accounts/${accountId}`);
+        assert.equal(refused.status, 409);
+        assert.equal(((await refused.json()) as { error: string }).error, 'account_is_default');
+
+        const made = await call('POST', `/api/claude/accounts/${other}/default`);
+        assert.equal(made.status, 200);
+        assert.deepEqual(await made.json(), { defaultAccountId: other });
+        assert.equal((await state()).defaultAccountId, other);
+
+        // The default itself is refused now; the shared account is not.
+        const refusedOther = await call('DELETE', `/api/claude/accounts/${other}`);
+        assert.equal(refusedOther.status, 409);
+      } finally {
+        deleteSetting(db, 'default_claude_account_id');
+        removeClaudeAccount(config, db, other);
+      }
+    });
+
+    it('refuses an account a running container mounts', async () => {
+      const other = addClaudeAccount(config, db).id;
+      try {
+        psStdout = 'abc123\n';
+        const response = await call('DELETE', `/api/claude/accounts/${other}`);
+        assert.equal(response.status, 409);
+        assert.equal(((await response.json()) as { error: string }).error, 'account_in_use');
+        const ps = commands.find((args) => args[0] === 'ps');
+        assert.ok(ps?.includes(`label=chief-web.claude-account=${other}`));
+        assert.ok(getClaudeAccount(db, other));
+      } finally {
+        removeClaudeAccount(config, db, other);
+      }
+    });
+
+    it('removes an account, its directory and the settings naming it', async () => {
+      const other = addClaudeAccount(config, db).id;
+      setSetting(db, 'default_claude_account_id', accountId);
+      const bindings = await call('GET', `/api/claude/accounts/${other}/bindings`);
+      assert.deepEqual(await bindings.json(), { sessions: 0, recurringTasks: 0 });
+
+      const response = await call('DELETE', `/api/claude/accounts/${other}`);
+
+      assert.equal(response.status, 204);
+      assert.equal(getClaudeAccount(db, other), null);
+      assert.equal(existsSync(claudeAccountDir(config, other)), false);
+      // A setting naming another account is left alone.
+      assert.equal(getSetting(db, 'default_claude_account_id'), accountId);
+      assert.ok(!(await state()).accounts.some((account) => account.id === other));
+      deleteSetting(db, 'default_claude_account_id');
+    });
+
+    it('closes the login of an account it removes', async () => {
+      const other = addClaudeAccount(config, db).id;
+      assert.equal((await call('POST', `/api/claude/accounts/${other}/login`)).status, 201);
+
+      const response = await call('DELETE', `/api/claude/accounts/${other}`);
+
+      assert.equal(response.status, 204);
+      assert.equal((await state()).login.terminalId, null);
+      assert.ok(commands.some((args) => args[0] === 'rm' && args.includes(`chief-web-claude-login-${other}`)));
+    });
+
+    it('answers 404 for an unknown account', async () => {
+      assert.equal((await call('DELETE', '/api/claude/accounts/0000000000000000')).status, 404);
+      assert.equal((await call('POST', '/api/claude/accounts/0000000000000000/default')).status, 404);
+      assert.equal((await call('POST', '/api/claude/accounts/0000000000000000/check')).status, 404);
+    });
   });
 });

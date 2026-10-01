@@ -265,4 +265,15 @@ describe('claude service: per-account status', () => {
 
     assert.equal(result.passed, true);
   });
+
+  it('removes the last account even though it is the default (US-006)', async () => {
+    config = loadConfig({ DATA_DIR: dataDir });
+    const only = addClaudeAccount(config, db);
+
+    await service.remove(only.id);
+
+    assert.equal(getClaudeAccount(db, only.id), null);
+    assert.deepEqual((await service.state()).accounts, []);
+    assert.equal((await service.state()).defaultAccountId, null);
+  });
 });

@@ -1,6 +1,16 @@
 import { randomBytes } from 'node:crypto';
 
-import { changeCount, type Database, integer, nowIso, nullableText, type Row, text } from './sqlite.js';
+import { CLAUDE_ACCOUNT_SETTING_KEYS } from './settings.js';
+import {
+  changeCount,
+  type Database,
+  integer,
+  nowIso,
+  nullableText,
+  type Row,
+  text,
+  withTransaction,
+} from './sqlite.js';
 
 /**
  * One Claude Code login chief-web can run on (multiple accounts US-001).
@@ -160,4 +170,52 @@ export function updateClaudeAccount(
  */
 export function deleteClaudeAccount(db: Database, id: string): boolean {
   return changeCount(db.prepare('DELETE FROM claude_accounts WHERE id = ?').run(id)) > 0;
+}
+
+/** How many sessions and recurring tasks name an account explicitly. */
+export interface ClaudeAccountBindings {
+  readonly sessions: number;
+  readonly recurringTasks: number;
+}
+
+/**
+ * Tables whose `claude_account_id` column names the account a row runs on.
+ * The column arrives with US-009; until a table has it, nothing in it can be
+ * bound and it is skipped.
+ */
+const BOUND_TABLES = { sessions: 'sessions', recurringTasks: 'recurring_tasks' } as const;
+const ACCOUNT_COLUMN = 'claude_account_id';
+
+function hasAccountColumn(db: Database, table: string): boolean {
+  return db
+    .prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`)
+    .get(table, ACCOUNT_COLUMN) !== undefined;
+}
+
+export function claudeAccountBindings(db: Database, id: string): ClaudeAccountBindings {
+  const count = (table: string): number => {
+    if (!hasAccountColumn(db, table)) return 0;
+    const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${ACCOUNT_COLUMN} = ?`).get(id);
+    return row ? integer(row, 'n') : 0;
+  };
+  return { sessions: count(BOUND_TABLES.sessions), recurringTasks: count(BOUND_TABLES.recurringTasks) };
+}
+
+/**
+ * Deletes the row and, in the same transaction, every reference to it:
+ * sessions and recurring tasks bound to it, and the account settings naming
+ * it, go back to `null` — "use the default". The credentials directory is
+ * the caller's (`removeClaudeAccount`).
+ */
+export function deleteClaudeAccountAndReferences(db: Database, id: string): boolean {
+  return withTransaction(db, () => {
+    for (const table of Object.values(BOUND_TABLES)) {
+      if (!hasAccountColumn(db, table)) continue;
+      db.prepare(`UPDATE ${table} SET ${ACCOUNT_COLUMN} = NULL WHERE ${ACCOUNT_COLUMN} = ?`).run(id);
+    }
+    for (const key of CLAUDE_ACCOUNT_SETTING_KEYS) {
+      db.prepare('DELETE FROM settings WHERE key = ? AND value = ?').run(key, id);
+    }
+    return deleteClaudeAccount(db, id);
+  });
 }

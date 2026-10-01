@@ -1,13 +1,15 @@
 import type { Config } from '../config.js';
 import {
   type ClaudeAccount,
+  type ClaudeAccountBindings,
+  claudeAccountBindings,
   type Database,
   getClaudeAccount,
   listClaudeAccounts,
   updateClaudeAccount,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
-import type { HostPathTranslator } from '../runner/index.js';
+import { CLAUDE_ACCOUNT_LABEL, type HostPathTranslator } from '../runner/index.js';
 import { type CommandRunner, spawnCommand } from '../ssh/index.js';
 import { TerminalError, type TerminalManager } from '../terminal/index.js';
 import {
@@ -17,7 +19,12 @@ import {
   claudeLoginContainerName,
   removeContainerArgs,
 } from './login.js';
-import { addClaudeAccount, defaultClaudeAccountId, removeClaudeAccount } from './accounts.js';
+import {
+  addClaudeAccount,
+  defaultClaudeAccountId,
+  removeClaudeAccount,
+  setDefaultClaudeAccount,
+} from './accounts.js';
 import { type ClaudeAuthStatus, probeClaudeAuth } from './status.js';
 import type { ClaudeUsage } from './usage.js';
 
@@ -278,6 +285,91 @@ export class ClaudeService {
       return { account: null, status, login: this.loginView() };
     }
     return { account, status, login: this.loginView() };
+  }
+
+  /** One account's view, re-probed: the panel's "Check again" (US-006). */
+  async check(accountId: string): Promise<ClaudeAccountStatusView> {
+    const status = await this.status(accountId, true);
+    return accountStatusView(this.requireAccount(accountId), status, this.usage.usage(accountId));
+  }
+
+  /** Sets or clears (`null`) the operator's name for an account. */
+  rename(accountId: string, nickname: string | null): ClaudeAccount {
+    this.requireAccount(accountId);
+    return updateClaudeAccount(this.db, accountId, { nickname }) ?? this.requireAccount(accountId);
+  }
+
+  /** Makes an account the one launches use unless told otherwise. */
+  makeDefault(accountId: string): { defaultAccountId: string | null } {
+    this.requireAccount(accountId);
+    setDefaultClaudeAccount(this.db, accountId);
+    return { defaultAccountId: defaultClaudeAccountId(this.db) };
+  }
+
+  /** How many sessions and recurring tasks name the account explicitly. */
+  bindings(accountId: string): ClaudeAccountBindings {
+    this.requireAccount(accountId);
+    return claudeAccountBindings(this.db, accountId);
+  }
+
+  /**
+   * Removes an account: its row, its credentials directory, and every
+   * reference to it, which then falls back to the default.
+   *
+   * Refused while it is the default and another account could take over
+   * (`account_is_default`; the last account may go), and while a session or
+   * PR-run container mounting it is running (`account_in_use`). A login open
+   * for it is closed first.
+   */
+  async remove(accountId: string): Promise<void> {
+    const account = this.requireAccount(accountId);
+    const name = account.nickname ?? account.email ?? accountId;
+    if (defaultClaudeAccountId(this.db) === accountId && listClaudeAccounts(this.db).length > 1) {
+      throw new ClaudeError(
+        409,
+        'account_is_default',
+        `Claude account ${name} is the default. Make another account the default first.`,
+      );
+    }
+    const running = await this.runningContainers(accountId);
+    if (running > 0) {
+      throw new ClaudeError(
+        409,
+        'account_in_use',
+        `Claude account ${name} is mounted by ${String(running)} running container${running === 1 ? '' : 's'}. Stop them first.`,
+        { containers: running },
+      );
+    }
+    if (this.login?.accountId === accountId) await this.discardLogin();
+    await this.removeContainer(claudeLoginContainerName(accountId));
+    removeClaudeAccount(this.config, this.db, accountId);
+    this.invalidate(accountId);
+    logger.info('removed claude account', { accountId });
+  }
+
+  /** Running containers carrying the account's label (sessions and PR runs). */
+  private async runningContainers(accountId: string): Promise<number> {
+    const listed = await this.run(
+      this.config.dockerBin,
+      [
+        'ps',
+        '--quiet',
+        '--filter',
+        `label=${CLAUDE_ACCOUNT_LABEL}=${accountId}`,
+        '--filter',
+        'status=running',
+      ],
+      '',
+      CONTAINER_COMMAND_TIMEOUT_MS,
+    );
+    if (listed.code !== 0) {
+      throw new ClaudeError(
+        502,
+        'docker_unavailable',
+        `Could not check which containers use the account: ${describeFailure(listed.stderr, listed.timedOut)}`,
+      );
+    }
+    return listed.stdout.split('\n').filter((line) => line.trim() !== '').length;
   }
 
   private requireAccount(accountId: string): ClaudeAccount {

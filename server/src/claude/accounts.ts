@@ -8,7 +8,11 @@ import {
   type CreateClaudeAccountInput,
   type Database,
   deleteClaudeAccount,
+  deleteClaudeAccountAndReferences,
+  getClaudeAccount,
+  getSetting,
   listClaudeAccounts,
+  setSetting,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -42,24 +46,34 @@ export function addClaudeAccount(
 }
 
 /**
- * The account a launch runs on when nothing more specific was chosen: the
+ * The account a launch runs on when nothing more specific was chosen: the one
+ * the operator made default (`default_claude_account_id`, US-006), else the
  * first account in display order, or null when none is connected. US-007
- * replaces this with the operator's default-account setting.
+ * refines the fallback to the first *signed-in* account.
  */
 export function defaultClaudeAccountId(db: Database): string | null {
+  const chosen = getSetting(db, 'default_claude_account_id');
+  if (chosen !== null && getClaudeAccount(db, chosen) !== null) return chosen;
   return listClaudeAccounts(db)[0]?.id ?? null;
 }
 
+/** Makes an existing account the default ("Make default", US-006). */
+export function setDefaultClaudeAccount(db: Database, id: string): void {
+  setSetting(db, 'default_claude_account_id', id);
+}
+
 /**
- * Deletes an account row and its credentials directory. A directory that
- * cannot be removed is logged and left behind; the delete still succeeds.
+ * Deletes an account row and its credentials directory, and clears every
+ * reference to it (sessions, recurring tasks, account settings) so those fall
+ * back to the default. A directory that cannot be removed is logged and left
+ * behind; the delete still succeeds.
  */
 export function removeClaudeAccount(
   config: Pick<Config, 'dataDir'>,
   db: Database,
   id: string,
 ): boolean {
-  const deleted = deleteClaudeAccount(db, id);
+  const deleted = deleteClaudeAccountAndReferences(db, id);
   if (deleted) removeClaudeAccountDir(config, id);
   return deleted;
 }

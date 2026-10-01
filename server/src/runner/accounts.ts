@@ -14,6 +14,13 @@ import { RUNNER_CLAUDE_DIR, RUNNER_GID, RUNNER_UID } from './image.js';
  * mounts the directory of the account it runs on, and nothing else.
  */
 
+/**
+ * Label carrying the id of the Claude account whose credentials directory the
+ * container mounts, so "is anything running on this account?" is answerable
+ * straight from the daemon.
+ */
+export const CLAUDE_ACCOUNT_LABEL = 'chief-web.claude-account';
+
 /** Credentials are secrets: only the owner (the runner user) may enter. */
 export const CLAUDE_ACCOUNT_DIR_MODE = 0o700;
 

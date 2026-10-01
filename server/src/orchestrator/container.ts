@@ -1,6 +1,7 @@
 import type { ContainerSpec } from '../docker/index.js';
 import type { Session } from '../db/index.js';
 import {
+  CLAUDE_ACCOUNT_LABEL,
   RUNNER_WORKSPACE_DIR,
   runnerBinds,
   runnerEnvironment,
@@ -32,12 +33,7 @@ export const PR_RUN_LABEL = 'chief-web.pr-run';
 export const PR_FEEDBACK_ROLE = 'pr-feedback';
 export const PR_NUMBER_LABEL = 'chief-web.pr-number';
 
-/**
- * Label carrying the id of the Claude account whose credentials directory the
- * container mounts, so "is anything running on this account?" is answerable
- * straight from the daemon.
- */
-export const CLAUDE_ACCOUNT_LABEL = 'chief-web.claude-account';
+export { CLAUDE_ACCOUNT_LABEL };
 
 type SessionIdentity = Pick<Session, 'id' | 'name' | 'repositoryId'>;
 
