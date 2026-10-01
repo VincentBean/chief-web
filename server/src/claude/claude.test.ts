@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
-import { claudeAuthSource, RUNNER_CLAUDE_DIR } from '../runner/index.js';
+import { HostPaths } from '../orchestrator/index.js';
+import { RUNNER_CLAUDE_DIR } from '../runner/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
 import {
@@ -30,27 +31,45 @@ function configWith(env: Record<string, string>): Config {
   return loadConfig({ ...env });
 }
 
-describe('claude auth probe', () => {
-  it('mounts the shared volume by name inside Docker', () => {
-    const config = configWith({ CLAUDE_AUTH_VOLUME: 'chief-web-claude-auth' });
+const ACCOUNT = '0123456789abcdef';
+const VOLUME_MOUNTPOINT = '/var/lib/docker/volumes/chief-web-data/_data';
+/** Inside Docker: the data volume, whose host mountpoint the daemon reports. */
+const IN_DOCKER = { DATA_DIR: '/data', CHIEF_DATA_VOLUME: 'chief-web-data' };
 
-    assert.equal(claudeAuthSource(config), 'chief-web-claude-auth');
-    assert.ok(
-      claudeProbeArgs(config).includes(`chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`),
-      'the probe container must see the same credentials as a session container',
-    );
-    assert.deepEqual(claudeProbeArgs(config).slice(-3), ['auth', 'status', '--json']);
+function hostPaths(config: Config): HostPaths {
+  return new HostPaths(config, {
+    inspectVolume: (name) => Promise.resolve({ name, mountpoint: VOLUME_MOUNTPOINT }),
+  });
+}
+
+/** `probeClaudeAuth` for the one account, with the fake command runner. */
+function probe(config: Config, run: CommandRunner): ReturnType<typeof probeClaudeAuth> {
+  return probeClaudeAuth(config, run, hostPaths(config), ACCOUNT);
+}
+
+describe('claude auth probe', () => {
+  it('mounts the account directory at its host path inside Docker', async () => {
+    const config = configWith(IN_DOCKER);
+    const args = await claudeProbeArgs(config, hostPaths(config), ACCOUNT);
+
+    const volume = args.indexOf('--volume');
+    assert.deepEqual(args.slice(volume, volume + 2), [
+      '--volume',
+      `${VOLUME_MOUNTPOINT}/claude-accounts/${ACCOUNT}:${RUNNER_CLAUDE_DIR}`,
+    ]);
+    assert.equal(args.filter((arg) => arg === '--volume').length, 1);
+    assert.deepEqual(args.slice(-3), ['auth', 'status', '--json']);
   });
 
-  it('bind-mounts the directory when there is no volume (local development)', () => {
-    const config = configWith({ CLAUDE_AUTH_DIR: '/tmp/creds' });
+  it('bind-mounts the account directory as-is when there is no volume (local development)', async () => {
+    const config = configWith({ DATA_DIR: '/tmp/chief' });
+    const args = await claudeProbeArgs(config, hostPaths(config), ACCOUNT);
 
-    assert.equal(claudeAuthSource(config), '/tmp/creds');
-    assert.ok(claudeProbeArgs(config).includes(`/tmp/creds:${RUNNER_CLAUDE_DIR}`));
+    assert.ok(args.includes(`/tmp/chief/claude-accounts/${ACCOUNT}:${RUNNER_CLAUDE_DIR}`));
   });
 
   it('reads the CLI verdict even though it exits non-zero when logged out', async () => {
-    const status = await probeClaudeAuth(configWith({}), runner({ code: 1, stdout: LOGGED_OUT }));
+    const status = await probe(configWith({}), runner({ code: 1, stdout: LOGGED_OUT }));
 
     assert.equal(status.authenticated, false);
     assert.equal(status.authMethod, 'none');
@@ -58,7 +77,7 @@ describe('claude auth probe', () => {
   });
 
   it('reports the signed-in account', async () => {
-    const status = await probeClaudeAuth(configWith({}), runner({ stdout: LOGGED_IN }));
+    const status = await probe(configWith({}), runner({ stdout: LOGGED_IN }));
 
     assert.equal(status.authenticated, true);
     assert.equal(status.account, 'someone@example.com');
@@ -68,7 +87,7 @@ describe('claude auth probe', () => {
   });
 
   it('fails closed when the probe cannot run', async () => {
-    const status = await probeClaudeAuth(
+    const status = await probe(
       configWith({}),
       runner({ code: 125, stderr: 'Unable to find image' }),
     );
@@ -78,14 +97,14 @@ describe('claude auth probe', () => {
   });
 
   it('fails closed when the probe times out', async () => {
-    const status = await probeClaudeAuth(configWith({}), runner({ timedOut: true }));
+    const status = await probe(configWith({}), runner({ timedOut: true }));
 
     assert.equal(status.authenticated, false);
     assert.match(status.error ?? '', /timed out/);
   });
 
   it('fails closed when the command itself throws', async () => {
-    const status = await probeClaudeAuth(configWith({}), () =>
+    const status = await probe(configWith({}), () =>
       Promise.reject(new Error('ENOENT docker')),
     );
 
@@ -107,12 +126,17 @@ describe('claude auth probe', () => {
 });
 
 describe('claude login container', () => {
-  it('runs detached under a fixed name with only the credentials volume', () => {
-    const args = claudeLoginContainerArgs(configWith({ CLAUDE_AUTH_VOLUME: 'vol' }));
+  it('runs detached under a fixed name with only the account directory', async () => {
+    const config = configWith(IN_DOCKER);
+    const args = await claudeLoginContainerArgs(config, hostPaths(config), ACCOUNT);
 
     assert.ok(args.includes('--detach'));
     assert.deepEqual(args.slice(2, 4), ['--name', CLAUDE_LOGIN_CONTAINER_NAME]);
-    assert.ok(args.includes(`vol:${RUNNER_CLAUDE_DIR}`));
+    const volume = args.indexOf('--volume');
+    assert.deepEqual(args.slice(volume, volume + 2), [
+      '--volume',
+      `${VOLUME_MOUNTPOINT}/claude-accounts/${ACCOUNT}:${RUNNER_CLAUDE_DIR}`,
+    ]);
     // No workspace and no repository key: signing in needs neither.
     assert.equal(args.filter((arg) => arg === '--volume').length, 1);
     assert.equal(args.at(-1), 'chief-web-runner:latest');

@@ -1,21 +1,23 @@
 import assert from 'node:assert/strict';
 import type http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
-import { CLAUDE_LOGIN_CONTAINER_NAME } from '../claude/index.js';
+import { addClaudeAccount, CLAUDE_LOGIN_CONTAINER_NAME } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import { closeDatabase, type Database, IN_MEMORY, openDatabase } from '../db/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { DockerApi } from '../docker/index.js';
-import { RUNNER_CLAUDE_DIR } from '../runner/index.js';
+import { claudeAccountDir, RUNNER_CLAUDE_DIR } from '../runner/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
 import { TerminalManager } from '../terminal/index.js';
 
 const PASSWORD = 'correct horse battery staple';
-const AUTH_VOLUME = 'chief-web-claude-auth';
 /** Id the fake `docker run` reports, registered in the fake daemon below. */
 const LOGIN_CONTAINER = 'login-container-id';
 
@@ -33,6 +35,10 @@ describe('claude api', () => {
   let baseUrl: string;
   let cookie: string;
   let config: Config;
+  let dataDir: string;
+  /** The account every probe and login container mounts. */
+  let accountId: string;
+  const accountBind = (): string => `${claudeAccountDir(config, accountId)}:${RUNNER_CLAUDE_DIR}`;
   let daemon: FakeDockerDaemon;
   let db: Database;
   let manager: TerminalManager;
@@ -101,13 +107,15 @@ describe('claude api', () => {
     daemon = await FakeDockerDaemon.start();
     daemon.addContainer({ id: LOGIN_CONTAINER, name: CLAUDE_LOGIN_CONTAINER_NAME });
 
+    dataDir = mkdtempSync(path.join(os.tmpdir(), 'chief-claude-api-'));
     config = loadConfig({
       CHIEF_WEB_PASSWORD: PASSWORD,
-      CLAUDE_AUTH_VOLUME: AUTH_VOLUME,
+      DATA_DIR: dataDir,
       // Every request re-probes, so a test can change the answer at will.
       CLAUDE_STATUS_CACHE_MS: '0',
     });
     db = openDatabase(IN_MEMORY);
+    accountId = addClaudeAccount(config, db).id;
     manager = new TerminalManager(new DockerApi(daemon.socketPath), {
       scrollbackLines: 500,
       scrollbackBytes: 100_000,
@@ -126,6 +134,7 @@ describe('claude api', () => {
     await new Promise((resolve) => server.close(resolve));
     await daemon.close();
     closeDatabase(db);
+    rmSync(dataDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
@@ -140,7 +149,7 @@ describe('claude api', () => {
     assert.equal(response.status, 401);
   });
 
-  it('probes a container with the shared credentials volume mounted', async () => {
+  it('probes a container with the account directory mounted', async () => {
     const body = await state();
 
     assert.equal(body.status.authenticated, false);
@@ -148,7 +157,7 @@ describe('claude api', () => {
     const probe = commands.find((args) => args.includes('status'));
     assert.ok(probe, 'a probe container should have been started');
     assert.ok(probe.includes('--rm'));
-    assert.ok(probe.includes(`${AUTH_VOLUME}:${RUNNER_CLAUDE_DIR}`));
+    assert.ok(probe.includes(accountBind()));
   });
 
   it('reports the account once the volume holds credentials', async () => {
@@ -201,7 +210,7 @@ describe('claude api', () => {
 
     const run = loginRuns()[0];
     assert.ok(run, 'the login container should have been started');
-    assert.ok(run.includes(`${AUTH_VOLUME}:${RUNNER_CLAUDE_DIR}`));
+    assert.ok(run.includes(accountBind()));
 
     const exec = daemon.execFor(body.login.terminalId ?? '');
     assert.ok(exec, 'the terminal should be an exec in the login container');

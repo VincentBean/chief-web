@@ -1,6 +1,7 @@
 export {
   addClaudeAccount,
   CLAUDE_CREDENTIALS_FILE,
+  defaultClaudeAccountId,
   importLegacyClaudeAuth,
   removeClaudeAccount,
 } from './accounts.js';
@@ -28,6 +29,7 @@ export {
   type ClaudeAuthStatus,
   CLAUDE_PROBE_LABEL,
   claudeProbeArgs,
+  failedClaudeStatus,
   parseStatusJson,
   probeClaudeAuth,
 } from './status.js';

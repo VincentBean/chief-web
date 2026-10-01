@@ -42,6 +42,15 @@ export function addClaudeAccount(
 }
 
 /**
+ * The account a launch runs on when nothing more specific was chosen: the
+ * first account in display order, or null when none is connected. US-007
+ * replaces this with the operator's default-account setting.
+ */
+export function defaultClaudeAccountId(db: Database): string | null {
+  return listClaudeAccounts(db)[0]?.id ?? null;
+}
+
+/**
  * Deletes an account row and its credentials directory. A directory that
  * cannot be removed is logged and left behind; the delete still succeeds.
  */

@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import type { Config } from '../config.js';
 import { logger } from '../lib/logger.js';
-import { RUNNER_GID, RUNNER_UID } from './image.js';
+import { RUNNER_CLAUDE_DIR, RUNNER_GID, RUNNER_UID } from './image.js';
 
 /**
  * Credentials directories of the Claude accounts (multiple accounts US-001).
@@ -23,6 +23,24 @@ export function claudeAccountsDir(config: Pick<Config, 'dataDir'>): string {
 
 export function claudeAccountDir(config: Pick<Config, 'dataDir'>, accountId: string): string {
   return path.join(claudeAccountsDir(config), accountId);
+}
+
+/** Turns a path the server sees into the one the Docker daemon mounts (`HostPaths`). */
+export interface HostPathTranslator {
+  translate(insideServer: string): Promise<string>;
+}
+
+/**
+ * The `source:target` bind that mounts an account's credentials directory at
+ * `~/.claude`. The directory lives on the data volume, so it is translated to
+ * a host path exactly as session workspaces are.
+ */
+export async function claudeAccountBind(
+  config: Pick<Config, 'dataDir'>,
+  paths: HostPathTranslator,
+  accountId: string,
+): Promise<string> {
+  return `${await paths.translate(claudeAccountDir(config, accountId))}:${RUNNER_CLAUDE_DIR}`;
 }
 
 /**

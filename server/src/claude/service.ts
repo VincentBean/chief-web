@@ -1,5 +1,7 @@
 import type { Config } from '../config.js';
+import type { Database } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import type { HostPathTranslator } from '../runner/index.js';
 import { type CommandRunner, spawnCommand } from '../ssh/index.js';
 import { TerminalError, type TerminalManager } from '../terminal/index.js';
 import {
@@ -9,7 +11,8 @@ import {
   claudeLoginContainerArgs,
   removeContainerArgs,
 } from './login.js';
-import { type ClaudeAuthStatus, probeClaudeAuth } from './status.js';
+import { addClaudeAccount, defaultClaudeAccountId } from './accounts.js';
+import { type ClaudeAuthStatus, failedClaudeStatus, probeClaudeAuth } from './status.js';
 
 /** A failure with an HTTP status the route can hand straight back. */
 export class ClaudeError extends Error {
@@ -61,7 +64,9 @@ export class ClaudeService {
 
   constructor(
     private readonly config: Config,
+    private readonly db: Database,
     private readonly terminals: TerminalManager,
+    private readonly paths: HostPathTranslator,
     private readonly run: CommandRunner = spawnCommand,
   ) {}
 
@@ -71,12 +76,26 @@ export class ClaudeService {
    */
   async status(force = false): Promise<ClaudeAuthStatus> {
     if (!force && this.cached !== null && this.isFresh(this.cached)) return this.cached;
-    this.probing ??= probeClaudeAuth(this.config, this.run).finally(() => {
+    this.probing ??= this.probe().finally(() => {
       this.probing = null;
     });
     const status = await this.probing;
     this.cached = status;
     return status;
+  }
+
+  /**
+   * Probes the default account. Until per-account status (US-004) there is one
+   * answer, and with no account at all it is "not signed in", without a probe.
+   */
+  private probe(): Promise<ClaudeAuthStatus> {
+    const accountId = defaultClaudeAccountId(this.db);
+    if (accountId === null) {
+      return Promise.resolve(
+        failedClaudeStatus('No Claude account is connected yet. Use Set up Claude to sign one in.'),
+      );
+    }
+    return probeClaudeAuth(this.config, this.run, this.paths, accountId);
   }
 
   async state(force = false): Promise<ClaudeStateView> {
@@ -97,9 +116,11 @@ export class ClaudeService {
     // so clearing it is also what makes `docker run --name` succeed.
     await this.discardLogin();
 
+    // A fresh install has no account yet; signing in is what creates one.
+    const accountId = defaultClaudeAccountId(this.db) ?? addClaudeAccount(this.config, this.db).id;
     const created = await this.run(
       this.config.dockerBin,
-      claudeLoginContainerArgs(this.config),
+      await claudeLoginContainerArgs(this.config, this.paths, accountId),
       '',
       CONTAINER_COMMAND_TIMEOUT_MS,
     );
@@ -207,10 +228,12 @@ export class ClaudeService {
 
 export function createClaudeService(
   config: Config,
+  db: Database,
   terminals: TerminalManager,
+  paths: HostPathTranslator,
   run: CommandRunner = spawnCommand,
 ): ClaudeService {
-  return new ClaudeService(config, terminals, run);
+  return new ClaudeService(config, db, terminals, paths, run);
 }
 
 function describeFailure(stderr: string, timedOut: boolean): string {

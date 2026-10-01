@@ -32,6 +32,13 @@ export const PR_RUN_LABEL = 'chief-web.pr-run';
 export const PR_FEEDBACK_ROLE = 'pr-feedback';
 export const PR_NUMBER_LABEL = 'chief-web.pr-number';
 
+/**
+ * Label carrying the id of the Claude account whose credentials directory the
+ * container mounts, so "is anything running on this account?" is answerable
+ * straight from the daemon.
+ */
+export const CLAUDE_ACCOUNT_LABEL = 'chief-web.claude-account';
+
 type SessionIdentity = Pick<Session, 'id' | 'name' | 'repositoryId'>;
 
 /**
@@ -98,6 +105,8 @@ export interface PrRunContainerInput {
   readonly run: PrRunIdentity;
   readonly image: string;
   readonly identity: GitIdentity;
+  /** The Claude account the run uses; `mounts.claudeAuth` is its directory. */
+  readonly accountId: string;
   readonly mounts: RunnerMounts;
   /** Memory cap in MiB; 0 for none. See `Config.containerMemoryLimitMb`. */
   readonly memoryLimitMb?: number;
@@ -120,7 +129,7 @@ export function prRunContainerSpec(input: PrRunContainerInput): ContainerSpec {
 
   return {
     image: input.image,
-    labels: prRunLabels(input.run),
+    labels: { ...prRunLabels(input.run), [CLAUDE_ACCOUNT_LABEL]: input.accountId },
     env,
     workingDir: RUNNER_WORKSPACE_DIR,
     binds: runnerBinds(input.mounts),
@@ -133,6 +142,8 @@ export interface SessionContainerInput {
   readonly image: string;
   /** Commit identity from the settings page (US-004). */
   readonly identity: GitIdentity;
+  /** The Claude account the session uses; `mounts.claudeAuth` is its directory. */
+  readonly accountId: string;
   /** Host-side sources; see `HostPaths`. */
   readonly mounts: RunnerMounts;
   /** Memory cap in MiB; 0 for none. See `Config.containerMemoryLimitMb`. */
@@ -154,7 +165,7 @@ export function sessionContainerSpec(input: SessionContainerInput): ContainerSpe
 
   return {
     image: input.image,
-    labels: sessionLabels(input.session),
+    labels: { ...sessionLabels(input.session), [CLAUDE_ACCOUNT_LABEL]: input.accountId },
     env,
     workingDir: RUNNER_WORKSPACE_DIR,
     binds: runnerBinds(input.mounts),

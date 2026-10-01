@@ -15,7 +15,8 @@ import {
   type VolumeDetails,
 } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
-import { claudeAuthSource } from '../runner/index.js';
+import { defaultClaudeAccountId } from '../claude/accounts.js';
+import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
 import { getGitIdentity } from '../settings/index.js';
 import {
@@ -97,7 +98,7 @@ export class SessionOrchestrator {
    * Ensures `session` has a running container and returns it. An existing
    * running container is reused; a stopped or duplicate one is replaced.
    */
-  async start(session: Session): Promise<SessionContainerView> {
+  async start(session: Session, accountId?: string): Promise<SessionContainerView> {
     const existing = await this.containersFor(session.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) {
@@ -112,13 +113,15 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, session.id, privateKey);
 
+    const account = this.accountFor(accountId);
     const spec = sessionContainerSpec({
       session,
+      accountId: account,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
       memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
-        claudeAuth: claudeAuthSource(this.config),
+        claudeAuth: await this.hostPaths.translate(claudeAccountDir(this.config, account)),
         workspaceDir: await this.hostPaths.translate(workspaceDir),
         ...(keyPath === undefined ? {} : { sshKeyPath: await this.hostPaths.translate(keyPath) }),
       },
@@ -222,7 +225,7 @@ export class SessionOrchestrator {
    * id and outlives the container, so a second pass on the same pull request
    * reuses the clone.
    */
-  async startPrRun(run: PrRunIdentity): Promise<SessionContainerView> {
+  async startPrRun(run: PrRunIdentity, accountId?: string): Promise<SessionContainerView> {
     const existing = await this.prRunContainersFor(run.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) return toView(running);
@@ -232,13 +235,15 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
 
+    const account = this.accountFor(accountId);
     const spec = prRunContainerSpec({
       run,
+      accountId: account,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
       memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
-        claudeAuth: claudeAuthSource(this.config),
+        claudeAuth: await this.hostPaths.translate(claudeAccountDir(this.config, account)),
         workspaceDir: await this.hostPaths.translate(workspaceDir),
         ...(keyPath === undefined ? {} : { sshKeyPath: await this.hostPaths.translate(keyPath) }),
       },
@@ -341,6 +346,23 @@ export class SessionOrchestrator {
       corrected: plan.correct.length,
     });
     return plan;
+  }
+
+  /**
+   * The Claude account a new container mounts: the one asked for, else the
+   * default. With no account connected there are no credentials to mount, so
+   * nothing is started.
+   */
+  private accountFor(accountId: string | undefined): string {
+    const resolved = accountId ?? defaultClaudeAccountId(this.db);
+    if (resolved === null) {
+      throw new OrchestratorError(
+        409,
+        'claude_not_authenticated',
+        'No Claude account is connected. Add one under Settings → Claude Code.',
+      );
+    }
+    return resolved;
   }
 
   private containersFor(sessionId: string): Promise<ContainerSummary[]> {

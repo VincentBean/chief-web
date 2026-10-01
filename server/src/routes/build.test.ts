@@ -10,6 +10,7 @@ import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
 import { BuildService, type BuildView } from '../build/index.js';
 import type { AgentInvocation, AgentResult, AgentRunner } from '../build/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -85,6 +86,8 @@ describe('build api', () => {
     fs.mkdirSync(config.workspacesDir, { recursive: true });
 
     db = openDatabase(IN_MEMORY);
+    // The Claude guard lets requests through only with an account to probe.
+    addClaudeAccount(config, db);
     const repository = createRepository(db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',

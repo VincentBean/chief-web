@@ -13,8 +13,8 @@ import type { VolumeDetails } from '../docker/index.js';
  * remainder of the path appended to it. Outside Docker there is no volume and
  * the path is already a host path.
  *
- * This is the per-directory version of the by-name volume mount the shared
- * credentials use (`claudeAuthSource`), which cannot express a subdirectory.
+ * Every directory a spawned container mounts goes through here: session
+ * workspaces, staged keys and the Claude account directories alike.
  */
 export class HostPaths {
   private mountpoint: Promise<string> | null = null;

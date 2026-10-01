@@ -57,9 +57,9 @@ build.
 - The status is cached for 15 seconds (`CLAUDE_STATUS_CACHE_MS`) because each
   probe costs a container start; **Re-check** ignores the cache.
 
-The credentials survive `docker compose down` and restarts. They are lost only
-by removing the volume (`docker volume rm chief-web-claude-auth`), which is what
-a `docker compose down -v` does.
+The credentials survive `docker compose down` and restarts: each account's
+login lives in its own directory on the data volume. To sign an account in
+afresh, use **Set up Claude** again.
 
 ## Recovering a failed session
 

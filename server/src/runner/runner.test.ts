@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { loadConfig } from '../config.js';
 import { IN_MEMORY, openDatabase, setSetting } from '../db/index.js';
+import { HostPaths } from '../orchestrator/index.js';
 import {
   DEFAULT_GIT_AUTHOR_EMAIL,
   DEFAULT_GIT_AUTHOR_NAME,
@@ -10,6 +12,8 @@ import {
   isValidGitAuthorName,
 } from '../settings/index.js';
 import {
+  claudeAccountBind,
+  claudeAccountDir,
   RUNNER_CLAUDE_DIR,
   RUNNER_SSH_KEY_PATH,
   RUNNER_WORKSPACE_DIR,
@@ -38,15 +42,26 @@ describe('runner image contract', () => {
     ]);
   });
 
-  it('mounts the auth volume read-write and the key read-only', () => {
+  it('mounts the account directory read-write and the key read-only', async () => {
+    // Inside Docker the account directory is on the data volume, so the daemon
+    // is given the volume's host mountpoint plus the relative path.
+    const config = loadConfig({ DATA_DIR: '/data', CHIEF_DATA_VOLUME: 'chief-web-data' });
+    const paths = new HostPaths(config, {
+      inspectVolume: (name) => Promise.resolve({ name, mountpoint: '/var/lib/docker/volumes/x/_data' }),
+    });
+    const accountId = '0123456789abcdef';
+    assert.equal(claudeAccountDir(config, accountId), `/data/claude-accounts/${accountId}`);
+    const hostDir = `/var/lib/docker/volumes/x/_data/claude-accounts/${accountId}`;
+    assert.equal(await claudeAccountBind(config, paths, accountId), `${hostDir}:${RUNNER_CLAUDE_DIR}`);
+
     const args = runnerMountArgs({
-      claudeAuth: 'chief-web-claude-auth',
+      claudeAuth: await paths.translate(claudeAccountDir(config, accountId)),
       workspaceDir: '/data/workspaces/s1',
       sshKeyPath: '/data/ssh-keys/r1.key',
     });
     assert.deepEqual(args, [
       '--volume',
-      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `${hostDir}:${RUNNER_CLAUDE_DIR}`,
       '--volume',
       `/data/workspaces/s1:${RUNNER_WORKSPACE_DIR}`,
       '--volume',
@@ -55,7 +70,7 @@ describe('runner image contract', () => {
   });
 
   it('omits the key mount when the session has no repository key', () => {
-    const args = runnerMountArgs({ claudeAuth: '/claude-auth', workspaceDir: '/w' });
+    const args = runnerMountArgs({ claudeAuth: '/data/claude-accounts/a', workspaceDir: '/w' });
     assert.equal(args.length, 4);
     assert.ok(!args.some((arg) => arg.includes(RUNNER_SSH_KEY_PATH)));
   });

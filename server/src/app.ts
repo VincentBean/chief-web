@@ -29,7 +29,7 @@ import {
 import { createDescriptionService } from './description/index.js';
 import { DockerApi } from './docker/index.js';
 import { UsageLimitHold } from './limits/index.js';
-import { createSessionOrchestrator } from './orchestrator/index.js';
+import { createSessionOrchestrator, HostPaths } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
 import { createReviewService, GithubReviewPublisher } from './review/index.js';
@@ -235,7 +235,13 @@ export function createApp(
   api.use(createRecurringTasksRouter(db));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));
-  const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
+  // The client is cheap to construct — nothing is dialled until the first
+  // request — so one instance serves the Claude containers, the orchestrator
+  // and the setup commands, and either can be replaced independently.
+  const docker = new DockerApi(config.dockerSocket);
+  const claude =
+    deps.claude ??
+    createClaudeService(config, db, terminals, new HostPaths(config, docker), deps.runCommand);
   api.use(createClaudeRouter(claude));
 
   // Mounted ahead of the sessions router so creating a session — and retrying
@@ -257,10 +263,6 @@ export function createApp(
   // And so is fixing its merge conflicts from the page’s button.
   api.post('/pull-requests/:repositoryId/:number/conflict-fix', guard);
 
-  // The client is cheap to construct — nothing is dialled until the first
-  // request — so one instance serves both the orchestrator and the setup
-  // commands, and either can be replaced independently.
-  const docker = new DockerApi(config.dockerSocket);
   // Kept separately from `orchestrator` because `SessionContainers` is the
   // narrow two-method view a test may stub, while starting a feedback-run
   // container needs the real thing. A test that stubs the orchestrator and

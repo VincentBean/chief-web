@@ -27,12 +27,20 @@ import {
   type ListContainersOptions,
   type VolumeDetails,
 } from '../docker/index.js';
-import { RUNNER_CLAUDE_DIR, RUNNER_SSH_KEY_PATH, RUNNER_WORKSPACE_DIR } from '../runner/index.js';
+import { addClaudeAccount, removeClaudeAccount } from '../claude/index.js';
+import {
+  claudeAccountDir,
+  RUNNER_CLAUDE_DIR,
+  RUNNER_SSH_KEY_PATH,
+  RUNNER_WORKSPACE_DIR,
+} from '../runner/index.js';
 import { writePrivateKey } from '../ssh/index.js';
 import {
+  CLAUDE_ACCOUNT_LABEL,
   CONTAINER_LOST_ERROR,
   FEEDBACK_LOST_ERROR,
   HostPaths,
+  type OrchestratorError,
   planReconciliation,
   REVIEW_LOST_ERROR,
   SESSION_LABEL,
@@ -149,6 +157,8 @@ interface Fixture {
   readonly config: Config;
   readonly db: Database;
   readonly dataDir: string;
+  /** The one Claude account, which every container mounts by default. */
+  readonly accountId: string;
   session(status?: SessionStatus, name?: string): Session;
 }
 
@@ -166,6 +176,7 @@ function fixture(env: Record<string, string> = {}): Fixture {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'chief-orch-'));
   const config = loadConfig({ DATA_DIR: dataDir, ...env });
   const db = openDatabase(IN_MEMORY);
+  const accountId = addClaudeAccount(config, db).id;
   const repository = createRepository(db, {
     name: 'demo',
     sshUrl: 'git@github.com:acme/demo.git',
@@ -176,6 +187,7 @@ function fixture(env: Record<string, string> = {}): Fixture {
     config,
     db,
     dataDir,
+    accountId,
     session(status: SessionStatus = 'pending', name = `feature-${++counter}`): Session {
       return createSession(db, {
         repositoryId: repository.id,
@@ -196,21 +208,23 @@ describe('session container spec', () => {
       session: { id: 'session-1', name: 'add-login', repositoryId: 'repo-1' },
       image: 'chief-web-runner:latest',
       identity: { name: 'chief-web', email: 'chief-web@localhost' },
+      accountId: '0123456789abcdef',
       mounts: {
-        claudeAuth: 'chief-web-claude-auth',
+        claudeAuth: '/host/claude-accounts/0123456789abcdef',
         workspaceDir: '/host/workspaces/session-1',
         sshKeyPath: '/host/ssh-keys/sessions/session-1.key',
       },
     });
 
     assert.equal(spec.labels?.[SESSION_LABEL], 'session-1');
+    assert.equal(spec.labels?.[CLAUDE_ACCOUNT_LABEL], '0123456789abcdef');
     assert.equal(spec.workingDir, RUNNER_WORKSPACE_DIR);
     assert.deepEqual(spec.binds, [
-      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `/host/claude-accounts/0123456789abcdef:${RUNNER_CLAUDE_DIR}`,
       `/host/workspaces/session-1:${RUNNER_WORKSPACE_DIR}`,
       `/host/ssh-keys/sessions/session-1.key:${RUNNER_SSH_KEY_PATH}:ro`,
     ]);
-    // The credentials volume is read-write; only the key is read-only.
+    // The credentials directory is read-write; only the key is read-only.
     assert.ok(!spec.binds?.[0]?.endsWith(':ro'));
     assert.ok(!spec.binds?.[1]?.endsWith(':ro'));
     assert.ok(spec.env?.includes('CHIEF_SESSION_ID=session-1'));
@@ -222,7 +236,11 @@ describe('session container spec', () => {
       session: { id: 'session-1', name: 'add-login', repositoryId: 'repo-1' },
       image: 'chief-web-runner:latest',
       identity: { name: 'chief-web', email: 'chief-web@localhost' },
-      mounts: { claudeAuth: 'chief-web-claude-auth', workspaceDir: '/host/workspaces/session-1' },
+      accountId: '0123456789abcdef',
+      mounts: {
+        claudeAuth: '/host/claude-accounts/0123456789abcdef',
+        workspaceDir: '/host/workspaces/session-1',
+      },
     };
     assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 4096 }).memoryBytes, 4096 * 1024 * 1024);
     assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 0 }).memoryBytes, undefined);
@@ -526,7 +544,7 @@ describe('session container lifecycle', () => {
   });
 
   beforeEach(() => {
-    env = fixture({ CLAUDE_AUTH_VOLUME: 'chief-web-claude-auth' });
+    env = fixture();
     orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath));
   });
 
@@ -543,8 +561,9 @@ describe('session container lifecycle', () => {
     const created = daemon.container(view.id);
     assert.equal(created?.labels[SESSION_LABEL], session.id);
     assert.equal(created?.workingDir, RUNNER_WORKSPACE_DIR);
+    assert.equal(created?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
     assert.deepEqual(created?.binds, [
-      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `${claudeAccountDir(env.config, env.accountId)}:${RUNNER_CLAUDE_DIR}`,
       `${sessionWorkspaceDir(env.config, session.id)}:${RUNNER_WORKSPACE_DIR}`,
       `${sessionKeyPath(env.config, session.id)}:${RUNNER_SSH_KEY_PATH}:ro`,
     ]);
@@ -553,6 +572,25 @@ describe('session container lifecycle', () => {
     assert.ok(fs.existsSync(sessionWorkspaceDir(env.config, session.id)));
     // The staged copy is the repository key, readable by the runner user.
     assert.equal(fs.readFileSync(sessionKeyPath(env.config, session.id), 'utf8').trim(), PRIVATE_KEY);
+  });
+
+  it('mounts the account it is asked for instead of the default', async () => {
+    const other = addClaudeAccount(env.config, env.db).id;
+    const view = await orchestrator.start(env.session(), other);
+
+    const created = daemon.container(view.id);
+    assert.equal(created?.labels[CLAUDE_ACCOUNT_LABEL], other);
+    assert.equal(created?.binds[0], `${claudeAccountDir(env.config, other)}:${RUNNER_CLAUDE_DIR}`);
+  });
+
+  it('starts nothing while no Claude account is connected', async () => {
+    removeClaudeAccount(env.config, env.db, env.accountId);
+
+    await assert.rejects(orchestrator.start(env.session()), (error: OrchestratorError) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.code, 'claude_not_authenticated');
+      return true;
+    });
   });
 
   it('omits the key mount for a repository that has no deploy key', async () => {

@@ -13,12 +13,10 @@ services:
       NODE_ENV: production
       PORT: 8080
       DATA_DIR: /data
+      # Legacy single-account credentials, read once on start to import an
+      # existing login as the first Claude account. No container mounts it:
+      # each account's login lives in DATA_DIR/claude-accounts/<id>.
       CLAUDE_AUTH_DIR: /claude-auth
-      # Name of the volume below. Containers the server spawns (the Claude
-      # login and auth-probe containers, and every session container) mount it
-      # by name: a bind mount of /claude-auth would be resolved on the host,
-      # where that path does not exist.
-      CLAUDE_AUTH_VOLUME: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}
       # Name of the data volume below. A session container gets *part* of it
       # (its own workspace) mounted at /workspace, which a volume name alone
       # cannot express, so the server looks up the volume's host mountpoint and
@@ -50,8 +48,9 @@ services:
     volumes:
       # Application data: SQLite database, SSH deploy keys, session workspaces.
       - chief-data:/data
-      # Claude Code credentials, shared with every session container (FR-5).
-      - claude-auth:/claude-auth
+      # Legacy Claude Code credentials, read-only: only the one-time import of
+      # an existing install's login reads them (see CLAUDE_AUTH_DIR above).
+      - claude-auth:/claude-auth:ro
       # Lets the server spawn one container per session (FR-6).
       # WARNING: this grants root-equivalent control of the host. See README.
       - /var/run/docker.sock:/var/run/docker.sock

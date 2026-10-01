@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { BuildError } from '../build/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -831,6 +832,8 @@ describe('the pull-request flag of a fix session', () => {
 
       const db = openDatabase(IN_MEMORY);
       databases.push(db);
+      // Containers mount a Claude account's directory; with none, nothing starts.
+      addClaudeAccount(config, db);
       setSetting(db, 'sentry_token', 'sntrys_token');
       const repository = createRepository(db, {
         name: 'demo',

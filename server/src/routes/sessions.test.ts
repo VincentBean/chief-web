@@ -8,6 +8,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -85,6 +86,8 @@ describe('sessions api', () => {
     fs.mkdirSync(config.sshKeysDir, { recursive: true });
 
     db = openDatabase(IN_MEMORY);
+    // The Claude guard lets requests through only with an account to probe.
+    addClaudeAccount(config, db);
     repository = createRepository(db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',
