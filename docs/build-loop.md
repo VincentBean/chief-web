@@ -252,8 +252,9 @@ limit in its place and the slot is still there when it resumes.
 
 **Coming back.** The scheduler resumes a waiting session by itself once
 `waiting_until` has passed (see
-[Scheduling](scheduling.md#the-usage-limit-hold)) — same container, same story,
-same counters, so the run continues rather than restarts. **Resume now** on the
+[Scheduling](scheduling.md#the-usage-limit-hold)) — same container (or a new
+one on the failover account), same story, same counters, so the run continues
+rather than restarts. **Resume now** on the
 session page ends the hold early: `POST /api/limits/hold/clear` with no body
 clears every account's hold and puts *every* waiting session back to work at
 once, subject to the cap, with the overflow on the queue; `{ accountId }`
