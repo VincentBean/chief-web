@@ -80,8 +80,9 @@ background, instead of babysitting one terminal per feature.
   steps it saw into the PRD.
   [Voice calls](docs/voice.md)
 
-If Claude runs into its usage limit mid-build, the session waits for the limit
-to lift and carries on instead of failing.
+If Claude runs into its usage limit mid-build, the session carries on instead
+of failing: on another of your Claude accounts when one has room, otherwise
+once the limit lifts.
 [The hold](docs/build-loop.md#the-usage-limit-hold)
 
 **New here?** [What you need](#what-you-need) → [Setup](#setup) →
@@ -97,8 +98,10 @@ to lift and carries on instead of failing.
   compose with `sudo`.
 - **A GitHub account** that can add a deploy key to each repository you want
   worked on, and create an access token.
-- **A Claude account** you can log into — a Pro/Max subscription or Anthropic
-  Console. There is no API key to paste; you sign in once, in the browser.
+- **One or more Claude accounts** you can log into — a Pro/Max subscription or
+  Anthropic Console. There is no API key to paste; you sign each one in once,
+  in the browser. With several, work moves to another account when one hits
+  its usage limit.
 - **Internet access** to GitHub (SSH and HTTPS) and to Anthropic.
 - **A few GB of disk** for the images and a full clone per session, plus enough
   RAM for the sessions you run at once. Each one is a container running an agent
@@ -234,9 +237,9 @@ the API, or in a log.
 
 Do this once per repository. Each one gets its own key.
 
-### 6. Sign in to Claude Code
+### 6. Add one or more Claude accounts
 
-Go to **Settings → Claude Code** and press **Add account**. A terminal
+Add one or more accounts in **Settings → Claude Code**: press **Add account**. A terminal
 appears and asks you to log in:
 
 1. Copy the URL it prints with **Ctrl+Shift+C** and open it in a new tab.
@@ -246,10 +249,13 @@ appears and asks you to log in:
 
 The account is now listed as signed in, with its 5-hour and 7-day plan usage.
 You only do this once per account — the login is kept on the data volume and
-survives restarts and `docker compose down`. Add more accounts the same way;
-see [Claude authentication](docs/claude-auth.md).
+survives restarts and `docker compose down`. Add more accounts the same way:
+the first one signed in is the default, **Make default** picks another, and a
+session can be put on any of them. Upgrading from a version with a single
+login? It is imported as the first account on start; see
+[Claude authentication](docs/claude-auth.md#upgrading-from-a-single-account).
 
-Until this says Authenticated you cannot create or plan a session. That is
+Until at least one account is signed in you cannot create or plan a session. That is
 deliberate: an agent that cannot log in would fail on its first run, a long way
 from the actual cause.
 
@@ -282,7 +288,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |
 | [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
 | [Voice calls](docs/voice.md) | setting up a call with chief, what it can do by voice, providers and costs, privacy and latency |
-| [Claude authentication](docs/claude-auth.md) | the one-time login |
+| [Claude authentication](docs/claude-auth.md) | Claude accounts: adding, removing, the default, usage, failover, upgrading from one login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
 | [Troubleshooting](docs/troubleshooting.md) | SSH and login failures, recovering a failed session |
 | [Development](docs/development.md) | running it from source |

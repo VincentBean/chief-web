@@ -13,9 +13,12 @@ services:
       NODE_ENV: production
       PORT: 8080
       DATA_DIR: /data
-      # Legacy single-account credentials, read once on start to import an
-      # existing login as the first Claude account. No container mounts it:
-      # each account's login lives in DATA_DIR/claude-accounts/<id>.
+      # Legacy single-account credentials (the claude-auth volume below). Read
+      # only on a start with no Claude accounts at all, to import an existing
+      # login as the first account; no container mounts it. Each account's
+      # login lives in DATA_DIR/claude-accounts/<id> on the data volume, and
+      # every container the server spawns bind-mounts one of those at
+      # ~/.claude (docs/claude-auth.md).
       CLAUDE_AUTH_DIR: /claude-auth
       # Name of the data volume below. A session container gets *part* of it
       # (its own workspace) mounted at /workspace, which a volume name alone
@@ -46,10 +49,13 @@ services:
       PR_SYNC_INTERVAL_MS: ${PR_SYNC_INTERVAL_MS:-900000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
-      # Application data: SQLite database, SSH deploy keys, session workspaces.
+      # Application data: SQLite database, SSH deploy keys, session workspaces
+      # and one credentials directory per Claude account (claude-accounts/<id>).
       - chief-data:/data
-      # Legacy Claude Code credentials, read-only: only the one-time import of
-      # an existing install's login reads them (see CLAUDE_AUTH_DIR above).
+      # Legacy Claude Code credentials, read-only: only the import of an
+      # existing install's login reads them (see CLAUDE_AUTH_DIR above). Once
+      # that account is listed in Settings, this line and the claude-auth
+      # volume below may be deleted.
       - claude-auth:/claude-auth:ro
       # Lets the server spawn one container per session (FR-6).
       # WARNING: this grants root-equivalent control of the host. See README.
@@ -70,10 +76,11 @@ services:
       replicas: 0
 
 volumes:
-  # Both volumes are explicitly named rather than <project>_<key>, so the names
-  # the server passes to the Docker socket are knowable without inspecting the
-  # compose project.
+  # Named explicitly rather than <project>_<key>, so the name the server passes
+  # to the Docker socket is knowable without inspecting the compose project.
   chief-data:
     name: ${CHIEF_DATA_VOLUME:-chief-web-data}
+  # The pre-multiple-accounts login, kept under its old name so an upgrade
+  # imports it. If you had renamed it, put that name here.
   claude-auth:
-    name: ${CLAUDE_AUTH_VOLUME:-chief-web-claude-auth}
+    name: chief-web-claude-auth

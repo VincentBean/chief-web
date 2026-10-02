@@ -39,11 +39,12 @@ Session creation, planning and any retry that runs an agent are blocked while
 no account is signed in — deliberately, so you find out here instead of two hours into a
 build.
 
-- **Credentials expired**, or you signed the account out elsewhere: press **Set
-  up Claude** again and repeat the login. It is the same flow as first-time
-  setup, and it replaces what is in the volume. Nothing else has to be restarted;
-  sessions already running pick the new credentials up on their next iteration,
-  because the volume is mounted live.
+- **Credentials expired**, or you signed the account out elsewhere: press
+  **Sign in again** on that account's row and repeat the login. It is the same
+  flow as adding it, and it replaces what is in the account's directory. Nothing
+  else has to be restarted; sessions already running on it pick the new
+  credentials up on their next iteration, because the directory is mounted
+  live.
 - **A build failed mid-run with an auth error**: re-authenticate, then press
   **Retry** on the session. Completed stories are not rebuilt.
 - **It says Not authenticated with an error next to it** (`docker: …`, `image

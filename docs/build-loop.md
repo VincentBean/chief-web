@@ -190,9 +190,11 @@ request; they live as long as the session's workspace does.
 ## The usage-limit hold
 
 Claude's usage limit is on the **account**, not on a session. When it is
-reached, every agent chief-web could start is refused, and the only useful
-response is to stop asking for a while. That pause is the **hold**, and there
-is one per Claude account: work on other accounts carries on.
+reached, every agent chief-web could start on that account is refused, and the
+only useful response is to stop asking it for a while. That pause is the
+**hold**, and there is one per [Claude account](claude-auth.md): work on other
+accounts carries on, and work on the held account
+[fails over](#failover-to-another-account) to another one when it can.
 
 **How a refusal is recognised.** The loop asks `isUsageLimitRefusal(result)`
 (`server/src/limits/detect.ts`) about the agent run before anything else looks
@@ -227,13 +229,18 @@ reported at 100% also holds its account, until that window's `resetsAt`. So:
 - a PR-feedback run is refused up front with `409 usage_limit_hold`, before it
   costs a container, a checkout or a GitHub call; one refused mid-run arms the
   hold and parks the builds on its account too;
-- **Start build** on a held account enqueues the session and answers
-  `429 usage_limit_hold`; the
-  [queue](scheduling.md#concurrency-and-the-build-queue) skips entries whose
-  account is held (and is not pumped at all while every account is), so their
-  order is kept rather than spent;
+- **Start build** on a held account with nowhere to fail over to enqueues the
+  session and answers `429 usage_limit_hold`; the
+  [queue](scheduling.md#concurrency-and-the-build-queue) skips such entries
+  (and is not pumped at all while every account is held), so their order is
+  kept rather than spent;
 - the row is on disk, so a server restarted mid-hold picks the hold back up
   instead of resuming every session straight into the limit.
+
+**When it ends.** A hold armed by a refusal expires an hour later; one armed by
+a full usage window expires at that window's reset time, as the usage endpoint
+reports it. If both apply, the later one wins. It expires by itself — the next
+scheduler tick picks the waiting work back up — or earlier with **Resume now**.
 
 **It costs no retry and no iteration.** The refused iteration is given back, the
 story's attempt count is left exactly where it was, and `prd.md` is untouched —
@@ -247,12 +254,34 @@ limit in its place and the slot is still there when it resumes.
 `waiting_until` has passed (see
 [Scheduling](scheduling.md#the-usage-limit-hold)) — same container, same story,
 same counters, so the run continues rather than restarts. **Resume now** on the
-session page ends the hold early: `POST /api/limits/hold/clear` clears the row
-and puts *every* waiting session back to work at once, subject to the cap, with
-the overflow on the queue. `GET /api/limits/hold` answers `{ until }` for
-anything that needs to know whether there is a hold at all. **Stop build** works
+session page ends the hold early: `POST /api/limits/hold/clear` with no body
+clears every account's hold and puts *every* waiting session back to work at
+once, subject to the cap, with the overflow on the queue; `{ accountId }`
+clears just that account. `GET /api/limits/hold` answers `{ until, accounts:
+[{ accountId, until }] }` — `until` is set only while every signed-in account
+is held. **Stop build** works
 on a held session too, and takes it back to **ready** without waiting the hour
 out.
+
+### Failover to another account
+
+With more than one account signed in, a session or PR run whose account is
+held does not have to wait for it. Before launching, chief-web looks for an
+account that is signed in, is not held, and whose 5-hour usage is **at most
+95%**, and runs the work there; when several qualify it takes the lowest 5-hour
+usage, then the lowest 7-day usage, then the first in the list (a window with
+no reading counts as 0%). The ceiling keeps work off an account that would be
+refused minutes into the run. Only when nothing qualifies does the work wait
+for its own account, exactly as described above, and the server logs once why.
+
+Failover does not pre-empt running work. A refused session is parked as above;
+the next scheduler tick resumes it on the failover account, recreating its
+container there (the workspace, story and counters are kept). The session
+records the account (`failoverClaudeAccountId`) and its page reads *Running on
+<other> while <own> is on hold until <time>*. A refusal on the failover account
+holds that account in turn. Once the session's own account is no longer held,
+the next agent launch takes it back home. The full rules are in
+[Claude authentication](claude-auth.md#failover).
 
 ## Push and pull request
 
