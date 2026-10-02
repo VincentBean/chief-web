@@ -39,7 +39,7 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
       guarded('Could not switch to the session', async () => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
-        const holdUntil = services.hold.until(effectiveClaudeAccountId(services.db, session));
+        const holdUntil = services.hold.waitingUntil(effectiveClaudeAccountId(services.db, session));
         if (holdUntil !== null) {
           return {
             ok: false,

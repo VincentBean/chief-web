@@ -1256,6 +1256,15 @@ export const MIGRATIONS: readonly Migration[] = [
       DELETE FROM settings WHERE key = 'claude_limit_until';
     `,
   },
+  {
+    id: '0028_session_failover_account',
+    sql: `
+      -- The account a session's container mounts while its own account is on
+      -- a usage-limit hold (multiple accounts US-015); NULL when it runs on
+      -- its own account.
+      ALTER TABLE sessions ADD COLUMN failover_claude_account_id TEXT;
+    `,
+  },
 ];
 
 /**

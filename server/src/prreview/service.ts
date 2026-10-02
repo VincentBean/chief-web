@@ -224,7 +224,7 @@ export class PrReviewService {
     }
 
     // The account the review's container would mount (US-014).
-    const held = this.hold.until(prRunClaudeAccountId(this.db));
+    const held = this.hold.waitingUntil(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new PrReviewError(
         409,
@@ -550,7 +550,9 @@ export class PrReviewService {
         // The account is out, not the pull request: the next attempt walks
         // straight back into the same wall, so hold the whole server, as a
         // feedback run does, and leave this one to be started again after.
-        const account = prRunClaudeAccountId(this.db);
+        // The account the container mounted: the failover one while the PR
+        // automation account is held (US-015).
+        const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
         const until = this.hold.arm(account);
         reasons.push(`Attempt ${String(attempt)}: ${pass.message}`);
         this.fail(

@@ -29,7 +29,7 @@ import { logger } from '../lib/logger.js';
 import { UsageLimitHold } from '../limits/index.js';
 import type { ReviewTarget } from '../review/index.js';
 import type { SessionContainers, SessionExecutor } from '../sessions/index.js';
-import { effectiveClaudeAccountId, getGithubToken } from '../settings/index.js';
+import { getGithubToken, runningClaudeAccountId } from '../settings/index.js';
 import { type CommitCount, countBranchCommits } from './commits.js';
 import type { DescriptionStep } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
@@ -933,8 +933,9 @@ export class DeliveryService implements BuildCompletion {
     opened: OpenedPullRequest | null,
     reason: string,
   ): DeliveryResult {
-    // The review ran in the session's container, on its effective account.
-    const until = this.hold.arm(effectiveClaudeAccountId(this.db, session));
+    // The review ran in the session's container, on its effective account —
+    // or the failover account the orchestrator mounted instead (US-015).
+    const until = this.hold.arm(runningClaudeAccountId(this.db, getSession(this.db, session.id) ?? session));
     logger.warn('delivery held: the review agent was refused for Claude’s usage limit', {
       session: session.id,
       name: session.name,

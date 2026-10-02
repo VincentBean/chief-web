@@ -202,7 +202,7 @@ export class SchedulerService implements SessionScheduler {
     try {
       // A task whose own account is held stays due (US-014); the rest fire.
       await this.tasks.fireDue(now, (task) =>
-        this.hold.active(effectiveClaudeAccountId(this.db, task)),
+        this.hold.waitingUntil(effectiveClaudeAccountId(this.db, task)) !== null,
       );
     } catch (cause) {
       logger.warn('could not fire the due recurring tasks', { error: describe(cause) });
@@ -233,7 +233,7 @@ export class SchedulerService implements SessionScheduler {
     // Left where it is, the timestamp is simply still due when the hold lifts,
     // and the very next tick honours it — which is the same catch-up this
     // service already does after a restart.
-    const until = this.hold.until(effectiveClaudeAccountId(this.db, session));
+    const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
     if (until !== null) {
       logger.info('scheduled start held by Claude’s usage limit', {
         session: session.id,

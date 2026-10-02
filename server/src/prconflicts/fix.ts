@@ -200,7 +200,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       );
     }
     // The account the fix's container would mount (US-014).
-    const held = this.hold.until(prRunClaudeAccountId(this.db));
+    const held = this.hold.waitingUntil(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new ConflictFixError(
         'usage_limit_hold',
@@ -558,7 +558,9 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       // — and the run ends without a standing failure, because a standing
       // failure would keep the scan off this pull request until one of its two
       // SHAs moved, long after the hold had lifted.
-      const account = prRunClaudeAccountId(this.db);
+      // The account the container mounted: the failover one while the PR
+      // automation account is held (US-015).
+      const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
       const until = this.hold.arm(account);
       await this.runner.reap(fix.id, containerId);
       await abortMerge(this.exec, containerId, {

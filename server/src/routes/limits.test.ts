@@ -243,7 +243,7 @@ describe('usage limit api', () => {
     assert.equal(body.hold.until, until < other ? until : other);
   });
 
-  it('clears one account’s hold, resuming only the sessions on it (US-014)', async () => {
+  it('clears one account’s hold; the other held account’s sessions fail over onto it (US-014, US-015)', async () => {
     const onDefault = seed('clear-one-default');
     const onOther = seed('clear-one-other');
     updateSession(db, onOther.id, { claudeAccountId: otherId });
@@ -256,11 +256,13 @@ describe('usage limit api', () => {
     const body = (await response.json()) as ClearBody;
 
     assert.equal(response.status, 200);
-    assert.equal(body.resumed, 1);
+    // Only the cleared account's hold lifts, but with it free the sessions on
+    // the still-held account have somewhere to run (US-015).
+    assert.equal(body.resumed, 2);
     assert.equal(hold.until(otherId), null);
     assert.equal(hold.until(accountId), until);
     assert.equal(getSession(db, onOther.id)?.status, 'building');
-    assert.equal(getSession(db, onDefault.id)?.status, 'waiting');
+    assert.equal(getSession(db, onDefault.id)?.status, 'building');
   });
 
   it('refuses a clear naming an unknown, malformed or unheld account', async () => {

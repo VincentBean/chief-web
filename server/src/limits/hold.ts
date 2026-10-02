@@ -2,6 +2,15 @@ import { claudeLimitKey, deleteSetting, getSetting, listClaudeAccounts, setSetti
 import type { Database } from '../db/index.js';
 import { claudeAccountSignedIn } from '../settings/index.js';
 import type { VoiceEventSink } from '../voice/events.js';
+import {
+  FAILOVER_MAX_FIVE_HOUR_UTILIZATION,
+  type FailoverCandidate,
+  type FailoverUsage,
+  failoverEligible,
+  fiveHourOf,
+  pickFailoverAccount,
+} from '../claude/failover.js';
+import { logger } from '../lib/logger.js';
 
 /**
  * The usage-limit hold (US-002), per Claude account since multiple accounts
@@ -38,6 +47,25 @@ export interface CappedUsage {
   readonly sevenDay: { readonly utilization: number; readonly resetsAt: string | null } | null;
 }
 
+/** Where each account's plan usage is read from (`ClaudeUsageService`, US-005). */
+export interface FailoverUsageReader {
+  usage(accountId: string): FailoverUsage | null;
+}
+
+/**
+ * Where work owned by an account launches (multiple accounts US-015): the
+ * account itself while it is not held, else the failover account, else
+ * nowhere — the work waits until `waitingUntil`.
+ */
+export interface LaunchRoute {
+  /** The account to launch on; the owner itself while the work waits. */
+  readonly accountId: string | null;
+  /** True when `accountId` is a failover account rather than the owner. */
+  readonly failover: boolean;
+  /** The owner's hold expiry while no account can take the work, else `null`. */
+  readonly waitingUntil: string | null;
+}
+
 /** One account's hold, as `GET /api/limits/hold` lists it. */
 export interface AccountHold {
   readonly accountId: string;
@@ -65,7 +93,89 @@ export class UsageLimitHold {
      * account is held while others carry on, nor when a hold is extended.
      */
     private readonly events: VoiceEventSink | null = null,
+    /**
+     * Plan usage for picking a failover account (US-015). Without one every
+     * window is unknown, which the choice counts as 0.
+     */
+    private readonly usage: FailoverUsageReader | null = null,
   ) {}
+
+  /** Why work on an account last waited, so the log says it once, not every tick. */
+  private readonly waitReasons = new Map<string, string>();
+
+  /**
+   * Where work owned by `accountId` — the effective account of a session, a
+   * recurring task or a PR run — launches at `now` (multiple accounts US-015):
+   * the account itself while it is not held; else the least-used other
+   * account (`pickFailoverAccount`); else it waits on its own hold, as it did
+   * before failover existed.
+   */
+  route(accountId: string | null, now: Date = new Date()): LaunchRoute {
+    const until = this.until(accountId, now);
+    if (accountId === null || until === null) {
+      if (accountId !== null) this.waitReasons.delete(accountId);
+      return { accountId, failover: false, waitingUntil: null };
+    }
+    const accounts = this.failoverCandidates();
+    const holds = this.list(now);
+    const failover = pickFailoverAccount(accounts, holds, now);
+    if (failover !== null) {
+      this.waitReasons.delete(accountId);
+      return { accountId: failover, failover: true, waitingUntil: null };
+    }
+    this.logWait(accountId, until, accounts, holds, now);
+    return { accountId, failover: false, waitingUntil: until };
+  }
+
+  /** The account work owned by `accountId` launches on now (see {@link route}). */
+  launchAccount(accountId: string | null, now: Date = new Date()): string | null {
+    return this.route(accountId, now).accountId;
+  }
+
+  /**
+   * The expiry work owned by `accountId` waits for: its hold, but only while
+   * no other account can take the work over (US-015). `null` when it may go.
+   */
+  waitingUntil(accountId: string | null, now: Date = new Date()): string | null {
+    return this.route(accountId, now).waitingUntil;
+  }
+
+  private failoverCandidates(): FailoverCandidate[] {
+    return listClaudeAccounts(this.db).map((account) => ({
+      id: account.id,
+      position: account.position,
+      authenticated: claudeAccountSignedIn(account),
+      usage: this.usage?.usage(account.id) ?? null,
+    }));
+  }
+
+  /** Says once per change why held work has nowhere to fail over to. */
+  private logWait(
+    accountId: string,
+    until: string,
+    accounts: readonly FailoverCandidate[],
+    holds: readonly AccountHold[],
+    now: Date,
+  ): void {
+    const held = new Set(
+      holds
+        .filter((hold) => hold.until !== null && Date.parse(hold.until) > now.getTime())
+        .map((hold) => hold.accountId),
+    );
+    const eligible = failoverEligible(accounts, held);
+    const reason =
+      eligible.length === 0
+        ? 'no other signed-in account is free of a usage-limit hold'
+        : `every other account is above ${FAILOVER_MAX_FIVE_HOUR_UTILIZATION}% of its 5-hour window`;
+    if (this.waitReasons.get(accountId) === reason) return;
+    this.waitReasons.set(accountId, reason);
+    logger.info('held claude account has no failover; its work waits', {
+      account: accountId,
+      until,
+      reason,
+      candidates: eligible.map((account) => ({ id: account.id, fiveHour: fiveHourOf(account) })),
+    });
+  }
 
   /**
    * Holds `accountId` until `expiry` — by default {@link USAGE_LIMIT_HOLD_MS}

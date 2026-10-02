@@ -39,6 +39,7 @@ import { DockerApi } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { USAGE_LIMIT_HOLD_MS, UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
+import type { FailoverUsage } from '../claude/failover.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
 import { planRetry } from '../recovery/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
@@ -1932,6 +1933,83 @@ describe('concurrency and the build queue', () => {
     await fleet.builds.start(search.id);
     assert.equal(fleet.session(search.id).status, 'building');
     await fleet.builds.stop(search.id);
+  });
+
+  it('resumes a held session on another account as soon as one is eligible (US-015)', async () => {
+    const world = new World();
+    const other = createClaudeAccount(world.db, { authMethod: 'claude.ai' }).id;
+    const usage = new Map<string, FailoverUsage>([
+      [other, { fiveHour: { utilization: 97 }, sevenDay: null }],
+    ]);
+    const hold = new UsageLimitHold(world.db, null, { usage: (id) => usage.get(id) ?? null });
+    const builds = createBuildService(
+      world.config,
+      world.db,
+      world.containers,
+      world.runner,
+      undefined,
+      createBuildLogStore(world.config, world.db),
+      hold,
+    );
+    let release = (): void => {};
+    const parkedAgent = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    world.runner.behaviour = () => parkedAgent;
+    const until = hold.arm(world.accountId);
+    updateSession(world.db, world.session.id, { status: 'waiting', waitingUntil: until });
+
+    // The only other account is above the 95% ceiling: nothing to fail over to.
+    assert.equal(await builds.resumeHeld(), 0);
+    assert.equal(getSession(world.db, world.session.id)?.status, 'waiting');
+
+    // The next tick after it drops below the ceiling resumes the session, long
+    // before its own hold lifts.
+    usage.set(other, { fiveHour: { utilization: 40 }, sevenDay: null });
+    assert.equal(await builds.resumeHeld(), 1);
+    assert.equal(getSession(world.db, world.session.id)?.status, 'building');
+    assert.equal(hold.until(world.accountId), until);
+
+    world.runner.result = { exitCode: 143, output: 'terminated', timedOut: false };
+    const stopped = builds.stop(world.session.id);
+    release();
+    await stopped;
+  });
+
+  it('brings a session parked on its failover account home once its own hold lifts (US-015)', async () => {
+    const world = new World();
+    const failover = createClaudeAccount(world.db, { authMethod: 'claude.ai' }).id;
+    const hold = new UsageLimitHold(world.db);
+    const builds = createBuildService(
+      world.config,
+      world.db,
+      world.containers,
+      world.runner,
+      undefined,
+      createBuildLogStore(world.config, world.db),
+      hold,
+    );
+    let release = (): void => {};
+    const parkedAgent = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    world.runner.behaviour = () => parkedAgent;
+    // It ran on the failover account, which then refused it; its own account
+    // is no longer held.
+    const until = hold.arm(failover);
+    updateSession(world.db, world.session.id, {
+      status: 'waiting',
+      waitingUntil: until,
+      failoverClaudeAccountId: failover,
+    });
+
+    assert.equal(await builds.resumeHeld(), 1);
+    assert.equal(getSession(world.db, world.session.id)?.status, 'building');
+
+    world.runner.result = { exitCode: 143, output: 'terminated', timedOut: false };
+    const stopped = builds.stop(world.session.id);
+    release();
+    await stopped;
   });
 
   it('parks every building session when one of them is refused (US-005)', async () => {

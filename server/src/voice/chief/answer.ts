@@ -41,7 +41,7 @@ export function answerPlanningQuestionTool(services: ChiefServices): ChiefTool {
       const open = planning.openQuestions;
       if (open.length === 0) return refuse('no_open_questions', `${session.name} has no open questions`);
       // As in `focus_session`: the session agent could not start, so say so now rather than "working on it".
-      const holdUntil = services.hold.until(effectiveClaudeAccountId(services.db, session));
+      const holdUntil = services.hold.waitingUntil(effectiveClaudeAccountId(services.db, session));
       if (holdUntil !== null) {
         return refuse('usage_limit_hold', `Claude is on a usage-limit hold until ${holdUntil}, so ${session.name} cannot take the answer now`);
       }

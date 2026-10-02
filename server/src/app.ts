@@ -285,16 +285,17 @@ export function createApp(
   // narrow two-method view a test may stub, while starting a feedback-run
   // container needs the real thing. A test that stubs the orchestrator and
   // wants runs passes `deps.prFeedback` as well.
-  const sessionOrchestrator = createSessionOrchestrator(config, db, docker);
-  const orchestrator = deps.orchestrator ?? sessionOrchestrator;
-  const exec = deps.exec ?? docker;
   // Background events for the voice call (voice US-015): every service below
   // reports on this one bus, and the voice service speaks what it hears.
   const events = new VoiceEventBus();
   // Claude's usage-limit hold (US-002). The hold is a row on the database, so
   // every instance reads the same one; sharing this one also means a hold that
-  // begins is reported on the bus once, whoever armed it.
-  const hold = new UsageLimitHold(db, events);
+  // begins is reported on the bus once, whoever armed it. It reads plan usage
+  // to pick the failover account for held work (multiple accounts US-015).
+  const hold = new UsageLimitHold(db, events, claudeUsage);
+  const sessionOrchestrator = createSessionOrchestrator(config, db, docker, hold);
+  const orchestrator = deps.orchestrator ?? sessionOrchestrator;
+  const exec = deps.exec ?? docker;
   // A window at 100% holds its account until the window resets (US-014).
   claudeUsage.onUsage((accountId, usage) => {
     hold.armForUsage(accountId, usage);

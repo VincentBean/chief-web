@@ -319,7 +319,7 @@ export class PrFeedbackService {
     // the same wall — so it is refused outright, and named the moment it is
     // worth asking again.
     // The account the run's container would mount (US-014).
-    const held = this.hold.until(prRunClaudeAccountId(this.db));
+    const held = this.hold.waitingUntil(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new PrFeedbackError(409, 'usage_limit_hold', heldStartMessage(prNumber, held));
     }
@@ -660,7 +660,9 @@ export class PrFeedbackService {
       // into the same wall a few seconds behind — and then the run is failed,
       // because a feedback pass is single-shot and comes back through Retry
       // rather than resuming by itself.
-      const account = prRunClaudeAccountId(this.db);
+      // The account the container mounted: the failover one while the PR
+      // automation account is held (US-015).
+      const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
       const until = this.hold.arm(account);
       // The agent is still in the container with the checkout under it and this
       // exec is being walked away from; the retry checks the same branch out.

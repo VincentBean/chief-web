@@ -24,6 +24,7 @@ import {
   updateVoiceCall,
 } from '../db/index.js';
 import { UsageLimitHold } from '../limits/index.js';
+import type { FailoverUsage } from '../claude/failover.js';
 import {
   type ScheduledBuilds,
   type SchedulerRecurringTasks,
@@ -104,6 +105,8 @@ interface World {
   readonly builds: FakeBuilds;
   readonly tasks: FakeRecurringTasks;
   readonly scheduler: SchedulerService;
+  /** Plan usage per account, as the hold reads it to pick a failover (US-015). */
+  readonly usage: Map<string, FailoverUsage>;
   session(input: { status?: SessionStatus; at?: string | null; name?: string }): Session;
 }
 
@@ -119,6 +122,7 @@ function world(env: Record<string, string> = {}): World {
   });
   const builds = new FakeBuilds(db);
   const tasks = new FakeRecurringTasks();
+  const usage = new Map<string, FailoverUsage>();
   let created = 0;
 
   return {
@@ -127,7 +131,14 @@ function world(env: Record<string, string> = {}): World {
     accountId,
     builds,
     tasks,
-    scheduler: new SchedulerService(config, db, builds, new UsageLimitHold(db), tasks),
+    usage,
+    scheduler: new SchedulerService(
+      config,
+      db,
+      builds,
+      new UsageLimitHold(db, null, { usage: (id) => usage.get(id) ?? null }),
+      tasks,
+    ),
     session({ status = 'ready', at = null, name }) {
       created += 1;
       return createSession(db, {
@@ -200,6 +211,8 @@ describe('the session scheduler', () => {
   it('fires a due schedule on an account that is not held (US-014)', async () => {
     const w = world();
     const other = createClaudeAccount(w.db, { authMethod: 'claude.ai' }).id;
+    // Too close to its own limit to take the held account's work over (US-015).
+    w.usage.set(other, { fiveHour: { utilization: 96 }, sevenDay: null });
     const onHeld = w.session({ at: PAST, name: 'on-held' });
     const onFree = w.session({ at: PAST, name: 'on-free' });
     updateSession(w.db, onFree.id, { claudeAccountId: other });
@@ -208,6 +221,11 @@ describe('the session scheduler', () => {
     assert.equal(await w.scheduler.tick(), 1);
     assert.deepEqual(w.builds.started, [onFree.id]);
     assert.equal(getSession(w.db, onHeld.id)?.scheduledStartAt, PAST);
+
+    // Once the other account has room, the held one's schedule fails over to it.
+    w.usage.set(other, { fiveHour: { utilization: 40 }, sevenDay: null });
+    assert.equal(await w.scheduler.tick(), 1);
+    assert.deepEqual(w.builds.started, [onFree.id, onHeld.id]);
   });
 
   it('leaves a pending session alone: a missed schedule is not a start', async () => {

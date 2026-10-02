@@ -376,6 +376,18 @@ export function effectiveClaudeAccountId(
 }
 
 /**
+ * The account a session's container last launched agent work on (multiple
+ * accounts US-015): the failover account the orchestrator recorded while its
+ * own account was held, else its effective account. What a refusal arms.
+ */
+export function runningClaudeAccountId(
+  db: Database,
+  session: { readonly claudeAccountId: string | null; readonly failoverClaudeAccountId: string | null },
+): string | null {
+  return session.failoverClaudeAccountId ?? effectiveClaudeAccountId(db, session);
+}
+
+/**
  * The account a PR automation run (review, feedback, conflict fix) launches on
  * when the caller names none (US-013): the PR automation choice, else the
  * default. `SessionOrchestrator.startPrRun` resolves exactly this way, so the

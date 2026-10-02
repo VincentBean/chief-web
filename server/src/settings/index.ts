@@ -29,6 +29,7 @@ export {
   getExplicitDefaultClaudeAccountId,
   getPrAutomationClaudeAccountId,
   prRunClaudeAccountId,
+  runningClaudeAccountId,
   getSentryClaudeAccountId,
   getGitIdentity,
   getGithubToken,

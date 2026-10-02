@@ -84,7 +84,7 @@ export interface ChiefServices {
    * Claude's usage-limit hold (multiple accounts US-014): `until` for one
    * account, `allHeldUntil` for "is every account held" (the overview).
    */
-  readonly hold: { until(accountId: string | null): string | null; allHeldUntil(): string | null };
+  readonly hold: { waitingUntil(accountId: string | null): string | null; allHeldUntil(): string | null };
   /** The planning terminal; `focus_session` refuses while it is open for the session. */
   readonly planning?: { isTerminalRunning(sessionId: string): boolean };
   /** The session voice agents `focus_session` starts; without them it refuses. */

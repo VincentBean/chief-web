@@ -190,6 +190,11 @@ export interface SessionView {
    */
   readonly effectiveClaudeAccountId: string | null;
   /**
+   * The account its container runs on instead while its own is on a
+   * usage-limit hold (multiple accounts US-015), `null` when it runs on its own.
+   */
+  readonly failoverClaudeAccountId: string | null;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -943,6 +948,7 @@ export class SessionService {
       effort: session.effort,
       claudeAccountId: session.claudeAccountId,
       effectiveClaudeAccountId: session.claudeAccountId ?? defaultAccountId,
+      failoverClaudeAccountId: session.failoverClaudeAccountId,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

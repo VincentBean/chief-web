@@ -810,7 +810,7 @@ describe('barge-in', () => {
             start: () => Promise.resolve({ id: `c-${session.id}`, name: `chief-web-${name}`, running: true, state: 'running' as const }),
             remove: () => Promise.resolve(),
           },
-          hold: { until: () => null },
+          hold: { waitingUntil: () => null },
         });
       },
       ...(earcons === undefined ? {} : { earcons }),
@@ -1022,7 +1022,7 @@ describe('a scripted call end to end (US-027)', () => {
               start: (session) => Promise.resolve({ id: `c-${session.id}`, name: `chief-web-${session.name}-${session.id}`, running: true, state: 'running' as const }),
               remove: () => Promise.resolve(),
             },
-            hold: { until: () => null },
+            hold: { waitingUntil: () => null },
           });
           return registry;
         },

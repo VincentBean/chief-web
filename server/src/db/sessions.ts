@@ -208,6 +208,12 @@ export interface Session {
    * accounts US-009), or null to follow the default account.
    */
   readonly claudeAccountId: string | null;
+  /**
+   * The account its container mounts instead while its own account is on a
+   * usage-limit hold (multiple accounts US-015), or null when it runs on its
+   * own. Written by the orchestrator at each agent launch.
+   */
+  readonly failoverClaudeAccountId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -255,6 +261,7 @@ export interface UpdateSessionInput {
   readonly feedback?: string | null;
   readonly effort?: EffortLevel | null;
   readonly claudeAccountId?: string | null;
+  readonly failoverClaudeAccountId?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -282,6 +289,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   feedback: 'feedback',
   effort: 'effort',
   claudeAccountId: 'claude_account_id',
+  failoverClaudeAccountId: 'failover_claude_account_id',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -347,6 +355,7 @@ export function mapSession(row: Row): Session {
     feedback: nullableText(row, 'feedback'),
     effort: effortOf(row),
     claudeAccountId: nullableText(row, 'claude_account_id'),
+    failoverClaudeAccountId: nullableText(row, 'failover_claude_account_id'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -378,6 +387,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     feedback: input.feedback ?? null,
     effort: input.effort ?? null,
     claudeAccountId: input.claudeAccountId ?? null,
+    failoverClaudeAccountId: null,
     createdAt: now,
     updatedAt: now,
   };

@@ -794,9 +794,9 @@ export interface Session {
   effectiveClaudeAccountId: string | null;
   /**
    * The account the session runs on while its own is on hold (failover,
-   * US-015); absent or null when it runs on its own account.
+   * US-015); null when it runs on its own account.
    */
-  failoverClaudeAccountId?: string | null;
+  failoverClaudeAccountId: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -74,13 +74,22 @@ export function Sessions() {
   const { search } = useLocation();
   const toast = useToast();
 
-  /** Which account a session runs on, named only once there is a choice (multiple accounts US-012). */
+  /**
+   * Which account a session runs on, named only once there is a choice
+   * (multiple accounts US-012) — and, while it has failed over (US-015), which
+   * held account it stands in for.
+   */
   const accountName = (session: Session): string | null => {
     if (claude === null || claude.accounts.length < 2) return null;
-    const id = session.failoverClaudeAccountId ?? session.effectiveClaudeAccountId;
-    if (id === null) return null;
-    const account = claude.accounts.find((candidate) => candidate.id === id);
-    return account === undefined ? `Account ${id.slice(0, 8)}` : claudeAccountName(account);
+    const nameOf = (id: string): string => {
+      const account = claude.accounts.find((candidate) => candidate.id === id);
+      return account === undefined ? `Account ${id.slice(0, 8)}` : claudeAccountName(account);
+    };
+    const own = session.effectiveClaudeAccountId;
+    if (session.failoverClaudeAccountId !== null && own !== null) {
+      return `Running on ${nameOf(session.failoverClaudeAccountId)} while ${nameOf(own)} is on hold`;
+    }
+    return own === null ? null : nameOf(own);
   };
   const params = new URLSearchParams(search);
   const filter: Filter = isFilter(params.get('filter')) ? (params.get('filter') as Filter) : 'all';

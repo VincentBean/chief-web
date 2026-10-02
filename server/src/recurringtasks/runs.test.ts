@@ -681,6 +681,7 @@ function session(overrides: Partial<Session>): Session {
     feedback: null,
     effort: null,
     claudeAccountId: null,
+    failoverClaudeAccountId: null,
     createdAt: '2026-09-05T03:00:00.000Z',
     updatedAt: '2026-09-05T03:00:00.000Z',
     ...overrides,

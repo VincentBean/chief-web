@@ -57,6 +57,7 @@ import {
   ADVISOR_MODELS,
   type AdvisorModel,
   effectiveClaudeAccountId,
+  runningClaudeAccountId,
   effortFor,
   getAgentTimeoutMs,
   getBuildModel,
@@ -568,7 +569,9 @@ export class BuildService {
     // queue is exactly the right place to put it — it is already the answer to
     // "there is no room for you yet", and the pump hands it a slot by itself
     // once the hold lifts.
-    const until = this.hold.until(effectiveClaudeAccountId(this.db, session));
+    // With a failover account free (US-015) it is not held at all: the
+    // orchestrator launches it there.
+    const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
     if (until !== null) {
       this.enqueueSession(session);
       throw new BuildError(429, 'usage_limit_hold', queuedForHoldMessage(session, until));
@@ -651,7 +654,21 @@ export class BuildService {
     // the sessions that were already `waiting`, so their own expiry can be the
     // stale one. The hold is what the resume is really waiting for — and it is
     // per account (US-014): only a session whose account is still held waits.
-    return this.resume(this.notHeld(listDueWaitingSessions(this.db, now)));
+    // And a session whose own account is still held need not wait for it once
+    // another account can take its work (US-015), so those are resumed before
+    // their own expiry — re-evaluated on every tick, as usage changes. Nor
+    // does a session parked by a refusal on its failover account: its
+    // `waiting_until` is that account's hold, not its own one's.
+    const due = new Set(listDueWaitingSessions(this.db, now).map((session) => session.id));
+    const at = new Date(now);
+    return this.resume(
+      this.notHeld(listWaitingSessions(this.db), at).filter(
+        (session) =>
+          due.has(session.id) ||
+          session.failoverClaudeAccountId !== null ||
+          this.hold.active(effectiveClaudeAccountId(this.db, session), at),
+      ),
+    );
   }
 
   /**
@@ -680,10 +697,13 @@ export class BuildService {
     return resumed;
   }
 
-  /** The sessions whose effective Claude account is not held (US-014). */
-  private notHeld(sessions: readonly Session[]): Session[] {
+  /**
+   * The sessions that can launch: their effective Claude account is not held
+   * (US-014), or a failover account can take their work (US-015).
+   */
+  private notHeld(sessions: readonly Session[], now: Date = new Date()): Session[] {
     return sessions.filter(
-      (session) => !this.hold.active(effectiveClaudeAccountId(this.db, session)),
+      (session) => this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session), now) === null,
     );
   }
 
@@ -794,11 +814,14 @@ export class BuildService {
     }
   }
 
-  /** True when the account the entry would launch on is held (US-014). */
+  /**
+   * True when the account the entry would launch on is held (US-014) and no
+   * failover account can take it instead (US-015).
+   */
   private isHeld(entry: BuildQueueEntry): boolean {
     const starter = this.starters.get(entry.kind);
     if (starter?.accountId === undefined) return this.hold.allHeld();
-    return this.hold.active(starter.accountId(entry));
+    return this.hold.waitingUntil(starter.accountId(entry)) !== null;
   }
 
   /** True when the entry's work is already starting or running here. */
@@ -929,8 +952,9 @@ export class BuildService {
         stopping: false,
         holdUntil: null,
         // The account `start` just resolved for the container: the row as it
-        // is now, which is what the orchestrator read.
-        accountId: effectiveClaudeAccountId(this.db, getSession(this.db, session.id) ?? session),
+        // is now, which is what the orchestrator read and wrote — the failover
+        // account while the session's own is held (US-015).
+        accountId: runningClaudeAccountId(this.db, getSession(this.db, session.id) ?? session),
         finished: Promise.resolve(),
       };
       this.runs.set(session.id, state);
@@ -1456,7 +1480,7 @@ export class BuildService {
     for (const session of listSessions(this.db, { status: 'building' })) {
       if (session.id === refusedId) continue;
       const state = this.runs.get(session.id);
-      const account = state?.accountId ?? effectiveClaudeAccountId(this.db, session);
+      const account = state?.accountId ?? runningClaudeAccountId(this.db, session);
       if (account !== accountId) continue;
       if (state === undefined) {
         this.park(session, null, until);

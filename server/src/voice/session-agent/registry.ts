@@ -93,8 +93,11 @@ export interface SessionAgentRegistryDeps {
   readonly db: Database;
   readonly docker: SessionAgentDocker;
   readonly containers: SessionContainers;
-  /** Claude's usage-limit hold: no agent starts while the session's account is held (US-014). */
-  readonly hold: { until(accountId: string | null): string | null };
+  /**
+   * Claude's usage-limit hold: no agent starts while the session's account is
+   * held (US-014) and no failover account can take it (US-015).
+   */
+  readonly hold: { waitingUntil(accountId: string | null): string | null };
   /**
    * The planning terminal's side of the lock. A thunk, because the planning
    * service is built after the registry (it asks the registry the reverse).
@@ -223,7 +226,7 @@ export class SessionAgentRegistry {
     if (!isCloned(this.deps.config, session.id)) {
       throw new SessionAgentError(409, 'session_not_cloned', `${session.name} has no clone yet, so there is nothing to plan against.`);
     }
-    const until = this.deps.hold.until(effectiveClaudeAccountId(this.deps.db, session));
+    const until = this.deps.hold.waitingUntil(effectiveClaudeAccountId(this.deps.db, session));
     if (until !== null) {
       throw new SessionAgentError(
         409,

@@ -19,7 +19,12 @@ import { logger } from '../lib/logger.js';
 import { defaultClaudeAccountId } from '../claude/accounts.js';
 import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
-import { getGitIdentity, getPrAutomationClaudeAccountId } from '../settings/index.js';
+import {
+  effectiveClaudeAccountId,
+  getGitIdentity,
+  getPrAutomationClaudeAccountId,
+} from '../settings/index.js';
+import type { UsageLimitHold } from '../limits/index.js';
 import {
   CLAUDE_ACCOUNT_LABEL,
   type PrRunIdentity,
@@ -104,6 +109,12 @@ export class SessionOrchestrator {
     private readonly config: Config,
     private readonly db: Database,
     private readonly docker: SessionDocker,
+    /**
+     * The usage-limit hold (US-014), read for failover (US-015): a container
+     * whose own account is held mounts the least-used other account instead.
+     * `null` launches on the own account whatever its hold says.
+     */
+    private readonly hold: UsageLimitHold | null = null,
   ) {
     this.hostPaths = new HostPaths(config, docker);
   }
@@ -120,16 +131,26 @@ export class SessionOrchestrator {
    * that follows it — the container is recreated, but only for
    * {@link SessionStartOptions.agentWork}: an agent iteration already running
    * keeps its container until the next one launches.
+   *
+   * While that account is on a usage-limit hold, the container mounts the
+   * failover account instead (multiple accounts US-015) and the session row
+   * records it in `failoverClaudeAccountId`; a hold armed under a running
+   * container is therefore one more "other account" the next agent launch
+   * recreates on. The record is cleared when the session next launches on its
+   * own account.
    */
   async start(session: Session, options: SessionStartOptions = {}): Promise<SessionContainerView> {
     const current = getSession(this.db, session.id) ?? session;
-    const wanted = current.claudeAccountId ?? defaultClaudeAccountId(this.db);
+    const own = effectiveClaudeAccountId(this.db, current);
+    const wanted = this.hold === null ? own : this.hold.launchAccount(own);
+    const failover = wanted !== null && wanted !== own ? wanted : null;
     const existing = await this.containersFor(session.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) {
       const mounted = running.labels[CLAUDE_ACCOUNT_LABEL];
       if (options.agentWork !== true || wanted === null || mounted === wanted) {
         this.recordContainer(session, running.id);
+        if (options.agentWork === true) this.recordFailover(current, failover);
         return toView(running);
       }
       logger.info('session container is on another claude account; recreating it', {
@@ -177,12 +198,14 @@ export class SessionOrchestrator {
     }
 
     this.recordContainer(session, containerId);
+    this.recordFailover(current, failover);
     logger.info('session container started', {
       session: session.id,
       container: containerId,
       name,
       workspace: workspaceDir,
       account,
+      ...(failover === null ? {} : { failoverFrom: own }),
     });
     return { id: containerId, name, running: true, state: 'running' };
   }
@@ -272,8 +295,10 @@ export class SessionOrchestrator {
       privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
 
     // Settings → GitHub's account for PR review, feedback and conflict fixes
-    // (US-013), else the default account.
-    const account = this.accountFor(accountId ?? getPrAutomationClaudeAccountId(this.db));
+    // (US-013), else the default account — or, while that one is held, the
+    // failover account (US-015).
+    const own = accountId ?? getPrAutomationClaudeAccountId(this.db) ?? defaultClaudeAccountId(this.db);
+    const account = this.accountFor(this.hold === null ? own : this.hold.launchAccount(own));
     const spec = prRunContainerSpec({
       run,
       accountId: account,
@@ -408,6 +433,19 @@ export class SessionOrchestrator {
     return this.docker.listContainers({ all: true, labels: [sessionLabelFilter(sessionId)] });
   }
 
+  /** Records (or clears) the failover account the session runs on (US-015). */
+  private recordFailover(session: Session, failoverClaudeAccountId: string | null): void {
+    if (session.failoverClaudeAccountId === failoverClaudeAccountId) return;
+    updateSession(this.db, session.id, { failoverClaudeAccountId });
+    if (failoverClaudeAccountId !== null) {
+      logger.info('session fails over to another claude account while its own is held', {
+        session: session.id,
+        account: session.claudeAccountId ?? defaultClaudeAccountId(this.db),
+        failover: failoverClaudeAccountId,
+      });
+    }
+  }
+
   private recordContainer(session: Session, containerId: string): void {
     if (session.containerId === containerId) return;
     updateSession(this.db, session.id, { containerId });
@@ -431,8 +469,9 @@ export function createSessionOrchestrator(
   config: Config,
   db: Database,
   docker: SessionDocker = new DockerApi(config.dockerSocket),
+  hold: UsageLimitHold | null = null,
 ): SessionOrchestrator {
-  return new SessionOrchestrator(config, db, docker);
+  return new SessionOrchestrator(config, db, docker, hold);
 }
 
 function toView(container: ContainerSummary): SessionContainerView {
