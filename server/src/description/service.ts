@@ -101,7 +101,7 @@ export class DescriptionService {
   async describe(session: Session, stories: readonly Story[]): Promise<DescriptionResult> {
     let containerId: string;
     try {
-      containerId = (await this.containers.start(session)).id;
+      containerId = (await this.containers.start(session, { agentWork: true })).id;
     } catch (cause) {
       return this.failed(session.id, session.name, 'container_unavailable', {
         message: `The description could not be started: ${describeError(cause)}`,

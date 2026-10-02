@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import {
+  claudeAccountName,
+  claudeAccountStatus,
+  type ClaudeState,
   fetchRecurringTaskDetail,
   RECURRING_TASK_HISTORY_LIMIT,
   type RecurringTaskDetail,
   type RecurringTaskOccurrence,
   sessionPath,
 } from '../api.ts';
-import { DASHBOARD_POLL_MS, describeError, redirectIfUnauthorised } from '../data.tsx';
+import { DASHBOARD_POLL_MS, describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link, recurringTaskIdFromPath, useLocation } from '../router.tsx';
 import { localTime, nextRunIn } from '../schedule.ts';
@@ -42,7 +45,23 @@ import {
  * that is `running` when the page opens settles without anybody touching this
  * tab, and the next occurrence counts down while it is on screen.
  */
+/**
+ * The task's Claude account in the facts: its own account by name, or the
+ * default it follows — named only when the operator pinned one, as the picker does.
+ */
+function accountFact(claude: ClaudeState | null, accountId: string | null): string {
+  if (accountId !== null) {
+    const account = claude === null ? null : claudeAccountStatus(claude, accountId);
+    return account === null ? `Account ${accountId.slice(0, 8)}` : claudeAccountName(account);
+  }
+  const fallback = claude === null ? null : claudeAccountStatus(claude, claude.defaultAccountId);
+  return fallback === null || !claude?.defaultIsExplicit
+    ? 'Default (first signed-in account)'
+    : `Default (${claudeAccountName(fallback)})`;
+}
+
 export function RecurringTask() {
+  const { claude } = useAppData();
   const { pathname } = useLocation();
   const id = recurringTaskIdFromPath(pathname);
   const [task, setTask] = useState<RecurringTaskDetail | null>(null);
@@ -202,6 +221,7 @@ export function RecurringTask() {
                 { label: 'Base branch', value: task.baseBranch, mono: true },
                 { label: 'Pull request into', value: task.prTarget, mono: true },
                 { label: 'Code review', value: task.runCodeReview ? 'on every run' : 'off' },
+                { label: 'Claude account', value: accountFact(claude, task.claudeAccountId) },
                 { label: 'Created', value: localTime(task.createdAt) },
               ]}
             />

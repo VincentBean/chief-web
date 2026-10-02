@@ -118,10 +118,14 @@ Recurring tasks are due-queried by the same tick as scheduled starts — the sam
 `SCHEDULER_INTERVAL_MS`, with a `next_run_at` column where a session has
 `scheduled_start_at` — so they inherit the same two behaviours:
 
-- **while the [usage-limit hold](build-loop.md#the-usage-limit-hold) is on,
-  nothing is fired.** A due task is left due rather than fired and lost, and the
-  first tick after the hold lifts runs it. Runs that have already *ended* are
-  still settled during a hold; only the firing waits.
+- **a task whose account is held, with nowhere to fail over to, is not
+  fired.** The [usage-limit hold](build-loop.md#the-usage-limit-hold) is per
+  account: a task is checked against the account it runs on (its own, else the
+  default). While another account can take the run
+  ([failover](#the-usage-limit-hold)) it fires as usual; otherwise it is left
+  due rather than fired and lost, and the first tick after the hold lifts runs
+  it. Runs that have already *ended* are still settled during a hold; only the
+  firing waits.
 - **downtime costs a task one run, not one per missed occurrence.** There is no
   notion of "while we were down": a task whose moment passed is simply due now
   and fires at the first tick after boot, and its next run is then computed
@@ -155,22 +159,48 @@ behind.
 
 ## The usage-limit hold
 
-While Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold) is on, the
-scheduler **starts nothing**. A due `scheduled_start_at` is left exactly where
-it is rather than fired and lost: it is simply still due at the first tick after
-the hold lifts, which is the same catch-up the scheduler already does after a
-restart. The queue is not pumped either, so its order is kept rather than spent
-on starts that would only be refused, and no [recurring task](#recurring-tasks)
-is fired — a task that came due during the hold is simply still due when it
-lifts.
+Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold) is **per
+account**: one [Claude account](claude-auth.md) hitting its limit holds that
+account only, and work on the others carries on. An account is held
+
+- for **one hour** after a run on it is refused for the usage limit, or
+- until the **reset time** of its 5-hour or 7-day window, when the usage
+  endpoint reports that window at 100% (the later reset when both are full).
+
+The hold **expires by itself** at that time — nothing has to clear it — or
+earlier with **Resume now** on a waiting session's page.
+
+**Failover.** Work whose account is held is not simply stopped: the scheduler
+first looks for another account to run it on. An account qualifies when it is
+signed in, is not held itself, and its 5-hour usage is **at most 95%**; of
+those, the one with the lowest 5-hour usage is chosen, then the lowest 7-day
+usage, then the first in the list. A usage window with no reading counts as 0%.
+The 95% ceiling is there because an account that close to its limit would only
+be refused minutes into the run. So for every due scheduled start, recurring
+task, queued build and pull request run:
+
+- its **own account is not held** → it starts on its own account;
+- its own account is held and **another account qualifies** → it starts there;
+  a session records it and reads *Running on <other> while <own> is on hold*;
+- its own account is held and **nothing qualifies** → it is left exactly where
+  it is rather than fired and lost: a due `scheduled_start_at` or recurring
+  task is still due at the first tick after the hold lifts (the same catch-up
+  the scheduler already does after a restart), and a queued entry keeps its
+  place. While **every** signed-in account is held the queue is not pumped at
+  all, and the sidebar shows the **On hold** countdown.
 
 What the tick does do during and after a hold is **resume waiting sessions**.
-Every tick asks for the sessions whose `waiting_until` has passed, oldest first,
-and puts them back to building — in the same container, on the same story, with
-the iteration and attempt counters they were paused with. That runs *before* the
-due schedules, because a held session never gave its build slot back and a
-schedule fired first could take one from it. Anything that no longer fits the
-cap goes onto the queue in the order it was resumed in.
+Every tick puts back to building, oldest first, the sessions whose
+`waiting_until` has passed, the ones whose own account is still held but can
+now fail over (another account dropped below 95% or its hold expired), and the
+ones parked while running on a failover account, which go back to their own
+account as soon as its hold has expired. They continue in the same workspace,
+on the same story, with the iteration and attempt counters they were paused
+with; a session resumed on a different account gets its container recreated on
+that account first. That runs *before* the due schedules, because a held
+session never gave its build slot back and a schedule fired first could take
+one from it. Anything that no longer fits the cap goes onto the queue in the
+order it was resumed in.
 
 ## Concurrency and the build queue
 

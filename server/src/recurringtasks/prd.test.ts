@@ -16,6 +16,7 @@ function task(overrides: Partial<RecurringTask> = {}): RecurringTask {
     prTarget: 'develop',
     runCodeReview: false,
     paused: false,
+    claudeAccountId: null,
     nextRunAt: null,
     lastOutcome: null,
     createdAt: '2026-09-05T00:00:00.000Z',

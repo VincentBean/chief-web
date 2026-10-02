@@ -338,7 +338,7 @@ export function chiefWorld(db: Database = openDatabase(IN_MEMORY)): ChiefWorld {
         return Promise.resolve({ id: 99, url: `https://github.com/acme/shop-api/pull/${prNumber}#pullrequestreview-99` });
       },
     },
-    hold: { until: () => state.hold },
+    hold: { waitingUntil: () => state.hold, allHeldUntil: () => state.hold },
     recurringTasks: {
       // Like the real one: the history row is the record, whatever the outcome.
       fireNow: async (taskId) => {

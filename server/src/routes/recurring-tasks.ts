@@ -189,6 +189,24 @@ interface Fields {
   readonly prTarget?: PrTargetBranch;
   readonly runCodeReview?: boolean;
   readonly paused?: boolean;
+  readonly claudeAccountId?: string | null;
+}
+
+/**
+ * `undefined` when absent, `null` to follow the default account, otherwise
+ * the id; whether it names an account is the service's question.
+ */
+function optionalAccountId(input: Record<string, unknown>): string | null | undefined | Invalid {
+  if (!('claudeAccountId' in input) || input['claudeAccountId'] === undefined) return undefined;
+  const raw = input['claudeAccountId'];
+  if (raw === null) return null;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return {
+      error: 'invalid_claude_account_id',
+      message: 'claudeAccountId must be an account id, or null for the default account.',
+    };
+  }
+  return raw.trim();
 }
 
 function parseFields(input: Record<string, unknown>): Fields | Invalid {
@@ -227,6 +245,9 @@ function parseFields(input: Record<string, unknown>): Fields | Invalid {
   const paused = optionalBoolean(input, 'paused', 'invalid_paused');
   if (typeof paused === 'object') return paused;
 
+  const claudeAccountId = optionalAccountId(input);
+  if (typeof claudeAccountId === 'object' && claudeAccountId !== null) return claudeAccountId;
+
   return {
     ...(name === undefined ? {} : { name }),
     ...(prompt === undefined ? {} : { prompt }),
@@ -235,6 +256,7 @@ function parseFields(input: Record<string, unknown>): Fields | Invalid {
     ...(prTarget === undefined ? {} : { prTarget }),
     ...(runCodeReview === undefined ? {} : { runCodeReview }),
     ...(paused === undefined ? {} : { paused }),
+    ...(claudeAccountId === undefined ? {} : { claudeAccountId }),
   };
 }
 

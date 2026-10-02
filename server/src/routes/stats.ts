@@ -1,9 +1,11 @@
 import { Router } from 'express';
 
 import type { BuildPoolView, BuildSlotUse, QueuedBuildView } from '../build/index.js';
+import type { ClaudeUsage, ClaudeUsageReader } from '../claude/index.js';
 import {
   countSentryIssuesAwaitingDecision,
   type Database,
+  listClaudeAccounts,
   readStats,
   type Stats,
   sumVoiceUsageSince,
@@ -48,6 +50,19 @@ export interface StatsView extends Stats {
   readonly voice: VoiceMonthView;
   /** What the sidebar's Sentry badge reads (sentry-badge US-001). */
   readonly sentry: SentryBadgeView;
+  /** Every Claude account's cached usage, in display order (multiple accounts US-005). */
+  readonly accounts: readonly StatsAccountView[];
+}
+
+export interface StatsAccountView {
+  readonly id: string;
+  /** The usage the background ticker last fetched; `null` before its first fetch. */
+  readonly usage: ClaudeUsage | null;
+  /**
+   * When the usage-limit hold on this account lifts. The hold is still one
+   * for every account (US-014 makes it per account), so each row carries it.
+   */
+  readonly holdUntil: string | null;
 }
 
 export interface SentryBadgeView {
@@ -91,6 +106,7 @@ export function createStatsRouter(
   db: Database,
   hold: UsageLimitHold,
   builds: StatsBuilds,
+  usage: ClaudeUsageReader,
 ): Router {
   const router = Router();
 
@@ -110,13 +126,21 @@ export function createStatsRouter(
         slots: pool.slots,
         queue: pool.queue,
       },
-      hold: { until: hold.until() },
+      // The global hold the sidebar's HoldClock shows (US-002): only while
+      // every signed-in account is held, until the first of them lifts.
+      // Per-account expiries are on `accounts` (multiple accounts US-014).
+      hold: { until: hold.allHeldUntil() },
       host: readHostLoad(),
       voice: readVoiceMonth(db, new Date()),
       sentry: {
         configured: getSentryToken(db) !== null,
         awaitingDecision: countSentryIssuesAwaitingDecision(db),
       },
+      accounts: listClaudeAccounts(db).map((account) => ({
+        id: account.id,
+        usage: usage.usage(account.id),
+        holdUntil: hold.until(account.id),
+      })),
     };
     res.status(200).json(view);
   });

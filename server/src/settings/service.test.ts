@@ -4,6 +4,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 import { loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   type Database,
   deleteSetting,
   getSetting,
@@ -20,6 +21,7 @@ import {
   getBuildModel,
   getCodeReviewDefault,
   getConflictFixEnabled,
+  getDefaultClaudeAccount,
   getDefaultEffort,
   getPlanningModel,
   getPlanningQuestions,
@@ -38,8 +40,109 @@ import {
   isValidSentryPlansPerTick,
   isValidSentryPollIntervalMinutes,
   readAppSettings,
+  SettingsError,
   updateAppSettings,
 } from './index.js';
+
+describe('default Claude account setting (multiple accounts US-007)', () => {
+  const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });
+  const db: Database = openDatabase(IN_MEMORY);
+
+  after(() => {
+    closeDatabase(db);
+  });
+
+  beforeEach(() => {
+    db.exec('DELETE FROM claude_accounts');
+    deleteSetting(db, 'default_claude_account_id');
+    deleteSetting(db, 'code_review_default');
+  });
+
+  it('stores a chosen account and reads it back as the explicit default', () => {
+    createClaudeAccount(db, { authMethod: 'claude.ai' });
+    const chosen = createClaudeAccount(db, { authMethod: 'claude.ai' });
+
+    const saved = updateAppSettings(db, config, { defaultClaudeAccountId: chosen.id });
+
+    assert.equal(saved.defaultClaudeAccountId, chosen.id);
+    assert.equal(getSetting(db, 'default_claude_account_id'), chosen.id);
+    assert.equal(readAppSettings(db, config).defaultClaudeAccountId, chosen.id);
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: chosen.id, explicit: true });
+  });
+
+  it('honours the chosen account even while it is signed out', () => {
+    createClaudeAccount(db, { authMethod: 'claude.ai' });
+    const chosen = createClaudeAccount(db);
+
+    updateAppSettings(db, config, { defaultClaudeAccountId: chosen.id });
+
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: chosen.id, explicit: true });
+  });
+
+  it('clears the row on null, which hands the choice back to the fallback', () => {
+    const first = createClaudeAccount(db, { authMethod: 'claude.ai' });
+    const chosen = createClaudeAccount(db, { authMethod: 'claude.ai' });
+    updateAppSettings(db, config, { defaultClaudeAccountId: chosen.id });
+
+    const saved = updateAppSettings(db, config, { defaultClaudeAccountId: null });
+
+    assert.equal(saved.defaultClaudeAccountId, null);
+    assert.equal(getSetting(db, 'default_claude_account_id'), null);
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: first.id, explicit: false });
+  });
+
+  it('leaves the stored choice alone when an update omits it', () => {
+    const chosen = createClaudeAccount(db);
+    updateAppSettings(db, config, { defaultClaudeAccountId: chosen.id });
+
+    updateAppSettings(db, config, { codeReviewDefault: true });
+
+    assert.equal(readAppSettings(db, config).defaultClaudeAccountId, chosen.id);
+  });
+
+  it('refuses an id that is not an account with a 400, leaving the stored one alone', () => {
+    const chosen = createClaudeAccount(db);
+    updateAppSettings(db, config, { defaultClaudeAccountId: chosen.id });
+
+    assert.throws(
+      () => updateAppSettings(db, config, { defaultClaudeAccountId: '0123456789abcdef', codeReviewDefault: true }),
+      (error: unknown) =>
+        error instanceof SettingsError && error.status === 400 && error.code === 'claude_account_not_found',
+    );
+    assert.equal(getSetting(db, 'default_claude_account_id'), chosen.id);
+    // Nothing else in the refused update was written either.
+    assert.equal(getCodeReviewDefault(db), false);
+  });
+
+  it('falls back to the signed-in account with the lowest position', () => {
+    createClaudeAccount(db, { position: 1 });
+    createClaudeAccount(db, { position: 2, authMethod: 'claude.ai' });
+    const lowest = createClaudeAccount(db, { position: 0, authMethod: 'claude.ai' });
+    // Created out of position order: the position decides, not the insert.
+    const signedOutFirst = createClaudeAccount(db, { position: -1 });
+
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: lowest.id, explicit: false });
+    assert.equal(readAppSettings(db, config).defaultClaudeAccountId, null);
+    assert.notEqual(getDefaultClaudeAccount(db)?.id, signedOutFirst.id);
+  });
+
+  it('falls back to the first account when nobody is signed in, and to null without accounts', () => {
+    assert.equal(getDefaultClaudeAccount(db), null);
+
+    createClaudeAccount(db, { position: 2 });
+    const first = createClaudeAccount(db, { position: 1 });
+
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: first.id, explicit: false });
+  });
+
+  it('treats a stored id that names no account any more as unset', () => {
+    const only = createClaudeAccount(db, { authMethod: 'claude.ai' });
+    setSetting(db, 'default_claude_account_id', 'ffffffffffffffff');
+
+    assert.equal(readAppSettings(db, config).defaultClaudeAccountId, null);
+    assert.deepEqual(getDefaultClaudeAccount(db), { id: only.id, explicit: false });
+  });
+});
 
 describe('review model setting (US-001)', () => {
   const config = loadConfig({ CHIEF_WEB_PASSWORD: 'correct horse battery staple' });

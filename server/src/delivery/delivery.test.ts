@@ -7,6 +7,7 @@ import { type Config, loadConfig } from '../config.js';
 import {
   createPrRun,
   createRecurringTask,
+  createClaudeAccount,
   createRepository,
   createSession,
   type Database,
@@ -38,6 +39,7 @@ import type {
   ReviewTarget,
 } from '../review/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
+import { effectiveClaudeAccountId } from '../settings/index.js';
 import { COMMIT_COUNT_SCRIPT, type CommitCount, commitCountExecSpec, countBranchCommits } from './commits.js';
 import { DescriptionStep, type SessionDescriber } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
@@ -388,6 +390,8 @@ class World {
       options.publicUrl === undefined ? {} : { PUBLIC_URL: options.publicUrl },
     );
     this.db = openDatabase(IN_MEMORY);
+    // The signed-in account every session follows by default.
+    createClaudeAccount(this.db, { authMethod: 'claude.ai' });
     const repository = createRepository(this.db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',
@@ -1199,7 +1203,11 @@ describe('the code review of a delivery', () => {
     assert.equal(held.status, 'waiting');
     assert.equal(held.failureStage, null);
     assert.notEqual(held.waitingUntil, null);
-    assert.equal(new UsageLimitHold(world.db).active(), true, 'agent work is held');
+    assert.equal(
+      new UsageLimitHold(world.db).active(effectiveClaudeAccountId(world.db, held)),
+      true,
+      'the session’s account is held',
+    );
     assert.match(held.lastError ?? '', /usage limit/);
     assert.equal(opener.ready.length, 0, 'the review it is waiting for has not happened');
     assert.equal(held.prUrl, 'https://github.com/acme/demo/pull/7');

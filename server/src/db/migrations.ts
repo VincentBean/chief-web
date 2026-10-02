@@ -1218,6 +1218,53 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN effort TEXT;
     `,
   },
+  {
+    id: '0025_claude_accounts',
+    sql: `
+      -- The Claude Code logins chief-web can run on (multiple accounts US-001).
+      -- Each row owns a credentials directory under the data volume, named by
+      -- its id; the profile columns are what the last status probe reported.
+      CREATE TABLE claude_accounts (
+        id           TEXT PRIMARY KEY,
+        nickname     TEXT,
+        email        TEXT,
+        organization TEXT,
+        subscription TEXT,
+        auth_method  TEXT,
+        position     INTEGER NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    id: '0026_claude_account_bindings',
+    sql: `
+      -- The Claude account a session, or every run of a recurring task, runs
+      -- on (multiple accounts US-009). NULL follows the default account, which
+      -- is what every existing row did before it could choose.
+      ALTER TABLE sessions ADD COLUMN claude_account_id TEXT;
+      ALTER TABLE recurring_tasks ADD COLUMN claude_account_id TEXT;
+    `,
+  },
+  {
+    id: '0027_claude_limit_per_account',
+    sql: `
+      -- The usage-limit hold is per account now (multiple accounts US-014),
+      -- stored as claude_limit_until:<account id>. The old global row names
+      -- no account, so it is dropped rather than guessed onto one.
+      DELETE FROM settings WHERE key = 'claude_limit_until';
+    `,
+  },
+  {
+    id: '0028_session_failover_account',
+    sql: `
+      -- The account a session's container mounts while its own account is on
+      -- a usage-limit hold (multiple accounts US-015); NULL when it runs on
+      -- its own account.
+      ALTER TABLE sessions ADD COLUMN failover_claude_account_id TEXT;
+    `,
+  },
 ];
 
 /**

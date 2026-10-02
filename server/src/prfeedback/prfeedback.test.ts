@@ -11,6 +11,7 @@ import {
   type BuildQueueKind,
   buildQueuePosition,
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   type Database,
   enqueueBuild,
@@ -181,6 +182,8 @@ describe('answering pull request feedback', () => {
   let containersStarted: string[];
   let slots: StubSlots;
   let hold: UsageLimitHold;
+  /** The one signed-in Claude account: the default every PR run launches on. */
+  let accountId: string;
   let seq = 0;
 
   const exec: SessionExecutor = {
@@ -240,7 +243,7 @@ describe('answering pull request feedback', () => {
       return Promise.resolve();
     }
 
-    holdAll(until: string): Promise<void> {
+    holdAll(_accountId: string | null, until: string): Promise<void> {
       this.heldUntil.push(until);
       return Promise.resolve();
     }
@@ -265,6 +268,7 @@ describe('answering pull request feedback', () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-web-prfeedback-'));
     config = loadConfig({ DATA_DIR: dataDir });
     db = openDatabase(IN_MEMORY);
+    accountId = createClaudeAccount(db, { authMethod: 'claude.ai' }).id;
   });
 
   after(() => {
@@ -294,7 +298,7 @@ describe('answering pull request feedback', () => {
     // The hold lives in a settings row on the shared database, so it outlives
     // the test that armed it unless it is lifted here.
     hold = new UsageLimitHold(db);
-    hold.clear();
+    hold.clearAll();
   });
 
   const serviceWith = (overrides: { slots?: BuildSlots } = {}): PrFeedbackService =>
@@ -744,7 +748,7 @@ describe('answering pull request feedback', () => {
   });
 
   it('refuses to start while Claude’s usage limit is held, and says until when', async () => {
-    const until = hold.arm();
+    const until = hold.arm(accountId);
 
     await assert.rejects(
       () => serviceWith().start(repository.id, 61),
@@ -773,7 +777,7 @@ describe('answering pull request feedback', () => {
 
     const runId = await runOnce(service);
     const view = service.status(runId);
-    const until = hold.until();
+    const until = hold.until(accountId);
 
     assert.ok(until !== null, 'the global hold is armed');
     assert.equal(view.status, 'failed');

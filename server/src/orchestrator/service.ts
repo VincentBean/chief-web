@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import {
   type Database,
+  getSession,
   listSessions,
   type Session,
   updateSession,
@@ -15,10 +16,17 @@ import {
   type VolumeDetails,
 } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
-import { claudeAuthSource } from '../runner/index.js';
+import { defaultClaudeAccountId } from '../claude/accounts.js';
+import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
-import { getGitIdentity } from '../settings/index.js';
 import {
+  effectiveClaudeAccountId,
+  getGitIdentity,
+  getPrAutomationClaudeAccountId,
+} from '../settings/index.js';
+import type { UsageLimitHold } from '../limits/index.js';
+import {
+  CLAUDE_ACCOUNT_LABEL,
   type PrRunIdentity,
   prRunContainerName,
   prRunContainerSpec,
@@ -72,6 +80,18 @@ export interface SessionContainerView {
   readonly state: string;
 }
 
+/** How {@link SessionOrchestrator.start} is asked for a container. */
+export interface SessionStartOptions {
+  /**
+   * The caller is about to launch agent work — a build iteration, a planning
+   * terminal, a review or a description (multiple accounts US-009). Only then
+   * is a running container on the wrong Claude account recreated: anything
+   * else (a push, a browser, a voice agent) may run next to an agent and must
+   * not pull its container out from under it.
+   */
+  readonly agentWork?: boolean;
+}
+
 /**
  * Per-session containers (US-009).
  *
@@ -89,6 +109,12 @@ export class SessionOrchestrator {
     private readonly config: Config,
     private readonly db: Database,
     private readonly docker: SessionDocker,
+    /**
+     * The usage-limit hold (US-014), read for failover (US-015): a container
+     * whose own account is held mounts the least-used other account instead.
+     * `null` launches on the own account whatever its hold says.
+     */
+    private readonly hold: UsageLimitHold | null = null,
   ) {
     this.hostPaths = new HostPaths(config, docker);
   }
@@ -96,13 +122,44 @@ export class SessionOrchestrator {
   /**
    * Ensures `session` has a running container and returns it. An existing
    * running container is reused; a stopped or duplicate one is replaced.
+   *
+   * The container mounts the session's effective Claude account (multiple
+   * accounts US-009): its own `claudeAccountId`, else the default. The row is
+   * read again for it, because callers hold a `Session` from before a
+   * `PATCH`. When that account is no longer the one a running container
+   * mounts — the session was moved, or the default changed under a session
+   * that follows it — the container is recreated, but only for
+   * {@link SessionStartOptions.agentWork}: an agent iteration already running
+   * keeps its container until the next one launches.
+   *
+   * While that account is on a usage-limit hold, the container mounts the
+   * failover account instead (multiple accounts US-015) and the session row
+   * records it in `failoverClaudeAccountId`; a hold armed under a running
+   * container is therefore one more "other account" the next agent launch
+   * recreates on. The record is cleared when the session next launches on its
+   * own account.
    */
-  async start(session: Session): Promise<SessionContainerView> {
+  async start(session: Session, options: SessionStartOptions = {}): Promise<SessionContainerView> {
+    const current = getSession(this.db, session.id) ?? session;
+    const own = effectiveClaudeAccountId(this.db, current);
+    const wanted = this.hold === null ? own : this.hold.launchAccount(own);
+    const failover = wanted !== null && wanted !== own ? wanted : null;
     const existing = await this.containersFor(session.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) {
-      this.recordContainer(session, running.id);
-      return toView(running);
+      const mounted = running.labels[CLAUDE_ACCOUNT_LABEL];
+      if (options.agentWork !== true || wanted === null || mounted === wanted) {
+        this.recordContainer(session, running.id);
+        if (options.agentWork === true) this.recordFailover(current, failover);
+        return toView(running);
+      }
+      logger.info('session container is on another claude account; recreating it', {
+        session: session.id,
+        container: running.id,
+        mounted: mounted ?? null,
+        account: wanted,
+      });
+      await this.notifyStopping(session.id);
     }
 
     // The workspace is created before the container so the bind mount does not
@@ -112,13 +169,15 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, session.id, privateKey);
 
+    const account = this.accountFor(wanted);
     const spec = sessionContainerSpec({
       session,
+      accountId: account,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
       memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
-        claudeAuth: claudeAuthSource(this.config),
+        claudeAuth: await this.hostPaths.translate(claudeAccountDir(this.config, account)),
         workspaceDir: await this.hostPaths.translate(workspaceDir),
         ...(keyPath === undefined ? {} : { sshKeyPath: await this.hostPaths.translate(keyPath) }),
       },
@@ -139,11 +198,14 @@ export class SessionOrchestrator {
     }
 
     this.recordContainer(session, containerId);
+    this.recordFailover(current, failover);
     logger.info('session container started', {
       session: session.id,
       container: containerId,
       name,
       workspace: workspaceDir,
+      account,
+      ...(failover === null ? {} : { failoverFrom: own }),
     });
     return { id: containerId, name, running: true, state: 'running' };
   }
@@ -222,7 +284,7 @@ export class SessionOrchestrator {
    * id and outlives the container, so a second pass on the same pull request
    * reuses the clone.
    */
-  async startPrRun(run: PrRunIdentity): Promise<SessionContainerView> {
+  async startPrRun(run: PrRunIdentity, accountId?: string): Promise<SessionContainerView> {
     const existing = await this.prRunContainersFor(run.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) return toView(running);
@@ -232,13 +294,19 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
 
+    // Settings → GitHub's account for PR review, feedback and conflict fixes
+    // (US-013), else the default account — or, while that one is held, the
+    // failover account (US-015).
+    const own = accountId ?? getPrAutomationClaudeAccountId(this.db) ?? defaultClaudeAccountId(this.db);
+    const account = this.accountFor(this.hold === null ? own : this.hold.launchAccount(own));
     const spec = prRunContainerSpec({
       run,
+      accountId: account,
       image: this.config.runnerImage,
       identity: getGitIdentity(this.db),
       memoryLimitMb: this.config.containerMemoryLimitMb,
       mounts: {
-        claudeAuth: claudeAuthSource(this.config),
+        claudeAuth: await this.hostPaths.translate(claudeAccountDir(this.config, account)),
         workspaceDir: await this.hostPaths.translate(workspaceDir),
         ...(keyPath === undefined ? {} : { sshKeyPath: await this.hostPaths.translate(keyPath) }),
       },
@@ -262,6 +330,7 @@ export class SessionOrchestrator {
       container: containerId,
       name,
       workspace: workspaceDir,
+      account,
     });
     return { id: containerId, name, running: true, state: 'running' };
   }
@@ -343,8 +412,38 @@ export class SessionOrchestrator {
     return plan;
   }
 
+  /**
+   * The Claude account a new container mounts: the one asked for, else the
+   * default. With no account connected there are no credentials to mount, so
+   * nothing is started.
+   */
+  private accountFor(accountId: string | null | undefined): string {
+    const resolved = accountId ?? defaultClaudeAccountId(this.db);
+    if (resolved === null) {
+      throw new OrchestratorError(
+        409,
+        'claude_not_authenticated',
+        'No Claude account is connected. Add one under Settings → Claude Code.',
+      );
+    }
+    return resolved;
+  }
+
   private containersFor(sessionId: string): Promise<ContainerSummary[]> {
     return this.docker.listContainers({ all: true, labels: [sessionLabelFilter(sessionId)] });
+  }
+
+  /** Records (or clears) the failover account the session runs on (US-015). */
+  private recordFailover(session: Session, failoverClaudeAccountId: string | null): void {
+    if (session.failoverClaudeAccountId === failoverClaudeAccountId) return;
+    updateSession(this.db, session.id, { failoverClaudeAccountId });
+    if (failoverClaudeAccountId !== null) {
+      logger.info('session fails over to another claude account while its own is held', {
+        session: session.id,
+        account: session.claudeAccountId ?? defaultClaudeAccountId(this.db),
+        failover: failoverClaudeAccountId,
+      });
+    }
   }
 
   private recordContainer(session: Session, containerId: string): void {
@@ -370,8 +469,9 @@ export function createSessionOrchestrator(
   config: Config,
   db: Database,
   docker: SessionDocker = new DockerApi(config.dockerSocket),
+  hold: UsageLimitHold | null = null,
 ): SessionOrchestrator {
-  return new SessionOrchestrator(config, db, docker);
+  return new SessionOrchestrator(config, db, docker, hold);
 }
 
 function toView(container: ContainerSummary): SessionContainerView {

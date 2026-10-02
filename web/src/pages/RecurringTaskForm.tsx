@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
   createRecurringTask,
   type CronPreview,
@@ -60,7 +61,7 @@ export function RecurringTaskForm() {
   const taskId = editedRecurringTaskIdFromPath(pathname);
   const editing = taskId !== null;
 
-  const { repositories } = useAppData();
+  const { repositories, claude } = useAppData();
   const toast = useToast();
   const usable = (repositories ?? []).filter((repository) => repository.keyConfigured);
 
@@ -71,6 +72,8 @@ export function RecurringTaskForm() {
   const [baseBranch, setBaseBranch] = useState('');
   const [prTarget, setPrTarget] = useState<PrTargetBranch>('main');
   const [runCodeReview, setRunCodeReview] = useState(false);
+  /** null = "Default (…)": runs follow whatever the default account is when they fire. */
+  const [claudeAccountId, setClaudeAccountId] = useState<string | null>(null);
 
   /** The task being edited, once it has loaded; null while creating. */
   const [task, setTask] = useState<RecurringTask | null>(null);
@@ -96,6 +99,7 @@ export function RecurringTaskForm() {
         setBaseBranch(loaded.baseBranch);
         setPrTarget(loaded.prTarget);
         setRunCodeReview(loaded.runCodeReview);
+        setClaudeAccountId(loaded.claudeAccountId);
         setLoadError(null);
       })
       .catch((cause: unknown) => {
@@ -182,6 +186,8 @@ export function RecurringTaskForm() {
       cronExpression: typedCron,
       prTarget,
       runCodeReview,
+      // Always sent, null included, so an edit can hand the task back to the default.
+      claudeAccountId,
       ...(effectiveBase.trim() === '' ? {} : { baseBranch: effectiveBase.trim() }),
     };
 
@@ -396,6 +402,24 @@ export function RecurringTaskForm() {
                   <p className="field__hint">
                     Every pull request this task opens is reviewed automatically, with the comments
                     posted to GitHub.
+                  </p>
+                </div>
+
+                <div className="field">
+                  <label className="field__label" htmlFor="task-claude-account">
+                    Claude account
+                  </label>
+                  <AccountPicker
+                    id="task-claude-account"
+                    value={claudeAccountId}
+                    onChange={setClaudeAccountId}
+                    accounts={claude?.accounts ?? []}
+                    defaultAccountId={claude?.defaultAccountId ?? null}
+                    disabled={claude === null}
+                  />
+                  <p className="field__hint">
+                    The subscription every run is built on. Default follows the setting on the
+                    Settings page at the moment a run fires.
                   </p>
                 </div>
 

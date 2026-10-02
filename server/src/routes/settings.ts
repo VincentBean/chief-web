@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { type RequestHandler, Router } from 'express';
 
 import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
@@ -38,6 +38,7 @@ import {
   normalizePlanningQuestions,
   parseVoiceSettingsUpdate,
   readAppSettings,
+  SettingsError,
   updateAppSettings,
 } from '../settings/index.js';
 
@@ -77,20 +78,31 @@ export function createSettingsRouter(
     res.status(200).json(readAppSettings(db, config));
   });
 
-  router.put('/settings', (req, res) => {
+  // Every field is optional and an omitted one is left alone, so PUT has
+  // always behaved as a PATCH; both verbs are accepted (multiple accounts US-007).
+  const save: RequestHandler = (req, res) => {
     const parsed = parseUpdate(req.body);
     if ('error' in parsed) {
       res.status(400).json(parsed);
       return;
     }
 
-    const saved = updateAppSettings(db, config, parsed);
+    let saved;
+    try {
+      saved = updateAppSettings(db, config, parsed);
+    } catch (error) {
+      if (!(error instanceof SettingsError)) throw error;
+      res.status(error.status).json({ error: error.code, message: error.message });
+      return;
+    }
     // The cap moved: give the queue whatever that just freed, now rather than
     // on the next scheduler tick. Lowering it is harmless — the pump finds no
     // free slot and does nothing.
     if (parsed.maxConcurrentSessions !== undefined) effects.pump();
     res.status(200).json(saved);
-  });
+  };
+  router.put('/settings', save);
+  router.patch('/settings', save);
 
   // Proves the token works and tells the operator which account it belongs to.
   // Accepts a token in the body so it can be checked *before* it is saved.
@@ -167,6 +179,9 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     openrouterApiKey?: string | null;
     elevenlabsApiKey?: string | null;
     voice?: VoiceSettingsUpdate;
+    defaultClaudeAccountId?: string | null;
+    prAutomationClaudeAccountId?: string | null;
+    sentryClaudeAccountId?: string | null;
   } = {};
 
   if ('githubToken' in input && input['githubToken'] !== undefined) {
@@ -413,6 +428,40 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     const voice = parseVoiceSettingsUpdate(input['voice']);
     if ('error' in voice) return voice;
     update.voice = voice;
+  }
+
+  // Whether the id names an account is the service's question (400 too).
+  if ('defaultClaudeAccountId' in input && input['defaultClaudeAccountId'] !== undefined) {
+    const raw = input['defaultClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_default_claude_account_id',
+        message: 'The default Claude account must be an account id, or null to clear it.',
+      };
+    }
+    update.defaultClaudeAccountId = raw;
+  }
+
+  if ('prAutomationClaudeAccountId' in input && input['prAutomationClaudeAccountId'] !== undefined) {
+    const raw = input['prAutomationClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_pr_automation_claude_account_id',
+        message: 'The pull request automation account must be an account id, or null for the default.',
+      };
+    }
+    update.prAutomationClaudeAccountId = raw;
+  }
+
+  if ('sentryClaudeAccountId' in input && input['sentryClaudeAccountId'] !== undefined) {
+    const raw = input['sentryClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_sentry_claude_account_id',
+        message: 'The Sentry account must be an account id, or null for the default.',
+      };
+    }
+    update.sentryClaudeAccountId = raw;
   }
 
   return update;

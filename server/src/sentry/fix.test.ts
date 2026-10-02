@@ -5,13 +5,16 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { BuildError } from '../build/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { loadConfig } from '../config.js';
 import {
   closeDatabase,
+  createClaudeAccount,
   createRepository,
   createSentryIssue,
   createSession,
   type Database,
+  deleteClaudeAccountAndReferences,
   deleteSession,
   enqueueBuild,
   featureBranchFor,
@@ -246,6 +249,7 @@ function view(session: Session): SessionView {
     queuePosition: null,
     stories: { total: 0, done: 0 },
     cloned: true,
+    effectiveClaudeAccountId: session.claudeAccountId,
   };
 }
 
@@ -819,6 +823,40 @@ describe('the Sentry fix session builder', () => {
   });
 });
 
+describe('the Claude account of a fix session (multiple accounts US-013)', () => {
+  it('creates the session on the Sentry account when one is chosen', async () => {
+    const w = world();
+    const chosen = createClaudeAccount(w.db);
+    setSetting(w.db, 'sentry_claude_account_id', chosen.id);
+    w.issue();
+
+    assert.ok((await w.fix()).ok);
+    assert.equal(w.sessions.created[0]?.claudeAccountId, chosen.id);
+  });
+
+  it('sends no account, so the session follows the default, when none is chosen', async () => {
+    const w = world();
+    createClaudeAccount(w.db);
+    w.issue();
+
+    assert.ok((await w.fix()).ok);
+    assert.equal(w.sessions.created.length, 1);
+    assert.equal('claudeAccountId' in (w.sessions.created[0] ?? {}), false);
+  });
+
+  it('sends no account once the chosen one is removed', async () => {
+    const w = world();
+    const chosen = createClaudeAccount(w.db);
+    setSetting(w.db, 'sentry_claude_account_id', chosen.id);
+    assert.equal(deleteClaudeAccountAndReferences(w.db, chosen.id), true);
+    w.issue();
+
+    assert.ok((await w.fix()).ok);
+    assert.equal(w.sessions.created.length, 1);
+    assert.equal('claudeAccountId' in (w.sessions.created[0] ?? {}), false);
+  });
+});
+
 describe('the pull-request flag of a fix session', () => {
   it('follows the repository default, through the real session service', async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-sentry-fix-pr-'));
@@ -831,6 +869,8 @@ describe('the pull-request flag of a fix session', () => {
 
       const db = openDatabase(IN_MEMORY);
       databases.push(db);
+      // Containers mount a Claude account's directory; with none, nothing starts.
+      addClaudeAccount(config, db);
       setSetting(db, 'sentry_token', 'sntrys_token');
       const repository = createRepository(db, {
         name: 'demo',

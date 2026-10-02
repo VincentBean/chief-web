@@ -314,6 +314,55 @@
     color: var(--color-status-wait);
   }
 
+  /* One Claude account (multiple accounts US-008): name on top, its two usage bars below. */
+  .status-row--account {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: 0.25rem;
+  }
+
+  .status-row__name {
+    color: var(--color-fg-default);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status-row__usage {
+    align-items: center;
+    display: flex;
+    font-size: var(--text-xs);
+    gap: 0.75rem;
+    grid-column: 2;
+    line-height: 1rem;
+    min-width: 0;
+  }
+
+  .status-row__usage .icon {
+    height: 0.75rem;
+    width: 0.75rem;
+  }
+
+  .status-row__window {
+    align-items: center;
+    display: inline-flex;
+    gap: 0.3125rem;
+  }
+
+  .status-row__window .gauge {
+    width: 2.25rem;
+  }
+
+  .status-row__window-label {
+    color: var(--color-fg-subtle);
+  }
+
+  .status-row__window-value {
+    color: var(--color-fg-default);
+    font-variant-numeric: tabular-nums;
+    min-width: 2ch;
+  }
+
   .sidebar__foot {
     border-top: 1px solid var(--color-line-subtle);
     display: flex;

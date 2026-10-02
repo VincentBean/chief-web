@@ -3,6 +3,7 @@ import {
   type Database,
   deleteRecurringTask,
   getRecurringTask,
+  getClaudeAccount,
   getRecurringTaskByName,
   getRepository,
   getSession,
@@ -74,6 +75,8 @@ export interface RecurringTaskView {
   readonly prTarget: PrTargetBranch;
   readonly runCodeReview: boolean;
   readonly paused: boolean;
+  /** The account runs are created on, or null to follow the default (US-013). */
+  readonly claudeAccountId: string | null;
   readonly nextRunAt: string | null;
   readonly lastOutcome: RecurringTaskOutcome | null;
   /** `last_outcome` in the operator's words, for the list's status column. */
@@ -116,6 +119,8 @@ export interface CreateRecurringTaskRequest {
   readonly prTarget?: PrTargetBranch;
   readonly runCodeReview?: boolean;
   readonly paused?: boolean;
+  /** Omitted or `null`: runs follow the default account. */
+  readonly claudeAccountId?: string | null;
 }
 
 export interface UpdateRecurringTaskRequest {
@@ -126,6 +131,8 @@ export interface UpdateRecurringTaskRequest {
   readonly prTarget?: PrTargetBranch;
   readonly runCodeReview?: boolean;
   readonly paused?: boolean;
+  /** `null` hands the task back to the default account. */
+  readonly claudeAccountId?: string | null;
 }
 
 export function toRecurringTaskView(db: Database, task: RecurringTask): RecurringTaskView {
@@ -142,6 +149,7 @@ export function toRecurringTaskView(db: Database, task: RecurringTask): Recurrin
     prTarget: task.prTarget,
     runCodeReview: task.runCodeReview,
     paused: task.paused,
+    claudeAccountId: task.claudeAccountId,
     nextRunAt: task.nextRunAt,
     lastOutcome: task.lastOutcome,
     lastOutcomeLabel: task.lastOutcome === null ? null : recurringTaskOutcomeLabel(task.lastOutcome),
@@ -232,6 +240,16 @@ function firstRunAt(expression: string, from: Date = new Date()): string | null 
   return nextCronRun(expression, from)?.toISOString() ?? null;
 }
 
+/**
+ * A chosen account has to exist now; whether it is signed in is checked when a
+ * run is created, since that can change between now and the next occurrence.
+ */
+function assertKnownAccount(db: Database, accountId: string | null | undefined): void {
+  if (typeof accountId === 'string' && getClaudeAccount(db, accountId) === null) {
+    throw new RecurringTaskError(400, 'claude_account_unknown', 'No such Claude account.');
+  }
+}
+
 function assertNameIsFree(
   db: Database,
   repositoryId: string,
@@ -263,6 +281,7 @@ export function createRecurringTaskFromRequest(
     throw new RecurringTaskError(400, 'invalid_prompt', 'A prompt is required.');
   }
   assertNameIsFree(db, request.repositoryId, request.name);
+  assertKnownAccount(db, request.claudeAccountId);
 
   const paused = request.paused ?? false;
   const task = createRecurringTask(db, {
@@ -274,6 +293,7 @@ export function createRecurringTaskFromRequest(
     prTarget: request.prTarget ?? 'main',
     runCodeReview: request.runCodeReview ?? false,
     paused,
+    claudeAccountId: request.claudeAccountId ?? null,
     // A task created paused waits for the resume to give it a schedule.
     nextRunAt: paused ? null : firstRunAt(request.cronExpression),
   });
@@ -305,6 +325,7 @@ export function updateRecurringTaskFromRequest(
     assertNameIsFree(db, task.repositoryId, request.name, task.id);
   }
   if (request.cronExpression !== undefined) assertUsableCron(request.cronExpression);
+  assertKnownAccount(db, request.claudeAccountId);
   if (request.prompt !== undefined && request.prompt.trim() === '') {
     throw new RecurringTaskError(400, 'invalid_prompt', 'A prompt is required.');
   }
@@ -326,6 +347,7 @@ export function updateRecurringTaskFromRequest(
     ...(request.prTarget === undefined ? {} : { prTarget: request.prTarget }),
     ...(request.runCodeReview === undefined ? {} : { runCodeReview: request.runCodeReview }),
     ...(request.paused === undefined ? {} : { paused: request.paused }),
+    ...(request.claudeAccountId === undefined ? {} : { claudeAccountId: request.claudeAccountId }),
     ...(nextRunAt === undefined ? {} : { nextRunAt }),
   });
   if (updated === null) {

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
+import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   createRepository,
@@ -188,6 +189,8 @@ async function fixture(
   fs.mkdirSync(config.sshKeysDir, { recursive: true });
 
   const db = openDatabase(IN_MEMORY);
+  // Containers mount a Claude account's directory; with none, nothing starts.
+  addClaudeAccount(config, db);
   const repository = createRepository(db, {
     name: 'demo',
     sshUrl: 'git@github.com:acme/demo.git',

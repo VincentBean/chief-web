@@ -15,7 +15,9 @@ import {
   openDatabase,
   type Session,
   type SessionStatus,
+  updateClaudeAccount,
   updateSession,
+  setSetting,
 } from '../db/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import {
@@ -27,12 +29,22 @@ import {
   type ListContainersOptions,
   type VolumeDetails,
 } from '../docker/index.js';
-import { RUNNER_CLAUDE_DIR, RUNNER_SSH_KEY_PATH, RUNNER_WORKSPACE_DIR } from '../runner/index.js';
-import { writePrivateKey } from '../ssh/index.js';
+import { addClaudeAccount, removeClaudeAccount, setDefaultClaudeAccount } from '../claude/index.js';
 import {
+  claudeAccountDir,
+  RUNNER_CLAUDE_DIR,
+  RUNNER_SSH_KEY_PATH,
+  RUNNER_WORKSPACE_DIR,
+} from '../runner/index.js';
+import { writePrivateKey } from '../ssh/index.js';
+import type { FailoverUsage } from '../claude/failover.js';
+import { UsageLimitHold } from '../limits/index.js';
+import {
+  CLAUDE_ACCOUNT_LABEL,
   CONTAINER_LOST_ERROR,
   FEEDBACK_LOST_ERROR,
   HostPaths,
+  type OrchestratorError,
   planReconciliation,
   REVIEW_LOST_ERROR,
   SESSION_LABEL,
@@ -149,6 +161,8 @@ interface Fixture {
   readonly config: Config;
   readonly db: Database;
   readonly dataDir: string;
+  /** The one Claude account, which every container mounts by default. */
+  readonly accountId: string;
   session(status?: SessionStatus, name?: string): Session;
 }
 
@@ -166,6 +180,7 @@ function fixture(env: Record<string, string> = {}): Fixture {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'chief-orch-'));
   const config = loadConfig({ DATA_DIR: dataDir, ...env });
   const db = openDatabase(IN_MEMORY);
+  const accountId = addClaudeAccount(config, db).id;
   const repository = createRepository(db, {
     name: 'demo',
     sshUrl: 'git@github.com:acme/demo.git',
@@ -176,6 +191,7 @@ function fixture(env: Record<string, string> = {}): Fixture {
     config,
     db,
     dataDir,
+    accountId,
     session(status: SessionStatus = 'pending', name = `feature-${++counter}`): Session {
       return createSession(db, {
         repositoryId: repository.id,
@@ -196,21 +212,23 @@ describe('session container spec', () => {
       session: { id: 'session-1', name: 'add-login', repositoryId: 'repo-1' },
       image: 'chief-web-runner:latest',
       identity: { name: 'chief-web', email: 'chief-web@localhost' },
+      accountId: '0123456789abcdef',
       mounts: {
-        claudeAuth: 'chief-web-claude-auth',
+        claudeAuth: '/host/claude-accounts/0123456789abcdef',
         workspaceDir: '/host/workspaces/session-1',
         sshKeyPath: '/host/ssh-keys/sessions/session-1.key',
       },
     });
 
     assert.equal(spec.labels?.[SESSION_LABEL], 'session-1');
+    assert.equal(spec.labels?.[CLAUDE_ACCOUNT_LABEL], '0123456789abcdef');
     assert.equal(spec.workingDir, RUNNER_WORKSPACE_DIR);
     assert.deepEqual(spec.binds, [
-      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `/host/claude-accounts/0123456789abcdef:${RUNNER_CLAUDE_DIR}`,
       `/host/workspaces/session-1:${RUNNER_WORKSPACE_DIR}`,
       `/host/ssh-keys/sessions/session-1.key:${RUNNER_SSH_KEY_PATH}:ro`,
     ]);
-    // The credentials volume is read-write; only the key is read-only.
+    // The credentials directory is read-write; only the key is read-only.
     assert.ok(!spec.binds?.[0]?.endsWith(':ro'));
     assert.ok(!spec.binds?.[1]?.endsWith(':ro'));
     assert.ok(spec.env?.includes('CHIEF_SESSION_ID=session-1'));
@@ -222,7 +240,11 @@ describe('session container spec', () => {
       session: { id: 'session-1', name: 'add-login', repositoryId: 'repo-1' },
       image: 'chief-web-runner:latest',
       identity: { name: 'chief-web', email: 'chief-web@localhost' },
-      mounts: { claudeAuth: 'chief-web-claude-auth', workspaceDir: '/host/workspaces/session-1' },
+      accountId: '0123456789abcdef',
+      mounts: {
+        claudeAuth: '/host/claude-accounts/0123456789abcdef',
+        workspaceDir: '/host/workspaces/session-1',
+      },
     };
     assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 4096 }).memoryBytes, 4096 * 1024 * 1024);
     assert.equal(sessionContainerSpec({ ...input, memoryLimitMb: 0 }).memoryBytes, undefined);
@@ -512,6 +534,67 @@ describe('reconciliation against a mocked Docker client', () => {
   });
 });
 
+describe('the account a pull request run mounts (multiple accounts US-013)', () => {
+  let daemon: FakeDockerDaemon;
+  let env: Fixture;
+  let orchestrator: SessionOrchestrator;
+
+  before(async () => {
+    daemon = await FakeDockerDaemon.start();
+  });
+
+  after(async () => {
+    await daemon.close();
+  });
+
+  beforeEach(() => {
+    env = fixture();
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath));
+  });
+
+  const startRun = async (id: string): Promise<string | undefined> => {
+    const view = await orchestrator.startPrRun({
+      id,
+      prNumber: 7,
+      repositoryId: env.session().repositoryId,
+    });
+    return daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL];
+  };
+
+  it('runs on the PR automation account when one is chosen', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+
+    assert.equal(await startRun('run-explicit'), chosen);
+  });
+
+  it('runs on the default account when none is chosen', async () => {
+    addClaudeAccount(env.config, env.db);
+
+    assert.equal(await startRun('run-unset'), env.accountId);
+  });
+
+  it('falls back to the default account once the chosen one is removed', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+    removeClaudeAccount(env.config, env.db, chosen);
+
+    assert.equal(await startRun('run-removed'), env.accountId);
+  });
+
+  it('lets a caller name the account outright', async () => {
+    const chosen = addClaudeAccount(env.config, env.db).id;
+    const other = addClaudeAccount(env.config, env.db).id;
+    setSetting(env.db, 'pr_automation_claude_account_id', chosen);
+
+    const view = await orchestrator.startPrRun(
+      { id: 'run-named', prNumber: 0, repositoryId: env.session().repositoryId },
+      other,
+    );
+    assert.equal(daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
+  });
+});
+
 describe('session container lifecycle', () => {
   let daemon: FakeDockerDaemon;
   let env: Fixture;
@@ -526,7 +609,7 @@ describe('session container lifecycle', () => {
   });
 
   beforeEach(() => {
-    env = fixture({ CLAUDE_AUTH_VOLUME: 'chief-web-claude-auth' });
+    env = fixture();
     orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath));
   });
 
@@ -543,8 +626,9 @@ describe('session container lifecycle', () => {
     const created = daemon.container(view.id);
     assert.equal(created?.labels[SESSION_LABEL], session.id);
     assert.equal(created?.workingDir, RUNNER_WORKSPACE_DIR);
+    assert.equal(created?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
     assert.deepEqual(created?.binds, [
-      `chief-web-claude-auth:${RUNNER_CLAUDE_DIR}`,
+      `${claudeAccountDir(env.config, env.accountId)}:${RUNNER_CLAUDE_DIR}`,
       `${sessionWorkspaceDir(env.config, session.id)}:${RUNNER_WORKSPACE_DIR}`,
       `${sessionKeyPath(env.config, session.id)}:${RUNNER_SSH_KEY_PATH}:ro`,
     ]);
@@ -553,6 +637,136 @@ describe('session container lifecycle', () => {
     assert.ok(fs.existsSync(sessionWorkspaceDir(env.config, session.id)));
     // The staged copy is the repository key, readable by the runner user.
     assert.equal(fs.readFileSync(sessionKeyPath(env.config, session.id), 'utf8').trim(), PRIVATE_KEY);
+  });
+
+  it("mounts the session's own account instead of the default", async () => {
+    const other = addClaudeAccount(env.config, env.db).id;
+    const session = env.session();
+    updateSession(env.db, session.id, { claudeAccountId: other });
+    // The row is read again: a caller holding the pre-PATCH session still gets it.
+    const view = await orchestrator.start(session);
+
+    const created = daemon.container(view.id);
+    assert.equal(created?.labels[CLAUDE_ACCOUNT_LABEL], other);
+    assert.equal(created?.binds[0], `${claudeAccountDir(env.config, other)}:${RUNNER_CLAUDE_DIR}`);
+  });
+
+  it('recreates a running container on another account only to launch agent work', async () => {
+    const session = env.session();
+    const first = await orchestrator.start(session);
+    const other = addClaudeAccount(env.config, env.db).id;
+    updateSession(env.db, session.id, { claudeAccountId: other });
+
+    // A push or a browser next to a running iteration keeps the container.
+    const reused = await orchestrator.start(session);
+    assert.equal(reused.id, first.id);
+    assert.equal(daemon.container(first.id)?.running, true);
+
+    const recreated = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(recreated.id, first.id);
+    assert.equal(daemon.container(first.id), undefined);
+    assert.equal(daemon.container(recreated.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
+    assert.equal(getSession(env.db, session.id)?.containerId, recreated.id);
+
+    // Back on the same account, agent work reuses it.
+    const again = await orchestrator.start(session, { agentWork: true });
+    assert.equal(again.id, recreated.id);
+  });
+
+  it('recreates the container on the failover account when a hold is armed on its own (US-015)', async () => {
+    const usage = new Map<string, FailoverUsage>();
+    const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
+    // Signed in, so it stays the default once the other accounts are added.
+    updateClaudeAccount(env.db, env.accountId, { authMethod: 'claude.ai' });
+    const session = env.session();
+    const first = await orchestrator.start(session);
+    assert.equal(daemon.container(first.id)?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
+
+    const busy = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    const quiet = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    usage.set(busy, { fiveHour: { utilization: 60 }, sevenDay: null });
+    usage.set(quiet, { fiveHour: { utilization: 20 }, sevenDay: null });
+    hold.arm(env.accountId);
+
+    // A push next to the running container keeps it, and records nothing.
+    const reused = await orchestrator.start(session);
+    assert.equal(reused.id, first.id);
+    assert.equal(getSession(env.db, session.id)?.failoverClaudeAccountId, null);
+
+    // The next agent run is launched on the least-used other account.
+    const recreated = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(recreated.id, first.id);
+    assert.equal(daemon.container(first.id), undefined);
+    assert.equal(daemon.container(recreated.id)?.labels[CLAUDE_ACCOUNT_LABEL], quiet);
+    assert.equal(
+      daemon.container(recreated.id)?.binds[0],
+      `${claudeAccountDir(env.config, quiet)}:${RUNNER_CLAUDE_DIR}`,
+    );
+    const failedOver = getSession(env.db, session.id);
+    assert.equal(failedOver?.failoverClaudeAccountId, quiet);
+    // The session's own choice is untouched: it is still "follow the default".
+    assert.equal(failedOver?.claudeAccountId, null);
+
+    // Still held: the next agent run keeps the failover container.
+    const kept = await orchestrator.start(session, { agentWork: true });
+    assert.equal(kept.id, recreated.id);
+
+    // Once the hold lifts, the next launch goes home and clears the record.
+    hold.clear(env.accountId);
+    const home = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(home.id, recreated.id);
+    assert.equal(daemon.container(home.id)?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
+    assert.equal(getSession(env.db, session.id)?.failoverClaudeAccountId, null);
+  });
+
+  it('keeps a held session on its own account when no other account is under 95% (US-015)', async () => {
+    const usage = new Map<string, FailoverUsage>();
+    const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
+    // Signed in, so it stays the default once the other accounts are added.
+    updateClaudeAccount(env.db, env.accountId, { authMethod: 'claude.ai' });
+    const other = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    usage.set(other, { fiveHour: { utilization: 96 }, sevenDay: null });
+    hold.arm(env.accountId);
+
+    const view = await orchestrator.start(env.session(), { agentWork: true });
+    assert.equal(daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
+  });
+
+  it('starts a PR run on the failover account while the PR automation account is held (US-015)', async () => {
+    const hold = new UsageLimitHold(env.db);
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
+    const other = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    hold.arm(env.accountId);
+
+    const view = await orchestrator.startPrRun({
+      id: 'run-failover',
+      prNumber: 7,
+      repositoryId: env.session().repositoryId,
+    });
+    assert.equal(daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
+  });
+
+  it('follows a default change for a session that has no account of its own', async () => {
+    const session = env.session();
+    const first = await orchestrator.start(session);
+    const other = addClaudeAccount(env.config, env.db).id;
+    setDefaultClaudeAccount(env.db, other);
+
+    const recreated = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(recreated.id, first.id);
+    assert.equal(daemon.container(recreated.id)?.labels[CLAUDE_ACCOUNT_LABEL], other);
+  });
+
+  it('starts nothing while no Claude account is connected', async () => {
+    removeClaudeAccount(env.config, env.db, env.accountId);
+
+    await assert.rejects(orchestrator.start(env.session()), (error: OrchestratorError) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.code, 'claude_not_authenticated');
+      return true;
+    });
   });
 
   it('omits the key mount for a repository that has no deploy key', async () => {

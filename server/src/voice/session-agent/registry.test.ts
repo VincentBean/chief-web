@@ -131,7 +131,7 @@ describe('session voice agents', () => {
       db,
       docker,
       containers,
-      hold: { active: () => holdActive, until: () => (holdActive ? '2026-09-25T20:00:00.000Z' : null) },
+      hold: { waitingUntil: () => (holdActive ? '2026-09-25T20:00:00.000Z' : null) },
       planning: () => ({ isTerminalRunning: (id) => terminalRunning.has(id) }),
       browsers: () => ({
         stop: (sessionId) => {
@@ -573,7 +573,7 @@ describe('session voice agents', () => {
     it('hands a finished session to its Q&A agent (voice US-025)', async () => {
       const session = newSession('done-already', 'finished');
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { waitingUntil: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: session.name }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
@@ -583,7 +583,7 @@ describe('session voice agents', () => {
     it('starts the agent and moves the focus', async () => {
       const session = newSession('talk-it-through');
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { waitingUntil: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: 'talk it through' }, context(focus));
       assert.equal(result.ok, true);
       assert.deepEqual(focus, [{ kind: 'session', sessionId: session.id }]);
@@ -603,7 +603,7 @@ describe('session voice agents', () => {
         },
       };
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry, planning, hold: { until: () => null } } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, planning, hold: { waitingUntil: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: session.name }, context(focus));
       assert.deepEqual(result, {
         ok: false,
@@ -620,7 +620,7 @@ describe('session voice agents', () => {
       const session = newSession('terminal-late');
       terminalRunning.add(session.id);
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { waitingUntil: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: session.name }, context(focus));
       assert.deepEqual(result, {
         ok: false,
@@ -756,7 +756,7 @@ describe('session voice agents', () => {
 
       // Chief's focus_session returns the refusal unchanged, for chief to say.
       const focus: CallFocus[] = [];
-      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { until: () => null } } as unknown as ChiefServices);
+      const tool = focusSessionTool({ db, sessionAgents: registry, hold: { waitingUntil: () => null } } as unknown as ChiefServices);
       const result = await tool.handler({ session: c.name }, {
         signal: new AbortController().signal,
         turn: 1,

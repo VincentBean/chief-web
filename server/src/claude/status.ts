@@ -1,14 +1,14 @@
 import type { Config } from '../config.js';
-import { claudeAuthSource, RUNNER_CLAUDE_DIR } from '../runner/index.js';
+import { claudeAccountBind, type HostPathTranslator } from '../runner/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
 
 /**
  * Is Claude Code signed in? (US-008)
  *
  * The answer is produced by a **probe container**: a `--rm` runner container
- * with the shared `claude-auth` volume mounted, running `claude auth status
- * --json`. That is the CLI's own non-interactive verdict on the credentials in
- * the volume, so it stays right even when the credential file format changes —
+ * with one account's credentials directory mounted, running `claude auth
+ * status --json`. That is the CLI's own non-interactive verdict on the
+ * credentials in that directory, so it stays right even when the credential file format changes —
  * which parsing `~/.claude/.credentials.json` from the server would not.
  *
  * The probe exits 1 when logged out but still prints its JSON, so the exit code
@@ -45,14 +45,18 @@ interface RawStatus {
 }
 
 /** `docker run` arguments for the probe. Exported so tests can assert them. */
-export function claudeProbeArgs(config: Config): string[] {
+export async function claudeProbeArgs(
+  config: Config,
+  paths: HostPathTranslator,
+  accountId: string,
+): Promise<string[]> {
   return [
     'run',
     '--rm',
     '--label',
     CLAUDE_PROBE_LABEL,
     '--volume',
-    `${claudeAuthSource(config)}:${RUNNER_CLAUDE_DIR}`,
+    await claudeAccountBind(config, paths, accountId),
     '--entrypoint',
     'claude',
     config.runnerImage,
@@ -66,23 +70,26 @@ export function claudeProbeArgs(config: Config): string[] {
 export async function probeClaudeAuth(
   config: Config,
   run: CommandRunner,
+  paths: HostPathTranslator,
+  accountId: string,
 ): Promise<ClaudeAuthStatus> {
   let result: CommandResult;
   try {
-    result = await run(config.dockerBin, claudeProbeArgs(config), '', config.claudeProbeTimeoutMs);
+    const args = await claudeProbeArgs(config, paths, accountId);
+    result = await run(config.dockerBin, args, '', config.claudeProbeTimeoutMs);
   } catch (cause) {
-    return failed(`The Claude status check could not be started: ${String(cause)}`);
+    return failedClaudeStatus(`The Claude status check could not be started: ${String(cause)}`);
   }
 
   if (result.timedOut) {
     const seconds = Math.round(config.claudeProbeTimeoutMs / 1000);
-    return failed(`The Claude status check timed out after ${seconds}s.`);
+    return failedClaudeStatus(`The Claude status check timed out after ${seconds}s.`);
   }
 
   const raw = parseStatusJson(result.stdout);
   if (raw === null) {
     const detail = (result.stderr.trim() || result.stdout.trim()).slice(0, 500);
-    return failed(
+    return failedClaudeStatus(
       detail === ''
         ? 'The Claude status check produced no output.'
         : `The Claude status check failed: ${detail}`,
@@ -100,7 +107,8 @@ export async function probeClaudeAuth(
   };
 }
 
-function failed(message: string): ClaudeAuthStatus {
+/** An `authenticated: false` answer carrying why. */
+export function failedClaudeStatus(message: string): ClaudeAuthStatus {
   return {
     authenticated: false,
     authMethod: null,
