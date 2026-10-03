@@ -12,8 +12,22 @@ import { EDIT_PROMPT_TEMPLATE, INIT_PROMPT_TEMPLATE } from './templates.js';
  * with lettered options, then a PRD in chief's exact format — is identical.
  */
 
-/** Which of chief's two prompts a planning terminal was started with. */
-export type PlanningMode = 'create' | 'edit';
+/**
+ * Which prompt a planning terminal was started with.
+ *
+ * `create` and `edit` are chief's two: a PRD written from scratch, or an
+ * existing one changed. `decide` is chief-web's own (decisions US-009) — a
+ * terminal opened on a session whose *build* is waiting for an answer, to work
+ * the question out rather than to plan anything.
+ */
+export type PlanningMode = 'create' | 'edit' | 'decide';
+
+/**
+ * The two modes that write a PRD, which is every mode but `decide`. Named so
+ * the prompt builders that only make sense for a PRD cannot be handed the
+ * one that does not write anything.
+ */
+export type PrdPlanningMode = Exclude<PlanningMode, 'decide'>;
 
 /** chief's own wording when `chief new` is given no context argument. */
 export const DEFAULT_CONTEXT = 'No additional context provided. Ask the user what they want to build.';
@@ -121,7 +135,7 @@ Rules chief-web enforces when it reads the file:
  * has feedback — in both modes, so a conversation resumed once a PRD exists
  * still knows what it is fixing.
  */
-export function planningPrompt(mode: PlanningMode, input: PlanningPromptInput): string {
+export function planningPrompt(mode: PrdPlanningMode, input: PlanningPromptInput): string {
   const body = mode === 'edit' ? editPlanningPrompt(input.sessionName) : initPlanningPrompt(input);
   const feedback = sessionFeedback(input);
   return feedback === null ? body : body + feedbackBlock(feedback, input.sessionName);
@@ -186,6 +200,77 @@ the one exception to writing only the PRD; never delete them.
 The stories then fix what that section describes.`;
 }
 
+/** What a `decide` terminal is told to work out (decisions US-009). */
+export interface DecisionPromptInput {
+  readonly sessionName: string;
+  /** The question the build agent asked, verbatim. */
+  readonly question: string;
+  /** The options it offered, in its order. */
+  readonly options: readonly string[];
+  /** What it said it had established, and why the question matters. */
+  readonly context: string | null;
+  /** Which option it would take unasked. */
+  readonly recommendation: string | null;
+  /** The story its iteration was on. */
+  readonly storyId: string | null;
+}
+
+/**
+ * The prompt of a "Discuss this" terminal (decisions US-009).
+ *
+ * Two things make this prompt different from every other one here, and both
+ * follow from *when* it runs: a build agent is alive in this very container,
+ * blocked on the question, with a half-finished working tree under it.
+ *
+ * - **It writes nothing.** Not the PRD, not the code, not `progress.md`. The
+ *   build loop owns this tree — the same rule a Q&A voice agent is held to
+ *   (`QA_DISALLOWED_TOOLS`) — and the edit tools are refused at the CLI as
+ *   well as forbidden here, because the only thing that should come out of
+ *   this conversation is the operator's decision, typed into the card.
+ * - **It is for one question.** It is not an invitation to review the branch
+ *   or re-plan the session; it is there to work out the answer and say what it
+ *   would cost, so the operator can decide and the build can carry on.
+ */
+export function decidePlanningPrompt(input: DecisionPromptInput): string {
+  const options =
+    input.options.length === 0
+      ? ''
+      : `\n\nThe options it offered:\n${input.options.map((option, index) => `${String(index + 1)}. ${option}`).join('\n')}`;
+  const context = input.context === null ? '' : `\n\nWhat it says it established:\n\n${input.context}`;
+  const recommendation =
+    input.recommendation === null ? '' : `\n\nWhat it would choose if nobody answered: ${input.recommendation}`;
+  const story = input.storyId === null ? 'a story of this session' : `story ${input.storyId}`;
+  return `The build of the chief-web session "${input.sessionName}" has stopped to ask the operator a question, and
+you are here to help them answer it. The agent that asked is still running in this container,
+blocked on the answer, with ${story} half-built in this working tree.
+
+The question, verbatim:
+
+<question>
+${input.question}
+</question>${options}${context}${recommendation}
+
+Your job is to put the operator in a position to decide, in this order:
+
+1. Read whatever bears on the question — the code, \`${containerPrdDir(input.sessionName)}/prd.md\`,
+   \`progress.md\`, the git log of this branch. Start now, without being asked.
+2. Tell them what you found in a few sentences: what the real choice is, what each option would
+   cost here (not in general), and which one you would take and why. Name files and symbols.
+3. Then answer their questions. One point per reply; do not restate the question back to them.
+
+Two rules, and they are absolute:
+
+- **Change nothing.** Do not edit, create or delete a single file — not the PRD, not the code, not
+  \`progress.md\` — and run no command that writes to this working tree, stages anything, commits,
+  stashes, cleans or checks anything out. A build agent is mid-story in this tree and its work is
+  not yours to touch. Read-only commands (\`git log\`, \`git diff\`, \`rg\`, tests you do not need to
+  write files for) are fine.
+- **You do not answer the question.** The operator types the decision into the card on the session
+  page, in their own words, and chief-web hands it to the waiting agent. Nothing you say here
+  reaches that agent. When the decision is clear, say so in one sentence — that they can send it
+  — and stop.`;
+}
+
 /**
  * `claude "<prompt>"`: the prompt is one argv element, never shell-parsed.
  * With `resumeId` it is `claude --resume <id> "<prompt>"`, continuing a
@@ -198,14 +283,30 @@ export function planningCommand(
   model?: string | null,
   resumeId?: string | null,
   effort?: EffortLevel | null,
+  disallowedTools: readonly string[] = [],
 ): string[] {
   // No `--model` at all when none is configured: an absent flag is what lets
   // Claude Code apply its own default, and there is no name that means that.
   const selected = model == null ? [] : ['--model', model];
   const thinking = effort == null ? [] : ['--effort', effort];
   const resume = resumeId == null ? [] : ['--resume', resumeId];
-  return ['claude', ...selected, ...thinking, ...resume, prompt];
+  // Variadic (`<tools...>`): one comma-joined value, and the prompt that
+  // follows it is positional, so it is passed as its own argument.
+  const refused = disallowedTools.length === 0 ? [] : ['--disallowedTools', disallowedTools.join(',')];
+  return ['claude', ...selected, ...thinking, ...resume, ...refused, prompt];
 }
+
+/**
+ * The tools a `decide` terminal may not use (decisions US-009).
+ *
+ * The prompt tells it not to write; this is what makes that true of a model
+ * that forgets. The same list the Q&A voice agent is held to, and for the same
+ * reason: the build loop owns the working tree of a session that is not
+ * pending. `Bash` is deliberately *not* here — reading the git log and running
+ * a test is most of how the question gets answered — so the prompt carries
+ * the part a flag cannot express.
+ */
+export const DECIDE_DISALLOWED_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
 /**
  * The first message of a planning terminal that resumes a voice planning

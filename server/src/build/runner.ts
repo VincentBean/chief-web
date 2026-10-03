@@ -1,8 +1,8 @@
-import type { ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
+import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import { AGENT_SIGNALLED, agentExecSpec, agentSignalSpec, headShaSpec } from './agent.js';
-import { AgentOutputFormatter } from './stream.js';
+import { type AgentToolCall, AgentOutputFormatter } from './stream.js';
 
 /**
  * Running one headless agent iteration inside a session container (US-013).
@@ -40,10 +40,29 @@ export interface AgentInvocation {
    */
   readonly effort?: string | null;
   /**
+   * `--mcp-config` for this iteration: the `chief` server that offers
+   * `ask_operator` (decisions US-003). `null`/absent passes no flag, which is
+   * how an iteration is launched where no question can be asked.
+   */
+  readonly mcpConfigFile?: string | null;
+  /**
+   * The iteration's budget as a clock that can be stopped (decisions US-004).
+   * Given one, it is used *instead of* {@link timeoutMs}: the two are the same
+   * number, and the deadline is the one that can be paused while the agent
+   * waits for an answer. Ignored by an executor that cannot stream.
+   */
+  readonly deadline?: ExecDeadline | null;
+  /**
    * Called with the agent's output as it is produced, already rendered from
    * `stream-json` into the lines a person reads (US-016).
    */
   readonly onOutput?: (text: string) => void;
+  /**
+   * Called for each tool call on the stream as it arrives (decisions US-004):
+   * how the loop notices `ask_operator`. It must not throw, and it must not
+   * block the stream — anything slow belongs in a promise of its own.
+   */
+  readonly onToolCall?: (call: AgentToolCall) => void;
 }
 
 export interface AgentResult {
@@ -95,6 +114,7 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.model,
       invocation.advisor,
       invocation.effort,
+      invocation.mcpConfigFile,
     );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
@@ -106,7 +126,9 @@ export class ContainerAgentRunner implements AgentRunner {
 
     // Rendered here rather than in the log store, so what the session's error
     // message quotes on a stalled iteration is exactly what the log showed.
-    const formatter = new AgentOutputFormatter();
+    const formatter = new AgentOutputFormatter(
+      invocation.onToolCall === undefined ? {} : { onToolCall: invocation.onToolCall },
+    );
     let output = '';
     const emit = (text: string): void => {
       if (text === '') return;
@@ -115,6 +137,9 @@ export class ContainerAgentRunner implements AgentRunner {
     };
 
     const result = await stream(invocation.containerId, spec, {
+      // The pausable clock when there is one; the plain cap otherwise. Both
+      // are the same budget, and `streamExec` prefers the deadline.
+      ...(invocation.deadline == null ? {} : { deadline: invocation.deadline }),
       timeoutMs: invocation.timeoutMs,
       // Everything is kept here, so the daemon client keeps nothing.
       maxOutputChars: 0,

@@ -408,7 +408,15 @@ function SessionRow({
         <Progress
           done={session.stories.done}
           total={session.stories.total}
-          tone={isEnded(session) ? SESSION_TONE[session.status] : session.status === 'failed' ? 'danger' : session.status === 'waiting' ? 'wait' : 'active'}
+          tone={
+            isEnded(session)
+              ? SESSION_TONE[session.status]
+              : session.status === 'failed' || session.status === 'deciding'
+                ? 'danger'
+                : session.status === 'waiting'
+                  ? 'wait'
+                  : 'active'
+          }
           compact
         />
       </td>
@@ -472,6 +480,7 @@ function rowNote(session: Session): string | null {
   if (session.status === 'waiting') {
     return session.waitingUntil === null ? 'held by usage limit' : `held · resumes ${startsIn(session.waitingUntil).replace('starts ', '')}`;
   }
+  if (session.status === 'deciding') return 'its agent is waiting for your decision';
   if (session.scheduleMissed) return 'missed its scheduled start';
   if (session.scheduledStartAt !== null) return startsIn(session.scheduledStartAt);
   if (session.status === 'pending' && !session.cloned) return 'clone did not finish';
@@ -505,6 +514,12 @@ export function DeletionWarning({ session }: { readonly session: Session }) {
         <p>
           <strong>This session is mid-build,</strong> waiting on Claude’s usage limit. Deleting it is
           deleting a build in progress: it will not resume when the limit lifts.
+        </p>
+      )}
+      {session.status === 'deciding' && (
+        <p>
+          <strong>This session is mid-build,</strong> with its agent waiting for your decision. Deleting
+          it ends that agent and the question goes with it.
         </p>
       )}
     </>

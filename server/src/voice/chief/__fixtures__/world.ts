@@ -410,6 +410,8 @@ function buildView(db: Database, sessionId: string, pool: BuildPoolView): BuildV
     queuePosition: queued?.position ?? null,
     activeBuilds: pool.active,
     maxConcurrentBuilds: pool.max,
+    decision: null,
+    decisionTimeoutMs: null,
   };
 }
 

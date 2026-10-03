@@ -1265,6 +1265,146 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN failover_claude_account_id TEXT;
     `,
   },
+  {
+    id: '0029_session_deciding_status',
+    sql: `
+      -- A session can now be waiting for the operator to decide something
+      -- (decisions US-001), which is a status of its own: the agent is alive
+      -- and holding its slot, so it is neither \`building\` nor \`waiting\`.
+      --
+      -- The same rebuild dance as 0005, 0007, 0008, 0010 and 0011: SQLite
+      -- cannot widen a CHECK in place, and \`sessions\` cannot be renamed out
+      -- of the way because every foreign key that references it follows the
+      -- rename. Since 0011 the table has grown two more children, and both
+      -- notes left behind then have been honoured here:
+      --
+      -- * CASCADE children have to be set aside and put back, or dropping the
+      --   old table takes them with it: \`stories\` and \`voice_session_agents\`.
+      -- * SET NULL children keep their rows but lose the link, so their
+      --   \`session_id\` is remembered by primary key and restored:
+      --   \`recurring_task_occurrences\` and \`sentry_issues\`.
+      --
+      -- Whoever rebuilds this table next: the two lists above are the thing to
+      -- re-derive from the schema, not to copy.
+      CREATE TABLE sessions_backup AS SELECT * FROM sessions;
+      CREATE TABLE stories_backup AS SELECT * FROM stories;
+      CREATE TABLE voice_session_agents_backup AS SELECT * FROM voice_session_agents;
+      CREATE TABLE occurrence_sessions_backup AS
+        SELECT id, session_id FROM recurring_task_occurrences WHERE session_id IS NOT NULL;
+      CREATE TABLE sentry_issue_sessions_backup AS
+        SELECT id, session_id FROM sentry_issues WHERE session_id IS NOT NULL;
+
+      DROP TABLE sessions;
+
+      CREATE TABLE sessions (
+        id                 TEXT PRIMARY KEY,
+        repository_id      TEXT NOT NULL
+                             REFERENCES repositories (id) ON DELETE RESTRICT,
+        -- Slug: letters, numbers, hyphens and underscores only.
+        name               TEXT NOT NULL
+                             CHECK (name <> '' AND name NOT GLOB '*[^A-Za-z0-9_-]*'),
+        status             TEXT NOT NULL
+                             CHECK (status IN
+                               ('pending', 'ready', 'building', 'waiting', 'deciding',
+                                'failed', 'finished', 'reviewing', 'fixing', 'pr-open',
+                                'merged')),
+        base_branch        TEXT NOT NULL,
+        feature_branch     TEXT NOT NULL,
+        pr_target_branch   TEXT NOT NULL CHECK (pr_target_branch IN ('develop', 'main')),
+        scheduled_start_at TEXT,
+        queued_at          TEXT,
+        container_id       TEXT,
+        pr_url             TEXT,
+        last_error         TEXT,
+        failure_stage      TEXT
+                             CHECK (failure_stage IS NULL OR failure_stage IN
+                               ('agent', 'prd', 'push', 'pull_request', 'review',
+                                'feedback', 'container_lost')),
+        -- UTC ISO time a \`waiting\` session may resume; NULL for every other
+        -- status, and for every row that predates the hold.
+        waiting_until      TEXT,
+        code_review        INTEGER NOT NULL DEFAULT 0 CHECK (code_review IN (0, 1)),
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        recurring_task_id  TEXT REFERENCES recurring_tasks (id) ON DELETE SET NULL,
+        pr_description     TEXT,
+        feedback           TEXT,
+        open_pull_request  INTEGER NOT NULL DEFAULT 1,
+        pushed_only        INTEGER NOT NULL DEFAULT 0,
+        effort             TEXT,
+        claude_account_id  TEXT,
+        failover_claude_account_id TEXT,
+        UNIQUE (repository_id, name)
+      );
+
+      INSERT INTO sessions
+        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at, recurring_task_id,
+         pr_description, feedback, open_pull_request, pushed_only, effort,
+         claude_account_id, failover_claude_account_id)
+      SELECT
+         id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+         scheduled_start_at, queued_at, container_id, pr_url, last_error, failure_stage,
+         waiting_until, code_review, created_at, updated_at, recurring_task_id,
+         pr_description, feedback, open_pull_request, pushed_only, effort,
+         claude_account_id, failover_claude_account_id
+      FROM sessions_backup;
+
+      INSERT INTO stories SELECT * FROM stories_backup;
+      INSERT INTO voice_session_agents SELECT * FROM voice_session_agents_backup;
+
+      UPDATE recurring_task_occurrences
+         SET session_id = (SELECT session_id FROM occurrence_sessions_backup
+                            WHERE occurrence_sessions_backup.id = recurring_task_occurrences.id)
+       WHERE id IN (SELECT id FROM occurrence_sessions_backup);
+      UPDATE sentry_issues
+         SET session_id = (SELECT session_id FROM sentry_issue_sessions_backup
+                            WHERE sentry_issue_sessions_backup.id = sentry_issues.id)
+       WHERE id IN (SELECT id FROM sentry_issue_sessions_backup);
+
+      DROP TABLE sessions_backup;
+      DROP TABLE stories_backup;
+      DROP TABLE voice_session_agents_backup;
+      DROP TABLE occurrence_sessions_backup;
+      DROP TABLE sentry_issue_sessions_backup;
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_repository ON sessions (repository_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
+      -- Backs the FIFO build queue (US-018); NULLs are not indexed by SQLite.
+      CREATE INDEX IF NOT EXISTS idx_sessions_queued_at ON sessions (queued_at)
+        WHERE queued_at IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_sessions_recurring_task
+        ON sessions (recurring_task_id)
+        WHERE recurring_task_id IS NOT NULL;
+    `,
+  },
+  {
+    id: '0030_decisions',
+    sql: `
+      -- One question a build agent asked the operator (decisions US-001).
+      -- The id is the MCP request id, which names the request and answer
+      -- files inside the session container, so an answer written from a
+      -- later request cannot land on the wrong question.
+      CREATE TABLE decisions (
+        id             TEXT PRIMARY KEY,
+        session_id     TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+        story_id       TEXT,
+        iteration      INTEGER,
+        question       TEXT NOT NULL,
+        -- JSON array of the choices the agent offered; NULL when it offered none.
+        options        TEXT,
+        context        TEXT,
+        recommendation TEXT,
+        status         TEXT NOT NULL,
+        answer         TEXT,
+        asked_at       TEXT NOT NULL,
+        closed_at      TEXT
+      );
+      -- The one query on the hot path: what is this session waiting on?
+      CREATE INDEX idx_decisions_session ON decisions(session_id, status);
+    `,
+  },
 ];
 
 /**

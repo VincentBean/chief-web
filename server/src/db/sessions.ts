@@ -17,6 +17,17 @@ export const SESSION_STATUSES = [
   'building',
   /** Held by Claude's usage limit: the container and the build slot are kept. */
   'waiting',
+  /**
+   * The build agent asked the operator a question it cannot answer itself
+   * (decisions US-001) and is blocked inside its iteration waiting for one.
+   *
+   * Nothing has been given up: the agent is alive with its whole context, the
+   * container is up, the iteration's own clock is stopped, and the build slot
+   * is still counted — so this is `waiting` with a question instead of a
+   * timer. The open question is the `decisions` row; answering it puts the
+   * session straight back to `building`.
+   */
+  'deciding',
   'failed',
   /** The build ran to the end; terminal for a session that opened no PR. */
   'finished',

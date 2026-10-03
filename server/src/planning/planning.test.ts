@@ -6,6 +6,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
+  askDecision,
   closeDatabase,
   createRepository,
   createSession,
@@ -267,6 +268,64 @@ describe('planning service', () => {
       planning.start(session.id),
       (error: unknown) => error instanceof PlanningError && error.code === 'session_not_pending',
     );
+  });
+
+  it('opens a read-only terminal on an open question, and nothing else (decisions US-009)', async () => {
+    clone();
+    updateSession(db, session.id, { status: 'deciding' });
+    askDecision(db, {
+      id: '7b1c2d3e-4a5b-4c6d-8e7f-0123456789ab',
+      sessionId: session.id,
+      storyId: 'US-002',
+      question: 'Keep the old sync API as a deprecated shim?',
+      options: ['Keep it', 'Remove it'],
+      context: 'Two call sites outside this repo use it.',
+      recommendation: 'Keep it.',
+    });
+
+    // The question is what makes this conversation possible: without the
+    // intent, a session that is not pending is still refused.
+    await assert.rejects(
+      planning.start(session.id),
+      (error: unknown) => error instanceof PlanningError && error.code === 'session_not_pending',
+    );
+    assert.equal(planning.status(session.id).canStart, 'decide');
+    assert.equal(planning.status(session.id).nextMode, 'decide');
+
+    const view = await planning.start(session.id, { intent: 'decide' });
+
+    assert.equal(view.mode, 'decide');
+    const command = terminals.created[0]?.command ?? [];
+    const prompt = command.at(-1) ?? '';
+    assert.match(prompt, /Keep the old sync API as a deprecated shim\?/);
+    assert.match(prompt, /1\. Keep it/);
+    assert.match(prompt, /Two call sites outside this repo use it\./);
+    assert.match(prompt, /story US-002 half-built in this working tree/);
+    // It must not write: a build agent owns this tree, mid-story.
+    assert.match(prompt, /\*\*Change nothing\.\*\*/);
+    assert.match(prompt, /You do not answer the question/);
+    const refused = command[command.indexOf('--disallowedTools') + 1] ?? '';
+    assert.deepEqual(refused.split(','), ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+    // And it is not a planning conversation: no PRD prompt, no story format.
+    assert.equal(prompt.includes('Chief PRD Generator'), false);
+  });
+
+  it('refuses to discuss a session with no open question (decisions US-009)', async () => {
+    clone();
+    updateSession(db, session.id, { status: 'deciding' });
+
+    await assert.rejects(
+      planning.start(session.id, { intent: 'decide' }),
+      (error: unknown) => error instanceof PlanningError && error.code === 'session_not_deciding',
+    );
+    // And a session that is merely building has nothing to discuss either.
+    updateSession(db, session.id, { status: 'building' });
+    await assert.rejects(
+      planning.start(session.id, { intent: 'decide' }),
+      (error: unknown) => error instanceof PlanningError && error.code === 'session_not_deciding',
+    );
+    assert.equal(planning.status(session.id).canStart, null);
+    assert.deepEqual(terminals.created, []);
   });
 
   it('starts an interactive claude with chief’s init prompt in the clone', async () => {

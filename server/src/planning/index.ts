@@ -1,4 +1,7 @@
 export {
+  DECIDE_DISALLOWED_TOOLS,
+  decidePlanningPrompt,
+  type DecisionPromptInput,
   DEFAULT_CONTEXT,
   editPlanningPrompt,
   FEEDBACK_BLOCK_HEADING,
@@ -10,6 +13,7 @@ export {
   type PlanningPromptInput,
   planningCommand,
   planningPrompt,
+  type PrdPlanningMode,
   VOICE_HANDOVER_PROMPT,
 } from './prompts.js';
 export {

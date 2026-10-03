@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from './request-files.js';
+import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from '../docker/request-files.js';
 
 /**
  * The server's half of the `chief` MCP server's `start_build` tool (US-008,

@@ -2,6 +2,7 @@ import type { Config } from '../config.js';
 import {
   type Database,
   deleteVoiceSessionAgent,
+  getOpenDecision,
   getRepository,
   getSession,
   getVoiceSessionAgent,
@@ -20,10 +21,13 @@ import { effortFor, getPlanningModel } from '../settings/index.js';
 import { TerminalError } from '../terminal/index.js';
 import type { CreateTerminalInput, TerminalView } from '../terminal/index.js';
 import {
+  DECIDE_DISALLOWED_TOOLS,
+  decidePlanningPrompt,
   MAX_CONTEXT_LENGTH,
   type PlanningMode,
   planningCommand,
   planningPrompt,
+  type PrdPlanningMode,
   VOICE_HANDOVER_PROMPT,
 } from './prompts.js';
 import type { VoiceEventSink } from '../voice/events.js';
@@ -80,6 +84,14 @@ export interface PlanningView {
   readonly mode: PlanningMode | null;
   /** Which prompt starting one *now* would use. */
   readonly nextMode: PlanningMode;
+  /**
+   * Whether a terminal can be opened at all right now (decisions US-009).
+   *
+   * `plan` while the session is pending, `decide` while its build waits for an
+   * answer, and `null` at every other moment — which is what the session page
+   * reads to decide whether to offer the button.
+   */
+  readonly canStart: 'plan' | 'decide' | null;
   /** Working directory of the terminal; the clone, as chief uses the repo root. */
   readonly cwd: string;
   readonly prd: PrdStatus;
@@ -93,6 +105,16 @@ export interface VoiceAgentLock {
 }
 
 export interface StartPlanningInput {
+  /**
+   * Which conversation to open (decisions US-009).
+   *
+   * `plan` is the one this service was built for: chief's PRD interview on a
+   * `pending` session. `decide` is the other one — a read-only terminal on a
+   * session whose build is waiting for an answer, opened from the decision
+   * card's "Discuss this". They share the terminal, the container and the
+   * lock, and nothing else.
+   */
+  readonly intent?: 'plan' | 'decide' | undefined;
   /** Free text describing the feature; fills chief's `{{CONTEXT}}` slot. */
   readonly context?: string | undefined;
   /**
@@ -203,8 +225,19 @@ export class PlanningService {
 
   private async performStart(sessionId: string, input: StartPlanningInput): Promise<PlanningView> {
     const session = this.requireSession(sessionId);
+    const intent = input.intent ?? 'plan';
 
-    if (session.status !== 'pending') {
+    // The one question this service asks differently per intent: planning
+    // happens while a session is pending, deciding while its build waits.
+    const decision = intent === 'decide' ? getOpenDecision(this.db, session.id) : null;
+    if (intent === 'decide' && (session.status !== 'deciding' || decision === null)) {
+      throw new PlanningError(
+        409,
+        'session_not_deciding',
+        `"${session.name}" is not waiting for a decision, so there is nothing to discuss.`,
+      );
+    }
+    if (intent === 'plan' && session.status !== 'pending') {
       throw new PlanningError(
         409,
         'session_not_pending',
@@ -259,21 +292,33 @@ export class PlanningService {
     }
 
     const repository = getRepository(this.db, session.repositoryId);
-    const mode: PlanningMode = this.prdStatus(session).exists ? 'edit' : 'create';
+    const prdMode: PrdPlanningMode = this.prdStatus(session).exists ? 'edit' : 'create';
+    const mode: PlanningMode = decision !== null ? 'decide' : prdMode;
     // A voice planning conversation carries on here (voice US-025): it already
-    // holds the planning prompt, so it only hears that the medium changed.
-    const voice = getVoiceSessionAgent(this.db, session.id);
+    // holds the planning prompt, so it only hears that the medium changed. A
+    // `decide` terminal never resumes one — it is about a question that was
+    // asked long after any planning conversation ended.
+    const voice = decision === null ? getVoiceSessionAgent(this.db, session.id) : null;
     const resumeId = voice?.mode === 'plan' ? voice.claudeSessionId : null;
     const prompt =
-      resumeId !== null
-        ? VOICE_HANDOVER_PROMPT
-        : planningPrompt(mode, {
+      decision !== null
+        ? decidePlanningPrompt({
             sessionName: session.name,
-            featureBranch: session.featureBranch,
-            repositoryName: repository?.name ?? session.repositoryId,
-            context: input.context,
-            feedback: session.feedback,
-          });
+            question: decision.question,
+            options: decision.options,
+            context: decision.context,
+            recommendation: decision.recommendation,
+            storyId: decision.storyId,
+          })
+        : resumeId !== null
+          ? VOICE_HANDOVER_PROMPT
+          : planningPrompt(prdMode, {
+              sessionName: session.name,
+              featureBranch: session.featureBranch,
+              repositoryName: repository?.name ?? session.repositoryId,
+              context: input.context,
+              feedback: session.feedback,
+            });
 
     let terminal: TerminalView;
     try {
@@ -286,6 +331,10 @@ export class PlanningService {
           getPlanningModel(this.db),
           resumeId,
           effortFor(this.db, session)?.level ?? null,
+          // A `decide` terminal shares the container with a build agent that
+          // is mid-story: the edit tools are refused at the CLI, not only in
+          // the prompt.
+          decision === null ? [] : DECIDE_DISALLOWED_TOOLS,
         ),
         cwd: CONTAINER_REPO_DIR,
       });
@@ -354,6 +403,7 @@ export class PlanningService {
   private toView(session: Session): PlanningView {
     const live = this.liveTerminal(session.id);
     const prd = this.prdStatus(session);
+    const deciding = session.status === 'deciding' && getOpenDecision(this.db, session.id) !== null;
     return {
       sessionId: session.id,
       sessionName: session.name,
@@ -364,7 +414,10 @@ export class PlanningService {
       mode: live?.mode ?? null,
       // A PRD that already exists is edited, never rewritten from scratch —
       // that is chief's `new` vs `edit` split, and what "Resume planning" does.
-      nextMode: prd.exists ? 'edit' : 'create',
+      // A session waiting on a question is neither: the only conversation
+      // worth opening on it is about that question (decisions US-009).
+      nextMode: deciding ? 'decide' : prd.exists ? 'edit' : 'create',
+      canStart: deciding ? 'decide' : session.status === 'pending' ? 'plan' : null,
       cwd: CONTAINER_REPO_DIR,
       prd,
     };

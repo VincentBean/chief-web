@@ -1,11 +1,12 @@
-import type { AttachedExec, ExecOutput, ExecSpec, ExecState } from '../docker/index.js';
+import type { AttachedExec, ExecOutput, ExecSpec, ExecState } from './api.js';
 import { logger } from '../lib/logger.js';
 
 /**
  * The file round trip every relay to the `chief` MCP server
  * (`runner/chief-mcp.js`) shares: the tool writes `<dir>/<id>.request` in the
  * session container and waits for `<id>.answer`, which the server writes.
- * The browser card and `start_build` differ only in their directory.
+ * The browser card, `start_build` and a build agent's `ask_operator`
+ * (`build/decisions.ts`) differ only in their directory.
  */
 
 /** uid of the session agent, and so of its MCP server. */

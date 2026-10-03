@@ -56,7 +56,10 @@ export function Overview() {
   const all = sessions ?? [];
   const attention = all.filter(needsAttention);
   const running = all.filter(isActive).sort((a, b) => {
-    const rank = (s: Session): number => (s.status === 'building' ? 0 : s.status === 'waiting' ? 1 : 2);
+    // A session waiting on the operator sorts above one that is working: it is
+    // the only one in the list that cannot get on without them.
+    const rank = (s: Session): number =>
+      s.status === 'deciding' ? 0 : s.status === 'building' ? 1 : s.status === 'waiting' ? 2 : 3;
     return rank(a) - rank(b) || (a.queuePosition ?? 0) - (b.queuePosition ?? 0);
   });
   const upcoming = all
@@ -198,7 +201,7 @@ export function Overview() {
                     <Progress
                       done={session.stories.done}
                       total={session.stories.total}
-                      tone={session.status === 'waiting' ? 'wait' : 'active'}
+                      tone={session.status === 'waiting' ? 'wait' : session.status === 'deciding' ? 'danger' : 'active'}
                       compact
                     />
                   </div>
@@ -442,6 +445,9 @@ function attentionReason(session: Session): string {
       ? 'held by Claude’s usage limit'
       : `held by Claude’s usage limit · resumes ${startsIn(session.waitingUntil).replace('starts ', '')}`;
   }
+  // The question itself is on the session page; here it is only why the
+  // session is standing still (decisions US-010).
+  if (session.status === 'deciding') return 'its build is waiting for your decision';
   if (session.scheduleMissed) return 'missed its scheduled start — mark it ready to build now';
   return '';
 }

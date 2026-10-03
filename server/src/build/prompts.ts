@@ -47,6 +47,15 @@ export interface AgentPromptInput {
   readonly prd: Pick<ParsedPrd, 'project' | 'description'> | null;
   /** Contents of `progress.md`, or `null` when the file does not exist yet. */
   readonly progress: string | null;
+  /**
+   * Whether this iteration has `ask_operator` (decisions US-003).
+   *
+   * The section describing it is only added when the tool is actually on the
+   * argv: a prompt that tells an agent to call a tool it does not have costs
+   * it a turn discovering that, and the whole point of the rules below is to
+   * keep it from burning the iteration on things that are not the story.
+   */
+  readonly canAsk?: boolean;
 }
 
 /**
@@ -92,6 +101,7 @@ export function agentCommand(
   model?: string | null,
   advisor?: string | null,
   effort?: string | null,
+  mcpConfigFile?: string | null,
 ): string[] {
   // `stream-json` is what makes the live log possible: the default text format
   // prints nothing until the agent exits, which for one iteration is up to an
@@ -103,11 +113,16 @@ export function agentCommand(
   // is the only way to launch the iteration the way it is launched today —
   // the flag is never passed bare and never passed with an empty value.
   // `--effort` follows the pair under the same rule: no effort is today's argv.
+  // `--mcp-config` is the iteration's one MCP server (decisions US-003), and
+  // is variadic (`<configs...>`), so it sits immediately before another flag.
+  // Absent, the iteration is launched exactly as it was before decisions
+  // existed and `ask_operator` is not a tool the agent has.
   return [
     'claude',
     ...(model == null ? [] : ['--model', model]),
     ...(advisor == null || advisor === '' ? [] : ['--advisor', advisor]),
     ...(effort == null || effort === '' ? [] : ['--effort', effort]),
+    ...(mcpConfigFile == null || mcpConfigFile === '' ? [] : ['--mcp-config', mcpConfigFile]),
     '--dangerously-skip-permissions',
     '--output-format',
     'stream-json',
@@ -183,6 +198,8 @@ something — three of those in a row end the whole run. So:
 ${context}`);
   }
 
+  if (input.canAsk === true) sections.push(askSection());
+
   const progress = (input.progress ?? '').trim();
   sections.push(`
 
@@ -197,6 +214,50 @@ ${
 }`);
 
   return sections.join('');
+}
+
+/**
+ * When to stop and ask (decisions US-003).
+ *
+ * The tool's own description says what it is for; this says when an iteration
+ * should reach for it, which is a different question and the one that decides
+ * whether the feature helps or hurts. Two failure modes are worth more than
+ * the words it takes to prevent them: an agent that asks instead of reading
+ * the code turns a build into a chat, and an agent that never asks guesses at
+ * a decision that was not its to make and throws a story's work away. So the
+ * bar is named explicitly, and so is the cost of waiting — which is nothing,
+ * because the clock stops.
+ */
+function askSection(): string {
+  return `
+
+---
+
+## chief-web: when you need a decision
+
+You have one tool for this: \`ask_operator\`. It puts your question in front of the operator and
+waits for their answer, and the iteration's clock is stopped for as long as it waits — a question
+costs you no part of your budget, however long it takes to answer.
+
+Ask when, and only when, **a decision is genuinely not yours to make**:
+
+- the PRD and the code leave a product question open, and the two readings lead to different work;
+- two designs are both defensible and the choice is not reversible in a later story;
+- doing the story properly needs something outside its scope (a schema change, a new dependency,
+  touching a module the PRD never mentions);
+- what you found contradicts the story — the behaviour it asks for is already there, or cannot
+  work as written.
+
+Do not ask for anything you can settle yourself. Read the code, the PRD, \`progress.md\` and the
+git history first; a question whose answer is in the repository is a question that wastes an
+operator's attention and your own turn. Never ask for permission to proceed, for a review of work
+you have already done, or for help with an error — those are yours. One question per call, and
+only while you are actually blocked on it.
+
+When you ask: say in one or two sentences what you have established, offer the concrete options
+you can see, and recommend one. If nobody answers, you are told so — then take the most
+conservative option, write the question and the choice you made under \`## Open Questions\` in the
+PRD and in your \`progress.md\` entry, and finish the story on that basis.`;
 }
 
 function prdContext(prd: AgentPromptInput['prd']): string | null {

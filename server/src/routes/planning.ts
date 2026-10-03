@@ -30,6 +30,11 @@ interface Invalid {
  * on their own — whether `claude` is still running and whether `prd.md` exists
  * and parses — without touching Docker. `POST` starts the conversation (or
  * resumes it with chief's edit prompt once a PRD exists) and `DELETE` ends it.
+ *
+ * `POST` with `intent: 'decide'` opens the other conversation this terminal
+ * can hold (decisions US-009): a read-only `claude` on a session whose build
+ * is waiting for an answer. Same terminal, same container, same lock — which
+ * is exactly why it is this route and not one of its own.
  */
 export function createPlanningRouter(planning: PlanningService, db: Database): Router {
   const router = Router();
@@ -82,7 +87,9 @@ function respondWithFailure(res: Response, cause: unknown): void {
  * `stopVoiceAgent: true` is the operator's yes to closing the session's
  * voice agent first (voice US-025).
  */
-function parseStart(body: unknown): { context?: string; stopVoiceAgent?: boolean } | Invalid {
+function parseStart(
+  body: unknown,
+): { intent?: 'plan' | 'decide'; context?: string; stopVoiceAgent?: boolean } | Invalid {
   if (body === undefined || body === null) return {};
   if (typeof body !== 'object' || Array.isArray(body)) {
     return { error: 'invalid_body', message: 'Expected a JSON object.' };
@@ -92,9 +99,19 @@ function parseStart(body: unknown): { context?: string; stopVoiceAgent?: boolean
   if (stop !== undefined && typeof stop !== 'boolean') {
     return { error: 'invalid_stop_voice_agent', message: 'stopVoiceAgent must be a boolean.' };
   }
+  // Which conversation to open (decisions US-009); absent means planning, as
+  // every caller meant before there was anything else to open.
+  const intent = (body as Record<string, unknown>)['intent'];
+  if (intent !== undefined && intent !== 'plan' && intent !== 'decide') {
+    return { error: 'invalid_intent', message: "intent must be 'plan' or 'decide'." };
+  }
   const context = parseContext((body as Record<string, unknown>)['context']);
   if ('error' in context) return context;
-  return stop === true ? { ...context, stopVoiceAgent: true } : context;
+  return {
+    ...context,
+    ...(intent === 'decide' ? { intent } : {}),
+    ...(stop === true ? { stopVoiceAgent: true } : {}),
+  };
 }
 
 function parseContext(raw: unknown): { context?: string } | Invalid {

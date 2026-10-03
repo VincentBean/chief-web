@@ -652,6 +652,19 @@
     white-space: pre-wrap;
   }
 
+  /* ------------------------------------------------------------- decision */
+  /* The question a build agent stopped to ask: the one thing on the page the
+     operator has to read before anything else moves, so it is set larger than
+     the prose around it. */
+  .decision__question {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    line-height: var(--text-lg--line-height);
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
   /* -------------------------------------------------------------- terminal */
   .terminal {
     display: flex;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { after, before, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
@@ -35,7 +36,7 @@ import {
   updatePrRun,
   updateSession,
 } from '../db/index.js';
-import { DockerApi } from '../docker/index.js';
+import { DockerApi, type ExecChunk, type ExecOutput, type ExecSpec } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
 import { USAGE_LIMIT_HOLD_MS, UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
@@ -58,10 +59,12 @@ import {
   remainingStories,
   selectNextStory,
 } from './loop.js';
+import { ASK_OPERATOR_TOOL, DecisionWatcher } from './decisions.js';
 import { createBuildLogStore } from './log.js';
 import { agentCommand, agentPrompt, storyContext } from './prompts.js';
 import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner } from './runner.js';
-import { type BuildCompletion, BuildError, createBuildService } from './service.js';
+import { BUILD_MCP_CONFIG_FILE } from './mcp.js';
+import { type BuildCompletion, BuildError, createBuildService, MAX_DECISION_ANSWER_CHARS } from './service.js';
 
 const PRD = `# PRD: Demo
 
@@ -529,7 +532,7 @@ class MockRunner implements AgentRunner {
   }
 }
 
-function serviceFor(world: World, completion?: BuildCompletion) {
+function serviceFor(world: World, completion?: BuildCompletion, decisions?: DecisionWatcher) {
   return createBuildService(
     world.config,
     world.db,
@@ -537,8 +540,233 @@ function serviceFor(world: World, completion?: BuildCompletion) {
     world.runner,
     completion,
     createBuildLogStore(world.config, world.db),
+    undefined,
+    null,
+    decisions,
   );
 }
+
+/**
+ * The session container's side of `ask_operator` (decisions US-004): the
+ * request file the MCP server would have written, and the answer written back
+ * through stdin. Enough of `RequestFileDocker` for the watcher, and nothing
+ * else — the file round trip itself is covered in `ask-mcp.test.ts`.
+ */
+class AskingContainer {
+  readonly answers: Record<string, unknown>[] = [];
+  requests: Record<string, unknown>[] = [];
+  private readonly exits = new Map<string, number>();
+  private nextExec = 0;
+
+  /** The request an `ask_operator` call leaves behind, with `id` as given. */
+  ask(id: string, question: string, fields: Record<string, unknown> = {}): void {
+    this.requests = [{ id, question, createdAt: '2026-10-03T10:00:00.000Z', ...fields }];
+  }
+
+  runExec(_container: string, spec: ExecSpec): Promise<ExecOutput> {
+    const stdout = spec.cmd.join(' ').includes('.request')
+      ? this.requests.map((request) => `${JSON.stringify(request)}\n`).join('')
+      : '';
+    return Promise.resolve({ exitCode: 0, stdout, stderr: '', timedOut: false });
+  }
+
+  attachExec(): Promise<{ execId: string; stdin: PassThrough; output: AsyncIterable<ExecChunk> }> {
+    const execId = `exec-${String((this.nextExec += 1))}`;
+    const stdin = new PassThrough();
+    let content = '';
+    stdin.on('data', (chunk: Buffer) => (content += chunk.toString('utf8')));
+    const finished = new Promise<void>((resolve) => {
+      stdin.on('end', () => {
+        if (content !== '') this.answers.push(JSON.parse(content) as Record<string, unknown>);
+        this.exits.set(execId, 0);
+        resolve();
+      });
+    });
+    const output: AsyncIterable<ExecChunk> = {
+      // The relay drains the output before asking for the exit code. There is
+      // nothing to print, so it only has to end — once stdin has closed.
+      [Symbol.asyncIterator]: () => ({
+        next: async (): Promise<IteratorResult<ExecChunk>> => {
+          await finished;
+          return { done: true, value: undefined };
+        },
+      }),
+    };
+    return Promise.resolve({ execId, stdin, output });
+  }
+
+  inspectExec(execId: string): Promise<{ running: boolean; exitCode: number | null; pid: number }> {
+    return Promise.resolve({ running: false, exitCode: this.exits.get(execId) ?? 0, pid: 0 });
+  }
+}
+
+const REQUEST_ID = '7b1c2d3e-4a5b-4c6d-8e7f-0123456789ab';
+
+describe('a build that stops to ask (decisions US-004, US-005, US-007)', () => {
+  /** A world whose iteration asks one question and then finishes its story. */
+  const asking = (world: World, container: AskingContainer) => {
+    const decisions = new DecisionWatcher({
+      db: world.db,
+      docker: container,
+      timeoutMs: 60_000,
+      discoveryMs: 200,
+      pollMs: 5,
+    });
+    return { decisions, builds: serviceFor(world, undefined, decisions) };
+  };
+
+  it('parks the session on the question, keeps its slot, and carries on once it is answered', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { decisions, builds } = asking(world, container);
+
+    let answeredAt = -1;
+    world.runner.behaviour = async (invocation, index): Promise<void> => {
+      if (index === 0) {
+        // The flag and the clock the iteration was launched with.
+        assert.equal(invocation.mcpConfigFile, BUILD_MCP_CONFIG_FILE);
+        assert.ok(invocation.deadline, 'the iteration is on a clock that can be stopped');
+        // `streamExec` is what starts the clock in production, and the mock
+        // runner is standing in for it here.
+        invocation.deadline.start(() => undefined);
+        assert.equal(invocation.deadline.isRunning, true);
+        container.ask(REQUEST_ID, 'Keep the old sync API as a deprecated shim?', {
+          options: ['Keep it', 'Remove it'],
+        });
+        invocation.onToolCall?.({ name: ASK_OPERATOR_TOOL, input: { question: 'Keep the old sync API?' } });
+        await until('the session is parked on the question', () => world.status() === 'deciding');
+
+        // Parked: the agent is alive, the question is on the page, and the
+        // session still holds its build slot.
+        const view = builds.status(world.session.id);
+        assert.equal(view.decision?.question, 'Keep the old sync API as a deprecated shim?');
+        assert.deepEqual(view.decision?.options, ['Keep it', 'Remove it']);
+        assert.equal(view.decision?.waiting, true);
+        assert.equal(view.decision?.storyId, 'US-002');
+        assert.equal(view.activeBuilds, 1, 'a question does not give the slot back');
+        assert.equal(invocation.deadline?.isRunning, false, 'its budget is not being spent');
+
+        const answered = await builds.answerDecision(world.session.id, 'Keep it for one release.');
+        answeredAt = index;
+        assert.equal(answered.status, 'building');
+        assert.equal(answered.decision, null);
+        assert.equal(invocation.deadline?.isRunning, true, 'working again, so the clock runs again');
+        assert.deepEqual(container.answers, [
+          { id: REQUEST_ID, answered: true, answer: 'Keep it for one release.' },
+        ]);
+      }
+      const id = /"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '';
+      world.markDone(id);
+      world.runner.commit();
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.error(), null, 'the iteration must not have failed');
+    assert.equal(answeredAt, 0, 'answered inside the iteration that asked, not a later one');
+    assert.equal(world.status(), 'finished');
+    // Two stories, two iterations: the question cost the run nothing.
+    assert.equal(world.runner.invocations.length, 2);
+    assert.equal(decisions.isWaiting(world.session.id), false);
+    assert.equal(builds.status(world.session.id).decision, null);
+  });
+
+  it('writes the question into the build log, with its options', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { builds } = asking(world, container);
+
+    world.runner.behaviour = async (invocation, index): Promise<void> => {
+      if (index === 0) {
+        container.ask(REQUEST_ID, 'Which database?', { options: ['Postgres', 'SQLite'], recommendation: 'Postgres.' });
+        invocation.onToolCall?.({ name: ASK_OPERATOR_TOOL, input: {} });
+        await until('the session is parked', () => world.status() === 'deciding');
+        await builds.answerDecision(world.session.id, 'Postgres.');
+      }
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(log, /waiting for your decision: Which database\?/);
+    assert.match(log, /Options: \(1\) Postgres \(2\) SQLite/);
+    assert.match(log, /It would choose: Postgres\./);
+  });
+
+  it('drops the question with the iteration, whatever ends it', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { decisions, builds } = asking(world, container);
+
+    world.runner.behaviour = async (invocation, index): Promise<void> => {
+      if (index > 0) return;
+      container.ask(REQUEST_ID, 'Which database?');
+      invocation.onToolCall?.({ name: ASK_OPERATOR_TOOL, input: {} });
+      await until('the session is parked', () => world.status() === 'deciding');
+      // The agent gives up on its own: the iteration ends with the question
+      // still open, which is what a timeout or a crash looks like too.
+    };
+    // Nothing committed and no status change, so the loop retries twice and
+    // then fails the session — none of which may leave a question standing.
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(decisions.isWaiting(world.session.id), false);
+    assert.equal(decisions.open(world.session.id), null);
+    assert.equal(world.status(), 'failed');
+  });
+
+  it('refuses an answer when nothing is waiting for one', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { builds } = asking(world, container);
+    await assert.rejects(
+      () => builds.answerDecision(world.session.id, 'Keep it.'),
+      (error: unknown) => error instanceof BuildError && error.code === 'decision_not_open',
+    );
+  });
+
+  it('refuses an empty answer, and one too long to be a decision', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { builds } = asking(world, container);
+    await assert.rejects(
+      () => builds.answerDecision(world.session.id, '   '),
+      (error: unknown) => error instanceof BuildError && error.code === 'decision_answer_empty',
+    );
+    await assert.rejects(
+      () => builds.answerDecision(world.session.id, 'x'.repeat(MAX_DECISION_ANSWER_CHARS + 1)),
+      (error: unknown) => error instanceof BuildError && error.code === 'decision_answer_too_long',
+    );
+  });
+
+  it('stops a build that is waiting on a question, and keeps what it committed', async () => {
+    const world = new World();
+    const container = new AskingContainer();
+    const { decisions, builds } = asking(world, container);
+
+    world.runner.behaviour = async (invocation, index): Promise<void> => {
+      if (index > 0) return;
+      container.ask(REQUEST_ID, 'Which database?');
+      invocation.onToolCall?.({ name: ASK_OPERATOR_TOOL, input: {} });
+      await until('the session is parked', () => world.status() === 'deciding');
+      // "Stop build" signals the agent; the mock agent notices and returns.
+      await until('the agent was signalled', () => world.runner.stops.length > 0);
+    };
+
+    await builds.start(world.session.id);
+    await until('the session is parked', () => world.status() === 'deciding');
+    await builds.stop(world.session.id);
+
+    assert.equal(world.status(), 'ready');
+    assert.equal(decisions.open(world.session.id), null, 'no question survives the run that asked it');
+    assert.equal(decisions.isWaiting(world.session.id), false);
+  });
+});
 
 describe('the build loop', () => {
   it('runs the stories in priority order and finishes', async () => {
@@ -593,8 +821,12 @@ describe('the build loop', () => {
       world.runner.commit();
     };
 
-    await serviceFor(world).start(world.session.id);
-    await serviceFor(world).whenIdle(world.session.id);
+    // One service, not two: `whenIdle` only knows about runs its own instance
+    // started, so a second one would resolve straight away and the assertions
+    // below would race the loop.
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
     assert.match(seen[0] ?? '', /### US-002: First story\n\*\*Status:\*\* in-progress/);
     // Only the selected story is touched.
     assert.match(seen[0] ?? '', /### US-001: Second story\n\*\*Status:\*\* todo/);
@@ -717,14 +949,17 @@ describe('the build loop', () => {
     world.runner.result = { exitCode: 1, output: '', timedOut: false };
 
     // Nothing saved: the environment's default is what the iteration gets.
-    await serviceFor(world).start(world.session.id);
-    await serviceFor(world).whenIdle(world.session.id);
+    // One service, not two: `whenIdle` only knows about runs its own instance
+    // started, so a second one would resolve straight away and the assertions
+    // below would race the loop.
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
     assert.equal(world.runner.invocations[0]?.timeoutMs, world.config.buildIterationTimeoutMs);
     assert.equal(world.config.buildIterationTimeoutMs, 1_800_000);
 
     setSettingNumber(world.db, 'agent_timeout_minutes', 7);
     updateSession(world.db, world.session.id, { status: 'ready' });
-    const builds = serviceFor(world);
     await builds.start(world.session.id);
     await builds.whenIdle(world.session.id);
 
@@ -738,13 +973,16 @@ describe('the build loop', () => {
 
     // Nothing saved: no `--model` reaches the CLI, which is how its own
     // default is selected.
-    await serviceFor(world).start(world.session.id);
-    await serviceFor(world).whenIdle(world.session.id);
+    // One service, not two: `whenIdle` only knows about runs its own instance
+    // started, so a second one would resolve straight away and the assertions
+    // below would race the loop.
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
     assert.equal(world.runner.invocations[0]?.model, null);
 
     setSetting(world.db, 'build_model', 'haiku');
     updateSession(world.db, world.session.id, { status: 'ready' });
-    const builds = serviceFor(world);
     await builds.start(world.session.id);
     await builds.whenIdle(world.session.id);
 
@@ -830,8 +1068,12 @@ describe('the build loop', () => {
     // downgraded, so passing it on would cost the story the whole iteration.
     setSetting(world.db, 'build_model', 'sonnet');
     setSetting(world.db, 'advisor_model', 'haiku');
-    await serviceFor(world).start(world.session.id);
-    await serviceFor(world).whenIdle(world.session.id);
+    // One service, not two: `whenIdle` only knows about runs its own instance
+    // started, so a second one would resolve straight away and the assertions
+    // below would race the loop.
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
 
     const refused = world.runner.invocations.at(-1);
     // The iteration happened, which is the whole point: the advisor is what
@@ -878,8 +1120,12 @@ describe('the build loop', () => {
     // pointless advisor is a working iteration, so nothing is stripped here.
     setSetting(world.db, 'build_model', 'sonnet');
     setSetting(world.db, 'advisor_model', 'sonnet');
-    await serviceFor(world).start(world.session.id);
-    await serviceFor(world).whenIdle(world.session.id);
+    // One service, not two: `whenIdle` only knows about runs its own instance
+    // started, so a second one would resolve straight away and the assertions
+    // below would race the loop.
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
 
     const invocation = world.runner.invocations.at(-1);
     assert.equal(invocation?.advisor, 'sonnet');

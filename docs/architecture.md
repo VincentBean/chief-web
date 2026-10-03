@@ -120,6 +120,7 @@ no native modules.
 | `repositories` | registered repos: name, SSH URL, GitHub slug, base branch, deploy key |
 | `sessions`     | one row per session: status, branches, schedule, container, PR, error |
 | `stories`      | the stories parsed from a session's `prd.md`, with commit SHAs      |
+| `decisions`    | one row per question a build agent asked the operator ([Decisions](decisions.md)) |
 | `settings`     | key-value configuration (GitHub PAT, concurrency limit, …)          |
 
 Migrations in `server/src/db/migrations.ts` run automatically on server start.

@@ -164,9 +164,21 @@ export function useAppData(): AppData {
   return value;
 }
 
-/** A session that needs the operator: failed, held, or slept through its start. */
+/**
+ * A session that needs the operator: waiting on a decision, failed, held, or
+ * slept through its start.
+ *
+ * `deciding` is first because it is the most literal case of it — an agent is
+ * standing still with a question (decisions US-010) — and the only one where
+ * the operator is the thing that is missing rather than a slot or a fix.
+ */
 export function needsAttention(session: Session): boolean {
-  return session.status === 'failed' || session.status === 'waiting' || session.scheduleMissed;
+  return (
+    session.status === 'deciding' ||
+    session.status === 'failed' ||
+    session.status === 'waiting' ||
+    session.scheduleMissed
+  );
 }
 
 /**
@@ -211,6 +223,9 @@ export function isActive(session: Session): boolean {
   return (
     session.status === 'building' ||
     session.status === 'waiting' ||
+    // Its agent is alive in its container, holding a build slot: active, and
+    // the one kind of active that is waiting on a person (decisions US-010).
+    session.status === 'deciding' ||
     session.status === 'reviewing' ||
     session.status === 'fixing' ||
     session.queuePosition !== null

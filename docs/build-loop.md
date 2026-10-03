@@ -20,7 +20,9 @@ the [FIFO queue](scheduling.md#concurrency-and-the-build-queue). One iteration i
    the next story attempt. It is written to the log as
    `Thinking effort: <level> (session)` or `(default)`. With neither set, no
    `--effort` is passed. The code review, PR feedback and merge conflict fix
-   runs never get the flag. The prompt is chief's `embed/prompt.txt`,
+   runs never get the flag. Last comes `--mcp-config`, pointing at the one MCP
+   server an iteration gets: `chief`, offering `ask_operator` and nothing else
+   ([Decisions](decisions.md)). The prompt is chief's `embed/prompt.txt`,
    ported verbatim into `server/src/build/templates.ts`,
    with the story inlined as JSON plus a chief-web addendum carrying the PRD's
    own context, the current `progress.md`, and what the agent has to leave
@@ -68,7 +70,15 @@ The loop stops itself in five ways:
   it is reaped, so the session is never made startable again while a previous
   agent is still in its workspace.
 
-Not one of them: **a Claude usage limit.** An iteration refused because the
+Not one of them, and not a stop at all: **a question.** An iteration that hits
+a decision only the operator can make calls `ask_operator` and blocks inside
+itself until it is answered. Nothing is given up — the agent keeps its context,
+the container keeps the half-finished working tree, the session keeps its build
+slot — and the iteration's own clock is stopped for as long as the question
+stands, so a wait costs the run neither a retry nor a minute of its budget. The
+session is **deciding** while it waits. See [Decisions](decisions.md).
+
+Not one of them either: **a Claude usage limit.** An iteration refused because the
 account is out of usage has produced neither a status change nor a commit, so it
 looks exactly like a stalled story, and it was cut off part-way, so it looks
 something like an iteration that ran out of time. It is neither. Nothing is

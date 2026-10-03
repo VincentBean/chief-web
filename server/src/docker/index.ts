@@ -18,3 +18,15 @@ export {
   type TerminalSize,
   type VolumeDetails,
 } from './api.js';
+export { ExecDeadline } from './deadline.js';
+export {
+  answerWriteSpec,
+  listRequestFiles,
+  listRequestsSpec,
+  REQUEST_DISCOVERY_MS,
+  REQUEST_POLL_MS,
+  REQUEST_USER,
+  type RequestFile,
+  type RequestFileDocker,
+  writeAnswerFile,
+} from './request-files.js';
