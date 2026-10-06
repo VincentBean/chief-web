@@ -209,11 +209,20 @@ export function Progress({
  * is the one for a ratio that sits at the end of a status row, where the number
  * beside it is already spelled out.
  */
-export function Gauge({ value, label }: { readonly value: number; readonly label: string }) {
+export function Gauge({
+  value,
+  label,
+  tone: forced,
+}: {
+  readonly value: number;
+  readonly label: string;
+  /** Overrides the default thresholds, for a ratio whose danger zone sits elsewhere. */
+  readonly tone?: Tone;
+}) {
   const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
   // The colour is the warning: quiet while there is room, amber as it fills,
   // red once the machine has nothing left to give.
-  const tone: Tone = percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active';
+  const tone: Tone = forced ?? (percent >= 90 ? 'danger' : percent >= 75 ? 'wait' : 'active');
   return (
     <div
       className={`gauge gauge--${tone}`}
@@ -226,6 +235,15 @@ export function Gauge({ value, label }: { readonly value: number; readonly label
       <div className="gauge__fill" style={{ width: `${String(percent)}%` }} />
     </div>
   );
+}
+
+/**
+ * A Claude usage window's bar turns amber from 80% and red from 95%: past
+ * that, a session may stop mid-iteration. Shared by the sidebar and the
+ * account picker so both colour the same number the same way.
+ */
+export function claudeUsageTone(utilization: number): Tone {
+  return utilization >= 95 ? 'danger' : utilization >= 80 ? 'wait' : 'active';
 }
 
 /** Build slots as one cell per slot. */

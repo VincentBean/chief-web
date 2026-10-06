@@ -66,7 +66,12 @@ export interface RecurringTaskBuilds {
 /** What the scheduler's tick calls; `RecurringTaskRunner` is the real one. */
 export interface RecurringTaskFiring {
   /** Fires every due task, at most once each. Returns how many fired. */
-  fireDue(now?: string): Promise<number>;
+  /**
+   * `held` (multiple accounts US-014) leaves a task due without firing it —
+   * its account is on a usage-limit hold — so the first tick after the hold
+   * lifts honours it.
+   */
+  fireDue(now?: string, held?: (task: RecurringTask) => boolean): Promise<number>;
   /** Settles the occurrences whose runs have since ended. Returns how many. */
   settle(): number;
 }
@@ -94,7 +99,10 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
     private readonly events: VoiceEventSink | null = null,
   ) {}
 
-  async fireDue(now: string = nowIso()): Promise<number> {
+  async fireDue(
+    now: string = nowIso(),
+    held: (task: RecurringTask) => boolean = () => false,
+  ): Promise<number> {
     let due: RecurringTask[];
     try {
       due = listDueRecurringTasks(this.db, now);
@@ -115,6 +123,7 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
 
     let fired = 0;
     for (const task of due) {
+      if (held(task)) continue;
       if (await this.fire(task, sessions, now)) fired += 1;
     }
     return fired;
@@ -233,6 +242,9 @@ export class RecurringTaskRunner implements RecurringTaskFiring {
         prTargetBranch: task.prTarget,
         codeReview: task.runCodeReview,
         recurringTaskId: task.id,
+        // Omitted when unset, so the run follows the default account rather
+        // than being pinned to whichever account is the default today.
+        ...(task.claudeAccountId === null ? {} : { claudeAccountId: task.claudeAccountId }),
       });
     } catch (cause) {
       return this.fireFailed(task, now, describe(cause), null);

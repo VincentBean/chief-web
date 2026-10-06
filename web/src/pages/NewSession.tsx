@@ -1,7 +1,12 @@
 import { type FormEvent, useEffect, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
+  ApiError,
+  claudeSignedIn,
   createSession,
+  EFFORT_LEVELS,
+  type EffortLevel,
   featureBranchFor,
   fetchSettings,
   MAX_FEEDBACK_LENGTH,
@@ -18,6 +23,9 @@ import { Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
 
 /** Session names become branch names and directories, so keep them to a slug. */
 const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** Refusals about the chosen account, which belong next to its field. */
+const ACCOUNT_ERRORS = new Set(['claude_account_unknown', 'claude_account_not_authenticated']);
 
 /**
  * Creating a session: the form on the left, what it does on the right. Its
@@ -41,6 +49,14 @@ export function NewSession() {
   const [codeReview, setCodeReview] = useState<boolean | null>(null);
   /** null until the operator ticks or unticks it: it then follows the repository. */
   const [openPullRequest, setOpenPullRequest] = useState<boolean | null>(null);
+  /** `''` follows the global default, which the server resolves at launch. */
+  const [effort, setEffort] = useState<EffortLevel | ''>('');
+  /** The global default for the "Default" label; undefined until it has loaded. */
+  const [defaultEffort, setDefaultEffort] = useState<EffortLevel | null | undefined>(undefined);
+  /** null follows the default account, which the server resolves at launch. */
+  const [claudeAccountId, setClaudeAccountId] = useState<string | null>(null);
+  /** The server refusing the chosen account, shown under the picker. */
+  const [accountError, setAccountError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stderr, setStderr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -50,7 +66,10 @@ export function NewSession() {
   useEffect(() => {
     const controller = new AbortController();
     fetchSettings(controller.signal)
-      .then((settings) => setCodeReview((current) => current ?? settings.codeReviewDefault))
+      .then((settings) => {
+        setCodeReview((current) => current ?? settings.codeReviewDefault);
+        setDefaultEffort(settings.defaultEffort);
+      })
       .catch(() => {
         // A convenience, not a requirement: an unreadable setting leaves it off
         // here and the server resolves the default itself.
@@ -70,6 +89,7 @@ export function NewSession() {
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     setError(null);
+    setAccountError(null);
     setStderr(null);
     if (selected === null) {
       setError('Choose a repository.');
@@ -93,6 +113,8 @@ export function NewSession() {
     if (!effectiveOpenPullRequest) input.codeReview = false;
     // Still loading: say nothing and let the server apply the global default.
     else if (codeReview !== null) input.codeReview = codeReview;
+    if (effort !== '') input.effort = effort;
+    if (claudeAccountId !== null) input.claudeAccountId = claudeAccountId;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
     if (feedbackTooLong) {
       setError(`Feedback can be at most ${MAX_FEEDBACK_LENGTH.toLocaleString()} characters.`);
@@ -123,11 +145,14 @@ export function NewSession() {
         setStderr(result.setup.stderr === '' ? null : result.setup.stderr);
         toast.warn(`${result.session.name} was created but could not be cloned.`);
       })
-      .catch((cause: unknown) => setError(describeError(cause)))
+      .catch((cause: unknown) => {
+        if (cause instanceof ApiError && ACCOUNT_ERRORS.has(cause.code)) setAccountError(cause.message);
+        else setError(describeError(cause));
+      })
       .finally(() => setBusy(false));
   };
 
-  const blocked = claude !== null && !claude.status.authenticated;
+  const blocked = claude !== null && !claudeSignedIn(claude);
 
   return (
     <div className="page page--narrow">
@@ -235,6 +260,50 @@ export function NewSession() {
                     </select>
                     <p className="field__hint">Opened when the last story is done.</p>
                   </div>
+                </div>
+
+                <div className="field">
+                  <label className="field__label" htmlFor="session-effort">
+                    Thinking effort
+                  </label>
+                  <select
+                    id="session-effort"
+                    className="field__input"
+                    value={effort}
+                    onChange={(event) => setEffort(event.target.value as EffortLevel | '')}
+                  >
+                    <option value="">
+                      {defaultEffort === undefined
+                        ? 'Default'
+                        : `Default (${defaultEffort ?? 'CLI default'})`}
+                    </option>
+                    {EFFORT_LEVELS.map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="field__hint">For planning and build. Default follows the setting on the Settings page.</p>
+                </div>
+
+                <div className="field">
+                  <label className="field__label" htmlFor="session-claude-account">
+                    Claude account
+                  </label>
+                  <AccountPicker
+                    id="session-claude-account"
+                    value={claudeAccountId}
+                    onChange={(id) => {
+                      setClaudeAccountId(id);
+                      setAccountError(null);
+                    }}
+                    accounts={claude?.accounts ?? []}
+                    defaultAccountId={claude?.defaultAccountId ?? null}
+                    disabled={claude === null || blocked}
+                  />
+                  <p className={accountError === null ? 'field__hint' : 'field__error'} role={accountError === null ? undefined : 'alert'}>
+                    {accountError ?? 'The subscription its agents run on. Default follows the setting on the Settings page.'}
+                  </p>
                 </div>
 
                 <div className="field">

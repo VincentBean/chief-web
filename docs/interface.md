@@ -8,11 +8,33 @@ Every authenticated page shares one frame: a sidebar with the six places the
 app has — **Overview**, **Sessions**, **Pull requests**, **Repositories**,
 **Terminals**, **Settings** — and, at the bottom, the facts worth having on
 screen at all times: how many build slots are in use, how hard the host's CPU
-and memory are being worked, and whether Claude Code is signed in. When Claude's
-usage limit is holding work, a countdown to the end of the hold sits there too.
+and memory are being worked, and one row per [Claude account](claude-auth.md).
+When Claude's usage limit holds **every** signed-in account, an **On hold**
+countdown to the earliest end of those holds sits there too.
 CPU is the busy fraction since the previous poll, so it reads `…` for the first
 few seconds after a server restart. Below a laptop-width viewport the sidebar becomes a
 drawer behind the menu button.
+
+**The account rows** follow the order of the list in Settings, and each links to
+[Settings → Claude Code](#settings). A row shows a status dot and the account's
+nickname (or email), and under it the account's plan usage: a **5h** and a
+**7d** bar with its percentage, or `–` for a window with no reading (an API-key
+login has none). Instead of the bars a row can read:
+
+- **not signed in**, in red — the account's last status probe said so;
+- **sign in again**, in red — its login has expired and could not be refreshed;
+- an hourglass and **on hold · 37m**, in amber — the account is held by its
+  [usage limit](build-loop.md#the-usage-limit-hold) and that is the time left;
+  its work runs on another account or waits
+  ([failover](claude-auth.md#failover)).
+
+The bars take their colour from the usage: **green below 80%**, **amber from
+80%**, **red from 95%** — the point above which an account is no longer chosen
+for failover. Hovering a row shows the name (with the email under a nickname)
+and when each window resets. With no account at all the sidebar reads **Claude:
+no account** in red. Usage and holds come with the five-second stats poll;
+names and sign-in state are read when the app loads and refreshed by the
+Settings page.
 
 The **Sentry** item carries a red count of the issues waiting on your decision —
 those with a proposed fix plan, local status `planned`, listed under **Needs your
@@ -86,7 +108,12 @@ overview and the list at once; a hidden tab polls nothing.
 
 **New session** (`/sessions/new`) is its own page: repository, name, base
 branch, pull request target, an optional scheduled start and a **Code review**
-checkbox (seeded from the [global default](#settings)), and an optional
+checkbox (seeded from the [global default](#settings)), a **Thinking effort**
+select (**Default** or one of the five levels; the Default option names the
+effort it currently resolves to, such as *Default (high)*, see
+[Thinking effort](sessions.md#thinking-effort)), a **Claude account** picker
+(**Default (<name>)** or one of the signed-in accounts, each with its usage; see
+[Claude account](sessions.md#claude-account)), and an optional
 **Feedback** box, with what happens next explained beside it. Feedback makes it
 a [feedback session](sessions.md#feedback-sessions); the box counts characters
 up to the 4000 allowed and the form refuses to submit past them. A successful create lands on the session page; a
@@ -104,7 +131,18 @@ attempt counters and the story list while building, the failure reason and what
 a retry will do when failed. The side column carries the facts (branches, pull
 request, timestamps), the PRD's parse state, the schedule, and the
 [code review](code-review.md) toggle, which stays changeable until the session
-is finished. A feedback session shows its feedback in a **Feedback** panel at
+is finished. Below it, a **Thinking effort** card shows the effort the session's
+next launch will use as a badge: its own level, else the Settings default, else
+*CLI default*. The card's select changes it (Default or one of the five
+levels) and saves on change. While a build runs, the card notes that the change
+applies from the next iteration. On a finished session the select is disabled.
+See [Thinking effort](sessions.md#thinking-effort). Under that, a **Claude
+account** card names the account the session runs on as a badge and holds the
+same picker as the new-session form, saving on change; while the session's own
+account is on hold and it runs elsewhere, the card reads *Running on <other>
+while <own> is on hold until <time>*. See
+[Claude account](sessions.md#claude-account). With more than one account, the
+sessions list shows each session's account under its name. A feedback session shows its feedback in a **Feedback** panel at
 the top of the main column, whatever its stage. The agent log runs full width underneath and follows live output
 while the loop runs.
 
@@ -208,6 +246,10 @@ the `settings` table so it can be changed without a restart:
   configured plus its last four characters. **Validate** calls
   `GET https://api.github.com/user` with the token and shows the account it
   authenticates as, or GitHub's error.
+- **Account for PR review, feedback and conflict fixes** (Settings → GitHub) —
+  the [Claude account](claude-auth.md#settings) code review, PR feedback and
+  merge-conflict fix runs mount. **Default** follows the default account.
+  Applies from the next run.
 - **Max concurrent building sessions** — the build concurrency cap.
   `MAX_CONCURRENT_SESSIONS` only supplies the default until a value is saved here.
 - **Agent timeout (minutes per iteration)** — how long one headless `claude -p`
@@ -255,6 +297,13 @@ the `settings` table so it can be changed without a restart:
   rates, uncached, so it is billed **in addition to** the build model. The
   feature is experimental. See [The advisor](build-loop.md#the-advisor) and
   [Claude Code's advisor docs](https://code.claude.com/docs/en/advisor).
+- **Default thinking effort** — the `--effort` level for sessions that have no
+  effort of their own: **CLI default** (no flag; the default) or `low`,
+  `medium`, `high`, `xhigh`, `max`. It applies to the planning terminal and
+  build iterations only, never to code review, PR feedback or merge-conflict
+  fixes. A change reaches every session left at **Default** from its next
+  launch: the next terminal opened, or the next build iteration. See
+  [Thinking effort](sessions.md#thinking-effort).
 - **Planning questions** — the [quick question buttons](sessions.md#planning)
   above the planning terminal, edited one question per line. The defaults are
   *Any open questions?* and *Re-check the entire PRD for issues, gaps and other
@@ -280,5 +329,12 @@ the `settings` table so it can be changed without a restart:
   session containers. Blank restores the defaults (`chief-web` /
   `chief-web@localhost`), which are also baked into the runner image. Use an
   address your GitHub account owns if you want the commits linked to it.
-- **Claude Code** — the one-time interactive login and its status; see
-  [Claude authentication](claude-auth.md).
+- **Claude Code** — the list of Claude accounts: add one (an interactive login
+  in a browser terminal), rename it, sign it in again, re-check it, remove it,
+  and **Make default** to choose the **default account** everything without an
+  account of its own runs on. Each row shows the account's status and its
+  5-hour and 7-day usage. See [Claude authentication](claude-auth.md).
+- **Account for Sentry fixes** (Settings → Sentry) — the Claude account Sentry
+  issue planning and fix sessions run on; **Default** follows the default
+  account. The rest of the Sentry settings are described in
+  [Sentry](sentry.md#2-paste-it-into-settings).

@@ -41,7 +41,12 @@ import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { getAgentTimeoutMs, getBuildModel, getGithubToken } from '../settings/index.js';
+import {
+  getAgentTimeoutMs,
+  getBuildModel,
+  getGithubToken,
+  prRunClaudeAccountId,
+} from '../settings/index.js';
 import { runPrCheckout } from './checkout.js';
 import { parseOutcome } from './outcome.js';
 import { CONTAINER_OUTCOME_PATH, type FeedbackItem, prFeedbackPrompt } from './prompts.js';
@@ -129,8 +134,8 @@ function isSettled(cause: unknown): cause is PrFeedbackError {
 export interface BuildSlots {
   freeSlots(): number;
   pump(): Promise<void>;
-  /** Parks every building session on `until` after this run was refused. */
-  holdAll(until: string): Promise<void>;
+  /** Parks every building session on `accountId` until `until` after this run was refused. */
+  holdAll(accountId: string | null, until: string): Promise<void>;
   /** Puts work at the back of the unified FIFO queue, or leaves it where it is. */
   enqueue(kind: BuildQueueKind, refId: string): BuildQueueEntry;
   /** Takes work back out of that queue; false when it was not in it. */
@@ -148,11 +153,15 @@ export interface BuildSlots {
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
 export interface PrRunContainers {
-  startPrRun(run: {
-    id: string;
-    prNumber: number;
-    repositoryId: string;
-  }): Promise<SessionContainerView>;
+  /** `accountId` omitted: Settings → GitHub's PR automation account, else the default. */
+  startPrRun(
+    run: {
+      id: string;
+      prNumber: number;
+      repositoryId: string;
+    },
+    accountId?: string,
+  ): Promise<SessionContainerView>;
   removePrRun(runId: string): Promise<void>;
 }
 
@@ -309,7 +318,8 @@ export class PrFeedbackService {
     // (US-007). The queue is no help against a hold — the pump would walk into
     // the same wall — so it is refused outright, and named the moment it is
     // worth asking again.
-    const held = this.hold.until();
+    // The account the run's container would mount (US-014).
+    const held = this.hold.waitingUntil(prRunClaudeAccountId(this.db));
     if (held !== null) {
       throw new PrFeedbackError(409, 'usage_limit_hold', heldStartMessage(prNumber, held));
     }
@@ -457,6 +467,9 @@ export class PrFeedbackService {
         const run = this.queuedRun(entry);
         return run !== null && this.live.has(run.id);
       },
+      // PR runs launch on the PR automation account (US-013), so that is the
+      // hold the queue checks (US-014).
+      accountId: () => prRunClaudeAccountId(this.db),
       start: async (entry) => {
         const ref = this.reference(entry);
         if (ref === null) {
@@ -647,12 +660,15 @@ export class PrFeedbackService {
       // into the same wall a few seconds behind — and then the run is failed,
       // because a feedback pass is single-shot and comes back through Retry
       // rather than resuming by itself.
-      const until = this.hold.arm();
+      // The account the container mounted: the failover one while the PR
+      // automation account is held (US-015).
+      const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
+      const until = this.hold.arm(account);
       // The agent is still in the container with the checkout under it and this
       // exec is being walked away from; the retry checks the same branch out.
       await this.runner.reap(run.id, container.id);
       this.fail(run.id, 'agent', heldRunMessage(until));
-      await this.slots.holdAll(until);
+      await this.slots.holdAll(account, until);
       return;
     }
     if (result.timedOut) {

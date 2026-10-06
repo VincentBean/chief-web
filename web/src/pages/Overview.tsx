@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   type BuildSlot,
   buildSlotKindLabel,
+  claudeSignedIn,
   describeBuildSlots,
   failureStageLabel,
   retrySession,
@@ -69,7 +70,7 @@ export function Overview() {
     .slice(0, 6);
 
   const setup = {
-    claude: claude?.status.authenticated === true,
+    claude: claude !== null && claudeSignedIn(claude),
     repository: (repositories ?? []).some((r) => r.keyConfigured),
     session: all.length > 0,
   };

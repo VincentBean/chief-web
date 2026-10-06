@@ -91,6 +91,7 @@ export function agentCommand(
   prompt: string,
   model?: string | null,
   advisor?: string | null,
+  effort?: string | null,
 ): string[] {
   // `stream-json` is what makes the live log possible: the default text format
   // prints nothing until the agent exits, which for one iteration is up to an
@@ -101,10 +102,12 @@ export function agentCommand(
   // sits right after it: the pair reads as one choice, and no advisor at all
   // is the only way to launch the iteration the way it is launched today —
   // the flag is never passed bare and never passed with an empty value.
+  // `--effort` follows the pair under the same rule: no effort is today's argv.
   return [
     'claude',
     ...(model == null ? [] : ['--model', model]),
     ...(advisor == null || advisor === '' ? [] : ['--advisor', advisor]),
+    ...(effort == null || effort === '' ? [] : ['--effort', effort]),
     '--dangerously-skip-permissions',
     '--output-format',
     'stream-json',

@@ -125,6 +125,15 @@ export function isDeliveryStage(
   );
 }
 
+/** Thinking efforts Claude Code accepts as `--effort`, lowest first. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export function isEffortLevel(value: string): value is EffortLevel {
+  return (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 /** Session names are slugs: letters, numbers, hyphens and underscores. */
 export const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -189,6 +198,22 @@ export interface Session {
    * Null for every session that was not started from feedback.
    */
   readonly feedback: string | null;
+  /**
+   * The thinking effort every launch of this session runs at (thinking effort
+   * US-002), or null to follow the global default.
+   */
+  readonly effort: EffortLevel | null;
+  /**
+   * The Claude account every container of this session mounts (multiple
+   * accounts US-009), or null to follow the default account.
+   */
+  readonly claudeAccountId: string | null;
+  /**
+   * The account its container mounts instead while its own account is on a
+   * usage-limit hold (multiple accounts US-015), or null when it runs on its
+   * own. Written by the orchestrator at each agent launch.
+   */
+  readonly failoverClaudeAccountId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -210,6 +235,10 @@ export interface CreateSessionInput {
   readonly recurringTaskId?: string | null;
   /** The feedback the session was started from; defaults to null. */
   readonly feedback?: string | null;
+  /** The thinking effort; defaults to null, the global default. */
+  readonly effort?: EffortLevel | null;
+  /** The Claude account; defaults to null, the default account. */
+  readonly claudeAccountId?: string | null;
 }
 
 export interface UpdateSessionInput {
@@ -230,6 +259,9 @@ export interface UpdateSessionInput {
   readonly recurringTaskId?: string | null;
   readonly prDescription?: string | null;
   readonly feedback?: string | null;
+  readonly effort?: EffortLevel | null;
+  readonly claudeAccountId?: string | null;
+  readonly failoverClaudeAccountId?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -255,6 +287,9 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   recurringTaskId: 'recurring_task_id',
   prDescription: 'pr_description',
   feedback: 'feedback',
+  effort: 'effort',
+  claudeAccountId: 'claude_account_id',
+  failoverClaudeAccountId: 'failover_claude_account_id',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -287,6 +322,16 @@ function failureStageOf(row: Row): FailureStage | null {
   return value as FailureStage;
 }
 
+/**
+ * A stored effort that is not one of {@link EFFORT_LEVELS} — hand-edited, or
+ * from a level Claude Code has since dropped — reads as null, so a launch
+ * falls back to the default instead of passing an unknown `--effort`.
+ */
+function effortOf(row: Row): EffortLevel | null {
+  const value = nullableText(row, 'effort');
+  return value !== null && isEffortLevel(value) ? value : null;
+}
+
 export function mapSession(row: Row): Session {
   return {
     id: text(row, 'id'),
@@ -308,6 +353,9 @@ export function mapSession(row: Row): Session {
     recurringTaskId: nullableText(row, 'recurring_task_id'),
     prDescription: nullableText(row, 'pr_description'),
     feedback: nullableText(row, 'feedback'),
+    effort: effortOf(row),
+    claudeAccountId: nullableText(row, 'claude_account_id'),
+    failoverClaudeAccountId: nullableText(row, 'failover_claude_account_id'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -337,6 +385,9 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     recurringTaskId: input.recurringTaskId ?? null,
     prDescription: null,
     feedback: input.feedback ?? null,
+    effort: input.effort ?? null,
+    claudeAccountId: input.claudeAccountId ?? null,
+    failoverClaudeAccountId: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -346,8 +397,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
         waiting_until, code_review, open_pull_request, recurring_task_id, feedback,
-        created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        effort, claude_account_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -366,6 +417,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     sqlBoolean(session.openPullRequest),
     session.recurringTaskId,
     session.feedback,
+    session.effort,
+    session.claudeAccountId,
     session.createdAt,
     session.updatedAt,
   );

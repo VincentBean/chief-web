@@ -68,6 +68,15 @@ export const ADVISOR_MODELS = ['opus', 'sonnet', 'fable'] as const;
 
 export type AdvisorModel = (typeof ADVISOR_MODELS)[number];
 
+/**
+ * Thinking effort levels Claude Code accepts as `--effort`, mirroring the
+ * server's `EFFORT_LEVELS`. The `<select>` uses `''` for "CLI default", which
+ * is sent as `null`.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
 /** Mirrors the server's `AppSettings`: the token is masked to its last 4 chars. */
 export interface Settings {
   githubToken: { configured: boolean; last4: string | null };
@@ -98,6 +107,8 @@ export interface Settings {
   reviewModel: AgentModel | null;
   /** Second model advising each build iteration; `null` means no advisor. */
   advisorModel: AdvisorModel | null;
+  /** Thinking effort for planning and build when a session has none; `null` leaves it to Claude Code. */
+  defaultEffort: EffortLevel | null;
   /** Whether new sessions start with their code-review flag on (US-004). */
   codeReviewDefault: boolean;
   /** One-click questions offered in the planning terminal; `[]` shows none. */
@@ -111,6 +122,12 @@ export interface Settings {
   voice: VoiceSettings;
   /** Scribe's credits per minute, measured after a Scribe call (voice US-023); null before one. */
   voiceScribeCreditsPerMin: number | null;
+  /** The account the operator made the default; null when the fallback applies. */
+  defaultClaudeAccountId: string | null;
+  /** The account PR review, feedback and conflict fixes run on; null follows the default. */
+  prAutomationClaudeAccountId: string | null;
+  /** The account Sentry plans and fixes run on; null follows the default. */
+  sentryClaudeAccountId: string | null;
 }
 
 /** Mirrors the server's `VOICE_STT_PROVIDERS` and the other voice enums. */
@@ -175,6 +192,8 @@ export interface SettingsUpdate {
   reviewModel?: AgentModel | null;
   /** `null` turns the advisor off again; it is off unless chosen. */
   advisorModel?: AdvisorModel | null;
+  /** `null` hands the effort back to Claude Code's own default. */
+  defaultEffort?: EffortLevel | null;
   codeReviewDefault?: boolean;
   /** Trimmed and blank entries dropped by the server; `null` restores the defaults. */
   planningQuestions?: string[] | null;
@@ -185,6 +204,11 @@ export interface SettingsUpdate {
   openrouterApiKey?: string | null;
   elevenlabsApiKey?: string | null;
   voice?: Partial<VoiceSettings>;
+  /** An existing account id; `null` hands the choice to the fallback. */
+  defaultClaudeAccountId?: string | null;
+  /** An existing account id; `null` follows the default account. */
+  prAutomationClaudeAccountId?: string | null;
+  sentryClaudeAccountId?: string | null;
 }
 
 export async function fetchSettings(signal?: AbortSignal): Promise<Settings> {
@@ -397,13 +421,109 @@ export interface ClaudeAuthStatus {
 /** The temporary `claude auth login` container and its terminal, if running. */
 export interface ClaudeLogin {
   active: boolean;
+  /** The account being signed in; null when no login is open. */
+  accountId: string | null;
   terminalId: string | null;
   containerId: string | null;
-  containerName: string;
+  containerName: string | null;
+}
+
+/** Mirrors the server's `ClaudeAccountStatusView` (multiple accounts US-004). */
+export interface ClaudeAccountStatus {
+  id: string;
+  nickname: string | null;
+  /** The last probed profile; kept while the account is signed out. */
+  email: string | null;
+  organization: string | null;
+  subscription: string | null;
+  authenticated: boolean;
+  /** Why the check could not run; `authenticated` is then always false. */
+  error: string | null;
+  checkedAt: string;
+  /** 5-hour and 7-day plan usage as last fetched (US-005); null before the first fetch. */
+  usage: ClaudeUsage | null;
+}
+
+/** One rolling limit window (multiple accounts US-005). */
+export interface ClaudeUsageWindow {
+  /** Percentage used, 0–100. */
+  utilization: number;
+  /** When it resets; null when nothing has been used in it yet. */
+  resetsAt: string | null;
+}
+
+/** Mirrors the server's `ClaudeUsage`. A window is null when the account has none (API-key logins). */
+export interface ClaudeUsage {
+  fiveHour: ClaudeUsageWindow | null;
+  sevenDay: ClaudeUsageWindow | null;
+  fetchedAt: string;
+  error: string | null;
+}
+
+/** The usage error that means only a new login helps; the refresh token is gone. */
+export const CLAUDE_SIGN_IN_AGAIN = 'sign in again';
+
+export function claudeNeedsSignIn(usage: ClaudeUsage | null | undefined): boolean {
+  return usage?.error === CLAUDE_SIGN_IN_AGAIN;
+}
+
+/** "5h 42% · 7d 10%", leaving out a window the account does not have; null when there is neither. */
+export function describeClaudeUsage(usage: ClaudeUsage | null | undefined): string | null {
+  if (usage == null) return null;
+  const parts: string[] = [];
+  if (usage.fiveHour !== null) parts.push(`5h ${String(Math.round(usage.fiveHour.utilization))}%`);
+  if (usage.sevenDay !== null) parts.push(`7d ${String(Math.round(usage.sevenDay.utilization))}%`);
+  return parts.length === 0 ? null : parts.join(' · ');
 }
 
 export interface ClaudeState {
-  status: ClaudeAuthStatus;
+  /** Every account in display order. */
+  accounts: ClaudeAccountStatus[];
+  /** The account a launch uses unless told otherwise; null when none exist. */
+  defaultAccountId: string | null;
+  /** False when nobody chose it: the signed-in account with the lowest position. */
+  defaultIsExplicit: boolean;
+  login: ClaudeLogin;
+}
+
+/** The nickname, else the email, else the bare id of an account never signed in. */
+export function claudeAccountName(account: Pick<ClaudeAccountStatus, 'id' | 'nickname' | 'email'>): string {
+  return account.nickname ?? account.email ?? `Account ${account.id.slice(0, 8)}`;
+}
+
+/** Sessions can launch once any account is signed in. */
+export function claudeSignedIn(state: ClaudeState): boolean {
+  return state.accounts.some((account) => account.authenticated);
+}
+
+/** One account's entry in the state, or null when it is not listed. */
+export function claudeAccountStatus(
+  state: ClaudeState,
+  accountId: string | null,
+): ClaudeAccountStatus | null {
+  return state.accounts.find((account) => account.id === accountId) ?? null;
+}
+
+/** Mirrors the server's `ClaudeAccount` row. */
+export interface ClaudeAccount {
+  id: string;
+  nickname: string | null;
+  email: string | null;
+  organization: string | null;
+  subscription: string | null;
+  authMethod: string | null;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Starting or ending one account's login. `account` is null when closing an
+ * abandoned "add account" login deleted the account it had created.
+ */
+export interface ClaudeAccountLogin {
+  account: ClaudeAccount | null;
+  status: ClaudeAuthStatus | null;
   login: ClaudeLogin;
 }
 
@@ -418,14 +538,65 @@ export async function fetchClaudeState(
   return api<ClaudeState>(path, options.signal ? { signal: options.signal } : {});
 }
 
-/** Spawns the login container and opens the terminal running the login flow. */
-export async function startClaudeLogin(): Promise<ClaudeState> {
-  return api<ClaudeState>('/api/claude/login', { method: 'POST' });
+/** Adds a Claude account and opens the terminal that signs it in. */
+export async function addClaudeAccount(): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>('/api/claude/accounts', { method: 'POST' });
 }
 
-/** Closes the login terminal, removes the container, and re-checks the status. */
-export async function stopClaudeLogin(): Promise<ClaudeState> {
-  return api<ClaudeState>('/api/claude/login', { method: 'DELETE' });
+/** Opens the login terminal of an existing account, to sign it in again. */
+export async function startClaudeLogin(accountId: string): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>(`/api/claude/accounts/${encodeURIComponent(accountId)}/login`, {
+    method: 'POST',
+  });
+}
+
+/** Closes an account's login terminal, removes the container, and re-probes it. */
+export async function stopClaudeLogin(accountId: string): Promise<ClaudeAccountLogin> {
+  return api<ClaudeAccountLogin>(`/api/claude/accounts/${encodeURIComponent(accountId)}/login`, {
+    method: 'DELETE',
+  });
+}
+
+/** Sets or clears (`null`, show the email) an account's nickname (US-006). */
+export async function renameClaudeAccount(accountId: string, nickname: string | null): Promise<ClaudeAccount> {
+  return api<ClaudeAccount>(`/api/claude/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ nickname }),
+  });
+}
+
+/** Makes an account the one launches use unless told otherwise. */
+export async function makeDefaultClaudeAccount(accountId: string): Promise<{ defaultAccountId: string | null }> {
+  return api<{ defaultAccountId: string | null }>(
+    `/api/claude/accounts/${encodeURIComponent(accountId)}/default`,
+    { method: 'POST' },
+  );
+}
+
+/** Re-probes one account, skipping the cached status. */
+export async function checkClaudeAccount(accountId: string): Promise<ClaudeAccountStatus> {
+  return api<ClaudeAccountStatus>(`/api/claude/accounts/${encodeURIComponent(accountId)}/check`, {
+    method: 'POST',
+  });
+}
+
+/** How many sessions and recurring tasks name the account explicitly. */
+export interface ClaudeAccountBindings {
+  sessions: number;
+  recurringTasks: number;
+}
+
+export async function fetchClaudeAccountBindings(accountId: string): Promise<ClaudeAccountBindings> {
+  return api<ClaudeAccountBindings>(`/api/claude/accounts/${encodeURIComponent(accountId)}/bindings`);
+}
+
+/**
+ * Removes an account and its credentials. Refused with 409 `account_is_default`
+ * while it is the default and others exist, and `account_in_use` while a
+ * container mounting it runs.
+ */
+export async function removeClaudeAccount(accountId: string): Promise<void> {
+  await api<void>(`/api/claude/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
 }
 
 /** Mirrors the server's `RepositoryView`: the private key is never included. */
@@ -615,6 +786,17 @@ export interface Session {
   pushedOnly: boolean;
   /** The feedback the session was started from; null when it was not. */
   feedback: string | null;
+  /** The session's own thinking effort; null follows the global default. */
+  effort: EffortLevel | null;
+  /** The session's own Claude account; null follows the default account. */
+  claudeAccountId: string | null;
+  /** The account its next container mounts; null only with no account at all. */
+  effectiveClaudeAccountId: string | null;
+  /**
+   * The account the session runs on while its own is on hold (failover,
+   * US-015); null when it runs on its own account.
+   */
+  failoverClaudeAccountId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -678,6 +860,10 @@ export interface SessionInput {
    * `MAX_FEEDBACK_LENGTH` characters once trimmed, or the server answers 400.
    */
   feedback?: string;
+  /** Omit or null to follow the global default thinking effort. */
+  effort?: EffortLevel | null;
+  /** Omit or null to run on the default Claude account. */
+  claudeAccountId?: string | null;
 }
 
 /** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */
@@ -962,6 +1148,29 @@ export async function setSessionCodeReview(id: string, codeReview: boolean): Pro
 }
 
 /**
+ * Sets this session’s thinking effort, or `null` to follow the global
+ * default (US-005). A running build picks it up from its next iteration;
+ * refused once the session is finished.
+ */
+export async function setSessionEffort(id: string, effort: EffortLevel | null): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/effort`, {
+    method: 'PUT',
+    body: JSON.stringify({ effort }),
+  });
+}
+
+/**
+ * Binds the session to a Claude account, or with `null` back to the default
+ * account (multiple accounts US-012). Refused once no agent runs again.
+ */
+export async function setSessionClaudeAccount(id: string, claudeAccountId: string | null): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/account`, {
+    method: 'PATCH',
+    body: JSON.stringify({ claudeAccountId }),
+  });
+}
+
+/**
  * Turns opening a pull request for this session on or off (US-008). Refused
  * once the pull request exists or the delivery is over.
  */
@@ -1144,6 +1353,8 @@ export interface Stats {
    * plan waiting on the operator.
    */
   sentry: { configured: boolean; awaitingDecision: number };
+  /** Every Claude account's cached usage and hold, in display order (multiple accounts US-005). */
+  accounts: { id: string; usage: ClaudeUsage | null; holdUntil: string | null }[];
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];
@@ -1297,6 +1508,8 @@ export interface RecurringTask {
   prTarget: PrTargetBranch;
   runCodeReview: boolean;
   paused: boolean;
+  /** The account every run is created on; null follows the default account. */
+  claudeAccountId: string | null;
   /** UTC ISO-8601 of the next occurrence; null while the task is paused. */
   nextRunAt: string | null;
   lastOutcome: RecurringTaskOutcome | null;
@@ -1319,6 +1532,8 @@ export interface RecurringTaskInput {
   prTarget?: PrTargetBranch;
   runCodeReview?: boolean;
   paused?: boolean;
+  /** `null` hands the task back to the default account. */
+  claudeAccountId?: string | null;
 }
 
 export async function fetchRecurringTasks(signal?: AbortSignal): Promise<RecurringTask[]> {
@@ -1358,6 +1573,7 @@ export interface CreateRecurringTaskInput {
   prTarget?: PrTargetBranch;
   runCodeReview?: boolean;
   paused?: boolean;
+  claudeAccountId?: string | null;
 }
 
 export async function createRecurringTask(input: CreateRecurringTaskInput): Promise<RecurringTask> {

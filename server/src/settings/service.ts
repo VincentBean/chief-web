@@ -1,10 +1,16 @@
 import type { Config } from '../config.js';
 import {
+  type ClaudeAccount,
   type Database,
   deleteSetting,
+  getClaudeAccount,
+  type EffortLevel,
   getSetting,
   getSettingNumber,
+  isEffortLevel,
+  listClaudeAccounts,
   setSetting,
+  type Session,
   type SettingKey,
   setSettingNumber,
   withTransaction,
@@ -114,6 +120,9 @@ export function isAdvisorModel(value: string): value is AdvisorModel {
   return (ADVISOR_MODELS as readonly string[]).includes(value);
 }
 
+// The effort levels live in the db layer, because a session stores one too.
+export { EFFORT_LEVELS, type EffortLevel, isEffortLevel } from '../db/index.js';
+
 /**
  * Which model plans a Sentry issue — the one call that triages it and writes
  * its proposed fix plan (US-002, presented as the *planning model* since
@@ -216,6 +225,8 @@ export interface AppSettings {
   readonly reviewModel: AgentModel | null;
   /** Model advising each build iteration; `null` means no advisor at all. */
   readonly advisorModel: AdvisorModel | null;
+  /** Thinking effort for sessions without their own; `null` passes no `--effort`. */
+  readonly defaultEffort: EffortLevel | null;
   /** Whether new sessions are created with the code-review flag already on. */
   readonly codeReviewDefault: boolean;
   /** Standard questions offered in the planning terminal; never absent. */
@@ -230,6 +241,19 @@ export interface AppSettings {
   readonly voice: VoiceSettings;
   /** Read-only: Scribe's measured credits per minute, null before a Scribe call (US-023). */
   readonly voiceScribeCreditsPerMin: number | null;
+  /**
+   * The Claude account the operator made the default, or `null` when none is
+   * chosen and the implicit fallback applies (multiple accounts US-007).
+   * `GET /api/claude` reports the account that actually resolves.
+   */
+  readonly defaultClaudeAccountId: string | null;
+  /**
+   * The account PR review, feedback and conflict fixes run on, or `null` for
+   * the default (US-013). Like the default, an id naming no account reads null.
+   */
+  readonly prAutomationClaudeAccountId: string | null;
+  /** The account Sentry plans and fixes run on, or `null` for the default (US-013). */
+  readonly sentryClaudeAccountId: string | null;
 }
 
 export interface AppSettingsUpdate {
@@ -254,6 +278,8 @@ export interface AppSettingsUpdate {
   readonly reviewModel?: AgentModel | null;
   /** `null` means no advisor at all; omitted leaves the stored value. */
   readonly advisorModel?: AdvisorModel | null;
+  /** `null` means no `--effort` flag; omitted leaves the stored value. */
+  readonly defaultEffort?: EffortLevel | null;
   readonly codeReviewDefault?: boolean;
   /** `null` restores the default questions; omitted leaves the stored list. */
   readonly planningQuestions?: string[] | null;
@@ -264,6 +290,111 @@ export interface AppSettingsUpdate {
   readonly openrouterApiKey?: string | null;
   readonly elevenlabsApiKey?: string | null;
   readonly voice?: VoiceSettingsUpdate;
+  /** An existing account id, or `null` for the implicit fallback. */
+  readonly defaultClaudeAccountId?: string | null;
+  /** The same rules as `defaultClaudeAccountId`; `null` follows the default. */
+  readonly prAutomationClaudeAccountId?: string | null;
+  readonly sentryClaudeAccountId?: string | null;
+}
+
+/** An update the request body was fine with but the stored state refuses. */
+export class SettingsError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SettingsError';
+  }
+}
+
+/** The default Claude account and whether the operator chose it (US-007). */
+export interface DefaultClaudeAccount {
+  readonly id: string;
+  readonly explicit: boolean;
+}
+
+/**
+ * Whether the row records a signed-in account: the status probe writes the
+ * auth method on every successful probe and clears it again when the CLI
+ * says the account is signed out, so this needs neither Docker nor a cache.
+ */
+export function claudeAccountSignedIn(account: ClaudeAccount): boolean {
+  return account.authMethod !== null;
+}
+
+/** A stored account id setting, or null when unset or naming no account. */
+function storedClaudeAccountId(db: Database, key: SettingKey): string | null {
+  const chosen = getSetting(db, key);
+  return chosen !== null && getClaudeAccount(db, chosen) !== null ? chosen : null;
+}
+
+/** The stored default account id, or null when unset or naming no account. */
+export function getExplicitDefaultClaudeAccountId(db: Database): string | null {
+  return storedClaudeAccountId(db, 'default_claude_account_id');
+}
+
+/**
+ * The account chosen for PR review, PR feedback and conflict fixes (US-013),
+ * or null when those follow the default account.
+ */
+export function getPrAutomationClaudeAccountId(db: Database): string | null {
+  return storedClaudeAccountId(db, 'pr_automation_claude_account_id');
+}
+
+/** The account chosen for Sentry plans and fixes (US-013), or null for the default. */
+export function getSentryClaudeAccountId(db: Database): string | null {
+  return storedClaudeAccountId(db, 'sentry_claude_account_id');
+}
+
+/**
+ * The account a launch runs on when nothing more specific was chosen (US-007):
+ * the operator's choice when there is one, otherwise the signed-in account
+ * with the lowest position. With nobody signed in it is the first account all
+ * the same, so "Sign in" and the launch guard have an account to talk about;
+ * null only when there are no accounts at all.
+ */
+export function getDefaultClaudeAccount(db: Database): DefaultClaudeAccount | null {
+  const chosen = getExplicitDefaultClaudeAccountId(db);
+  if (chosen !== null) return { id: chosen, explicit: true };
+  const accounts = listClaudeAccounts(db);
+  const fallback = accounts.find(claudeAccountSignedIn) ?? accounts[0];
+  return fallback === undefined ? null : { id: fallback.id, explicit: false };
+}
+
+/**
+ * The account a session — or a recurring task's run — launches on (multiple
+ * accounts US-009): its own choice, else the default. The one definition the
+ * orchestrator, the session views and the usage-limit hold (US-014) share.
+ */
+export function effectiveClaudeAccountId(
+  db: Database,
+  owner: { readonly claudeAccountId: string | null },
+): string | null {
+  return owner.claudeAccountId ?? getDefaultClaudeAccount(db)?.id ?? null;
+}
+
+/**
+ * The account a session's container last launched agent work on (multiple
+ * accounts US-015): the failover account the orchestrator recorded while its
+ * own account was held, else its effective account. What a refusal arms.
+ */
+export function runningClaudeAccountId(
+  db: Database,
+  session: { readonly claudeAccountId: string | null; readonly failoverClaudeAccountId: string | null },
+): string | null {
+  return session.failoverClaudeAccountId ?? effectiveClaudeAccountId(db, session);
+}
+
+/**
+ * The account a PR automation run (review, feedback, conflict fix) launches on
+ * when the caller names none (US-013): the PR automation choice, else the
+ * default. `SessionOrchestrator.startPrRun` resolves exactly this way, so the
+ * hold checked before a run is the hold of the account it will run on.
+ */
+export function prRunClaudeAccountId(db: Database): string | null {
+  return getPrAutomationClaudeAccountId(db) ?? getDefaultClaudeAccount(db)?.id ?? null;
 }
 
 /**
@@ -540,6 +671,38 @@ export function getAdvisorModel(db: Database): AdvisorModel | null {
  */
 export function getStoredAdvisorModel(db: Database): string | null {
   return getSetting(db, 'advisor_model');
+}
+
+/**
+ * The thinking effort a session launches with when it has no effort of its
+ * own, or `null` to pass no `--effort` at all and let the CLI apply its default.
+ *
+ * Read with the same fail-safe as {@link getPlanningModel}: a stored value that
+ * is not in {@link EFFORT_LEVELS} — a hand-edited `ultra`, say — reads as
+ * `null` rather than being handed to a CLI that might refuse it.
+ */
+export function getDefaultEffort(db: Database): EffortLevel | null {
+  const stored = getSetting(db, 'default_effort');
+  return stored !== null && isEffortLevel(stored) ? stored : null;
+}
+
+/** The thinking effort a run launches with, and where it came from. */
+export interface EffortChoice {
+  readonly level: EffortLevel;
+  /** `session` when the session chose it, `default` when the global setting did. */
+  readonly source: 'session' | 'default';
+}
+
+/**
+ * The effective thinking effort for a session: its own `effort` when it has
+ * one, otherwise {@link getDefaultEffort}, otherwise `null` — no `--effort` at
+ * all, which leaves the choice to the CLI. Read at launch rather than stored at
+ * creation, so a changed default reaches every session that has none of its own.
+ */
+export function effortFor(db: Database, session: Pick<Session, 'effort'>): EffortChoice | null {
+  if (session.effort !== null) return { level: session.effort, source: 'session' };
+  const fallback = getDefaultEffort(db);
+  return fallback === null ? null : { level: fallback, source: 'default' };
 }
 
 function readModel(
@@ -1049,6 +1212,7 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     buildModel: getBuildModel(db),
     reviewModel: getReviewModel(db),
     advisorModel: getAdvisorModel(db),
+    defaultEffort: getDefaultEffort(db),
     codeReviewDefault: getCodeReviewDefault(db),
     planningQuestions: getPlanningQuestions(db),
     gitAuthorName: identity.name,
@@ -1057,6 +1221,9 @@ export function readAppSettings(db: Database, config: Config): AppSettings {
     elevenlabsApiKey: masked(getElevenLabsApiKey(db)),
     voice: getVoiceSettings(db),
     voiceScribeCreditsPerMin: getVoiceScribeCreditsPerMin(db),
+    defaultClaudeAccountId: getExplicitDefaultClaudeAccountId(db),
+    prAutomationClaudeAccountId: getPrAutomationClaudeAccountId(db),
+    sentryClaudeAccountId: getSentryClaudeAccountId(db),
   };
 }
 
@@ -1065,6 +1232,17 @@ export function updateAppSettings(
   config: Config,
   update: AppSettingsUpdate,
 ): AppSettings {
+  const accountChoices: readonly [SettingKey, string | null | undefined][] = [
+    ['default_claude_account_id', update.defaultClaudeAccountId],
+    ['pr_automation_claude_account_id', update.prAutomationClaudeAccountId],
+    ['sentry_claude_account_id', update.sentryClaudeAccountId],
+  ];
+  for (const [, chosen] of accountChoices) {
+    if (typeof chosen === 'string' && getClaudeAccount(db, chosen) === null) {
+      throw new SettingsError(400, 'claude_account_not_found', `No Claude account has the id ${chosen}.`);
+    }
+  }
+
   withTransaction(db, () => {
     if (update.githubToken === null) deleteSetting(db, 'github_token');
     else if (update.githubToken !== undefined) setSetting(db, 'github_token', update.githubToken);
@@ -1131,6 +1309,12 @@ export function updateAppSettings(
       setSetting(db, 'advisor_model', update.advisorModel);
     }
 
+    // A cleared row is "no --effort flag", the CLI's own default.
+    if (update.defaultEffort === null) deleteSetting(db, 'default_effort');
+    else if (update.defaultEffort !== undefined) {
+      setSetting(db, 'default_effort', update.defaultEffort);
+    }
+
     if (update.codeReviewDefault !== undefined) {
       setSetting(db, 'code_review_default', update.codeReviewDefault ? '1' : '0');
     }
@@ -1164,6 +1348,13 @@ export function updateAppSettings(
     }
 
     if (update.voice !== undefined) writeVoiceSettings(db, update.voice);
+
+    // `null` clears the row: the default falls back to the implicit choice,
+    // the other two to the default account.
+    for (const [key, chosen] of accountChoices) {
+      if (chosen === null) deleteSetting(db, key);
+      else if (chosen !== undefined) setSetting(db, key, chosen);
+    }
   });
 
   return readAppSettings(db, config);

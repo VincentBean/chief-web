@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
 import type http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import express from 'express';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
+import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -94,6 +98,7 @@ describe('pull requests api', () => {
   let baseUrl: string;
   let cookie: string;
   let config: Config;
+  let dataDir: string;
   let db: Database;
   let server: http.Server;
   let gateway: StubGateway;
@@ -101,8 +106,11 @@ describe('pull requests api', () => {
   let repositoryId: string;
 
   before(async () => {
-    config = loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD });
+    dataDir = mkdtempSync(path.join(os.tmpdir(), 'chief-prs-api-'));
+    config = loadConfig({ CHIEF_WEB_PASSWORD: PASSWORD, DATA_DIR: dataDir });
     db = openDatabase(IN_MEMORY);
+    // The Claude guard lets requests through only with an account to probe.
+    addClaudeAccount(config, db);
     gateway = new StubGateway();
     scan = new StubScan();
 
@@ -141,6 +149,7 @@ describe('pull requests api', () => {
   after(async () => {
     closeDatabase(db);
     await new Promise((resolve) => server.close(resolve));
+    rmSync(dataDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {

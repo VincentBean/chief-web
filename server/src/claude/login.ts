@@ -1,5 +1,10 @@
 import type { Config } from '../config.js';
-import { claudeAuthSource, RUNNER_CLAUDE_DIR, RUNNER_HOME } from '../runner/index.js';
+import {
+  claudeAccountBind,
+  type HostPathTranslator,
+  RUNNER_CLAUDE_DIR,
+  RUNNER_HOME,
+} from '../runner/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 
 /**
@@ -8,22 +13,24 @@ import { CONTAINER_REPO_DIR } from '../sessions/index.js';
  * Signing in needs a real TTY — the CLI prints an OAuth URL and then waits for
  * the code to be pasted back — so it runs in a browser terminal (US-007) inside
  * a throwaway runner container. The only thing that container has mounted is
- * the shared `claude-auth` volume, which is exactly where the credentials must
- * land: every session container mounts the same volume at `~/.claude`, so one
- * login authenticates all of them, and it survives `docker compose down`
- * because a named volume outlives the containers using it.
+ * the credentials directory of the account being signed in, which is exactly
+ * where the credentials must land: every container launched on that account
+ * mounts the same directory at `~/.claude`, and it survives `docker compose
+ * down` because it lives on the data volume.
  */
 
 /**
- * Fixed name so a container left behind by a server restart is found and
- * replaced rather than duplicated.
+ * Fixed per account, so a container left behind by a server restart is found
+ * and replaced rather than duplicated.
  */
-export const CLAUDE_LOGIN_CONTAINER_NAME = 'chief-web-claude-login';
+export function claudeLoginContainerName(accountId: string): string {
+  return `chief-web-claude-login-${accountId}`;
+}
 
 export const CLAUDE_LOGIN_LABEL = 'chief-web.role=claude-login';
 
 /**
- * Path of the CLI's own state file inside the shared volume.
+ * Path of the CLI's own state file inside the account's directory.
  *
  * `claude auth login` writes the credentials *and* the signed-in account here,
  * but it never sets the flags the interactive **first-run wizard** owns. That
@@ -64,7 +71,7 @@ fi`;
  * CLI's own status is printed as confirmation.
  */
 const LOGIN_SCRIPT = `echo "chief-web: signing Claude Code in. Open the URL below, approve it, then paste"
-echo "the code back here. Credentials are written to the shared claude-auth volume."
+echo "the code back here. Credentials are written to this account's directory."
 echo
 claude auth login
 code=$?
@@ -85,27 +92,31 @@ export const CLAUDE_LOGIN_CWD = RUNNER_HOME;
 
 /**
  * `docker run` arguments for the login container: detached, idling on the
- * image's default command, with only the credentials volume attached. The
+ * image's default command, with only the account's credentials directory attached. The
  * terminal is `docker exec`ed into it afterwards, the same way session
  * containers are driven.
  */
-export function claudeLoginContainerArgs(config: Config): string[] {
+export async function claudeLoginContainerArgs(
+  config: Config,
+  paths: HostPathTranslator,
+  accountId: string,
+): Promise<string[]> {
   return [
     'run',
     '--detach',
     '--name',
-    CLAUDE_LOGIN_CONTAINER_NAME,
+    claudeLoginContainerName(accountId),
     '--label',
     CLAUDE_LOGIN_LABEL,
     '--volume',
-    `${claudeAuthSource(config)}:${RUNNER_CLAUDE_DIR}`,
+    await claudeAccountBind(config, paths, accountId),
     config.runnerImage,
   ];
 }
 
 /**
  * `docker rm -f`, used both to clean up and to clear a stale name. `-v` is
- * deliberately absent: the credentials volume must outlive the container.
+ * deliberately absent: nothing the container mounts may go with it.
  */
 export function removeContainerArgs(nameOrId: string): string[] {
   return ['rm', '--force', nameOrId];

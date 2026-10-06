@@ -8,6 +8,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
+import { addClaudeAccount, setDefaultClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
@@ -20,8 +21,10 @@ import {
   openDatabase,
   type Repository,
   setSetting,
+  updateClaudeAccount,
   updateSession,
 } from '../db/index.js';
+import { getDefaultClaudeAccount } from '../settings/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import type { SessionContainerView } from '../orchestrator/index.js';
 import type { ReadyResult, SessionPrdView, SessionView, SetupResult } from '../sessions/index.js';
@@ -44,6 +47,8 @@ interface ErrorBody {
 /** Containers the stub orchestrator was asked to start, newest last. */
 let started: string[] = [];
 let removed: string[] = [];
+/** Accounts whose status probe answers "signed out" (multiple accounts US-009). */
+const signedOut = new Set<string>();
 /** What the scripted git commands answer with, keyed by setup step. */
 let gitExit: Record<string, Partial<ExecOutput>> = {};
 
@@ -85,6 +90,8 @@ describe('sessions api', () => {
     fs.mkdirSync(config.sshKeysDir, { recursive: true });
 
     db = openDatabase(IN_MEMORY);
+    // The Claude guard lets requests through only with an account to probe.
+    addClaudeAccount(config, db);
     repository = createRepository(db, {
       name: 'demo',
       sshUrl: 'git@github.com:acme/demo.git',
@@ -96,10 +103,13 @@ describe('sessions api', () => {
     const app = createApp(config, createAuthService(config, db), db, {
       // The Claude guard in front of `POST /sessions` runs a probe container;
       // this is the only thing standing in for Docker in these tests.
-      runCommand: () =>
+      runCommand: (_command, args) =>
         Promise.resolve({
           code: 0,
-          stdout: '{"loggedIn": true, "authMethod": "claude.ai"}',
+          // The probe mounts the account's own directory, named by its id.
+          stdout: args.some((arg) => [...signedOut].some((id) => arg.includes(id)))
+            ? '{"loggedIn": false}'
+            : '{"loggedIn": true, "authMethod": "claude.ai"}',
           stderr: '',
           timedOut: false,
         }),
@@ -241,6 +251,249 @@ describe('sessions api', () => {
     assert.equal(tooLong.body.error, 'invalid_feedback');
     // Rejected before anything was written or started.
     assert.equal(started.length, 2);
+  });
+
+  it('stores a thinking effort on create and returns it from get and list', async () => {
+    const { status, body } = await create({ effort: 'xhigh' });
+
+    assert.equal(status, 201);
+    assert.equal(body.session.effort, 'xhigh');
+
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'xhigh');
+
+    const listed = (await (await call('GET', '/api/sessions')).json()) as {
+      sessions: SessionView[];
+    };
+    assert.equal(listed.sessions[0]?.effort, 'xhigh');
+  });
+
+  it('creates a session without an effort as null, explicit null included', async () => {
+    const without = await create();
+    assert.equal(without.status, 201);
+    assert.equal(without.body.session.effort, null);
+
+    const explicit = await create({ name: 'null-effort', effort: null });
+    assert.equal(explicit.status, 201);
+    assert.equal(explicit.body.session.effort, null);
+  });
+
+  it('rejects an effort outside the five levels and creates nothing', async () => {
+    for (const effort of ['ultra', 'High', '', 3]) {
+      const { status, body } = await create({ effort });
+      assert.equal(status, 400);
+      assert.equal(body.error, 'invalid_effort');
+      assert.match(body.message ?? '', /low, medium, high, xhigh, max/);
+    }
+    assert.equal(listSessions(db).length, 0);
+    assert.equal(started.length, 0);
+  });
+
+  it('sets and clears the thinking effort of an existing session', async () => {
+    const { body } = await create();
+    assert.equal(body.session.effort, null);
+
+    const set = await call('PUT', `/api/sessions/${body.session.id}/effort`, { effort: 'high' });
+    assert.equal(set.status, 200);
+    assert.equal(((await set.json()) as SessionView).effort, 'high');
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'high');
+
+    const cleared = await call('PUT', `/api/sessions/${body.session.id}/effort`, { effort: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(((await cleared.json()) as SessionView).effort, null);
+    const refetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await refetched.json()) as SessionView).effort, null);
+  });
+
+  it('rejects a missing or unknown effort and changes nothing', async () => {
+    const { body } = await create({ effort: 'low' });
+
+    for (const payload of [{}, { effort: 'ultra' }, { effort: 'High' }, { effort: 3 }, []]) {
+      const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, payload);
+
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.equal(((await response.json()) as ErrorBody).error, 'invalid_effort');
+    }
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'low');
+  });
+
+  it('answers 404 for the effort of an unknown session', async () => {
+    const response = await call('PUT', '/api/sessions/nope/effort', { effort: 'high' });
+
+    assert.equal(response.status, 404);
+  });
+
+  it('changes the effort in every status before the session finishes', async () => {
+    const { body } = await create();
+    for (const status of ['pending', 'ready', 'building', 'waiting', 'failed'] as const) {
+      updateSession(db, body.session.id, { status, effort: null });
+
+      const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, {
+        effort: 'max',
+      });
+
+      assert.equal(response.status, 200, status);
+      assert.equal(((await response.json()) as SessionView).effort, 'max', status);
+    }
+  });
+
+  it('refuses to change the effort of a finished session', async () => {
+    const { body } = await create({ effort: 'medium' });
+    updateSession(db, body.session.id, { status: 'finished' });
+
+    const response = await call('PUT', `/api/sessions/${body.session.id}/effort`, {
+      effort: 'high',
+    });
+
+    assert.equal(response.status, 409);
+    const error = (await response.json()) as ErrorBody;
+    assert.equal(error.error, 'effort_locked');
+    assert.match(error.message ?? '', /finished/);
+    const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+    assert.equal(((await fetched.json()) as SessionView).effort, 'medium');
+  });
+
+  describe('claude account (multiple accounts US-009)', () => {
+    /** An account the probe reports as signed in, or as signed out. */
+    const account = (signedIn: boolean): string => {
+      const id = addClaudeAccount(config, db).id;
+      if (signedIn) updateClaudeAccount(db, id, { authMethod: 'claude.ai' });
+      else signedOut.add(id);
+      return id;
+    };
+    const defaultId = (): string | null => getDefaultClaudeAccount(db)?.id ?? null;
+
+    it('follows the default account when the session names none', async () => {
+      const { status, body } = await create();
+
+      assert.equal(status, 201);
+      assert.equal(body.session.claudeAccountId, null);
+      assert.equal(body.session.effectiveClaudeAccountId, defaultId());
+    });
+
+    it('stores an account on create and returns it from get and list', async () => {
+      const id = account(true);
+      const { status, body } = await create({ claudeAccountId: id });
+
+      assert.equal(status, 201);
+      assert.equal(body.session.claudeAccountId, id);
+      assert.equal(body.session.effectiveClaudeAccountId, id);
+      const fetched = (await (await call('GET', `/api/sessions/${body.session.id}`)).json()) as SessionView;
+      assert.equal(fetched.claudeAccountId, id);
+      assert.equal(fetched.effectiveClaudeAccountId, id);
+      const listed = (await (await call('GET', '/api/sessions')).json()) as { sessions: SessionView[] };
+      assert.equal(listed.sessions[0]?.claudeAccountId, id);
+      assert.equal(listed.sessions[0]?.effectiveClaudeAccountId, id);
+    });
+
+    it('answers 400 claude_account_unknown for an unknown account and creates nothing', async () => {
+      const { status, body } = await create({ claudeAccountId: 'ffffffffffffffff' });
+
+      assert.equal(status, 400);
+      assert.equal(body.error, 'claude_account_unknown');
+      assert.equal(listSessions(db).length, 0);
+    });
+
+    it('answers 409 claude_account_not_authenticated for a signed-out account', async () => {
+      const { status, body } = await create({ claudeAccountId: account(false) });
+
+      assert.equal(status, 409);
+      assert.equal(body.error, 'claude_account_not_authenticated');
+      assert.equal(listSessions(db).length, 0);
+    });
+
+    it('rejects a claudeAccountId that is not a string', async () => {
+      for (const claudeAccountId of [3, '', true]) {
+        const { status, body } = await create({ claudeAccountId });
+        assert.equal(status, 400);
+        assert.equal(body.error, 'invalid_claude_account_id');
+      }
+    });
+
+    it('sets and clears the account of an existing session', async () => {
+      const id = account(true);
+      const { body } = await create();
+
+      const set = await call('PATCH', `/api/sessions/${body.session.id}/account`, {
+        claudeAccountId: id,
+      });
+      assert.equal(set.status, 200);
+      assert.equal(((await set.json()) as SessionView).effectiveClaudeAccountId, id);
+
+      const cleared = await call('PATCH', `/api/sessions/${body.session.id}/account`, {
+        claudeAccountId: null,
+      });
+      assert.equal(cleared.status, 200);
+      const view = (await cleared.json()) as SessionView;
+      assert.equal(view.claudeAccountId, null);
+      assert.equal(view.effectiveClaudeAccountId, defaultId());
+    });
+
+    it('reports a default change for a session that follows the default', async () => {
+      const { body } = await create();
+      const id = account(true);
+      setDefaultClaudeAccount(db, id);
+      try {
+        const fetched = (await (await call('GET', `/api/sessions/${body.session.id}`)).json()) as SessionView;
+        assert.equal(fetched.claudeAccountId, null);
+        assert.equal(fetched.effectiveClaudeAccountId, id);
+      } finally {
+        deleteSetting(db, 'default_claude_account_id');
+      }
+    });
+
+    it('validates the account a PATCH names', async () => {
+      const { body } = await create();
+      const patch = (payload: unknown): Promise<Response> =>
+        call('PATCH', `/api/sessions/${body.session.id}/account`, payload);
+
+      const unknown = await patch({ claudeAccountId: 'ffffffffffffffff' });
+      assert.equal(unknown.status, 400);
+      assert.equal(((await unknown.json()) as ErrorBody).error, 'claude_account_unknown');
+
+      const out = await patch({ claudeAccountId: account(false) });
+      assert.equal(out.status, 409);
+      assert.equal(((await out.json()) as ErrorBody).error, 'claude_account_not_authenticated');
+
+      const missing = await patch({});
+      assert.equal(missing.status, 400);
+      assert.equal(((await missing.json()) as ErrorBody).error, 'invalid_claude_account_id');
+
+      assert.equal((await call('PATCH', '/api/sessions/nope/account', { claudeAccountId: null })).status, 404);
+    });
+
+    it('changes the account in every status the effort can change in', async () => {
+      const id = account(true);
+      const { body } = await create();
+      for (const status of ['pending', 'ready', 'building', 'waiting', 'failed', 'reviewing', 'fixing', 'pr-open'] as const) {
+        updateSession(db, body.session.id, { status, claudeAccountId: null });
+        const response = await call('PATCH', `/api/sessions/${body.session.id}/account`, {
+          claudeAccountId: id,
+        });
+        assert.equal(response.status, 200, status);
+      }
+    });
+
+    it('refuses to change the account where the effort is locked', async () => {
+      const id = account(true);
+      for (const status of ['finished', 'merged'] as const) {
+        const { body } = await create({ name: `locked-${status}` });
+        updateSession(db, body.session.id, { status });
+
+        const response = await call('PATCH', `/api/sessions/${body.session.id}/account`, {
+          claudeAccountId: id,
+        });
+
+        assert.equal(response.status, 409, status);
+        const error = (await response.json()) as ErrorBody;
+        assert.equal(error.error, 'claude_account_locked');
+        assert.ok(error.message !== undefined && error.message.length > 0);
+        const fetched = (await (await call('GET', `/api/sessions/${body.session.id}`)).json()) as SessionView;
+        assert.equal(fetched.claudeAccountId, null);
+      }
+    });
   });
 
   it('rejects feedback that is not a string', async () => {

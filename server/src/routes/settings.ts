@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { type RequestHandler, Router } from 'express';
 
 import type { Config } from '../config.js';
 import type { Database } from '../db/index.js';
@@ -9,10 +9,13 @@ import {
   AGENT_MODELS,
   type AgentModel,
   type AppSettingsUpdate,
+  EFFORT_LEVELS,
+  type EffortLevel,
   getGithubToken,
   type VoiceSettingsUpdate,
   isAdvisorModel,
   isAgentModel,
+  isEffortLevel,
   isValidGitAuthorEmail,
   isValidGitAuthorName,
   isValidSentryBaseUrl,
@@ -35,6 +38,7 @@ import {
   normalizePlanningQuestions,
   parseVoiceSettingsUpdate,
   readAppSettings,
+  SettingsError,
   updateAppSettings,
 } from '../settings/index.js';
 
@@ -74,20 +78,31 @@ export function createSettingsRouter(
     res.status(200).json(readAppSettings(db, config));
   });
 
-  router.put('/settings', (req, res) => {
+  // Every field is optional and an omitted one is left alone, so PUT has
+  // always behaved as a PATCH; both verbs are accepted (multiple accounts US-007).
+  const save: RequestHandler = (req, res) => {
     const parsed = parseUpdate(req.body);
     if ('error' in parsed) {
       res.status(400).json(parsed);
       return;
     }
 
-    const saved = updateAppSettings(db, config, parsed);
+    let saved;
+    try {
+      saved = updateAppSettings(db, config, parsed);
+    } catch (error) {
+      if (!(error instanceof SettingsError)) throw error;
+      res.status(error.status).json({ error: error.code, message: error.message });
+      return;
+    }
     // The cap moved: give the queue whatever that just freed, now rather than
     // on the next scheduler tick. Lowering it is harmless — the pump finds no
     // free slot and does nothing.
     if (parsed.maxConcurrentSessions !== undefined) effects.pump();
     res.status(200).json(saved);
-  });
+  };
+  router.put('/settings', save);
+  router.patch('/settings', save);
 
   // Proves the token works and tells the operator which account it belongs to.
   // Accepts a token in the body so it can be checked *before* it is saved.
@@ -156,6 +171,7 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     buildModel?: AgentModel | null;
     reviewModel?: AgentModel | null;
     advisorModel?: AdvisorModel | null;
+    defaultEffort?: EffortLevel | null;
     codeReviewDefault?: boolean;
     planningQuestions?: string[] | null;
     gitAuthorName?: string | null;
@@ -163,6 +179,9 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     openrouterApiKey?: string | null;
     elevenlabsApiKey?: string | null;
     voice?: VoiceSettingsUpdate;
+    defaultClaudeAccountId?: string | null;
+    prAutomationClaudeAccountId?: string | null;
+    sentryClaudeAccountId?: string | null;
   } = {};
 
   if ('githubToken' in input && input['githubToken'] !== undefined) {
@@ -351,6 +370,10 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
   if ('error' in advisor) return advisor;
   if (advisor.present) update.advisorModel = advisor.value;
 
+  const effort = parseModelField(input, 'defaultEffort', EFFORT_RULE);
+  if ('error' in effort) return effort;
+  if (effort.present) update.defaultEffort = effort.value;
+
   if ('codeReviewDefault' in input && input['codeReviewDefault'] !== undefined) {
     const raw = input['codeReviewDefault'];
     if (typeof raw !== 'boolean') {
@@ -407,6 +430,40 @@ function parseUpdate(body: unknown): AppSettingsUpdate | Invalid {
     update.voice = voice;
   }
 
+  // Whether the id names an account is the service's question (400 too).
+  if ('defaultClaudeAccountId' in input && input['defaultClaudeAccountId'] !== undefined) {
+    const raw = input['defaultClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_default_claude_account_id',
+        message: 'The default Claude account must be an account id, or null to clear it.',
+      };
+    }
+    update.defaultClaudeAccountId = raw;
+  }
+
+  if ('prAutomationClaudeAccountId' in input && input['prAutomationClaudeAccountId'] !== undefined) {
+    const raw = input['prAutomationClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_pr_automation_claude_account_id',
+        message: 'The pull request automation account must be an account id, or null for the default.',
+      };
+    }
+    update.prAutomationClaudeAccountId = raw;
+  }
+
+  if ('sentryClaudeAccountId' in input && input['sentryClaudeAccountId'] !== undefined) {
+    const raw = input['sentryClaudeAccountId'];
+    if (raw !== null && typeof raw !== 'string') {
+      return {
+        error: 'invalid_sentry_claude_account_id',
+        message: 'The Sentry account must be an account id, or null for the default.',
+      };
+    }
+    update.sentryClaudeAccountId = raw;
+  }
+
   return update;
 }
 
@@ -437,6 +494,8 @@ type ModelField<M extends string> =
 
 /** Which names a model field accepts, and what it says when it gets another. */
 interface ModelRule<M extends string> {
+  /** What the field holds, as the rejection names it. */
+  readonly noun: string;
   readonly allowed: readonly string[];
   readonly accepts: (value: string) => value is M;
   /** What clearing the field means, for the operator reading the rejection. */
@@ -445,6 +504,7 @@ interface ModelRule<M extends string> {
 
 /** The three `--model` fields: any family chief-web offers, or the CLI default. */
 const AGENT_MODEL_RULE: ModelRule<AgentModel> = {
+  noun: 'model',
   allowed: AGENT_MODELS,
   accepts: isAgentModel,
   cleared: 'Send null to let Claude Code choose.',
@@ -456,9 +516,22 @@ const AGENT_MODEL_RULE: ModelRule<AgentModel> = {
  * here is what keeps an unusable advisor unsavable rather than unbuildable.
  */
 const ADVISOR_MODEL_RULE: ModelRule<AdvisorModel> = {
+  noun: 'model',
   allowed: ADVISOR_MODELS,
   accepts: isAdvisorModel,
   cleared: 'Send null to run without an advisor.',
+};
+
+/**
+ * The default thinking effort: one of the levels `--effort` accepts. It goes
+ * through the model parser because it behaves exactly like a model field —
+ * omitted leaves it, `null` clears it, anything else must be on the list.
+ */
+const EFFORT_RULE: ModelRule<EffortLevel> = {
+  noun: 'thinking effort',
+  allowed: EFFORT_LEVELS,
+  accepts: isEffortLevel,
+  cleared: 'Send null to pass no --effort flag.',
 };
 
 /**
@@ -480,17 +553,23 @@ function parseModelField<M extends string>(
   if (typeof raw === 'string' && rule.accepts(raw)) return { present: true, value: raw };
   return {
     error: MODEL_ERRORS[key],
-    message: `The model must be one of ${rule.allowed.join(', ')}. ${rule.cleared}`,
+    message: `The ${rule.noun} must be one of ${rule.allowed.join(', ')}. ${rule.cleared}`,
   };
 }
 
-type ModelKey = 'planningModel' | 'buildModel' | 'reviewModel' | 'advisorModel';
+type ModelKey =
+  | 'planningModel'
+  | 'buildModel'
+  | 'reviewModel'
+  | 'advisorModel'
+  | 'defaultEffort';
 
 const MODEL_ERRORS: Record<ModelKey, string> = {
   planningModel: 'invalid_planning_model',
   buildModel: 'invalid_build_model',
   reviewModel: 'invalid_review_model',
   advisorModel: 'invalid_advisor_model',
+  defaultEffort: 'invalid_default_effort',
 };
 
 const ABSENT_MODEL: ModelField<never> = { present: false };

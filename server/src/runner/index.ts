@@ -1,5 +1,4 @@
 export {
-  claudeAuthSource,
   RUNNER_CLAUDE_DIR,
   RUNNER_GID,
   RUNNER_HOME,
@@ -13,3 +12,14 @@ export {
   type RunnerMounts,
   runnerMountArgs,
 } from './image.js';
+export {
+  CLAUDE_ACCOUNT_DIR_MODE,
+  CLAUDE_ACCOUNT_LABEL,
+  chownToRunner,
+  claudeAccountBind,
+  claudeAccountDir,
+  claudeAccountsDir,
+  createClaudeAccountDir,
+  type HostPathTranslator,
+  removeClaudeAccountDir,
+} from './accounts.js';

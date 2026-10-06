@@ -1,6 +1,13 @@
 import { type Response, Router } from 'express';
 
-import { PR_TARGET_BRANCHES, type PrTargetBranch, SESSION_NAME_PATTERN } from '../db/index.js';
+import {
+  EFFORT_LEVELS,
+  type EffortLevel,
+  isEffortLevel,
+  PR_TARGET_BRANCHES,
+  type PrTargetBranch,
+  SESSION_NAME_PATTERN,
+} from '../db/index.js';
 import {
   type CreateSessionRequest,
   MAX_FEEDBACK_LENGTH,
@@ -140,6 +147,38 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
     try {
       res.status(200).json(sessions.setOpenPullRequest(req.params.id, parsed.openPullRequest));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  // Sets or clears the session's thinking effort (US-005). `effort: null`
+  // follows the global default again; omitting it is a mistake. Refused once
+  // the session is finished.
+  router.put('/sessions/:id/effort', (req, res) => {
+    const parsed = parseSetEffort(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setEffort(req.params.id, parsed.effort));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  // Binds the session to a Claude account (multiple accounts US-009), or with
+  // `claudeAccountId: null` back to the default. Locked like the effort; the
+  // service checks the account exists and is signed in.
+  router.patch('/sessions/:id/account', (req, res) => {
+    const parsed = parseSetClaudeAccount(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setClaudeAccount(req.params.id, parsed.claudeAccountId));
     } catch (cause: unknown) {
       respondWithFailure(res, cause);
     }
@@ -290,6 +329,48 @@ function parseSetOpenPullRequest(body: unknown): { openPullRequest: boolean } | 
   return { openPullRequest: parsed.openPullRequest };
 }
 
+/** The body of `PUT /sessions/:id/effort`: the field is required, `null` included. */
+function parseSetEffort(body: unknown): { effort: EffortLevel | null } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return { ...badBody, error: 'invalid_effort' };
+
+  const parsed = parseEffort(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.effort === undefined) {
+    return { error: 'invalid_effort', message: 'effort is required.' };
+  }
+  return { effort: parsed.effort };
+}
+
+/** The body of `PATCH /sessions/:id/account`: the field is required, `null` included. */
+function parseSetClaudeAccount(body: unknown): { claudeAccountId: string | null } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return { ...badBody, error: 'invalid_claude_account_id' };
+
+  const parsed = parseClaudeAccountId(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.claudeAccountId === undefined) {
+    return { error: 'invalid_claude_account_id', message: 'claudeAccountId is required.' };
+  }
+  return { claudeAccountId: parsed.claudeAccountId };
+}
+
+/** Absent and `null` both mean "use the default account"; anything else must be a string id. */
+function parseClaudeAccountId(
+  input: Record<string, unknown>,
+): { claudeAccountId?: string | null } | Invalid {
+  const raw = input.claudeAccountId;
+  if (raw === undefined) return {};
+  if (raw === null) return { claudeAccountId: null };
+  if (typeof raw !== 'string' || raw === '') {
+    return {
+      error: 'invalid_claude_account_id',
+      message: 'claudeAccountId must be an account id or null.',
+    };
+  }
+  return { claudeAccountId: raw };
+}
+
 /** `undefined` when the field is absent; an `Invalid` when it is not a boolean. */
 function optionalBoolean(
   input: Record<string, unknown>,
@@ -316,6 +397,20 @@ function parseOpenPullRequest(
     };
   }
   return { openPullRequest: raw };
+}
+
+/** Absent and `null` both mean "follow the global default"; anything else must be a level. */
+function parseEffort(input: Record<string, unknown>): { effort?: EffortLevel | null } | Invalid {
+  const raw = input.effort;
+  if (raw === undefined) return {};
+  if (raw === null) return { effort: null };
+  if (typeof raw !== 'string' || !isEffortLevel(raw)) {
+    return {
+      error: 'invalid_effort',
+      message: `The thinking effort must be one of: ${EFFORT_LEVELS.join(', ')}.`,
+    };
+  }
+  return { effort: raw };
 }
 
 function parseCreate(body: unknown): CreateSessionRequest | Invalid {
@@ -381,6 +476,12 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     };
   }
 
+  const effort = parseEffort(input);
+  if ('error' in effort) return effort;
+
+  const claudeAccount = parseClaudeAccountId(input);
+  if ('error' in claudeAccount) return claudeAccount;
+
   return {
     repositoryId,
     name,
@@ -393,6 +494,8 @@ function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     ...pullRequest,
     ...(baseBranch === undefined ? {} : { baseBranch }),
     ...(feedback === undefined ? {} : { feedback }),
+    ...effort,
+    ...claudeAccount,
   };
 }
 

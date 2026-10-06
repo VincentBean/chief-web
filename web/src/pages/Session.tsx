@@ -1,17 +1,22 @@
 import { type FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
   ApiError,
   backToPlanning,
   type Build,
+  claudeAccountName,
   clearUsageLimitHold,
   deleteSession,
+  EFFORT_LEVELS,
+  type EffortLevel,
   type FailureStage,
   failureStageLabel,
   isDeliveryStage,
   fetchBuild,
   fetchPlanning,
   fetchSession,
+  fetchSettings,
   leaveQueue,
   markSessionReady,
   type Planning,
@@ -22,7 +27,9 @@ import {
   retrySession,
   retrySessionSetup,
   type Session as SessionData,
+  setSessionClaudeAccount,
   setSessionCodeReview,
+  setSessionEffort,
   setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
@@ -575,6 +582,10 @@ export function Session() {
           <OpenPullRequestPanel session={session} busy={busy} onToggle={onOpenPullRequest} />
 
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
+
+          <EffortPanel session={session} onSaved={setSession} />
+
+          <AccountPanel session={session} onSaved={setSession} />
         </aside>
       </div>
 
@@ -1373,6 +1384,206 @@ function CodeReviewPanel({
           ? `The review can no longer be turned ${session.codeReview ? 'off' : 'on'}: ${locked}`
           : 'The review runs automatically after the pull request is created and posts its comments to GitHub.'}
       </p>
+    </Panel>
+  );
+}
+
+/* ------------------------------------------------------- thinking effort */
+
+/**
+ * Why the effort is frozen, per status — the mirror of the server's
+ * `EFFORT_LOCKED` (US-005): no agent runs for these sessions again.
+ */
+const EFFORT_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  finished: 'this session has finished, so no agent will run for it again.',
+  merged: 'the pull request has been merged, so no agent will run for this session again.',
+};
+
+/**
+ * The thinking effort this session's planning and build run at (US-008). The
+ * select saves on change; the badge shows what actually applies — the
+ * session's own level, else the Settings default, else Claude Code's own.
+ */
+function EffortPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  /** `undefined` while the Settings default is loading or could not be read; `null` when there is none. */
+  const [defaultEffort, setDefaultEffort] = useState<EffortLevel | null | undefined>(undefined);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchSettings(controller.signal)
+      .then((settings) => setDefaultEffort(settings.defaultEffort))
+      .catch(() => {
+        // Without the default the badge just says "default"; nothing to report.
+      });
+    return () => controller.abort();
+  }, []);
+
+  const locked = EFFORT_LOCKED[session.status];
+  const effective = session.effort ?? (defaultEffort === undefined ? 'default' : (defaultEffort ?? 'CLI default'));
+
+  const onChange = (value: EffortLevel | ''): void => {
+    const effort = value === '' ? null : value;
+    setSaving(true);
+    setMessage(null);
+    setError(null);
+    setSessionEffort(session.id, effort)
+      .then((next) => {
+        onSaved(next);
+        setMessage(
+          next.effort === null
+            ? 'Saved: this session now follows the default from Settings.'
+            : `Saved: this session now runs at ${next.effort} effort.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setError(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel title="Thinking effort" icon="zap" meta={<Badge tone={session.effort === null ? 'neutral' : 'ready'}>{effective}</Badge>}>
+      <div className="field">
+        <label className="field__label" htmlFor="session-page-effort">
+          Effort for planning and build
+        </label>
+        <select
+          id="session-page-effort"
+          className="field__input"
+          value={session.effort ?? ''}
+          disabled={locked !== undefined || saving}
+          onChange={(event) => onChange(event.target.value as EffortLevel | '')}
+        >
+          <option value="">
+            {defaultEffort === undefined ? 'Default' : `Default (${defaultEffort ?? 'CLI default'})`}
+          </option>
+          {EFFORT_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The effort can no longer be changed: ${locked}`
+            : session.effort === null
+              ? 'Following the default from Settings.'
+              : 'Set for this session; choose Default to follow the setting on the Settings page again.'}
+          {locked === undefined && session.status === 'building'
+            ? ' A build is running: a change applies from its next iteration.'
+            : ''}
+        </p>
+      </div>
+      {message !== null && <Notice kind="ok">{message}</Notice>}
+      {error !== null && <Notice kind="error">{error}</Notice>}
+    </Panel>
+  );
+}
+
+/* --------------------------------------------------------- claude account */
+
+/**
+ * The Claude account this session's containers mount (multiple accounts
+ * US-012). The picker saves on change and shares the effort's lock: once no
+ * agent runs for the session again, its account no longer matters. The badge
+ * names the account the session actually runs on.
+ */
+function AccountPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  const { claude, stats } = useAppData();
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const locked = EFFORT_LOCKED[session.status];
+  const nameOf = (id: string): string => {
+    const account = claude?.accounts.find((candidate) => candidate.id === id);
+    return account === undefined ? `Account ${id.slice(0, 8)}` : claudeAccountName(account);
+  };
+
+  const failover = session.failoverClaudeAccountId ?? null;
+  const effective = session.effectiveClaudeAccountId;
+  const runningOn = failover ?? effective;
+  const heldUntil =
+    failover !== null && effective !== null
+      ? (stats?.accounts.find((account) => account.id === effective)?.holdUntil ?? null)
+      : null;
+
+  const onChange = (claudeAccountId: string | null): void => {
+    const hadContainer = session.containerId !== null;
+    setSaving(true);
+    setError(null);
+    setSessionClaudeAccount(session.id, claudeAccountId)
+      .then((next) => {
+        onSaved(next);
+        const name = next.effectiveClaudeAccountId === null ? 'the default account' : nameOf(next.effectiveClaudeAccountId);
+        toast.ok(
+          hadContainer
+            ? `Saved: ${name} is used from the next agent run; the current container is restarted first.`
+            : `Saved: this session now runs on ${name}.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setError(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel
+      title="Claude account"
+      icon="key"
+      meta={
+        runningOn === null ? (
+          <Badge tone="danger">no account</Badge>
+        ) : (
+          <Badge tone={failover !== null ? 'wait' : session.claudeAccountId === null ? 'neutral' : 'ready'}>{nameOf(runningOn)}</Badge>
+        )
+      }
+    >
+      <div className="field">
+        <label className="field__label" htmlFor="session-page-claude-account">
+          Account for planning and build
+        </label>
+        <AccountPicker
+          id="session-page-claude-account"
+          value={session.claudeAccountId}
+          onChange={onChange}
+          accounts={claude?.accounts ?? []}
+          defaultAccountId={claude?.defaultAccountId ?? null}
+          disabled={locked !== undefined || saving || claude === null}
+        />
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The account can no longer be changed: ${locked}`
+            : session.claudeAccountId === null
+              ? 'Following the default account from Settings.'
+              : 'Set for this session; choose Default to follow the default account from Settings again.'}
+        </p>
+      </div>
+      {failover !== null && effective !== null && (
+        <p className="muted">
+          Running on {nameOf(failover)} while {nameOf(effective)} is on hold
+          {heldUntil === null ? '.' : ` until ${localTime(heldUntil)}.`}
+        </p>
+      )}
+      {error !== null && <Notice kind="error">{error}</Notice>}
     </Panel>
   );
 }

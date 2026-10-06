@@ -10,10 +10,12 @@ import {
   createRepository,
   createSession,
   type Database,
+  deleteSetting,
   featureBranchFor,
   getVoiceSessionAgent,
   IN_MEMORY,
   openDatabase,
+  setSetting,
   type Session,
   updateSession,
   upsertVoiceSessionAgent,
@@ -137,6 +139,23 @@ describe('planning prompts', () => {
     assert.deepEqual(planningCommand('go', 'haiku', 'abc'), ['claude', '--model', 'haiku', '--resume', 'abc', 'go']);
     assert.deepEqual(planningCommand('go', null, 'abc'), ['claude', '--resume', 'abc', 'go']);
     assert.deepEqual(planningCommand('go', null, null), ['claude', 'go']);
+  });
+
+  it('puts --effort after --model and before --resume (thinking effort US-004)', () => {
+    assert.deepEqual(planningCommand('go', null, null, 'high'), ['claude', '--effort', 'high', 'go']);
+    assert.deepEqual(planningCommand('go', 'haiku', null, 'low'), ['claude', '--model', 'haiku', '--effort', 'low', 'go']);
+    assert.deepEqual(planningCommand('go', 'haiku', 'abc', 'max'), [
+      'claude',
+      '--model',
+      'haiku',
+      '--effort',
+      'max',
+      '--resume',
+      'abc',
+      'go',
+    ]);
+    assert.deepEqual(planningCommand('go', null, null, null), ['claude', 'go']);
+    assert.deepEqual(planningCommand('go', 'haiku', 'abc', null), ['claude', '--model', 'haiku', '--resume', 'abc', 'go']);
   });
 
   it('targets .chief/prds/<session name>/prd.md', () => {
@@ -367,6 +386,25 @@ describe('planning service', () => {
     assert.deepEqual(terminals.removed, [opened.terminalId]);
     assert.equal(view.terminalId, null);
     assert.equal(view.running, false);
+  });
+
+  it('reads the thinking effort each time a terminal opens (thinking effort US-004)', async (t) => {
+    clone();
+    await planning.start(session.id);
+    assert.equal((terminals.created[0]?.command ?? []).includes('--effort'), false);
+    await planning.stop(session.id);
+
+    setSetting(db, 'default_effort', 'medium');
+    t.after(() => deleteSetting(db, 'default_effort'));
+    await planning.start(session.id);
+    assert.deepEqual((terminals.created[1]?.command ?? []).slice(0, 3), ['claude', '--effort', 'medium']);
+    await planning.stop(session.id);
+
+    updateSession(db, session.id, { effort: 'xhigh' });
+    await planning.start(session.id);
+    const command = terminals.created[2]?.command ?? [];
+    assert.deepEqual(command.slice(0, 3), ['claude', '--effort', 'xhigh']);
+    assert.match(command.at(-1) ?? '', /Chief PRD Generator/);
   });
 
   describe('handover from a voice call (voice US-025)', () => {

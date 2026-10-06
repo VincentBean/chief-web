@@ -8,8 +8,10 @@ import {
   createSession,
   type Database,
   deleteSession,
+  type EffortLevel,
   type FailureStage,
   featureBranchFor,
+  getClaudeAccount,
   getQueuedBuild,
   getRecurringTask,
   getRepository,
@@ -30,7 +32,7 @@ import {
   updateSession,
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
-import type { SessionContainerView } from '../orchestrator/index.js';
+import type { SessionContainerView, SessionStartOptions } from '../orchestrator/index.js';
 import { removeSessionWorkspace, sessionRepoDir } from '../orchestrator/index.js';
 import {
   agentLogPathFor,
@@ -40,7 +42,11 @@ import {
   progressPathFor,
   readPrdDocument,
 } from '../prd/index.js';
-import { getCodeReviewDefault } from '../settings/index.js';
+import {
+  claudeAccountSignedIn,
+  getCodeReviewDefault,
+  getDefaultClaudeAccount,
+} from '../settings/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
 import type { VoiceEventSink } from '../voice/events.js';
@@ -69,7 +75,7 @@ export class SessionError extends Error {
 
 /** The slice of the orchestrator (US-009) session setup drives. */
 export interface SessionContainers {
-  start(session: Session): Promise<SessionContainerView>;
+  start(session: Session, options?: SessionStartOptions): Promise<SessionContainerView>;
   remove(sessionId: string): Promise<void>;
 }
 
@@ -169,6 +175,26 @@ export interface SessionView {
    */
   readonly feedback: string | null;
   /**
+   * The thinking effort this session launches at (thinking effort US-002), or
+   * `null` to follow the global default.
+   */
+  readonly effort: EffortLevel | null;
+  /**
+   * The Claude account this session asked for (multiple accounts US-009), or
+   * `null` to follow the default account.
+   */
+  readonly claudeAccountId: string | null;
+  /**
+   * The account its next container mounts: `claudeAccountId`, else the
+   * default. `null` only while no account is connected at all.
+   */
+  readonly effectiveClaudeAccountId: string | null;
+  /**
+   * The account its container runs on instead while its own is on a
+   * usage-limit hold (multiple accounts US-015), `null` when it runs on its own.
+   */
+  readonly failoverClaudeAccountId: string | null;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -251,6 +277,10 @@ export interface CreateSessionRequest {
   readonly recurringTaskId?: string | null;
   /** The feedback the session is started from; already trimmed and bounded. */
   readonly feedback?: string | null;
+  /** The thinking effort; omitted or null follows the global default. */
+  readonly effort?: EffortLevel | null;
+  /** The Claude account; omitted or null follows the default account. */
+  readonly claudeAccountId?: string | null;
 }
 
 /** The longest feedback a session is started from (voice feedback US-001), after trimming. */
@@ -286,6 +316,16 @@ const OPEN_PULL_REQUEST_LOCKED: Partial<Record<SessionStatus, string>> = {
   merged: 'its pull request has already been merged.',
 };
 
+/**
+ * The statuses in which the thinking effort no longer changes (US-005). Every
+ * other status can still launch an agent — a build iteration, a review fix or
+ * a planning terminal — so the level there still decides something.
+ */
+const EFFORT_LOCKED: Partial<Record<SessionStatus, string>> = {
+  finished: 'this session has finished, so no agent will run for it again.',
+  merged: 'its pull request has already been merged.',
+};
+
 export class SessionService {
   /** Setups in flight, so two clicks cannot clone the same session twice. */
   private readonly running = new Map<string, Promise<SessionSetupView>>();
@@ -305,7 +345,8 @@ export class SessionService {
       this.db,
       repositoryId === undefined ? {} : { repositoryId },
     );
-    return sessions.map((session) => this.toView(session));
+    const defaultAccountId = this.defaultAccountId();
+    return sessions.map((session) => this.toView(session, defaultAccountId));
   }
 
   get(id: string): SessionView | null {
@@ -329,6 +370,9 @@ export class SessionService {
         'invalid_session_name',
         'Use letters, numbers, hyphens and underscores only.',
       );
+    }
+    if (request.claudeAccountId !== undefined && request.claudeAccountId !== null) {
+      this.requireUsableAccount(request.claudeAccountId);
     }
     if (!hasPrivateKey(this.config, repository.id)) {
       throw new SessionError(
@@ -363,6 +407,8 @@ export class SessionService {
         openPullRequest: request.openPullRequest ?? repository.openPullRequestDefault,
         recurringTaskId: request.recurringTaskId ?? null,
         feedback: request.feedback ?? null,
+        effort: request.effort ?? null,
+        claudeAccountId: request.claudeAccountId ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -610,6 +656,83 @@ export class SessionService {
   }
 
   /**
+   * Sets or clears the session's own thinking effort (US-005); `null` makes it
+   * follow the global default again.
+   *
+   * Only the row changes. A build that is running keeps its current iteration
+   * and reads the new level when it launches the next one.
+   */
+  setEffort(id: string, effort: EffortLevel | null): SessionView {
+    const session = this.requireSession(id);
+    const locked = EFFORT_LOCKED[session.status];
+    if (locked !== undefined) {
+      throw new SessionError(
+        409,
+        'effort_locked',
+        `The thinking effort of "${session.name}" can no longer be changed: ${locked}`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { effort }) ?? session;
+    logger.info('session effort updated', {
+      session: session.id,
+      name: session.name,
+      effort,
+    });
+    return this.toView(updated);
+  }
+
+  /**
+   * Binds the session to a Claude account (multiple accounts US-009); `null`
+   * makes it follow the default account again. Locked in the same statuses as
+   * the thinking effort, for the same reason.
+   *
+   * Only the row changes. A running container keeps its credentials until the
+   * next launch of agent work, which recreates it on the new account — the
+   * agent iteration running now is not interrupted.
+   */
+  setClaudeAccount(id: string, claudeAccountId: string | null): SessionView {
+    const session = this.requireSession(id);
+    const locked = EFFORT_LOCKED[session.status];
+    if (locked !== undefined) {
+      throw new SessionError(
+        409,
+        'claude_account_locked',
+        `The Claude account of "${session.name}" can no longer be changed: ${locked}`,
+      );
+    }
+    if (claudeAccountId !== null) this.requireUsableAccount(claudeAccountId);
+
+    const updated = updateSession(this.db, session.id, { claudeAccountId }) ?? session;
+    logger.info('session claude account updated', {
+      session: session.id,
+      name: session.name,
+      claudeAccountId,
+    });
+    return this.toView(updated);
+  }
+
+  /** The default account, resolved once per list rather than once per row. */
+  private defaultAccountId(): string | null {
+    return getDefaultClaudeAccount(this.db)?.id ?? null;
+  }
+
+  /** An account a session may be bound to: it exists and is signed in. */
+  private requireUsableAccount(accountId: string): void {
+    const account = getClaudeAccount(this.db, accountId);
+    if (account === null) {
+      throw new SessionError(400, 'claude_account_unknown', 'No such Claude account.');
+    }
+    if (!claudeAccountSignedIn(account)) {
+      throw new SessionError(
+        409,
+        'claude_account_not_authenticated',
+        `The Claude account "${account.nickname ?? account.email ?? account.id}" is not signed in. Sign it in under Settings → Claude Code first.`,
+      );
+    }
+  }
+
+  /**
    * Deletes the session, its container and its workspace (US-015).
    *
    * Everything chief-web created *here* goes; nothing on the remote does. The
@@ -793,7 +916,7 @@ export class SessionService {
     }
   }
 
-  private toView(session: Session): SessionView {
+  private toView(session: Session, defaultAccountId = this.defaultAccountId()): SessionView {
     const repository = getRepository(this.db, session.repositoryId);
     return {
       id: session.id,
@@ -822,6 +945,10 @@ export class SessionService {
       openPullRequest: session.openPullRequest,
       pushedOnly: session.pushedOnly,
       feedback: session.feedback,
+      effort: session.effort,
+      claudeAccountId: session.claudeAccountId,
+      effectiveClaudeAccountId: session.claudeAccountId ?? defaultAccountId,
+      failoverClaudeAccountId: session.failoverClaudeAccountId,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

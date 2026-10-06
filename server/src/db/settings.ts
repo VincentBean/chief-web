@@ -35,6 +35,12 @@ export const SETTING_KEYS = [
    */
   'advisor_model',
   /**
+   * `--effort` for every launch of a session that has no thinking effort of its
+   * own. An absent row means "no `--effort` flag", so the CLI applies its own
+   * default — there is no value here standing for that default.
+   */
+  'default_effort',
+  /**
    * Whether a new session gets its code-review flag set when the request does
    * not say (US-004). Stored as `1`/`0`; an absent row means off.
    */
@@ -86,12 +92,6 @@ export const SETTING_KEYS = [
    */
   'sentry_base_url',
   /**
-   * ISO timestamp until which agent work is held after a Claude usage-limit
-   * refusal (US-002). Written and read through `limits/hold.ts`; a value in
-   * the past means no hold, so nothing has to sweep the row.
-   */
-  'claude_limit_until',
-  /**
    * Voice calls (voice US-001). Both provider keys are write-only over the
    * API, exactly like `github_token`; every `voice_*` row is read through
    * `VOICE_FIELDS` in `settings/service.ts`, where an absent or unreadable
@@ -136,9 +136,46 @@ export const SETTING_KEYS = [
    * array, means `DEFAULT_PLANNING_QUESTIONS`.
    */
   'planning_questions',
+  /**
+   * The Claude account a launch runs on when nothing more specific was chosen
+   * (multiple accounts US-006/US-007). An id that names no account any more
+   * means "unset"; removing an account clears it anyway.
+   */
+  'default_claude_account_id',
+  /**
+   * The Claude account PR review, PR feedback and merge-conflict fixes run on
+   * (US-013); unset means the default account.
+   */
+  'pr_automation_claude_account_id',
+  /** The Claude account Sentry plans and fix sessions run on (US-013); unset means the default. */
+  'sentry_claude_account_id',
 ] as const;
 
-export type SettingKey = (typeof SETTING_KEYS)[number];
+/**
+ * ISO timestamp until which one Claude account's work is held after a
+ * usage-limit refusal or a capped usage window (US-002, multiple accounts
+ * US-014), keyed by account id. Written and read through `limits/hold.ts`; a
+ * value in the past means no hold, so nothing has to sweep the row. The old
+ * global `claude_limit_until` row is deleted by migration 0027.
+ */
+export type ClaudeLimitKey = `claude_limit_until:${string}`;
+
+export type SettingKey = (typeof SETTING_KEYS)[number] | ClaudeLimitKey;
+
+/** The setting holding `accountId`'s usage-limit hold expiry. */
+export function claudeLimitKey(accountId: string): ClaudeLimitKey {
+  return `claude_limit_until:${accountId}`;
+}
+
+/**
+ * Settings whose value is a Claude account id. Removing an account deletes
+ * every one of these that names it, so they fall back to the default.
+ */
+export const CLAUDE_ACCOUNT_SETTING_KEYS: readonly SettingKey[] = [
+  'default_claude_account_id',
+  'pr_automation_claude_account_id',
+  'sentry_claude_account_id',
+];
 
 export function getSetting(db: Database, key: SettingKey): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

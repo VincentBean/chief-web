@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
+import { addClaudeAccount, defaultClaudeAccountId, removeClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   type CreateRecurringTaskInput,
@@ -28,7 +29,7 @@ import {
 } from '../db/index.js';
 import { type ExecScript, FakeDockerDaemon, type FakeExec } from '../docker/fake-daemon.js';
 import { DockerApi } from '../docker/index.js';
-import { SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
+import { CLAUDE_ACCOUNT_LABEL, SessionOrchestrator, sessionRepoDir } from '../orchestrator/index.js';
 import { parsePrd, prdParses, prdPathFor } from '../prd/index.js';
 import { SessionService } from '../sessions/index.js';
 import { writePrivateKey } from '../ssh/index.js';
@@ -98,6 +99,8 @@ async function fixture(): Promise<Fixture> {
   fs.mkdirSync(config.sshKeysDir, { recursive: true });
 
   const db = openDatabase(IN_MEMORY);
+  // Containers mount a Claude account's directory; with none, nothing starts.
+  addClaudeAccount(config, db);
   const repository = createRepository(db, {
     name: 'demo',
     sshUrl: 'git@github.com:acme/demo.git',
@@ -167,6 +170,17 @@ function clonesInto(config: Config, db: Database): (exec: FakeExec) => ExecScrip
 }
 
 describe('firing a recurring task', () => {
+  it('leaves a task due when the held predicate says its account is held (US-014)', async () => {
+    const f = await fixture();
+    const held = f.task({});
+    const now = new Date(Date.UTC(2026, 8, 5, 3, 0)).toISOString();
+
+    assert.equal(await f.runner.fireDue(now, (task) => task.id === held.id), 0);
+    assert.deepEqual(listSessions(f.db, {}), []);
+
+    assert.equal(await f.runner.fireDue(now, () => false), 1);
+  });
+
   it('turns a due task into a queued session with a generated PRD', async () => {
     const f = await fixture();
     const task = f.task({ runCodeReview: true, prTarget: 'main' });
@@ -598,6 +612,51 @@ describe('settling a recurring task run', () => {
   });
 });
 
+describe('the Claude account a run is created on (multiple accounts US-013)', () => {
+  /** The run the firing created, and the account its container mounts. */
+  async function fire(f: Fixture): Promise<{ run: Session; label: string | undefined }> {
+    assert.equal(await f.runner.fireDue(), 1);
+    const [run] = listSessions(f.db, {});
+    assert.ok(run);
+    return { run, label: f.daemon.listContainers()[0]?.labels[CLAUDE_ACCOUNT_LABEL] };
+  }
+
+  it('creates the run on the account the task names', async () => {
+    const f = await fixture();
+    const chosen = addClaudeAccount(f.config, f.db, { authMethod: 'claude.ai' });
+    f.task({ claudeAccountId: chosen.id });
+
+    const { run, label } = await fire(f);
+    assert.equal(run.claudeAccountId, chosen.id);
+    assert.equal(label, chosen.id);
+  });
+
+  it('leaves the run on the default account when the task names none', async () => {
+    const f = await fixture();
+    const task = f.task();
+    assert.equal(task.claudeAccountId, null);
+
+    const { run, label } = await fire(f);
+    // Not pinned: the run keeps following the default if it changes later.
+    assert.equal(run.claudeAccountId, null);
+    assert.equal(label, defaultClaudeAccountId(f.db));
+  });
+
+  it('falls back to the default account once the chosen one is removed', async () => {
+    const f = await fixture();
+    const chosen = addClaudeAccount(f.config, f.db, { authMethod: 'claude.ai' });
+    const task = f.task({ claudeAccountId: chosen.id });
+
+    assert.equal(removeClaudeAccount(f.config, f.db, chosen.id), true);
+    assert.equal(getRecurringTask(f.db, task.id)?.claudeAccountId, null);
+
+    const { run, label } = await fire(f);
+    assert.equal(run.claudeAccountId, null);
+    assert.ok(label !== undefined && label !== chosen.id);
+    assert.equal(label, defaultClaudeAccountId(f.db));
+  });
+});
+
 /** A session row, for the settlement decision the tests make directly. */
 function session(overrides: Partial<Session>): Session {
   return {
@@ -620,6 +679,9 @@ function session(overrides: Partial<Session>): Session {
     recurringTaskId: 'task-1',
     prDescription: null,
     feedback: null,
+    effort: null,
+    claudeAccountId: null,
+    failoverClaudeAccountId: null,
     createdAt: '2026-09-05T03:00:00.000Z',
     updatedAt: '2026-09-05T03:00:00.000Z',
     ...overrides,

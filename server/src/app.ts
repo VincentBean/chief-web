@@ -16,7 +16,13 @@ import {
   createBuildLogStore,
   createBuildService,
 } from './build/index.js';
-import { type ClaudeService, createClaudeService, requireClaudeAuth } from './claude/index.js';
+import {
+  type ClaudeService,
+  type ClaudeUsageService,
+  createClaudeService,
+  createClaudeUsageService,
+  requireClaudeAuth,
+} from './claude/index.js';
 import { BrowserService } from './browser/index.js';
 import type { Config } from './config.js';
 import { type Database, getSession } from './db/index.js';
@@ -29,7 +35,7 @@ import {
 import { createDescriptionService } from './description/index.js';
 import { DockerApi } from './docker/index.js';
 import { UsageLimitHold } from './limits/index.js';
-import { createSessionOrchestrator } from './orchestrator/index.js';
+import { createSessionOrchestrator, HostPaths } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
 import { createReviewService, GithubReviewPublisher } from './review/index.js';
@@ -102,6 +108,12 @@ export interface AppDependencies {
    * shared credentials volume with a real container.
    */
   readonly claude?: ClaudeService;
+  /**
+   * Every Claude account's 5-hour and 7-day usage and the sweep that keeps
+   * their tokens fresh (multiple accounts US-005). Started here; tests may
+   * pass one over a fake usage endpoint.
+   */
+  readonly claudeUsage?: ClaudeUsageService;
   /**
    * Open pull requests and their review feedback (US-021). Defaults to a
    * service that talks to GitHub; tests pass one built on a stub gateway so
@@ -235,7 +247,19 @@ export function createApp(
   api.use(createRecurringTasksRouter(db));
   const terminals = deps.terminals ?? createTerminalManager(config);
   api.use(createTerminalsRouter(terminals));
-  const claude = deps.claude ?? createClaudeService(config, terminals, deps.runCommand);
+  // The client is cheap to construct — nothing is dialled until the first
+  // request — so one instance serves the Claude containers, the orchestrator
+  // and the setup commands, and either can be replaced independently.
+  const docker = new DockerApi(config.dockerSocket);
+  const hostPaths = new HostPaths(config, docker);
+  // Background ticker (US-005): usage is cached per account and refreshed off
+  // the request path, so `/api/stats` and `/api/claude` never wait on it.
+  const claudeUsage =
+    deps.claudeUsage ?? createClaudeUsageService(config, db, hostPaths, deps.runCommand);
+  claudeUsage.start();
+  const claude =
+    deps.claude ??
+    createClaudeService(config, db, terminals, hostPaths, deps.runCommand, claudeUsage);
   api.use(createClaudeRouter(claude));
 
   // Mounted ahead of the sessions router so creating a session — and retrying
@@ -257,24 +281,25 @@ export function createApp(
   // And so is fixing its merge conflicts from the page’s button.
   api.post('/pull-requests/:repositoryId/:number/conflict-fix', guard);
 
-  // The client is cheap to construct — nothing is dialled until the first
-  // request — so one instance serves both the orchestrator and the setup
-  // commands, and either can be replaced independently.
-  const docker = new DockerApi(config.dockerSocket);
   // Kept separately from `orchestrator` because `SessionContainers` is the
   // narrow two-method view a test may stub, while starting a feedback-run
   // container needs the real thing. A test that stubs the orchestrator and
   // wants runs passes `deps.prFeedback` as well.
-  const sessionOrchestrator = createSessionOrchestrator(config, db, docker);
-  const orchestrator = deps.orchestrator ?? sessionOrchestrator;
-  const exec = deps.exec ?? docker;
   // Background events for the voice call (voice US-015): every service below
   // reports on this one bus, and the voice service speaks what it hears.
   const events = new VoiceEventBus();
   // Claude's usage-limit hold (US-002). The hold is a row on the database, so
   // every instance reads the same one; sharing this one also means a hold that
-  // begins is reported on the bus once, whoever armed it.
-  const hold = new UsageLimitHold(db, events);
+  // begins is reported on the bus once, whoever armed it. It reads plan usage
+  // to pick the failover account for held work (multiple accounts US-015).
+  const hold = new UsageLimitHold(db, events, claudeUsage);
+  const sessionOrchestrator = createSessionOrchestrator(config, db, docker, hold);
+  const orchestrator = deps.orchestrator ?? sessionOrchestrator;
+  const exec = deps.exec ?? docker;
+  // A window at 100% holds its account until the window resets (US-014).
+  claudeUsage.onUsage((accountId, usage) => {
+    hold.armForUsage(accountId, usage);
+  });
   // Session voice agents (voice US-018) and the planning terminal lock each
   // other out; the thunk lets the registry ask the service built after it.
   const sessionAgents: SessionAgentRegistry = new SessionAgentRegistry({
@@ -486,9 +511,9 @@ export function createApp(
   api.use(createBuildRouter(builds));
   // Claude's usage-limit hold (US-002) and the "Resume now" that ends it early
   // (US-008), on the shared hold built above.
-  api.use(createLimitsRouter(hold, builds));
+  api.use(createLimitsRouter(db, hold, builds));
   // The overview page's numbers (US-022): aggregates over the database only.
-  api.use(createStatsRouter(db, hold, builds));
+  api.use(createStatsRouter(db, hold, builds, claudeUsage));
   // Voice (voice US-001): the provider checks and the voice picker's proxy;
   // since US-007 also the call socket, on the gateway's cookie check. Built
   // this late because chief (US-008) reads the build pool, the build logs,

@@ -1,4 +1,5 @@
 export {
+  CLAUDE_ACCOUNT_LABEL,
   REPOSITORY_LABEL,
   ROLE_LABEL,
   SESSION_LABEL,
@@ -27,6 +28,7 @@ export {
   type SessionContainerView,
   type SessionDocker,
   SessionOrchestrator,
+  type SessionStartOptions,
 } from './service.js';
 export {
   ensureSessionWorkspace,

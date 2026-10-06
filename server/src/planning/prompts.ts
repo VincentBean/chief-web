@@ -1,3 +1,4 @@
+import type { EffortLevel } from '../db/index.js';
 import { prdDirFor, screenshotsDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import { EDIT_PROMPT_TEMPLATE, INIT_PROMPT_TEMPLATE } from './templates.js';
@@ -189,14 +190,21 @@ The stories then fix what that section describes.`;
  * `claude "<prompt>"`: the prompt is one argv element, never shell-parsed.
  * With `resumeId` it is `claude --resume <id> "<prompt>"`, continuing a
  * voice planning conversation (voice US-025); the id sits right after the
- * flag, whose value is optional.
+ * flag, whose value is optional. With `effort` (thinking effort US-004),
+ * `--effort <level>` sits between the model and the resume id.
  */
-export function planningCommand(prompt: string, model?: string | null, resumeId?: string | null): string[] {
+export function planningCommand(
+  prompt: string,
+  model?: string | null,
+  resumeId?: string | null,
+  effort?: EffortLevel | null,
+): string[] {
   // No `--model` at all when none is configured: an absent flag is what lets
   // Claude Code apply its own default, and there is no name that means that.
   const selected = model == null ? [] : ['--model', model];
+  const thinking = effort == null ? [] : ['--effort', effort];
   const resume = resumeId == null ? [] : ['--resume', resumeId];
-  return ['claude', ...selected, ...resume, prompt];
+  return ['claude', ...selected, ...thinking, ...resume, prompt];
 }
 
 /**

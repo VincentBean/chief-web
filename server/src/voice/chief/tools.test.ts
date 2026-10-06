@@ -796,7 +796,7 @@ describe('answer_planning_question (voice multi-planning US-012)', () => {
     const { w, started, ids } = world();
     const tool = createChiefTools({
       ...w.services,
-      hold: { until: () => '2026-09-25T18:00:00.000Z' },
+      hold: { waitingUntil: () => '2026-09-25T18:00:00.000Z', allHeldUntil: () => null },
       planningStates: {
         listPlanningSessions: () => [],
         planningState: (id) => ({

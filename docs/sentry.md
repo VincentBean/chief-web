@@ -83,12 +83,13 @@ chief-web only ever touches the projects you link in step 3.
 | **Poll every (minutes)** | 15 | How often linked projects are checked. 1–1440. |
 | **Planning model** | `haiku` | The model that triages each new issue and writes the fix plan you approve. |
 | **Plans per poll** | 2 | How many issues are planned per poll, across every repository. 1–10. |
+| **Account for Sentry fixes** | Default | The [Claude account](claude-auth.md#settings) the planning call and the fix sessions run on. **Default** follows the default account. A fix session keeps the account it was created with. |
 | **API base URL** | `https://sentry.io/api/0/` | Only for self-hosted Sentry. Blank restores the hosted API. |
 
-All five are read on the fly — **none of them needs a restart**. The interval is
+All six are read on the fly — **none of them needs a restart**. The interval is
 re-read before every wait, so a change applies from the next poll; the plan cap
 is read inside the planning pass itself, so a change applies from the next tick;
-the token, the model and the base URL are read at the moment they are used, so
+the token, the model, the account and the base URL are read at the moment they are used, so
 saving a token starts the integration at the next tick, and removing one stops
 it.
 

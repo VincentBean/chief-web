@@ -1,23 +1,23 @@
-import { type FormEvent, lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
+import { AccountPicker } from '../AccountPicker.tsx';
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
   AGENT_MODELS,
   type AgentModel,
   ApiError,
+  EFFORT_LEVELS,
+  type EffortLevel,
   checkElevenLabsKey,
   checkOpenRouterKey,
   type ElevenLabsVoice,
-  fetchClaudeState,
   fetchSettings,
   fetchVoiceVoices,
   type OpenRouterSlugs,
   saveSettings,
   type Settings as SettingsData,
   type SettingsUpdate,
-  startClaudeLogin,
-  stopClaudeLogin,
   testSpeechToText,
   testTextToSpeech,
   validateGithubToken,
@@ -28,11 +28,12 @@ import {
   VOICE_TTS_MODELS,
   type VoiceSettings,
 } from '../api.ts';
-import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useAppData, useMediaQuery } from '../data.tsx';
+import { describeError, redirectIfUnauthorised, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { ClaudeAccountsPanel } from './ClaudeAccounts.tsx';
 import { playPcm16 } from '../voice/pcm.ts';
 import { recordWav } from '../voice/wav.ts';
 
@@ -49,6 +50,8 @@ const MODEL_LABELS: Record<AgentModel, string> = {
 
 const asModel = (value: string): AgentModel | null => (value === '' ? null : (value as AgentModel));
 
+const asEffort = (value: string): EffortLevel | null => (value === '' ? null : (value as EffortLevel));
+
 const asAdvisor = (value: string): AdvisorModel | null => (value === '' ? null : (value as AdvisorModel));
 
 /** Mirrors the server's `DEFAULT_PLANNING_QUESTIONS`, for the Restore defaults button. */
@@ -61,17 +64,15 @@ const toQuestions = (text: string): string[] =>
     .map((line) => line.trim())
     .filter((line) => line !== '');
 
-// xterm.js only matters once an operator actually signs Claude in.
-const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
-
 /**
  * Global settings (US-004): the GitHub token, the build cap and timeout, the
- * models, the commit identity, and Claude Code's one-time sign-in. One form;
- * the save bar appears when something has changed.
+ * models, the commit identity, and the Claude accounts (`ClaudeAccountsPanel`,
+ * multiple accounts US-006). One form; the save bar appears when something
+ * has changed.
  */
 export function Settings() {
   const toast = useToast();
-  const { claude, setClaude } = useAppData();
+  const { claude } = useAppData();
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState('');
@@ -80,10 +81,14 @@ export function Settings() {
   const [prSyncInterval, setPrSyncInterval] = useState('15');
   const [conflictInterval, setConflictInterval] = useState('30');
   const [conflictFixEnabled, setConflictFixEnabled] = useState(true);
+  /** null = follow the default account (US-013), for both pickers. */
+  const [prAutomationAccount, setPrAutomationAccount] = useState<string | null>(null);
+  const [sentryAccount, setSentryAccount] = useState<string | null>(null);
   const [planningModel, setPlanningModel] = useState('');
   const [buildModel, setBuildModel] = useState('');
   const [reviewModel, setReviewModel] = useState('');
   const [advisorModel, setAdvisorModel] = useState('');
+  const [defaultEffort, setDefaultEffort] = useState('');
   /**
    * The server's own words for an advisor Claude Code would refuse at launch
    * (US-006), shown under the advisor select. A toast is the wrong home for it:
@@ -108,14 +113,6 @@ export function Settings() {
   /** OpenRouter's verdict on each model name, shown under its field. */
   const [slugProblems, setSlugProblems] = useState<Partial<Record<keyof OpenRouterSlugs, string>>>({});
   const [busy, setBusy] = useState<'save' | 'validate' | 'remove' | 'remove-sentry' | 'remove-voice-key' | null>(null);
-  const [claudeBusy, setClaudeBusy] = useState<'start' | 'stop' | 'check' | null>(null);
-  // Kept apart from `claude.login.active` so the pane stays on screen (and
-  // readable) after the login process itself has exited.
-  const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
-  // Below `lg` the login terminal is not rendered at all: mounting it would
-  // open a WebSocket onto a PTY too narrow to read and impossible to paste
-  // a code into. The login itself keeps running on the server.
-  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -126,18 +123,8 @@ export function Settings() {
         if (redirectIfUnauthorised(error)) return;
         setLoadError(describeError(error));
       });
-    // A login terminal survives a page reload, so an in-progress one is picked
-    // back up rather than started again.
-    fetchClaudeState({ signal: controller.signal })
-      .then((state) => {
-        setClaude(state);
-        if (state.login.terminalId !== null) setLoginTerminal(state.login.terminalId);
-      })
-      .catch(() => {
-        // The status line below says "checking" until it can say more.
-      });
     return () => controller.abort();
-  }, [setClaude]);
+  }, []);
 
   // `/settings#claude` from the sidebar or the overview lands on that panel.
   useEffect(() => {
@@ -152,10 +139,13 @@ export function Settings() {
     setPrSyncInterval(String(loaded.prSyncIntervalMinutes));
     setConflictInterval(String(loaded.prConflictIntervalMinutes));
     setConflictFixEnabled(loaded.conflictFixEnabled);
+    setPrAutomationAccount(loaded.prAutomationClaudeAccountId);
+    setSentryAccount(loaded.sentryClaudeAccountId);
     setPlanningModel(loaded.planningModel ?? '');
     setBuildModel(loaded.buildModel ?? '');
     setReviewModel(loaded.reviewModel ?? '');
     setAdvisorModel(loaded.advisorModel ?? '');
+    setDefaultEffort(loaded.defaultEffort ?? '');
     setPlanningQuestions(loaded.planningQuestions.join('\n'));
     setCodeReviewDefault(loaded.codeReviewDefault);
     setAuthorName(loaded.gitAuthorName);
@@ -176,14 +166,6 @@ export function Settings() {
       })
       .catch((error: unknown) => toast.error(describeError(error)))
       .finally(() => setBusy(null));
-  };
-
-  const runClaude = (kind: NonNullable<typeof claudeBusy>, action: () => Promise<{ ok: boolean; text: string }>): void => {
-    setClaudeBusy(kind);
-    action()
-      .then((result) => toast.push(result.ok ? 'ok' : 'error', result.text))
-      .catch((error: unknown) => toast.error(describeError(error)))
-      .finally(() => setClaudeBusy(null));
   };
 
   const onSubmit = (event: FormEvent): void => {
@@ -232,16 +214,23 @@ export function Settings() {
       toast.error(voice.error);
       return;
     }
+    // An account removed in the panel above since the page loaded: the server
+    // already cleared it, and sending the id back would only be refused.
+    const stillListed = (id: string | null): string | null =>
+      id !== null && claude !== null && !claude.accounts.some((account) => account.id === id) ? null : id;
     const update: SettingsUpdate = {
       maxConcurrentSessions: parsed,
       agentTimeoutMinutes: timeout,
       prSyncIntervalMinutes: syncInterval,
       prConflictIntervalMinutes: conflictScan,
       conflictFixEnabled,
+      prAutomationClaudeAccountId: stillListed(prAutomationAccount),
+      sentryClaudeAccountId: stillListed(sentryAccount),
       planningModel: asModel(planningModel),
       buildModel: asModel(buildModel),
       reviewModel: asModel(reviewModel),
       advisorModel: asAdvisor(advisorModel),
+      defaultEffort: asEffort(defaultEffort),
       planningQuestions: toQuestions(planningQuestions),
       codeReviewDefault,
       gitAuthorName: authorName.trim() === '' ? null : authorName.trim(),
@@ -344,50 +333,6 @@ export function Settings() {
     });
   };
 
-  const onSetUpClaude = (): void => {
-    runClaude('start', async () => {
-      const state = await startClaudeLogin();
-      setClaude(state);
-      setLoginTerminal(state.login.terminalId);
-      return { ok: true, text: 'Login terminal ready. Open the URL it prints, then paste the code back.' };
-    });
-  };
-
-  const onCloseLogin = (): void => {
-    runClaude('stop', async () => {
-      const state = await stopClaudeLogin();
-      setClaude(state);
-      setLoginTerminal(null);
-      return state.status.authenticated
-        ? { ok: true, text: 'Claude Code is signed in.' }
-        : { ok: false, text: 'Claude Code is still not signed in.' };
-    });
-  };
-
-  const onLoginExit = (): void => {
-    fetchClaudeState({ refresh: true })
-      .then((state) => {
-        setClaude(state);
-        toast.push(
-          state.status.authenticated ? 'ok' : 'error',
-          state.status.authenticated
-            ? 'Claude Code is signed in. Close the terminal to clean up.'
-            : 'The login ended without signing in. Close the terminal and try again.',
-        );
-      })
-      .catch((error: unknown) => toast.error(describeError(error)));
-  };
-
-  const onCheckClaude = (): void => {
-    runClaude('check', async () => {
-      const state = await fetchClaudeState({ refresh: true });
-      setClaude(state);
-      return state.status.authenticated
-        ? { ok: true, text: 'Claude Code is signed in.' }
-        : { ok: false, text: state.status.error ?? 'Claude Code is not signed in.' };
-    });
-  };
-
   if (loadError !== null) {
     return (
       <div className="page page--narrow">
@@ -419,10 +364,13 @@ export function Settings() {
     prSyncInterval !== String(settings.prSyncIntervalMinutes) ||
     conflictInterval !== String(settings.prConflictIntervalMinutes) ||
     conflictFixEnabled !== settings.conflictFixEnabled ||
+    prAutomationAccount !== settings.prAutomationClaudeAccountId ||
+    sentryAccount !== settings.sentryClaudeAccountId ||
     planningModel !== (settings.planningModel ?? '') ||
     buildModel !== (settings.buildModel ?? '') ||
     reviewModel !== (settings.reviewModel ?? '') ||
     advisorModel !== (settings.advisorModel ?? '') ||
+    defaultEffort !== (settings.defaultEffort ?? '') ||
     planningQuestions !== settings.planningQuestions.join('\n') ||
     codeReviewDefault !== settings.codeReviewDefault ||
     authorName !== settings.gitAuthorName ||
@@ -435,88 +383,11 @@ export function Settings() {
     openrouterKey.trim() !== '' ||
     elevenlabsKey.trim() !== '' ||
     JSON.stringify(voiceForm) !== JSON.stringify(toVoiceForm(settings.voice));
-  const claudeStatus = claude?.status ?? null;
-
   return (
     <div className="page page--narrow">
       <PageHeader title="Settings" subtitle="Applies to every repository and session. Changes take effect at the next iteration; nothing running is interrupted." />
 
-      <Panel
-        title="Claude Code"
-        icon="zap"
-        id="claude"
-        meta={
-          claudeStatus === null ? (
-            <Badge>checking…</Badge>
-          ) : claudeStatus.authenticated ? (
-            <Badge tone="done">signed in</Badge>
-          ) : (
-            <Badge tone="danger">not signed in</Badge>
-          )
-        }
-        actions={
-          <>
-            <button type="button" className={claudeStatus?.authenticated === true ? 'button button--small' : 'button button--small button--primary'} onClick={onSetUpClaude} disabled={claudeBusy !== null || loginTerminal !== null}>
-              <Icon name="key" />
-              {claudeBusy === 'start' ? 'Starting…' : claudeStatus?.authenticated === true ? 'Sign in again' : 'Sign in'}
-            </button>
-            <button type="button" className="button button--small button--quiet" onClick={onCheckClaude} disabled={claudeBusy !== null}>
-              <Icon name="sync" />
-              {claudeBusy === 'check' ? 'Checking…' : 'Re-check'}
-            </button>
-          </>
-        }
-      >
-        <p className={claudeStatus?.authenticated === true ? undefined : 'muted'}>
-          {claudeStatus === null
-            ? 'Probing the shared credentials volume…'
-            : claudeStatus.authenticated
-              ? `Signed in${claudeStatus.account === null ? '' : ` as ${claudeStatus.account}`}${claudeStatus.subscription === null ? '' : ` (${claudeStatus.subscription})`}. Every session container shares these credentials.`
-              : 'Sessions cannot be created until Claude Code is signed in. It is a one-time browser login; the credentials are kept on a volume that survives restarts.'}
-        </p>
-        {claudeStatus?.error != null && <p className="field__hint">Status check: {claudeStatus.error}</p>}
-
-        {loginTerminal !== null && (
-          <div className="stack stack--tight">
-            <div className="row__line">
-              <span className="mono muted">{claude?.login.containerName ?? 'claude login'}</span>
-              <span className="toolbar__spacer" />
-              <button type="button" className="button button--small button--danger" onClick={onCloseLogin} disabled={claudeBusy !== null}>
-                <Icon name="x" />
-                {claudeBusy === 'stop' ? 'Closing…' : 'Close login terminal'}
-              </button>
-            </div>
-            {desktop ? (
-              <>
-                <Suspense fallback={<Skeleton lines={6} />}>
-                  <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
-                </Suspense>
-                <ol className="steps steps--plain steps--compact">
-                  <li className="step">
-                    <span className="step__marker">1</span>
-                    <span className="step__body">Select the URL the terminal prints, copy it with Ctrl+Shift+C, open it in a new tab.</span>
-                  </li>
-                  <li className="step">
-                    <span className="step__marker">2</span>
-                    <span className="step__body">Approve the request and copy the code Claude gives back.</span>
-                  </li>
-                  <li className="step">
-                    <span className="step__marker">3</span>
-                    <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
-                  </li>
-                </ol>
-              </>
-            ) : (
-              <Notice kind="info">
-                <strong>Finish this sign-in on a desktop.</strong> The login is an interactive terminal: it prints a URL to
-                open and waits for the code you get back, which needs a keyboard and a wider screen. The terminal is already
-                running on the server, so opening this page on a desktop picks it up where it is — or close it here and start
-                again there.
-              </Notice>
-            )}
-          </div>
-        )}
-      </Panel>
+      <ClaudeAccountsPanel />
 
       <form onSubmit={onSubmit} className="stack">
         <Panel
@@ -577,6 +448,21 @@ export function Settings() {
               Fix merge conflicts automatically
             </label>
             <p className="field__hint">Off means no scan and no agent: nothing is pushed to your pull requests, and no API budget is spent on looking. A fix already running is left to finish.</p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="pr-automation-claude-account">
+              Account for PR review, feedback and conflict fixes
+            </label>
+            <AccountPicker
+              id="pr-automation-claude-account"
+              value={prAutomationAccount}
+              onChange={setPrAutomationAccount}
+              accounts={claude?.accounts ?? []}
+              defaultAccountId={claude?.defaultAccountId ?? null}
+              disabled={claude === null}
+            />
+            <p className="field__hint">The Claude account automatic code reviews, PR feedback runs and merge-conflict fixes run on. Applies from the next run; Default follows the default account.</p>
           </div>
         </Panel>
 
@@ -664,6 +550,20 @@ export function Settings() {
                 A second model consulted during build runs only — planning, review and Sentry never use it. It spends extra tokens at the advisor model's own
                 rates, and it is an experimental Claude Code feature.
               </p>
+            </div>
+            <div className="field">
+              <label className="field__label" htmlFor="default-effort">
+                Default thinking effort
+              </label>
+              <select id="default-effort" name="default-effort" value={defaultEffort} onChange={(event) => setDefaultEffort(event.target.value)} className="field__input">
+                <option value="">CLI default</option>
+                {EFFORT_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+              <p className="field__hint">Applies to planning and build. A session can override it with its own effort.</p>
             </div>
           </div>
 
@@ -777,6 +677,21 @@ export function Settings() {
             </label>
             <input id="sentry-base-url" name="sentry-base-url" type="text" autoComplete="off" spellCheck={false} placeholder="https://sentry.io/api/0/" value={sentryBaseUrl} onChange={(event) => setSentryBaseUrl(event.target.value)} className="field__input mono" />
             <p className="field__hint">Only for self-hosted Sentry. Blank restores the hosted API.</p>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="sentry-claude-account">
+              Account for Sentry fixes
+            </label>
+            <AccountPicker
+              id="sentry-claude-account"
+              value={sentryAccount}
+              onChange={setSentryAccount}
+              accounts={claude?.accounts ?? []}
+              defaultAccountId={claude?.defaultAccountId ?? null}
+              disabled={claude === null}
+            />
+            <p className="field__hint">The Claude account issue plans and fix sessions run on. A fix session keeps the account it was created with; Default follows the default account.</p>
           </div>
         </Panel>
 

@@ -56,6 +56,9 @@ import {
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
+  effectiveClaudeAccountId,
+  runningClaudeAccountId,
+  effortFor,
   getAgentTimeoutMs,
   getBuildModel,
   getMaxConcurrentSessions,
@@ -199,6 +202,13 @@ interface RunState {
    * own bookkeeping is finished, exactly as it does for "Stop build".
    */
   holdUntil: string | null;
+  /**
+   * The Claude account the run's container was started on (multiple accounts
+   * US-014): the one a refusal holds, and the one {@link BuildService.holdAll}
+   * matches against. Resolved at launch, because the container keeps that
+   * account until the next launch even if the session's choice changes.
+   */
+  readonly accountId: string | null;
   /** Resolves when the loop has finished; awaited by "Stop build". */
   finished: Promise<void>;
 }
@@ -326,6 +336,12 @@ export interface QueuedStart {
   isRunning?(entry: BuildQueueEntry): boolean;
   /** Starts the entry. It is already out of the queue by the time this runs. */
   start(entry: BuildQueueEntry): Promise<void>;
+  /**
+   * The Claude account the entry would launch on (multiple accounts US-014),
+   * so the pump can skip it while that account is held and serve the rest.
+   * Without it the entry waits only while every account is held.
+   */
+  accountId?(entry: BuildQueueEntry): string | null;
   /** Puts a start that threw somewhere the operator will see it. */
   onFailed?(entry: BuildQueueEntry, message: string): void;
 }
@@ -375,6 +391,10 @@ export class BuildService {
     this.registerStart('session', {
       exists: (entry) => getSession(this.db, entry.refId) !== null,
       isRunning: (entry) => this.runs.has(entry.refId),
+      accountId: (entry) => {
+        const session = getSession(this.db, entry.refId);
+        return session === null ? null : effectiveClaudeAccountId(this.db, session);
+      },
       start: async (entry) => {
         const session = this.requireSession(entry.refId);
         // Something may have changed while it waited — it went back to
@@ -549,7 +569,9 @@ export class BuildService {
     // queue is exactly the right place to put it — it is already the answer to
     // "there is no room for you yet", and the pump hands it a slot by itself
     // once the hold lifts.
-    const until = this.hold.until();
+    // With a failover account free (US-015) it is not held at all: the
+    // orchestrator launches it there.
+    const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
     if (until !== null) {
       this.enqueueSession(session);
       throw new BuildError(429, 'usage_limit_hold', queuedForHoldMessage(session, until));
@@ -630,10 +652,23 @@ export class BuildService {
   async resumeHeld(now: string = nowIso()): Promise<number> {
     // A second refusal during the hold extends it (US-002) without re-parking
     // the sessions that were already `waiting`, so their own expiry can be the
-    // stale one. The hold is what the resume is really waiting for.
-    if (this.hold.active()) return 0;
-
-    return this.resume(listDueWaitingSessions(this.db, now));
+    // stale one. The hold is what the resume is really waiting for — and it is
+    // per account (US-014): only a session whose account is still held waits.
+    // And a session whose own account is still held need not wait for it once
+    // another account can take its work (US-015), so those are resumed before
+    // their own expiry — re-evaluated on every tick, as usage changes. Nor
+    // does a session parked by a refusal on its failover account: its
+    // `waiting_until` is that account's hold, not its own one's.
+    const due = new Set(listDueWaitingSessions(this.db, now).map((session) => session.id));
+    const at = new Date(now);
+    return this.resume(
+      this.notHeld(listWaitingSessions(this.db), at).filter(
+        (session) =>
+          due.has(session.id) ||
+          session.failoverClaudeAccountId !== null ||
+          this.hold.active(effectiveClaudeAccountId(this.db, session), at),
+      ),
+    );
   }
 
   /**
@@ -648,9 +683,12 @@ export class BuildService {
    * them through. Everything after that is the ordinary resume: the cap is
    * respected and the overflow goes on the queue.
    */
-  async resumeAllHeld(): Promise<number> {
-    this.hold.clear();
-    const resumed = await this.resume(listWaitingSessions(this.db));
+  async resumeAllHeld(accountId?: string): Promise<number> {
+    if (accountId === undefined) this.hold.clearAll();
+    else this.hold.clear(accountId);
+    // Every waiting session whose account is free now: with one account
+    // cleared, the sessions on another account still held keep waiting.
+    const resumed = await this.resume(this.notHeld(listWaitingSessions(this.db)));
     // The hold turned `drain()` into a no-op (US-005), so anything queued while
     // it was on is still sitting there. Held sessions were served their slots
     // first, above; this hands whatever is left to the queue rather than making
@@ -672,16 +710,17 @@ export class BuildService {
    * is the only thing given up: the loop's first act is to reap the agent the
    * last process left behind, and the story is picked again from the file.
    *
-   * No cap check: a `building` session never gave its slot back. Under the
-   * hold it is parked instead, exactly as {@link holdOthers} would have done,
-   * and resumed with the rest when the hold lifts.
+   * No cap check: a `building` session never gave its slot back. When its
+   * account is held (US-014) and no failover account can take the work
+   * (US-015) it is parked instead, exactly as {@link holdOthers} would have
+   * done, and resumed with the rest when the hold lifts.
    */
   async resumeOrphaned(): Promise<number> {
     let resumed = 0;
     for (const session of listSessions(this.db, { status: 'building' })) {
       if (this.runs.has(session.id) || this.isStarting('session', session.id)) continue;
 
-      const until = this.hold.until();
+      const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
       if (until !== null) {
         this.park(session, null, until);
         continue;
@@ -706,6 +745,16 @@ export class BuildService {
       }
     }
     return resumed;
+  }
+
+  /**
+   * The sessions that can launch: their effective Claude account is not held
+   * (US-014), or a failover account can take their work (US-015).
+   */
+  private notHeld(sessions: readonly Session[], now: Date = new Date()): Session[] {
+    return sessions.filter(
+      (session) => this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session), now) === null,
+    );
   }
 
   /** The shared body of both resumes: cap first, queue for the overflow. */
@@ -762,13 +811,14 @@ export class BuildService {
 
   private async drain(): Promise<void> {
     for (;;) {
-      // A free slot is no use while the hold is on (US-005). The queue keeps
-      // its order and its entries; the pump that runs when the hold lifts is
-      // the one that empties it.
-      if (this.hold.active()) return;
+      // A free slot is no use to an entry whose account is held (US-005,
+      // per account since US-014). Such entries keep their order and their
+      // place; the first entry on an account that can work takes the slot,
+      // and the pump that runs when a hold lifts serves the rest.
+      if (this.hold.allHeld()) return;
       if (this.freeSlots() <= 0) return;
 
-      const next = this.queue().find((entry) => !this.isBusy(entry));
+      const next = this.queue().find((entry) => !this.isBusy(entry) && !this.isHeld(entry));
       if (next === undefined) return;
 
       const starter = this.starters.get(next.kind);
@@ -812,6 +862,16 @@ export class BuildService {
         starter.onFailed?.(next, message);
       }
     }
+  }
+
+  /**
+   * True when the account the entry would launch on is held (US-014) and no
+   * failover account can take it instead (US-015).
+   */
+  private isHeld(entry: BuildQueueEntry): boolean {
+    const starter = this.starters.get(entry.kind);
+    if (starter?.accountId === undefined) return this.hold.allHeld();
+    return this.hold.waitingUntil(starter.accountId(entry)) !== null;
   }
 
   /** True when the entry's work is already starting or running here. */
@@ -899,7 +959,7 @@ export class BuildService {
     try {
       let containerId: string;
       try {
-        containerId = (await this.containers.start(session)).id;
+        containerId = (await this.containers.start(session, { agentWork: true })).id;
       } catch (cause) {
         throw new BuildError(
           502,
@@ -941,6 +1001,10 @@ export class BuildService {
         startedAt: parked?.startedAt ?? nowIso(),
         stopping: false,
         holdUntil: null,
+        // The account `start` just resolved for the container: the row as it
+        // is now, which is what the orchestrator read and wrote — the failover
+        // account while the session's own is held (US-015).
+        accountId: runningClaudeAccountId(this.db, getSession(this.db, session.id) ?? session),
         finished: Promise.resolve(),
       };
       this.runs.set(session.id, state);
@@ -1125,7 +1189,7 @@ export class BuildService {
     snapshot: PrdSnapshot,
     state: RunState,
   ): Promise<boolean> {
-    state.containerId = (await this.containers.start(session)).id;
+    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
 
     // chief marks the story in-progress before invoking the agent, and so does
     // this: the status the loop leaves behind is what the *next* read is
@@ -1152,6 +1216,10 @@ export class BuildService {
     const buildModel = getBuildModel(this.db);
     const advisor = advisorFor(this.db);
     if (advisor.dropped !== null) log.write(`${advisor.dropped}\n`);
+    // The effort is resolved on the same line and from a fresh read of the
+    // session row, so an effort changed mid-build lands at the next iteration.
+    const effort = effortFor(this.db, getSession(this.db, session.id) ?? session);
+    if (effort !== null) log.write(`Thinking effort: ${effort.level} (${effort.source})\n`);
     // Read per iteration, so a timeout changed on the settings page applies to
     // the next one without a restart (US-019). The agent is told the same
     // number it is held to: it is the only one of the two that can decide not
@@ -1173,6 +1241,7 @@ export class BuildService {
         timeoutMs,
         model: buildModel,
         advisor: advisor.model,
+        effort: effort?.level ?? null,
         onOutput: (text) => log.write(text),
       });
     } catch (cause) {
@@ -1204,7 +1273,7 @@ export class BuildService {
     // would hit it within seconds. So the run is parked on a global hold
     // instead and picks the same story up again when the hold lifts.
     if (isUsageLimitRefusal(result)) {
-      const until = this.hold.arm();
+      const until = this.hold.arm(state.accountId);
       // Inside this iteration's own markers, so the per-iteration history
       // explains the gap rather than showing a section that stops mid-air.
       log.write(`\n${holdMessage(until)}\n`);
@@ -1223,10 +1292,11 @@ export class BuildService {
       else this.park(session, state, until);
 
       // The limit belongs to the account, not to this session, so every other
-      // run is about to be refused for the same reason (US-005). They come off
-      // the agent now, on this expiry, rather than each discovering the wall
-      // for itself.
-      await this.holdOthers(session.id, until);
+      // run on that account is about to be refused for the same reason
+      // (US-005, US-014). They come off the agent now, on this expiry, rather
+      // than each discovering the wall for itself; runs on other accounts
+      // carry on.
+      await this.holdOthers(session.id, state.accountId, until);
       return false;
     }
 
@@ -1428,9 +1498,10 @@ export class BuildService {
    * refusal is the same outage {@link holdOthers} exists for — the only
    * difference is that there is no refused session of its own to skip.
    */
-  async holdAll(until: string): Promise<void> {
-    await this.holdOthers(null, until);
+  async holdAll(accountId: string | null, until: string): Promise<void> {
+    await this.holdOthers(null, accountId, until);
   }
+
 
   /**
    * Puts every *other* building session on the same hold (US-005).
@@ -1451,10 +1522,16 @@ export class BuildService {
    * under it — is parked too. There is no exec to reap, and leaving it
    * `building` would have it counted as working while nothing is.
    */
-  private async holdOthers(refusedId: string | null, until: string): Promise<void> {
+  private async holdOthers(
+    refusedId: string | null,
+    accountId: string | null,
+    until: string,
+  ): Promise<void> {
     for (const session of listSessions(this.db, { status: 'building' })) {
       if (session.id === refusedId) continue;
       const state = this.runs.get(session.id);
+      const account = state?.accountId ?? runningClaudeAccountId(this.db, session);
+      if (account !== accountId) continue;
       if (state === undefined) {
         this.park(session, null, until);
         continue;

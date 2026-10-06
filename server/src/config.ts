@@ -30,18 +30,23 @@ export interface Config {
    * the volume's host mountpoint first.
    */
   readonly dataVolume: string;
-  /** Mount point of the shared `claude-auth` volume with agent credentials. */
-  readonly claudeAuthDir: string;
   /**
-   * Name of the Docker volume holding those credentials, mounted into every
-   * container the server spawns. Empty outside Docker, where
-   * {@link claudeAuthDir} is a real host path and can be bind-mounted instead.
+   * Mount point of the legacy single-account `claude-auth` volume. Only read
+   * once, to import an existing login as the first account (multiple accounts
+   * US-001); no container mounts it any more.
    */
-  readonly claudeAuthVolume: string;
+  readonly claudeAuthDir: string;
   /** Cap on how long the `claude auth status` probe container may take. */
   readonly claudeProbeTimeoutMs: number;
   /** How long a probe result is reused before another container is spawned. */
   readonly claudeStatusCacheMs: number;
+  /**
+   * Base URL of the plan-usage endpoint (`/api/oauth/usage` is appended).
+   * Only tests point it anywhere else (multiple accounts US-005).
+   */
+  readonly claudeUsageUrl: string;
+  /** How long an account's fetched plan usage is reused before it is asked again. */
+  readonly claudeUsageCacheMs: number;
   /** Docker socket used to spawn session containers. */
   readonly dockerSocket: string;
   /** Docker CLI binary used to spawn short-lived helper containers. */
@@ -266,9 +271,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workspacesDir: path.resolve(str('WORKSPACES_DIR', path.join(dataDir, 'workspaces'))),
     dataVolume: str('CHIEF_DATA_VOLUME', ''),
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
-    claudeAuthVolume: str('CLAUDE_AUTH_VOLUME', ''),
     claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 30_000),
     claudeStatusCacheMs: int('CLAUDE_STATUS_CACHE_MS', 15_000),
+    claudeUsageUrl: str('CLAUDE_USAGE_URL', 'https://api.anthropic.com'),
+    claudeUsageCacheMs: int('CLAUDE_USAGE_CACHE_MS', 60_000),
     dockerSocket: str('DOCKER_SOCKET', '/var/run/docker.sock'),
     dockerBin: str('DOCKER_BIN', 'docker'),
     runnerImage: str('RUNNER_IMAGE', 'chief-web-runner:latest'),

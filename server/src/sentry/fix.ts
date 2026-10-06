@@ -16,6 +16,7 @@ import {
 import { logger } from '../lib/logger.js';
 import { giveToRunner, sessionRepoDir } from '../orchestrator/index.js';
 import { prdDirFor } from '../prd/index.js';
+import { getSentryClaudeAccountId } from '../settings/index.js';
 import type { CreateSessionRequest, ReadyResult, SessionSetupView } from '../sessions/index.js';
 import { sessionPrdFile } from '../sessions/index.js';
 
@@ -284,6 +285,7 @@ export class SentryFixService implements SentryFixer {
 
     const name = this.sessionName(repository.id, shortIds(issues));
 
+    const sentryAccount = getSentryClaudeAccountId(this.db);
     let setup: SessionSetupView;
     try {
       setup = await this.sessions.create({
@@ -295,6 +297,8 @@ export class SentryFixService implements SentryFixer {
         // goes through the existing automatic review and PR-feedback chain
         // without anybody asking for it.
         codeReview: true,
+        // Settings → Sentry's account; unset leaves the session on the default.
+        ...(sentryAccount === null ? {} : { claudeAccountId: sentryAccount }),
       });
     } catch (cause) {
       // A missing deploy key, a name the database refused: nothing was created.

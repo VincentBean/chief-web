@@ -35,6 +35,11 @@ export interface AgentInvocation {
    */
   readonly advisor?: string | null;
   /**
+   * `--effort` for this iteration: the session's thinking effort, or the global
+   * default. `null`/absent passes no flag, leaving the choice to the CLI.
+   */
+  readonly effort?: string | null;
+  /**
    * Called with the agent's output as it is produced, already rendered from
    * `stream-json` into the lines a person reads (US-016).
    */
@@ -89,6 +94,7 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.prompt,
       invocation.model,
       invocation.advisor,
+      invocation.effort,
     );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {

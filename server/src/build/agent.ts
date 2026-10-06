@@ -88,9 +88,10 @@ export function agentExecSpec(
   prompt: string,
   model?: string | null,
   advisor?: string | null,
+  effort?: string | null,
 ): ExecSpec {
   return {
-    cmd: wrapAgentCommand(sessionId, iteration, agentCommand(prompt, model, advisor)),
+    cmd: wrapAgentCommand(sessionId, iteration, agentCommand(prompt, model, advisor, effort)),
     workingDir: CONTAINER_REPO_DIR,
   };
 }

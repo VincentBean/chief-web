@@ -58,19 +58,21 @@ containers themselves hold nothing you would miss:
 
 | Volume                  | Mounted in server at | Contents                                                          |
 | ----------------------- | -------------------- | ----------------------------------------------------------------- |
-| `chief-web-data`        | `/data`              | the SQLite database, the per-repository SSH deploy keys, and one workspace (clone + `.chief/` state) per session |
-| `chief-web-claude-auth` | `/claude-auth`       | the Claude Code credentials, shared by every session container     |
+| `chief-web-data`        | `/data`              | the SQLite database, the per-repository SSH deploy keys, one workspace (clone + `.chief/` state) per session, and one credentials directory per Claude account |
+| `chief-web-claude-auth` | `/claude-auth` (ro)  | legacy single-account credentials, imported once as the first Claude account |
 
-Both are named explicitly (`CHIEF_DATA_VOLUME`, `CLAUDE_AUTH_VOLUME`) rather
-than carrying the compose project prefix, because the server passes those names
-to the Docker socket when it spawns containers. A container mounts the
-credentials volume **by name**; its own workspace is a *subdirectory* of the data
+Both are named explicitly (`CHIEF_DATA_VOLUME` for the data volume; the legacy
+volume keeps its old name and can be removed once it has been imported, see
+[Upgrading from a single account](claude-auth.md#upgrading-from-a-single-account))
+rather than carrying the compose project prefix, because the server passes the
+data volume's name to the Docker socket. A container's workspace and its Claude
+account directory (`claude-accounts/<id>`) are *subdirectories* of the data
 volume, which a name cannot express, so the server looks the volume's host
 mountpoint up once and bind-mounts the subdirectory — bind sources are always
 resolved on the host.
 
 `docker compose down` keeps both volumes. `docker compose down -v` destroys
-them: every session, every workspace, every deploy key and the Claude login.
+them: every session, every workspace, every deploy key and every Claude account's login.
 Backing chief-web up means backing up `chief-web-data`.
 
 ## The Docker socket, and what it costs
@@ -134,7 +136,7 @@ plus a short-lived one for each repository "Test connection".
 The image ships git, OpenSSH, Node.js 22 and the Claude Code CLI (`claude`), and:
 
 - runs as the unprivileged **`node`** user (uid 1000) — never root;
-- mounts the shared `claude-auth` volume at **`~/.claude`** (`/home/node/.claude`),
+- mounts a Claude account's directory at **`~/.claude`** (`/home/node/.claude`),
   with `CLAUDE_CONFIG_DIR` pointing there so all agent state persists in it;
 - mounts the per-session workspace at **`/workspace`**, which is also the workdir;
 - idles as PID 1 (`tini` + `tail -f /dev/null`) because the server `docker exec`s
@@ -165,7 +167,7 @@ Each session container mounts exactly three things:
 
 | Source                                | Target                | Mode |
 | ------------------------------------- | --------------------- | ---- |
-| `claude-auth` volume                  | `/home/node/.claude`  | rw   |
+| `claude-accounts/<account-id>/`       | `/home/node/.claude`  | rw   |
 | `workspaces/<session-id>/`            | `/workspace`          | rw   |
 | the repository's SSH private key      | `/keys/id_ed25519`    | ro   |
 

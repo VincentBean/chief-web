@@ -96,7 +96,7 @@ A session is in exactly one of six states, and the badge on the
 | `pending` | Being set up, or being planned: there is no PRD chief-web can build yet | **Mark ready**, once `prd.md` parses |
 | `ready` | The PRD is parsed and the stories are in the database | **Start build**, a [scheduled start](scheduling.md#scheduled-starts), or its turn in the [queue](scheduling.md#concurrency-and-the-build-queue) |
 | `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
-| `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires, **Resume now**, or **Stop build** |
+| `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires or another account can take over ([failover](#claude-account)), **Resume now**, or **Stop build** |
 | `failed` | A stage gave up and stored why (see [Failure and recovery](build-loop.md#failure-and-recovery)) | **Retry**, which resumes at the stage that failed |
 | `finished` | Every story is `done`, the pull request is open and the [code review](code-review.md), if it was on, has been posted — or, for a [recurring run](#sessions-a-recurring-task-started) that changed nothing, there was nothing to deliver at all | Nothing — the session's work is on `origin` |
 
@@ -110,6 +110,99 @@ it opens. It is set on the new-session form (seeded from **Settings → Run code
 review on new sessions**) and can be changed from the session page at any time
 until the session is finished. What the review does, what it posts and what
 happens when it fails is [its own page](code-review.md).
+
+## Thinking effort
+
+A session can also carry a **thinking effort**: how hard Claude Code thinks
+before it answers, passed to the CLI as `--effort <level>`. There are five
+levels, from least to most: **`low`**, **`medium`**, **`high`**, **`xhigh`**
+and **`max`**. More effort means more thinking tokens per turn, so it costs
+more usage and time.
+
+The effort applies to the two places chief-web launches Claude Code for a
+session: the [planning terminal](#planning) and every
+[build iteration](build-loop.md). Nothing else changes. The
+[code review](code-review.md) pass, pull request feedback runs and
+[merge conflict fix](merge-conflicts.md) runs always launch without
+`--effort`, whatever the session or the setting says.
+
+The effort a launch uses is resolved in this order:
+
+1. **The session's own effort**, if it has one. Set it on the new-session form
+   or in the **Thinking effort** card on the session page.
+2. **The global default**, **Settings → Default thinking effort**, for a
+   session left at **Default**.
+3. **Claude Code's own default**, when neither is set. In that case no
+   `--effort` is passed at all.
+
+A session left at **Default** stores no level of its own, so a later change to
+the global default reaches it too. Sessions created by a
+[recurring task](#sessions-a-recurring-task-started), a Sentry fix or a voice
+action always start at **Default**.
+
+**A change applies from the next launch.** Nothing is restarted. The planning
+terminal reads the effort when it is opened, so a terminal that is already
+open keeps its effort until you close it and open a new one. A build reads it
+at the start of every iteration, so a change made while a session is
+**building** applies from the next iteration, and the story that is running
+finishes at the old effort. Each iteration writes the effort it uses to the
+build log as `Thinking effort: <level> (session)` or `(default)`. Once a session
+is **finished** its effort can no longer be changed, because no agent will run
+for it again.
+
+## Claude account
+
+chief-web can have [several Claude accounts](claude-auth.md), and each session
+runs on one of them. Every container the session gets — the planning terminal,
+the build, the review, the pull request description — mounts that account's
+login, and its usage counts against that account's limits.
+
+**The picker.** The new-session form has a **Claude account** field right after
+**Thinking effort**, and the session page has a **Claude account** card under
+the thinking effort card. Both open the same picker: each account with its
+status dot, its nickname or email, and its 5-hour and 7-day usage, marked *not
+signed in* or *sign in again* (those cannot be chosen) or *on hold* (it can be
+chosen; the work fails over or waits, see below).
+
+**The default.** The first choice is **Default (<name>)**: the session stores
+no account of its own and follows the default account, so a later change of
+the default reaches it too. The default is the account pinned with **Make
+default** in [Settings → Claude Code](claude-auth.md#make-default); with none
+pinned it is the first signed-in account, and the option reads **Default
+(first signed-in account)**. The account a launch uses is resolved in this
+order:
+
+1. **The session's own account**, if it has one.
+2. **The default account**, for a session left at **Default**.
+
+With no account signed in at all, no session can be created or planned. A
+session whose account is removed falls back to the default. Sessions created by
+a [recurring task](#sessions-a-recurring-task-started) run on the task's
+account, Sentry fix sessions on the Sentry account
+([Settings](claude-auth.md#settings)), and voice-created sessions on the
+default.
+
+**Changing it on a running session.** The card saves on change. Nothing is
+interrupted: the account is read when agent work is launched, so the change
+applies from the next build iteration, planning terminal, review or
+description, and the story that is running finishes on the old account. Unlike
+the thinking effort, an account cannot be swapped inside a running container,
+so that next launch **recreates the session's container** on the new account
+first — the workspace on the data volume is kept; a planning terminal or
+browser terminal open in the old container closes. The toast says so when the
+session has a container. Once a session is **finished** or merged its account
+can no longer be changed (`409 claude_account_locked`).
+
+**Failover.** When the session's account is held by its
+[usage limit](build-loop.md#the-usage-limit-hold), the session does not have to
+wait: it runs on another signed-in account that is not held and whose 5-hour
+usage is at most 95% — the least used one. The card's badge names the account
+it is actually running on, the card reads **Running on <other> while <own> is
+on hold until <time>**, and the sessions list carries the same line without
+the time. As soon as its own account's
+hold has expired, the next launch takes it back home. When no other account
+qualifies, the session waits at **waiting** as it would with one account. The
+full rules are in [Failover](claude-auth.md#failover).
 
 ## Planning
 
@@ -152,8 +245,8 @@ data volume (a `stat` plus a parse of a small markdown file), never through
 Docker. The parser lives in `server/src/prd/` and follows chief's
 `internal/prd/markdown.go`.
 
-Planning is behind the same guard as session creation: Claude Code has to be
-signed in once (see [Claude authentication](claude-auth.md)) before an
+Planning is behind the same guard as session creation: at least one Claude account has to be
+signed in (see [Claude authentication](claude-auth.md)) before an
 interactive `claude` can be started.
 
 ## Marking a session ready

@@ -35,31 +35,33 @@ repository, generate a new keypair, and add the new public key on GitHub.
 
 The indicator on **Settings → Claude Code** is the verdict of a real
 `claude auth status` run in a container, so it is the truth, not a cached guess.
-Session creation, planning and any retry that runs an agent are blocked while it
-says this — deliberately, so you find out here instead of two hours into a
+Session creation, planning and any retry that runs an agent are blocked while
+no account is signed in — deliberately, so you find out here instead of two hours into a
 build.
 
-- **Credentials expired**, or you signed the account out elsewhere: press **Set
-  up Claude** again and repeat the login. It is the same flow as first-time
-  setup, and it replaces what is in the volume. Nothing else has to be restarted;
-  sessions already running pick the new credentials up on their next iteration,
-  because the volume is mounted live.
+- **Credentials expired**, or you signed the account out elsewhere: press
+  **Sign in again** on that account's row and repeat the login. It is the same
+  flow as adding it, and it replaces what is in the account's directory. Nothing
+  else has to be restarted; sessions already running on it pick the new
+  credentials up on their next iteration, because the directory is mounted
+  live.
 - **A build failed mid-run with an auth error**: re-authenticate, then press
   **Retry** on the session. Completed stories are not rebuilt.
 - **It says Not authenticated with an error next to it** (`docker: …`, `image
   not found`, a timeout): the *probe* could not run. chief-web fails closed — an
   unanswerable check is not a pass. Usually the runner image is missing
   (`docker compose build runner`) or the Docker socket is unreachable. Fix that
-  and press **Re-check**.
+  and press **Check again** on the account.
 - **The login terminal shows nothing**: the login container did not start. Check
   `docker compose logs server` and that `RUNNER_IMAGE` exists locally
   (`docker image ls chief-web-runner`).
 - The status is cached for 15 seconds (`CLAUDE_STATUS_CACHE_MS`) because each
-  probe costs a container start; **Re-check** ignores the cache.
+  probe costs a container start; **Check again** and **Re-check all** ignore the
+  cache.
 
-The credentials survive `docker compose down` and restarts. They are lost only
-by removing the volume (`docker volume rm chief-web-claude-auth`), which is what
-a `docker compose down -v` does.
+The credentials survive `docker compose down` and restarts: each account's
+login lives in its own directory on the data volume. To sign an account in
+afresh, use **Sign in again** on its row.
 
 ## Recovering a failed session
 

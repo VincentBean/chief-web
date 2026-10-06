@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import {
+  claudeAccountName,
   deleteSession,
   failureStageLabel,
   leaveQueue,
@@ -69,9 +70,27 @@ function isStatusFilter(value: string | null): value is SessionStatus {
  * to exactly what they count.
  */
 export function Sessions() {
-  const { sessions, repositories, error, refresh } = useAppData();
+  const { sessions, repositories, claude, error, refresh } = useAppData();
   const { search } = useLocation();
   const toast = useToast();
+
+  /**
+   * Which account a session runs on, named only once there is a choice
+   * (multiple accounts US-012) — and, while it has failed over (US-015), which
+   * held account it stands in for.
+   */
+  const accountName = (session: Session): string | null => {
+    if (claude === null || claude.accounts.length < 2) return null;
+    const nameOf = (id: string): string => {
+      const account = claude.accounts.find((candidate) => candidate.id === id);
+      return account === undefined ? `Account ${id.slice(0, 8)}` : claudeAccountName(account);
+    };
+    const own = session.effectiveClaudeAccountId;
+    if (session.failoverClaudeAccountId !== null && own !== null) {
+      return `Running on ${nameOf(session.failoverClaudeAccountId)} while ${nameOf(own)} is on hold`;
+    }
+    return own === null ? null : nameOf(own);
+  };
   const params = new URLSearchParams(search);
   const filter: Filter = isFilter(params.get('filter')) ? (params.get('filter') as Filter) : 'all';
   const status: StatusFilter = isStatusFilter(params.get('status')) ? (params.get('status') as SessionStatus) : 'all';
@@ -313,6 +332,7 @@ export function Sessions() {
                   key={session.id}
                   session={session}
                   busy={busyId === session.id}
+                  accountName={accountName(session)}
                   onRetry={() => onRetry(session)}
                   onRetrySetup={() => onRetrySetup(session)}
                   onLeaveQueue={() => onLeaveQueue(session)}
@@ -341,6 +361,7 @@ export function Sessions() {
 function SessionRow({
   session,
   busy,
+  accountName,
   onRetry,
   onRetrySetup,
   onLeaveQueue,
@@ -348,6 +369,8 @@ function SessionRow({
 }: {
   readonly session: Session;
   readonly busy: boolean;
+  /** The account the session runs on; null hides the line (one account only). */
+  readonly accountName: string | null;
   readonly onRetry: () => void;
   readonly onRetrySetup: () => void;
   readonly onLeaveQueue: () => void;
@@ -369,6 +392,7 @@ function SessionRow({
             <FeedbackBadge session={session} />
             {session.queuePosition !== null && <span className="badge badge--wait">queued #{session.queuePosition}</span>}
           </span>
+          {accountName !== null && <span className="cell-stack__meta">{accountName}</span>}
           <span className="cell-stack__meta">
             {session.repositoryName}
             {note !== null && (
