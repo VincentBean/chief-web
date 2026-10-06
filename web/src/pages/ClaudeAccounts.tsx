@@ -1,4 +1,4 @@
-import { type KeyboardEvent, lazy, Suspense, useEffect, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 
 import {
   addClaudeAccount,
@@ -21,6 +21,7 @@ import {
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
 import { DESKTOP_QUERY, describeError, useAppData, useMediaQuery } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
+import type { TerminalPaneHandle } from '../TerminalPane.tsx';
 import { resetsIn } from '../schedule.ts';
 import { useToast } from '../toast.tsx';
 import { Badge, EmptyState, Gauge, Notice, Panel, Skeleton } from '../ui.tsx';
@@ -62,6 +63,8 @@ export function ClaudeAccountsPanel() {
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
   const [loginTerminal, setLoginTerminal] = useState<string | null>(null);
+  const loginPane = useRef<TerminalPaneHandle>(null);
+  const [loginCode, setLoginCode] = useState('');
   const [renaming, setRenaming] = useState<{ readonly id: string; readonly draft: string } | null>(null);
   const [removing, setRemoving] = useState<Removing | null>(null);
   // Below `lg` the login terminal is not rendered at all: mounting it would
@@ -131,6 +134,7 @@ export function ClaudeAccountsPanel() {
       const state = await fetchClaudeState({ refresh: stopped === null });
       setClaude(state);
       setLoginTerminal(null);
+      setLoginCode('');
       if (stopped !== null && stopped.account === null) {
         return { ok: false, text: 'The login was closed before it signed in; the account was not added.' };
       }
@@ -153,6 +157,21 @@ export function ClaudeAccountsPanel() {
         );
       })
       .catch((error: unknown) => toast.error(describeError(error)));
+  };
+
+  // `claude auth login` reads the code with echo off, so nothing shows in the
+  // terminal as it is typed or pasted. The field shows what is about to go in,
+  // and pastes without the clipboard API, which plain HTTP does not offer.
+  const onSendCode = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    const code = loginCode.trim();
+    if (code === '') return;
+    if (loginPane.current?.send(code) !== true) {
+      toast.error('Not connected to the login terminal.');
+      return;
+    }
+    setLoginCode('');
+    toast.push('ok', 'Code sent. The terminal says whether it was accepted.');
   };
 
   const onCheck = (account: ClaudeAccountStatus): void => {
@@ -414,7 +433,7 @@ export function ClaudeAccountsPanel() {
           {desktop ? (
             <>
               <Suspense fallback={<Skeleton lines={6} />}>
-                <TerminalPane terminalId={loginTerminal} onExit={onLoginExit} />
+                <TerminalPane ref={loginPane} terminalId={loginTerminal} onExit={onLoginExit} />
               </Suspense>
               <ol className="steps steps--plain steps--compact">
                 <li className="step">
@@ -427,9 +446,33 @@ export function ClaudeAccountsPanel() {
                 </li>
                 <li className="step">
                   <span className="step__marker">3</span>
-                  <span className="step__body">Paste it into the terminal with Ctrl+Shift+V, press Enter, then close the terminal.</span>
+                  <span className="step__body">Paste it into the field below and send it, then close the terminal once it says the login worked.</span>
                 </li>
               </ol>
+              <form className="field" onSubmit={onSendCode}>
+                <label className="field__label" htmlFor="claude-login-code">
+                  Code
+                </label>
+                <input
+                  id="claude-login-code"
+                  className="field__input mono"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={loginCode}
+                  onChange={(event) => setLoginCode(event.target.value)}
+                  placeholder="Paste the code Claude gives back"
+                />
+                <div className="field__actions">
+                  <button type="submit" className="button button--primary" disabled={loginCode.trim() === ''}>
+                    <Icon name="check" />
+                    Send code
+                  </button>
+                </div>
+                <p className="field__hint">
+                  Claude Code hides the code at its <span className="mono">Paste code here</span> prompt, so the terminal
+                  shows nothing as you type or paste it. This sends it as written, followed by Enter.
+                </p>
+              </form>
             </>
           ) : (
             <Notice kind="info">

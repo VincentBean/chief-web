@@ -55,7 +55,10 @@ opens a browser terminal in it running `claude auth login`, shown inline:
 
 1. Copy the URL it prints (Ctrl+Shift+C) and open it in a new tab.
 2. Approve the request and copy the code Claude gives you.
-3. Paste it back into the terminal (Ctrl+Shift+V) and press Enter.
+3. Paste it into the **Code** field under the terminal and press **Send code**.
+   Claude Code reads the code with echo off, so nothing appears in the terminal
+   as it is typed or pasted; the field sends it to the terminal followed by
+   Enter, and the terminal answers with the result.
 4. Press **Close login terminal**.
 
 Closing (`DELETE /api/claude/accounts/<id>/login`) kills the terminal, removes

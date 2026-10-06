@@ -248,7 +248,8 @@ appears and asks you to log in:
 
 1. Copy the URL it prints with **Ctrl+Shift+C** and open it in a new tab.
 2. Approve it, and copy the code Claude gives you.
-3. Paste it back into the terminal with **Ctrl+Shift+V** and press Enter.
+3. Paste it into the **Code** field under the terminal and press **Send code**.
+   The terminal itself does not show the code as you type or paste it.
 4. Press **Close login terminal**.
 
 The account is now listed as signed in, with its 5-hour and 7-day plan usage.

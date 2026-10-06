@@ -253,6 +253,9 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, r
         (event.ctrlKey && event.shiftKey && event.code === 'KeyV') ||
         (event.shiftKey && event.code === 'Insert');
       if (paste) {
+        // No clipboard API outside a secure context (plain HTTP to a LAN
+        // address): let the browser's own paste event reach xterm instead.
+        if (!window.isSecureContext) return true;
         void navigator.clipboard
           .readText()
           .then((text) => term.paste(text))

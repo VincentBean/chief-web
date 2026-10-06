@@ -237,6 +237,8 @@ How it works:
   because the pid Docker reports for an exec is a *host* pid and cannot be
   signalled from within the container's PID namespace.
 - Copy with Ctrl+Shift+C (or Ctrl+Insert), paste with Ctrl+Shift+V or Ctrl+V.
+  Outside a secure context (plain HTTP to a LAN address) the browser has no
+  clipboard API, so Ctrl+Shift+V falls through to the browser's own paste.
   The terminal refits to the window on every layout change and tells the PTY its
   new size.
 
