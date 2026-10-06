@@ -4,6 +4,7 @@ import {
   findPrConflictFix,
   findPrReview,
   findPrRun,
+  getOpenDecision,
   listPrConflictFixes,
   listPrReviews,
   listPrRuns,
@@ -75,6 +76,13 @@ function describeSession(services: ChiefServices, session: Session, now: Date, t
     }
     case 'waiting':
       return `waiting (usage limit)${session.waitingUntil === null ? '' : ` until ${when(session.waitingUntil, now, timeZone)}`}, ${counts.done}/${counts.total} stories done`;
+    case 'deciding': {
+      // The question itself, so chief can raise it on the call rather than
+      // only reporting that the session is stuck (decisions US-008).
+      const open = getOpenDecision(db, session.id);
+      const asked = open === null ? '' : `: “${oneLine(open.question, 80)}”`;
+      return `waiting for your decision${asked}, ${counts.done}/${counts.total} stories done`;
+    }
     case 'pending':
       return counts.total === 0 ? 'pending, planning' : `pending, planning (${counts.total} stories so far)`;
     case 'ready':

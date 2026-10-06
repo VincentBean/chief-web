@@ -536,7 +536,10 @@ quiet moment (2 s of silence on both sides):
   finished or failed, a pull request opened, a feedback run finished, a conflict
   fixed, Claude's usage-limit hold, a planning session that finished drafting
   on its own (`planning.drafted`: "Your session csv-export on shop-api has
-  finished with 4 open questions.").
+  finished with 4 open questions."), and a build that has stopped to ask you
+  something (`build.deciding`, with the question in it; see
+  [Decisions](decisions.md)) — the one event you can act on from the call
+  itself, so it is spoken however quiet you have asked chief to be.
 - **All** adds: each finished story, a build waiting, a recurring task fired, a
   review finished, a PRD that just became valid.
 - **None** speaks nothing.

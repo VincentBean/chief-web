@@ -3,8 +3,9 @@
 
 /**
  * The `chief` MCP server of the session voice agent (voice feedback US-006,
- * US-007): a stdio server with two tools, `open_browser_with_operator` and,
- * for a planning agent, `start_build` (below).
+ * US-007) and of a build iteration (decisions US-002): a stdio server with
+ * `open_browser_with_operator`, `start_build` for a planning agent, and
+ * `ask_operator` for a build iteration (all below).
  *
  * Calling it writes `<dir>/<requestId>.request` (`{ id, hint, createdAt }`);
  * chief-web sees the tool call on the agent's stream, reads the request, and
@@ -27,6 +28,15 @@
  * `{ id, started: true, queued }`, `{ id, started: false, errors: [...] }` (the
  * PRD does not parse) or `{ id, started: false, reason }` (a refusal).
  *
+ * `ask_operator` (decisions US-002) is the third, offered only to a build
+ * iteration (`CHIEF_MCP_ASK_OPERATOR=1`): the question goes into
+ * `<ask dir>/<requestId>.request` (`{ id, question, options, context,
+ * recommendation, createdAt }`) and the answer comes back as
+ * `{ id, answered: true, answer }` or `{ id, answered: false, reason }`. Its
+ * wait is measured in hours rather than minutes — there is a person at the
+ * other end of it — and when nobody answers, the tool says so and the agent
+ * carries on with the most conservative reading rather than hanging.
+ *
  * Newline-delimited JSON-RPC 2.0 on stdin/stdout, no dependencies; the image
  * installs no npm packages for runner scripts.
  */
@@ -40,6 +50,17 @@ const BUILD_DIR = process.env.CHIEF_MCP_BUILD_DIR || '/tmp/.chief-voice/build';
 const ANSWER_TIMEOUT_MS = Number(process.env.CHIEF_MCP_ANSWER_TIMEOUT_MS) || 5 * 60_000;
 /** Marking ready and starting a build takes seconds, not an operator typing. */
 const BUILD_TIMEOUT_MS = Number(process.env.CHIEF_MCP_BUILD_TIMEOUT_MS) || 60_000;
+const ASK_DIR = process.env.CHIEF_MCP_ASK_DIR || '/tmp/.chief-build/ask';
+/**
+ * How long `ask_operator` waits (decisions US-002).
+ *
+ * An operator is not a daemon: the question may be asked while they are
+ * asleep, and the whole point of waiting at all is that the agent keeps its
+ * context and its half-finished working tree until the answer arrives.
+ * chief-web stops the iteration's own clock for exactly as long, and passes
+ * this number in so the two cannot drift.
+ */
+const ASK_TIMEOUT_MS = Number(process.env.CHIEF_MCP_ASK_TIMEOUT_MS) || 4 * 60 * 60_000;
 const POLL_MS = Number(process.env.CHIEF_MCP_POLL_MS) || 250;
 const CDP_URL = process.env.CHIEF_MCP_CDP_URL || 'http://127.0.0.1:9222';
 /** How long the page may take to appear, and to load. */
@@ -81,9 +102,61 @@ const BUILD_TOOL = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 };
 
+const ASK_TOOL = {
+  name: 'ask_operator',
+  description:
+    'Ask the operator a question you cannot answer yourself, and wait for their answer. This is for a ' +
+    'decision, not for help: a choice between designs that are both defensible, a product question the ' +
+    'PRD and the code leave open, a change in scope you must not make on your own. Use it when guessing ' +
+    "would risk the story's work, and never for anything you can settle by reading the code, the PRD, " +
+    'progress.md or the git history — read those first. One question per call, and only when you are ' +
+    'genuinely blocked on it: the build stops until it is answered. Say what you have established, offer ' +
+    'the concrete options you see, and recommend one. The answer comes back as the operator wrote it. If ' +
+    'nobody answers it says so, and you then take the most conservative option, write the question down ' +
+    'under `## Open Questions` in the PRD, and carry on.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: {
+        type: 'string',
+        description: 'The question, in one or two sentences, answerable without reading the code.',
+      },
+      options: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'The concrete choices you see, each in a few words; omit when it is not a choice between options.',
+      },
+      context: {
+        type: 'string',
+        description: 'What you established and why it matters: a short paragraph, no code dumps.',
+      },
+      recommendation: {
+        type: 'string',
+        description: 'Which option you would take if nobody answered, and why — in one sentence.',
+      },
+    },
+    required: ['question'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `ask_operator` is opt-in (decisions US-002), the other way round from
+ * `start_build`: a build iteration's server is started with
+ * `CHIEF_MCP_ASK_OPERATOR=1`, and a voice agent's is not — there is already an
+ * operator on the call it can simply ask out loud.
+ *
+ * It also decides the whole tool set, because the two callers have nothing in
+ * common: an iteration gets the question and *only* the question. It has no
+ * use for a browser it would be looking at alone, and it cannot start a build
+ * it is already inside — so neither is offered however the environment is
+ * set, rather than left to be switched off correctly from outside.
+ */
+const ASK_OFFERED = process.env.CHIEF_MCP_ASK_OPERATOR === '1';
+
 /** A Q&A agent's server is started with `CHIEF_MCP_START_BUILD=0`: only a planning agent can build. */
-const BUILD_OFFERED = process.env.CHIEF_MCP_START_BUILD !== '0';
-const TOOLS = BUILD_OFFERED ? [TOOL, BUILD_TOOL] : [TOOL];
+const BUILD_OFFERED = !ASK_OFFERED && process.env.CHIEF_MCP_START_BUILD !== '0';
+const TOOLS = ASK_OFFERED ? [ASK_TOOL] : BUILD_OFFERED ? [TOOL, BUILD_TOOL] : [TOOL];
 
 /** In-flight tool calls by JSON-RPC id, so `notifications/cancelled` can stop one. */
 const running = new Map();
@@ -100,11 +173,12 @@ function removeQuietly(file) {
   }
 }
 
-function writeRequest(id, hint, dir = DIR) {
+/** `<dir>/<id>.request`, written atomically: chief-web must never read half of one. */
+function writeRequest(id, fields, dir = DIR) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `${id}.request`);
   const tmp = `${file}.tmp`;
-  const request = hint === null ? { id, createdAt: new Date().toISOString() } : { id, hint, createdAt: new Date().toISOString() };
+  const request = { id, ...(fields ?? {}), createdAt: new Date().toISOString() };
   fs.writeFileSync(tmp, JSON.stringify(request), { mode: 0o600 });
   fs.renameSync(tmp, file);
   return file;
@@ -161,7 +235,7 @@ function notOpened(answer) {
 async function openBrowser(requestId, args) {
   const hint = typeof args.hint === 'string' ? args.hint.trim().slice(0, 200) : '';
   const id = crypto.randomUUID();
-  const requestFile = writeRequest(id, hint);
+  const requestFile = writeRequest(id, { hint });
   const answerFile = path.join(DIR, `${id}.answer`);
   const controller = new AbortController();
   running.set(requestId, controller);
@@ -213,6 +287,72 @@ async function startBuild(requestId) {
       throw new NotBuilt(`The build did not start: ${sentence(answer.reason)}. Tell the operator why in one sentence.`);
     }
     throw new NotBuilt('chief-web did not answer, so the build did not start. Tell the operator to say "build it".');
+  } finally {
+    running.delete(requestId);
+    removeQuietly(answerFile);
+    removeQuietly(requestFile);
+  }
+}
+
+/* ------------------------------------------------------ ask_operator */
+
+/** Nobody answered in time, or chief-web declined to ask: what the agent is told to do instead. */
+const UNANSWERED =
+  'Nobody answered. Do not ask again and do not wait: take the most conservative of the options you ' +
+  'offered, note the question and the choice you made under `## Open Questions` in the PRD and in your ' +
+  'progress.md entry, and finish the story on that basis.';
+
+/** The strings the tool passes on, trimmed and bounded; the prompt is not a transport. */
+const MAX_QUESTION_CHARS = 2000;
+const MAX_OPTIONS = 8;
+
+function askText(value, limit = MAX_QUESTION_CHARS) {
+  return typeof value === 'string' ? value.trim().slice(0, limit) : '';
+}
+
+/** A question that was not answered: the tool's error, so the agent cannot read it as a decision. */
+class NotAsked extends Error {}
+
+/**
+ * The question, and the operator's answer (decisions US-002).
+ *
+ * Unlike the other two tools this one can wait for hours, because what it is
+ * waiting for is a person. chief-web stops the iteration's clock while it does,
+ * so the only cost of the wait is wall-clock time; and when the wait runs out
+ * the agent is told to carry on rather than left hanging, because an iteration
+ * that dies holding an unanswered question has thrown its story away.
+ */
+async function askOperator(requestId, args) {
+  const question = askText(args.question);
+  if (question === '') {
+    throw new NotAsked('ask_operator needs a `question`. Say what you need decided, in one or two sentences.');
+  }
+  const options = Array.isArray(args.options)
+    ? args.options.map((option) => askText(option, 300)).filter((option) => option !== '').slice(0, MAX_OPTIONS)
+    : [];
+  const id = crypto.randomUUID();
+  const requestFile = writeRequest(
+    id,
+    {
+      question,
+      options,
+      context: askText(args.context, MAX_QUESTION_CHARS),
+      recommendation: askText(args.recommendation, 600),
+    },
+    ASK_DIR,
+  );
+  const answerFile = path.join(ASK_DIR, `${id}.answer`);
+  const controller = new AbortController();
+  running.set(requestId, controller);
+  try {
+    const answer = await waitForAnswer(answerFile, requestFile, controller.signal, ASK_TIMEOUT_MS);
+    if (answer !== null && answer.answered === true && askText(answer.answer, 100_000) !== '') {
+      return `The operator answered:\n\n${askText(answer.answer, 100_000)}\n\nThat is the decision. Act on it, and record it in your progress.md entry for this story.`;
+    }
+    if (answer !== null && typeof answer.reason === 'string' && answer.reason !== '') {
+      throw new NotAsked(`The question did not reach the operator: ${sentence(answer.reason)}. ${UNANSWERED}`);
+    }
+    throw new NotAsked(UNANSWERED);
   } finally {
     running.delete(requestId);
     removeQuietly(answerFile);
@@ -452,6 +592,18 @@ async function handle(message) {
       send({ id, result: { tools: TOOLS } });
       return;
     case 'tools/call': {
+      if (params?.name === ASK_TOOL.name && ASK_OFFERED) {
+        try {
+          send({ id, result: { content: [{ type: 'text', text: await askOperator(id, params.arguments ?? {}) }] } });
+        } catch (cause) {
+          const text =
+            cause instanceof NotAsked
+              ? cause.message
+              : `The question did not reach the operator (${cause instanceof Error ? cause.message : String(cause)}). ${UNANSWERED}`;
+          send({ id, result: { content: [{ type: 'text', text }], isError: true } });
+        }
+        return;
+      }
       if (params?.name === BUILD_TOOL.name && BUILD_OFFERED) {
         try {
           send({ id, result: { content: [{ type: 'text', text: await startBuild(id) }] } });
@@ -461,7 +613,7 @@ async function handle(message) {
         }
         return;
       }
-      if (params?.name !== TOOL.name) {
+      if (params?.name !== TOOL.name || ASK_OFFERED) {
         send({ id, error: { code: -32602, message: `Unknown tool: ${String(params?.name)}` } });
         return;
       }

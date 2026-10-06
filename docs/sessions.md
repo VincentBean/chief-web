@@ -88,7 +88,7 @@ feedback session is an ordinary session.
 
 ## Session states
 
-A session is in exactly one of six states, and the badge on the
+A session is in exactly one of seven states, and the badge on the
 [dashboard](interface.md#sessions) is that state:
 
 | Status | What it means | What moves it on |
@@ -97,6 +97,7 @@ A session is in exactly one of six states, and the badge on the
 | `ready` | The PRD is parsed and the stories are in the database | **Start build**, a [scheduled start](scheduling.md#scheduled-starts), or its turn in the [queue](scheduling.md#concurrency-and-the-build-queue) |
 | `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
 | `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires or another account can take over ([failover](#claude-account)), **Resume now**, or **Stop build** |
+| `deciding` | The build agent asked you something it cannot decide itself and is waiting for the answer, holding its context, its container and its build slot ([Decisions](decisions.md)) | **Send decision**, the agent giving up on the wait, or **Stop build** |
 | `failed` | A stage gave up and stored why (see [Failure and recovery](build-loop.md#failure-and-recovery)) | **Retry**, which resumes at the stage that failed |
 | `finished` | Every story is `done`, the pull request is open and the [code review](code-review.md), if it was on, has been posted — or, for a [recurring run](#sessions-a-recurring-task-started) that changed nothing, there was nothing to deliver at all | Nothing — the session's work is on `origin` |
 

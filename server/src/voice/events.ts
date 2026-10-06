@@ -32,6 +32,13 @@ export type VoiceBusEvent =
   | { readonly kind: 'build.failed'; readonly sessionId: string; readonly name: string; readonly message: string }
   | { readonly kind: 'build.waiting'; readonly sessionId: string; readonly name: string; readonly until: string }
   | {
+      /** The build agent asked the operator something and is waiting (decisions US-008). */
+      readonly kind: 'build.deciding';
+      readonly sessionId: string;
+      readonly name: string;
+      readonly question: string;
+    }
+  | {
       readonly kind: 'pr.opened';
       readonly sessionId: string;
       readonly name: string;
@@ -110,6 +117,10 @@ export const EVENT_TIERS: Readonly<Record<VoiceEventKind, 'important' | 'all'>> 
   'pr.conflict_fixed': 'important',
   'limits.hold': 'important',
   'planning.drafted': 'important',
+  // A build that has stopped to ask something is the one event the operator
+  // can act on from the call itself, so chief says it however quiet they
+  // asked it to be about everything else.
+  'build.deciding': 'important',
   'build.story_done': 'all',
   'build.waiting': 'all',
   'task.fired': 'all',
@@ -143,6 +154,8 @@ export function describeEvent(event: VoiceBusEvent, timeZone?: string): string {
       return `The build of ${event.name} failed: ${clip(event.message)}`;
     case 'build.waiting':
       return `${event.name} is waiting for Claude's usage limit until ${clockTime(event.until, timeZone)}.`;
+    case 'build.deciding':
+      return `${event.name} needs a decision: ${clip(event.question)}`;
     case 'pr.opened':
       return event.adopted
         ? `Pull request ${String(event.number)} for ${event.name} was already open and is adopted.`

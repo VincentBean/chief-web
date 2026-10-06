@@ -730,6 +730,7 @@ export const SESSION_STATUSES = [
   'ready',
   'building',
   'waiting',
+  'deciding',
   'failed',
   'finished',
   'reviewing',
@@ -997,7 +998,7 @@ export interface PrdStatus {
   bytes: number;
 }
 
-export type PlanningMode = 'create' | 'edit';
+export type PlanningMode = 'create' | 'edit' | 'decide';
 
 /** Mirrors the server's `PlanningView` (US-011). */
 export interface Planning {
@@ -1012,6 +1013,12 @@ export interface Planning {
   mode: PlanningMode | null;
   /** Which prompt starting one now would use: `edit` once a PRD exists. */
   nextMode: PlanningMode;
+  /**
+   * Whether a terminal can be opened right now, and which conversation it
+   * would be: `plan` while the session is pending, `decide` while its build
+   * waits for an answer (decisions US-010), `null` otherwise.
+   */
+  canStart: 'plan' | 'decide' | null;
   cwd: string;
   prd: PrdStatus;
   /** The standard questions from Settings, re-read on every request. */
@@ -1063,13 +1070,19 @@ export async function fetchPrd(id: string, signal?: AbortSignal): Promise<Sessio
  * `{{CONTEXT}}` slot and is only used when no `prd.md` exists yet — otherwise
  * the server starts chief's edit prompt instead.
  */
-export async function startPlanning(id: string, context?: string, options: { stopVoiceAgent?: boolean } = {}): Promise<Planning> {
+export async function startPlanning(
+  id: string,
+  context?: string,
+  options: { stopVoiceAgent?: boolean; intent?: 'plan' | 'decide' } = {},
+): Promise<Planning> {
   return api<Planning>(`/api/sessions/${encodeURIComponent(id)}/planning`, {
     method: 'POST',
     body: JSON.stringify({
       ...(context === undefined || context === '' ? {} : { context }),
       // The operator's yes to closing the session's voice agent first (voice US-025).
       ...(options.stopVoiceAgent === true ? { stopVoiceAgent: true } : {}),
+      // "Discuss this": a read-only terminal on the open question (decisions US-010).
+      ...(options.intent === 'decide' ? { intent: 'decide' } : {}),
     }),
   });
 }
@@ -1217,6 +1230,35 @@ export interface Build {
   activeBuilds: number;
   /** The cap they are counted against, from the settings page. */
   maxConcurrentBuilds: number;
+  /** The question the agent stopped to ask (decisions US-010); null when none. */
+  decision: Decision | null;
+  /** How long a question stands before the agent gives up on it. */
+  decisionTimeoutMs: number | null;
+}
+
+/**
+ * One question a build agent asked the operator (decisions US-010). Mirrors
+ * the server's `DecisionView`.
+ */
+export interface Decision {
+  id: string;
+  question: string;
+  /** The choices the agent offered, in its own order; may be empty. */
+  options: string[];
+  /** What it had established, and why the question matters. */
+  context: string | null;
+  /** Which option it would take if nobody answered. */
+  recommendation: string | null;
+  /** The story its iteration was on. */
+  storyId: string | null;
+  askedAt: string;
+  /** When the agent stops waiting; null once nothing is waiting any more. */
+  waitingUntil: string | null;
+  /**
+   * False once the agent that asked has gone — a restart, a stopped build.
+   * The question is then a record of what was asked, not something to answer.
+   */
+  waiting: boolean;
 }
 
 /** Polled by the session page while a build runs; a file read plus a map lookup. */
@@ -1227,6 +1269,18 @@ export async function fetchBuild(id: string, signal?: AbortSignal): Promise<Buil
 /** "Start build": promotes a ready session to `building` and starts the loop. */
 export async function startBuild(id: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/build`, { method: 'POST' });
+}
+
+/**
+ * The decision, in the operator's own words, handed to the agent that is
+ * waiting for it (decisions US-010). The build is `building` again by the time
+ * this answers.
+ */
+export async function answerDecision(id: string, answer: string): Promise<Build> {
+  return api<Build>(`/api/sessions/${encodeURIComponent(id)}/decision`, {
+    method: 'POST',
+    body: JSON.stringify({ answer }),
+  });
 }
 
 /** "Stop build": signals the agent and returns the session to `ready`. */

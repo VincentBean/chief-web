@@ -142,7 +142,16 @@ same picker as the new-session form, saving on change; while the session's own
 account is on hold and it runs elsewhere, the card reads *Running on <other>
 while <own> is on hold until <time>*. See
 [Claude account](sessions.md#claude-account). With more than one account, the
-sessions list shows each session's account under its name. A feedback session shows its feedback in a **Feedback** panel at
+sessions list shows each session's account under its name.
+
+A session whose build has stopped to ask something ([Decisions](decisions.md))
+shows a **Needs your decision** card above everything else: the question, what
+the agent established, the options it offered as buttons that fill the answer
+box, a countdown to the moment it stops waiting, and **Send decision**.
+**Discuss this** opens a read-only Claude on the question in the same
+container, in a terminal under the card; sending the decision closes it.
+
+A feedback session shows its feedback in a **Feedback** panel at
 the top of the main column, whatever its stage. The agent log runs full width underneath and follows live output
 while the loop runs.
 

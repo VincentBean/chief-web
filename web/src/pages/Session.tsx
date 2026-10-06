@@ -2,11 +2,13 @@ import { type FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'rea
 
 import { AccountPicker } from '../AccountPicker.tsx';
 import {
+  answerDecision,
   ApiError,
   backToPlanning,
   type Build,
   claudeAccountName,
   clearUsageLimitHold,
+  type Decision,
   deleteSession,
   EFFORT_LEVELS,
   type EffortLevel,
@@ -74,6 +76,8 @@ type Busy =
   | 'planning'
   | 'build'
   | 'stop-build'
+  | 'answer'
+  | 'discuss'
   | 'resume-hold'
   | 'leave-queue'
   | 'delivery'
@@ -275,6 +279,30 @@ export function Session() {
       return 'Build stopped. Everything already committed is kept.';
     });
 
+  const onAnswerDecision = (answer: string): void =>
+    run('answer', async () => {
+      const next = await answerDecision(id, answer);
+      setBuild(next);
+      applyStatus(next.status);
+      // The discussion was about a question that is now settled, and its
+      // `claude` is a second process in the build's own container.
+      if (planning.mode === 'decide' && planning.terminalId !== null) setPlanning(await stopPlanning(id));
+      return 'Sent. The agent has your decision and is building again.';
+    });
+
+  const onDiscussDecision = (): void =>
+    run('discuss', async () => {
+      const next = await startPlanning(id, undefined, { intent: 'decide' });
+      setPlanning(next);
+      return 'Opened a read-only Claude on the question. It changes nothing; the decision is still yours to send.';
+    });
+
+  const onCloseDiscussion = (): void =>
+    run('stop', async () => {
+      setPlanning(await stopPlanning(id));
+      return null;
+    });
+
   const onResumeNow = (): void =>
     run('resume-hold', async () => {
       const { resumed } = await clearUsageLimitHold();
@@ -375,7 +403,7 @@ export function Session() {
           {busy === 'resume-hold' ? 'Resuming…' : 'Resume now'}
         </button>
       )}
-      {(status === 'building' || status === 'waiting') && (
+      {(status === 'building' || status === 'waiting' || status === 'deciding') && (
         <button type="button" className="button" onClick={onStopBuild} disabled={busy !== null}>
           <Icon name="stop" />
           {busy === 'stop-build' ? 'Stopping…' : 'Stop build'}
@@ -443,6 +471,16 @@ export function Session() {
       {status === 'failed' && (
         <FailurePanel error={session.lastError} stage={session.failureStage} stories={stories} retryIsDelivery={retryIsDelivery} />
       )}
+      {build.decision !== null && (
+        <DecisionPanel
+          decision={build.decision}
+          planning={planning}
+          busy={busy}
+          onAnswer={onAnswerDecision}
+          onDiscuss={onDiscussDecision}
+          onCloseDiscussion={onCloseDiscussion}
+        />
+      )}
       {status === 'waiting' && <HoldPanel until={session.waitingUntil} />}
       {(status === 'reviewing' || status === 'fixing') && <DraftPanel status={status} prUrl={session.prUrl} />}
       {cleanRun && (
@@ -471,7 +509,9 @@ export function Session() {
           the build if you would rather it did not.
         </Notice>
       )}
-      {session.lastError !== null && status !== 'failed' && status !== 'waiting' && <Notice kind="error">{session.lastError}</Notice>}
+      {session.lastError !== null && status !== 'failed' && status !== 'waiting' && status !== 'deciding' && (
+        <Notice kind="error">{session.lastError}</Notice>
+      )}
       {!session.cloned && (
         <Notice kind="error">
           <strong>The clone did not finish,</strong> so there is no workspace to plan in.{' '}
@@ -706,7 +746,9 @@ function Stages({ session, build, prd }: { readonly session: SessionData; readon
         ? `story ${String(done + 1)} of ${String(build.stories.length)}`
         : status === 'waiting'
           ? 'on hold'
-          : build.stories.length > 0
+          : status === 'deciding'
+            ? 'waiting for your decision'
+            : build.stories.length > 0
             ? `${String(done)}/${String(build.stories.length)} done`
             : '',
     deliver:
@@ -1082,6 +1124,184 @@ function FailurePanel({
               ? `The workspace is on the data volume, not in the container that was lost. The retry starts a fresh container on the same clone and resumes at the first story that is not done${outstanding === 0 ? '.' : ` (${String(outstanding)} left).`}`
               : `Nothing committed is lost. The retry resumes from the PRD: every story already marked done is skipped${outstanding === 0 ? '.' : `, so ${String(outstanding)} ${outstanding === 1 ? 'is' : 'are'} left to run.`}`}
       </p>
+    </Panel>
+  );
+}
+
+/* -------------------------------------------------------------- decision */
+
+/**
+ * The question the build agent stopped to ask (decisions US-010).
+ *
+ * It sits above everything else on the page, because while it stands nothing
+ * else on the page is going to change: the agent is alive in its container
+ * with the story half-built, holding its build slot, waiting. Two ways out,
+ * and the card is built around the fact that most questions only need the
+ * first: type the decision and send it, or open a read-only Claude on the
+ * question and work it out first.
+ *
+ * What the card is careful about is the difference between a question and the
+ * record of one. Once the agent has gone — a restart, a stopped build — the
+ * row is still worth reading and there is nothing left to answer, so the form
+ * goes and the reason takes its place.
+ */
+function DecisionPanel({
+  decision,
+  planning,
+  busy,
+  onAnswer,
+  onDiscuss,
+  onCloseDiscussion,
+}: {
+  readonly decision: Decision;
+  readonly planning: Planning;
+  readonly busy: Busy;
+  readonly onAnswer: (answer: string) => void;
+  readonly onDiscuss: () => void;
+  readonly onCloseDiscussion: () => void;
+}) {
+  const [answer, setAnswer] = useState('');
+  const box = useRef<HTMLTextAreaElement>(null);
+  const [now, setNow] = useState(() => Date.now());
+  // Its own second-by-second timer, like the hold's: the deadline is the one
+  // thing on this card that moves on its own.
+  useEffect(() => {
+    if (decision.waitingUntil === null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [decision.waitingUntil]);
+
+  // A fresh question gets a fresh box: the draft belongs to the question it
+  // was being typed into, not to the panel.
+  useEffect(() => {
+    setAnswer('');
+  }, [decision.id]);
+
+  const discussing = planning.mode === 'decide' && planning.terminalId !== null;
+  const desktop = useMediaQuery(DESKTOP_QUERY);
+  const expired = decision.waitingUntil !== null && new Date(decision.waitingUntil).getTime() <= now;
+  const canSend = decision.waiting && !expired && answer.trim() !== '' && busy === null;
+
+  const send = (event: FormEvent): void => {
+    event.preventDefault();
+    if (canSend) onAnswer(answer.trim());
+  };
+
+  /** Puts an option in the box rather than sending it: it is a draft, not a vote. */
+  const choose = (option: string): void => {
+    setAnswer(option);
+    box.current?.focus();
+  };
+
+  return (
+    <Panel
+      title="Needs your decision"
+      icon="comment"
+      tone="warn"
+      meta={
+        decision.waitingUntil !== null && !expired ? (
+          <span className="panel__meta mono hold-clock" title="How long the agent waits before carrying on without you">
+            {countdown(decision.waitingUntil, now)}
+          </span>
+        ) : (
+          <Badge tone={decision.waiting ? 'wait' : 'neutral'}>{decision.waiting ? 'waiting' : 'no longer waiting'}</Badge>
+        )
+      }
+      actions={
+        discussing ? (
+          <button type="button" className="button button--quiet" onClick={onCloseDiscussion} disabled={busy !== null}>
+            {busy === 'stop' ? 'Closing…' : 'Close discussion'}
+          </button>
+        ) : (
+          decision.waiting && (
+            <button type="button" className="button" onClick={onDiscuss} disabled={busy !== null}>
+              <Icon name="terminal" />
+              {busy === 'discuss' ? 'Opening…' : 'Discuss this'}
+            </button>
+          )
+        )
+      }
+    >
+      <p className="decision__question">{decision.question}</p>
+
+      {decision.context !== null && <p className="muted">{decision.context}</p>}
+
+      {decision.options.length > 0 && (
+        <div className="field">
+          <span className="field__label">What it offered</span>
+          <div className="quick-questions">
+            {decision.options.map((option, index) => (
+              <button
+                // Options are free text and may repeat, so the text alone is no key.
+                key={`${String(index)}:${option}`}
+                type="button"
+                className="button button--small"
+                onClick={() => choose(option)}
+                disabled={!decision.waiting || busy !== null}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+          <p className="field__hint">Puts the option in the box below; say why, or change it, before you send.</p>
+        </div>
+      )}
+
+      {decision.recommendation !== null && (
+        <p className="field__hint">
+          <strong>It would choose:</strong> {decision.recommendation}
+        </p>
+      )}
+
+      {decision.waiting ? (
+        <form className="field" onSubmit={send}>
+          <label className="field__label" htmlFor="decision-answer">
+            Your decision
+          </label>
+          <textarea
+            ref={box}
+            id="decision-answer"
+            className="field__input"
+            rows={3}
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder="Keep the old sync API as a deprecated shim for one release, and say so in the PRD."
+          />
+          <div className="field__actions">
+            <button type="submit" className="button button--primary" disabled={!canSend}>
+              <Icon name="check" />
+              {busy === 'answer' ? 'Sending…' : 'Send decision'}
+            </button>
+          </div>
+          <p className="field__hint">
+            It goes to the agent as you wrote it, and the build carries on from where it stopped —{' '}
+            {decision.storyId === null ? 'the story it was on' : decision.storyId} keeps the iteration and the retries it
+            had. Nothing is lost while it waits: the iteration’s clock is stopped. If nobody answers, the agent takes the
+            most conservative option, writes the question into the PRD’s open questions and finishes the story on that
+            basis.
+          </p>
+        </form>
+      ) : (
+        <Notice kind="info">
+          <strong>Nothing is waiting for this answer any more.</strong> The agent that asked it has gone — the build was
+          stopped, or chief-web restarted under it — so the question is a record of what it wanted to know. Retrying the
+          build starts a fresh iteration, which can ask again if it still needs to.
+        </Notice>
+      )}
+
+      {discussing &&
+        (desktop ? (
+          <Suspense fallback={<Skeleton lines={6} />}>
+            <TerminalPane terminalId={planning.terminalId ?? ''} size="tall" />
+          </Suspense>
+        ) : (
+          <Notice kind="info">
+            <strong>The discussion needs a desktop.</strong> It is an interactive Claude conversation, which needs a
+            keyboard and a wider screen. It keeps running on the server, and the decision can still be sent from here.
+          </Notice>
+        ))}
     </Panel>
   );
 }

@@ -89,9 +89,10 @@ export function agentExecSpec(
   model?: string | null,
   advisor?: string | null,
   effort?: string | null,
+  mcpConfigFile?: string | null,
 ): ExecSpec {
   return {
-    cmd: wrapAgentCommand(sessionId, iteration, agentCommand(prompt, model, advisor, effort)),
+    cmd: wrapAgentCommand(sessionId, iteration, agentCommand(prompt, model, advisor, effort, mcpConfigFile)),
     workingDir: CONTAINER_REPO_DIR,
   };
 }

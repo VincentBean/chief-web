@@ -21,6 +21,9 @@ export const SESSION_TONE: Record<Session['status'], Tone> = {
   ready: 'ready',
   building: 'active',
   waiting: 'wait',
+  // A question waiting on the operator is the one state that is their move
+  // rather than the agent's, so it reads like a failure does: it needs you.
+  deciding: 'danger',
   failed: 'danger',
   // The purple pair is the pull request lifecycle; a session that ended with
   // no pull request is done green, because nothing about it is still moving.
@@ -61,6 +64,7 @@ export const SESSION_LABEL: Record<Session['status'], string> = {
   ready: 'ready',
   building: 'building',
   waiting: 'on hold',
+  deciding: 'needs you',
   failed: 'failed',
   finished: 'finished',
   reviewing: 'reviewing',
@@ -69,7 +73,13 @@ export const SESSION_LABEL: Record<Session['status'], string> = {
   merged: 'merged',
 };
 
-/** Statuses with an agent of their own running: worth a moving dot. */
+/**
+ * Statuses with an agent of their own running: worth a moving dot.
+ *
+ * A `deciding` session has one too — alive, holding its workspace — but it is
+ * not moving, and a pulse on it would read as "working" when the whole point
+ * of the badge is that it is not.
+ */
 function isRunning(status: Session['status']): boolean {
   return status === 'building' || status === 'reviewing' || status === 'fixing';
 }

@@ -16,6 +16,7 @@ export { HostPaths } from './host-paths.js';
 export {
   CONTAINER_LOST_ERROR,
   type ContainerRemoval,
+  DECISION_LOST_ERROR,
   FEEDBACK_LOST_ERROR,
   planReconciliation,
   type ReconciliationPlan,

@@ -13,6 +13,7 @@ import {
   enqueueBuild,
   failSession,
   type FailureStage,
+  type Decision,
   getQueuedBuild,
   getSession,
   listBuildQueue,
@@ -36,6 +37,7 @@ import {
   updateSession,
   updateStory,
 } from '../db/index.js';
+import { ExecDeadline } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
 import {
@@ -65,6 +67,7 @@ import {
   getStoredAdvisorModel,
   isAdvisorModel,
 } from '../settings/index.js';
+import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
@@ -138,6 +141,33 @@ export interface BuildView {
   readonly activeBuilds: number;
   /** The cap those builds are counted against (US-004). */
   readonly maxConcurrentBuilds: number;
+  /**
+   * The question the agent is waiting on (decisions US-005), or `null`.
+   *
+   * It rides along with the build view rather than on an endpoint of its own
+   * because it *is* build state: the session page already polls this, and a
+   * question that arrived in the same tick as the status that explains it must
+   * not be a poll behind it.
+   */
+  readonly decision: DecisionView | null;
+  /** How long a question stands before the agent stops waiting for it. */
+  readonly decisionTimeoutMs: number | null;
+}
+
+/** One question of the session, as the page renders it (decisions US-005). */
+export interface DecisionView {
+  readonly id: string;
+  readonly question: string;
+  readonly options: readonly string[];
+  readonly context: string | null;
+  readonly recommendation: string | null;
+  /** The story the iteration was on when it asked. */
+  readonly storyId: string | null;
+  readonly askedAt: string;
+  /** When the agent will stop waiting; null when nothing is waiting any more. */
+  readonly waitingUntil: string | null;
+  /** False once the agent has gone: the row is history, not a question. */
+  readonly waiting: boolean;
 }
 
 /**
@@ -249,6 +279,11 @@ interface PrdSnapshot {
  * active build is what stops a fourth session from starting into a limit that
  * has already refused the other three.
  *
+ * A `deciding` one (decisions US-001) has given up even less: its agent is
+ * alive inside its iteration, holding the container and the working tree,
+ * waiting for an answer. Handing its slot away would start a second build
+ * into a pool that is still fully occupied.
+ *
  * A `reviewing` one (US-002) is running the delivery's code review, which is
  * an agent in the session's own container just as a build iteration is. The
  * session was counted for that review back when it stayed `building` through
@@ -257,7 +292,21 @@ interface PrdSnapshot {
  * here: the feedback run the session is waiting on holds a slot of its own
  * through {@link countActivePrRuns}, and counting both would spend two.
  */
-const ACTIVE_BUILD_STATUSES: readonly SessionStatus[] = ['building', 'waiting', 'reviewing'];
+const ACTIVE_BUILD_STATUSES: readonly SessionStatus[] = ['building', 'waiting', 'deciding', 'reviewing'];
+
+/**
+ * How long an answer may be (decisions US-006). Generous enough for a
+ * paragraph with a code snippet in it, bounded because it goes into a prompt.
+ */
+export const MAX_DECISION_ANSWER_CHARS = 4000;
+
+/**
+ * The statuses "Stop build" acts on: a run in flight, one parked on the usage
+ * limit, and one waiting for a decision (decisions US-007). All three hold a
+ * slot and a container, and all three go back to `ready` with everything they
+ * committed intact.
+ */
+const STOPPABLE_STATUSES: readonly SessionStatus[] = ['building', 'waiting', 'deciding'];
 
 /**
  * A kind of work that can hold a build slot (US-001).
@@ -385,6 +434,14 @@ export class BuildService {
     private readonly hold: UsageLimitHold = new UsageLimitHold(db),
     /** Voice background events (voice US-015); `null` where nothing listens. */
     private readonly events: VoiceEventSink | null = null,
+    /**
+     * The operator's half of `ask_operator` (decisions US-004); `null` where
+     * no question can be relayed — a test on a stub executor, or any install
+     * whose Docker client cannot attach an exec. An iteration then launches
+     * with no `--mcp-config` and no clock to pause, exactly as it did before
+     * decisions existed.
+     */
+    private readonly decisions: DecisionWatcher | null = null,
   ) {
     // Sessions are the one kind this service starts itself; reviews and
     // feedback runs register theirs from above.
@@ -794,13 +851,16 @@ export class BuildService {
    * gave its slot back — so the sessions being resumed must not be counted
    * against a cap they are already inside. Only what is actually working is:
    * `reviewing` is in here for the same reason it is an active build (US-002),
-   * because the review it names is an agent running right now.
+   * because the review it names is an agent running right now — and so is
+   * `deciding` (decisions US-001), whose agent is alive and waiting rather
+   * than working, but is in the pool either way.
    */
   private resumeSlots(): number {
     const max = getMaxConcurrentSessions(this.db, this.config);
     return (
       max -
       (countSessionsByStatus(this.db, 'building') +
+        countSessionsByStatus(this.db, 'deciding') +
         countSessionsByStatus(this.db, 'reviewing') +
         this.starting.size +
         countActivePrRuns(this.db) +
@@ -1050,7 +1110,7 @@ export class BuildService {
     const state = this.runs.get(sessionId);
 
     if (state === undefined) {
-      if (session.status !== 'building' && session.status !== 'waiting') {
+      if (!STOPPABLE_STATUSES.includes(session.status)) {
         throw new BuildError(
           409,
           'session_not_building',
@@ -1059,8 +1119,11 @@ export class BuildService {
       }
       // `building` with no loop behind it: this server was restarted while the
       // session was running. `waiting` never has one — the loop unwound when
-      // the hold parked it. Returning either to `ready` is the whole of "stop"
-      // — and it frees the slot it was counted against.
+      // the hold parked it — and a `deciding` session only reaches this with
+      // its agent gone, so its question goes with the run. Returning any of
+      // them to `ready` is the whole of "stop", and it frees the slot it was
+      // counted against.
+      this.decisions?.abandon(session.id);
       const idle = this.returnToReady(session);
       void this.pump();
       return this.toView(idle);
@@ -1068,6 +1131,9 @@ export class BuildService {
 
     state.stopping = true;
     try {
+      // A blocked agent is signalled like any other: it is waiting inside its
+      // own process, and the stop is what the operator wants instead of the
+      // answer. The row goes with it when the iteration unwinds.
       await this.runner.stop(sessionId, state.containerId);
     } catch (cause) {
       logger.warn('could not signal the build agent', {
@@ -1086,9 +1152,7 @@ export class BuildService {
     const stopped = getSession(this.db, sessionId) ?? session;
     logger.info('build stopped', { session: sessionId, iterations: state.iteration });
     return this.toView(
-      stopped.status === 'building' || stopped.status === 'waiting'
-        ? this.returnToReady(stopped)
-        : stopped,
+      STOPPABLE_STATUSES.includes(stopped.status) ? this.returnToReady(stopped) : stopped,
     );
   }
 
@@ -1225,6 +1289,15 @@ export class BuildService {
     // number it is held to: it is the only one of the two that can decide not
     // to start a full-suite run with four minutes left.
     const timeoutMs = getAgentTimeoutMs(this.db, this.config);
+    // The budget as a clock that can be stopped (decisions US-004): the time
+    // the agent spends waiting for an answer is not time it spent working, so
+    // it is not charged to the iteration. Without a watcher there is nothing
+    // that could pause it and the plain timeout is used instead.
+    const deadline = this.decisions === null ? null : new ExecDeadline(timeoutMs);
+    // Written one line above the launch, like the model and the effort: the
+    // file carries the answer timeout, and a `null` here is an iteration that
+    // simply has no way to ask.
+    const mcpConfigFile = (await this.decisions?.prepare(session.id, state.containerId)) ?? null;
     let result: AgentResult;
     try {
       result = await this.runner.run({
@@ -1237,17 +1310,31 @@ export class BuildService {
           timeoutMs,
           prd: snapshot.parsed,
           progress: this.readProgress(session),
+          canAsk: mcpConfigFile !== null,
         }),
         timeoutMs,
         model: buildModel,
         advisor: advisor.model,
         effort: effort?.level ?? null,
+        mcpConfigFile,
+        deadline,
         onOutput: (text) => log.write(text),
+        onToolCall: (call) => {
+          if (call.name !== ASK_OPERATOR_TOOL) return;
+          // Detached on purpose: this runs on the output stream, and finding
+          // the request file is an exec into the container. The agent is
+          // already blocked on its answer file, so nothing is racing us.
+          void this.asked(session, story, state, deadline, log);
+        },
       });
     } catch (cause) {
+      // The question dies with the iteration that asked it, however that
+      // iteration ended (decisions US-007).
+      this.decisions?.abandon(session.id);
       log.end(null);
       throw cause;
     }
+    this.decisions?.abandon(session.id);
 
     // The hold went up under this iteration because *another* session was
     // refused (US-005), and the agent was signalled off the machine to make
@@ -1394,6 +1481,43 @@ export class BuildService {
       },
     );
     return true;
+  }
+
+  /**
+   * The iteration asked the operator something (decisions US-004).
+   *
+   * Everything that matters here is in {@link DecisionWatcher.asked}; what is
+   * left is the log, which is the only place an operator who is not on the
+   * session page will see the question. It goes inside the iteration's own
+   * markers, exactly as a usage-limit hold does, so the per-iteration history
+   * explains the gap instead of showing a section that stops mid-air.
+   */
+  private async asked(
+    session: Session,
+    story: Story,
+    state: RunState,
+    deadline: ExecDeadline | null,
+    log: { write(text: string): void },
+  ): Promise<void> {
+    try {
+      const decision = await this.decisions?.asked({
+        session,
+        containerId: state.containerId,
+        storyId: story.storyId,
+        iteration: state.iteration,
+        deadline,
+        stopped: () => state.stopping || state.holdUntil !== null,
+      });
+      if (decision === null || decision === undefined) return;
+      log.write(`\n${decisionMessage(decision)}\n`);
+    } catch (cause) {
+      // A question that could not be taken down is not a failed build: the
+      // agent's own wait runs out and it carries on with its best guess.
+      logger.warn('could not take down the build agent’s question', {
+        session: session.id,
+        error: describe(cause),
+      });
+    }
   }
 
   private async handOff(session: Session, stories: readonly Story[]): Promise<void> {
@@ -1623,7 +1747,7 @@ export class BuildService {
    * exactly as for a build stopped mid-iteration.
    */
   private returnToReady(session: Session): Session {
-    if (session.status !== 'building' && session.status !== 'waiting') return session;
+    if (!STOPPABLE_STATUSES.includes(session.status)) return session;
     try {
       this.readPrd(session);
     } catch (cause) {
@@ -1680,7 +1804,86 @@ export class BuildService {
       queuePosition: buildQueuePosition(this.db, 'session', session.id),
       activeBuilds: this.slotsInUse().length,
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
+      decision: this.decisionView(session),
+      decisionTimeoutMs: this.decisions?.timeoutMs ?? null,
     };
+  }
+
+  /**
+   * The question this session is waiting on (decisions US-005).
+   *
+   * `waiting` is the difference between a question and a record of one: a row
+   * whose agent has gone — the server was restarted under it — is still shown,
+   * because what was asked is worth reading, but the page offers no answer box
+   * for it. The expiry is computed rather than stored: it is the moment the
+   * agent's own wait runs out, and that is `asked_at` plus the timeout both
+   * ends were given.
+   */
+  private decisionView(session: Session): DecisionView | null {
+    const open = this.decisions?.open(session.id) ?? null;
+    if (open === null) return null;
+    const waiting = this.decisions?.isWaiting(session.id) === true;
+    const timeoutMs = this.decisions?.timeoutMs ?? null;
+    return {
+      id: open.id,
+      question: open.question,
+      options: open.options,
+      context: open.context,
+      recommendation: open.recommendation,
+      storyId: open.storyId,
+      askedAt: open.askedAt,
+      waitingUntil:
+        waiting && timeoutMs !== null ? new Date(Date.parse(open.askedAt) + timeoutMs).toISOString() : null,
+      waiting,
+    };
+  }
+
+  /**
+   * "Answer": the operator's decision, written into the container the blocked
+   * agent is reading, and onto the row (decisions US-006).
+   *
+   * Refused rather than silently dropped when there is nothing waiting: an
+   * answer typed into a question whose agent has gone would read as accepted
+   * and change nothing.
+   */
+  async answerDecision(sessionId: string, answer: string): Promise<BuildView> {
+    const session = this.requireSession(sessionId);
+    if (this.decisions === null) {
+      throw new BuildError(409, 'decisions_unavailable', 'This server cannot relay answers to a build agent.');
+    }
+    const text = answer.trim();
+    if (text === '') {
+      throw new BuildError(400, 'decision_answer_empty', 'Write the decision before sending it.');
+    }
+    if (text.length > MAX_DECISION_ANSWER_CHARS) {
+      throw new BuildError(
+        400,
+        'decision_answer_too_long',
+        `Keep the answer under ${String(MAX_DECISION_ANSWER_CHARS)} characters; it is a decision, not a document.`,
+      );
+    }
+    if (!this.decisions.isWaiting(sessionId)) {
+      throw new BuildError(
+        409,
+        'decision_not_open',
+        `"${session.name}" is not waiting for a decision any more.`,
+      );
+    }
+
+    let answered: Decision | null;
+    try {
+      answered = await this.decisions.answer(sessionId, text);
+    } catch (cause) {
+      throw new BuildError(502, 'decision_answer_failed', describe(cause));
+    }
+    if (answered === null) {
+      throw new BuildError(
+        409,
+        'decision_not_open',
+        `"${session.name}" is not waiting for a decision any more.`,
+      );
+    }
+    return this.toView(getSession(this.db, sessionId) ?? session);
   }
 }
 
@@ -1693,8 +1896,9 @@ export function createBuildService(
   logs: BuildLogs = new NullBuildLogs(),
   hold: UsageLimitHold = new UsageLimitHold(db),
   events: VoiceEventSink | null = null,
+  decisions: DecisionWatcher | null = null,
 ): BuildService {
-  return new BuildService(config, db, containers, runner, completion, logs, hold, events);
+  return new BuildService(config, db, containers, runner, completion, logs, hold, events, decisions);
 }
 
 /**
@@ -1766,6 +1970,27 @@ function advisorFor(db: Database): AdvisorChoice {
     };
   }
   return { model: stored, dropped: null };
+}
+
+/**
+ * The question, in the live log (decisions US-004).
+ *
+ * Whoever is watching the log is watching it because they want to know what
+ * the agent is doing, and this is the one thing it is doing that it needs them
+ * for. The options and the recommendation go in too: the answer can be typed
+ * into the card on the session page without reading anything else.
+ */
+function decisionMessage(decision: Decision): string {
+  const options =
+    decision.options.length === 0
+      ? ''
+      : `\nOptions: ${decision.options.map((option, index) => `(${String(index + 1)}) ${option}`).join(' ')}`;
+  const recommendation = decision.recommendation === null ? '' : `\nIt would choose: ${decision.recommendation}`;
+  return (
+    `[chief-web] The agent is waiting for your decision: ${decision.question}${options}${recommendation}\n` +
+    'Answer it on the session page. Nothing is lost while it waits: the iteration’s clock is stopped, ' +
+    'and the agent carries on with the most conservative option if nobody answers.'
+  );
 }
 
 function holdMessage(until: string): string {

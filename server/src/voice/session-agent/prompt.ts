@@ -1,4 +1,4 @@
-import { containerPrdDir, type PlanningMode, type PlanningPromptInput, planningPrompt } from '../../planning/prompts.js';
+import { containerPrdDir, type PlanningPromptInput, planningPrompt, type PrdPlanningMode } from '../../planning/prompts.js';
 import { cutOffNote } from '../cut-off.js';
 
 /**
@@ -58,7 +58,7 @@ export function voiceRulesPrompt(language: string, planning = true): string {
  * A feedback session opens on the feedback quoted above rather than on what to build.
  */
 export function voiceModeOverrides(
-  mode: PlanningMode,
+  mode: PrdPlanningMode,
   prdPath: string,
   context: string | null,
   hasFeedback = false,
@@ -162,7 +162,7 @@ export interface VoicePlanningPromptInput extends Omit<PlanningPromptInput, 'con
  * terminal gets it (`create` fills chief's context slot with the operator's
  * first words), plus {@link voiceModeOverrides}.
  */
-export function voicePlanningPrompt(mode: PlanningMode, input: VoicePlanningPromptInput): string {
+export function voicePlanningPrompt(mode: PrdPlanningMode, input: VoicePlanningPromptInput): string {
   const firstWords = input.firstWords ?? null;
   const body = planningPrompt(mode, {
     sessionName: input.sessionName,

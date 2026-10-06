@@ -11,6 +11,22 @@ export {
   wrapWithPidFile,
 } from './agent.js';
 export {
+  ASK_OPERATOR_TOOL,
+  DECISION_TIMEOUT_MS,
+  type DecisionAnswer,
+  DecisionWatcher,
+  type DecisionWatcherDeps,
+} from './decisions.js';
+export {
+  BUILD_AGENT_USER,
+  BUILD_MCP_CONFIG_FILE,
+  buildMcpConfig,
+  type BuildMcpConfigOptions,
+  buildMcpConfigWriteSpec,
+  CHIEF_MCP_COMMAND,
+  DECISION_ASK_DIR,
+} from './mcp.js';
+export {
   type BuildLogEvent,
   type BuildLogHistory,
   type BuildLogIteration,
@@ -63,7 +79,9 @@ export {
   type BuildSlotUse,
   type BuildView,
   createBuildService,
+  type DecisionView,
   MarkSessionFinished,
+  MAX_DECISION_ANSWER_CHARS,
   type QueuedBuildView,
   type QueuedStart,
 } from './service.js';
@@ -76,7 +94,9 @@ export {
   WS_CLOSE_TOO_SLOW,
 } from './socket.js';
 export {
+  type AgentOutputOptions,
   AgentOutputFormatter,
+  type AgentToolCall,
   LineBuffer,
   MAX_TOOL_INPUT_CHARS,
   MAX_TOOL_RESULT_CHARS,

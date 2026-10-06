@@ -67,26 +67,46 @@ export class LineBuffer {
   }
 }
 
+/** A `tool_use` block the agent emitted, as the watcher reports it. */
+export interface AgentToolCall {
+  /** The CLI's own name for it, e.g. `mcp__chief__ask_operator`. */
+  readonly name: string;
+  /** The arguments, when they arrived as an object; `{}` otherwise. */
+  readonly input: Readonly<Record<string, unknown>>;
+}
+
+export interface AgentOutputOptions {
+  /**
+   * Called for every tool call on the stream, as it arrives (decisions
+   * US-004). The build loop watches for `ask_operator` this way rather than by
+   * polling the container: the stream is already being parsed a line at a
+   * time, so noticing one costs nothing. It must not throw.
+   */
+  readonly onToolCall?: (call: AgentToolCall) => void;
+}
+
 export class AgentOutputFormatter {
   private readonly lines = new LineBuffer();
+
+  constructor(private readonly options: AgentOutputOptions = {}) {}
 
   /** Renders every complete line in `chunk`; `''` when it completed none. */
   push(chunk: string): string {
     return this.lines
       .push(chunk)
-      .map((line) => renderLine(line))
+      .map((line) => renderLine(line, this.options))
       .join('');
   }
 
   /** Renders the last line when the stream ends without a newline. */
   flush(): string {
     const rest = this.lines.flush();
-    return rest === null ? '' : renderLine(rest);
+    return rest === null ? '' : renderLine(rest, this.options);
   }
 }
 
 /** One line of the agent's stdout as the log should show it, newline included. */
-export function renderLine(line: string): string {
+export function renderLine(line: string, options: AgentOutputOptions = {}): string {
   const trimmed = line.trim();
   if (trimmed === '') return '';
 
@@ -97,7 +117,7 @@ export function renderLine(line: string): string {
     case 'system':
       return renderSystem(event);
     case 'assistant':
-      return renderAssistant(event);
+      return renderAssistant(event, options);
     case 'user':
       return renderUser(event);
     case 'result':
@@ -114,7 +134,7 @@ function renderSystem(event: Record<string, unknown>): string {
   return `[claude] started with ${model}${cwd === null ? '' : ` in ${cwd}`}\n`;
 }
 
-function renderAssistant(event: Record<string, unknown>): string {
+function renderAssistant(event: Record<string, unknown>, options: AgentOutputOptions = {}): string {
   let out = '';
   for (const part of contentOf(event)) {
     const type = part['type'];
@@ -122,9 +142,11 @@ function renderAssistant(event: Record<string, unknown>): string {
       const text = (asString(part['text']) ?? '').trim();
       if (text !== '') out += `${text}\n`;
     } else if (type === 'tool_use' || type === 'server_tool_use') {
+      const name = asString(part['name']);
+      if (name !== null) options.onToolCall?.({ name, input: asRecord(part['input']) ?? {} });
       out += isAdvisorName(part['name'])
         ? renderAdvisorCall(part)
-        : `[tool] ${asString(part['name']) ?? 'tool'}${toolArguments(part['input'])}\n`;
+        : `[tool] ${name ?? 'tool'}${toolArguments(part['input'])}\n`;
     } else if (isAdvisorName(type)) {
       // The advisor answers inside the same assistant message that called it:
       // a server-side tool's result is a content block, not a `user` event.

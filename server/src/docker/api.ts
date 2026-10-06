@@ -2,6 +2,8 @@ import http from 'node:http';
 import { Writable, type Duplex } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 
+import type { ExecDeadline } from './deadline.js';
+
 /**
  * The slice of the Docker Engine API chief-web needs, spoken directly over the
  * unix socket.
@@ -128,6 +130,13 @@ export interface ExecChunk {
 export interface StreamExecOptions {
   /** Cap on the whole command; see {@link DockerApi.runExec}. */
   readonly timeoutMs?: number;
+  /**
+   * The same cap, as a clock the caller can stop (`docker/deadline.ts`). A
+   * build iteration waiting for the operator's decision pauses it, so the time
+   * the question takes to answer is not charged to the agent. Takes precedence
+   * over {@link timeoutMs} when both are given.
+   */
+  readonly deadline?: ExecDeadline;
   /**
    * Called with each chunk the moment it arrives, so a caller can show output
    * while the command is still running. It must not throw.
@@ -394,13 +403,17 @@ export class DockerApi {
     };
 
     let timedOut = false;
-    const timer =
-      options.timeoutMs === undefined
-        ? null
-        : setTimeout(() => {
-            timedOut = true;
-            stream.destroy();
-          }, options.timeoutMs);
+    const expire = (): void => {
+      timedOut = true;
+      stream.destroy();
+    };
+    // A pausable deadline owns its own timer; `timeoutMs` is the plain one.
+    const stopClock =
+      options.deadline !== undefined
+        ? options.deadline.start(expire)
+        : options.timeoutMs === undefined
+          ? null
+          : ((timer) => () => clearTimeout(timer))(setTimeout(expire, options.timeoutMs));
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -412,7 +425,7 @@ export class DockerApi {
         stream.on('error', (error: Error) => (timedOut ? resolve() : reject(error)));
       });
     } finally {
-      if (timer !== null) clearTimeout(timer);
+      stopClock?.();
       stream.destroy();
     }
     take(decoder.flush());

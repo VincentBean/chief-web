@@ -2,7 +2,7 @@ import type { BrowserInfo, BrowserListener } from '../browser/index.js';
 import { logger } from '../lib/logger.js';
 import type { CallClock } from './call.js';
 import type { BrowserAskOutcome, BrowserCredentials, SavedLoginView, ServerMessage } from './protocol.js';
-import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from './request-files.js';
+import { listRequestFiles, REQUEST_DISCOVERY_MS, REQUEST_POLL_MS, type RequestFileDocker, writeAnswerFile } from '../docker/request-files.js';
 
 /**
  * The "watch with me" card (voice feedback US-007): the server's half of the

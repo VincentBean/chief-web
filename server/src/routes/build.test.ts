@@ -65,6 +65,13 @@ describe('build api', () => {
   const call = (method: string, target: string): Promise<Response> =>
     fetch(`${baseUrl}${target}`, { method, headers: { cookie } });
 
+  const post = (target: string, body: unknown): Promise<Response> =>
+    fetch(`${baseUrl}${target}`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
   /** Finishes the only story and commits, exactly as a real agent would. */
   let head: string;
   const runner: AgentRunner = {
@@ -318,5 +325,33 @@ describe('build api', () => {
       deleteSession(db, other.id);
       deleteSetting(db, 'max_concurrent_sessions');
     }
+  });
+
+  /**
+   * The answer endpoint (decisions US-006). What the route itself owns is the
+   * body and the status codes; the round trip to the waiting agent is covered
+   * in `build/build.test.ts` and `build/decisions.test.ts`.
+   */
+  it('refuses an answer that is not one, before anything else is looked at', async () => {
+    const noBody = await post(`/api/sessions/${session.id}/decision`, []);
+    assert.equal(noBody.status, 400);
+    assert.equal(((await noBody.json()) as ErrorBody).error, 'invalid_body');
+
+    const notText = await post(`/api/sessions/${session.id}/decision`, { answer: 42 });
+    assert.equal(notText.status, 400);
+    assert.equal(((await notText.json()) as ErrorBody).error, 'invalid_answer');
+  });
+
+  it('says so when this server cannot relay an answer at all', async () => {
+    // The injected build service has no decision watcher: there is no Docker
+    // client behind it, so there is no container to write an answer into.
+    const response = await post(`/api/sessions/${session.id}/decision`, { answer: 'Keep it.' });
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as ErrorBody).error, 'decisions_unavailable');
+  });
+
+  it('answers 404 for a session that does not exist', async () => {
+    const response = await post('/api/sessions/nope/decision', { answer: 'Keep it.' });
+    assert.equal(response.status, 404);
   });
 });

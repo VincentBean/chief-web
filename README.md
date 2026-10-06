@@ -41,6 +41,10 @@ background, instead of babysitting one terminal per feature.
   branch. Anything over your limit waits in a queue. Closing the tab or
   restarting the server does not stop them.
   [Concurrency](docs/scheduling.md#concurrency-and-the-build-queue)
+- **Asks you when it should not guess.** A build that hits a decision only you
+  can make stops and asks it, instead of guessing or stalling. The agent waits
+  with its work intact, and you answer in a box on the session page — or open a
+  read-only Claude on the question first. [Decisions](docs/decisions.md)
 - **Starts when you tell it to.** Give a session a start time and it runs
   overnight. [Scheduled starts](docs/scheduling.md#scheduled-starts)
 - **Repeats work on a schedule.** Save a prompt and a cron expression — "run
@@ -281,6 +285,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Repositories](docs/repositories.md) | adding a repository, deploy keys, testing the connection, its code review context |
 | [Sessions](docs/sessions.md) | what a session is and the states it goes through |
 | [The build loop](docs/build-loop.md) | how a build runs, the live log, the usage limit, what happens when it fails |
+| [Decisions](docs/decisions.md) | the question a build stops to ask you, answering it, and talking it through first |
 | [Code review](docs/code-review.md) | the automatic review, the per-repository context it gets, and reviewing a pull request by hand |
 | [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |

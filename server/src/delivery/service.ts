@@ -273,7 +273,10 @@ export class DeliveryService implements BuildCompletion {
     if (session === null) {
       throw new DeliveryError(404, 'session_not_found', 'This session no longer exists.');
     }
-    if (session.status === 'building') {
+    // `deciding` is a build in flight too (decisions US-007): its agent is
+    // waiting for an answer with a story half-written, which is the last
+    // moment to be pushing a branch and opening a pull request over it.
+    if (session.status === 'building' || session.status === 'deciding') {
       throw new DeliveryError(
         409,
         'session_is_building',

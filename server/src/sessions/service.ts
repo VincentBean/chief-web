@@ -741,7 +741,9 @@ export class SessionService {
    * cleaning up this server, not undoing the work.
    *
    * A `building` session is stopped first, so the agent process is signalled
-   * and the loop unwound before its container is pulled out from under it.
+   * and the loop unwound before its container is pulled out from under it. So
+   * is a `deciding` one (decisions US-007): its agent is alive and waiting for
+   * an answer that is never coming now, and it holds this workspace.
    * Docker is asked before anything local is removed: if the daemon cannot be
    * reached, the container's fate is unknown, and the honest answer is to
    * refuse rather than to orphan a running container next to a deleted
@@ -750,7 +752,7 @@ export class SessionService {
   async delete(id: string): Promise<void> {
     const session = this.requireSession(id);
 
-    if (session.status === 'building' && this.lifecycle.builds !== undefined) {
+    if ((session.status === 'building' || session.status === 'deciding') && this.lifecycle.builds !== undefined) {
       try {
         await this.lifecycle.builds.stop(session.id);
       } catch (cause) {

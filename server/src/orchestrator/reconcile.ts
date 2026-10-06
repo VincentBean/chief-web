@@ -43,6 +43,21 @@ export const REVIEW_LOST_ERROR =
  * still pushing fixes (US-005). That run is gone too — feedback containers are
  * cleared out at startup — so the retry re-runs the delivery from the review.
  */
+/**
+ * Stored on a session that was waiting for the operator to decide something
+ * (decisions US-007) when the process went down.
+ *
+ * The agent was blocked inside an exec this process owned, so the restart took
+ * both the agent and the only channel its answer could have arrived on. There
+ * is nothing to resume: the question is swept with the run, and the retry
+ * starts a fresh iteration which is free to ask again if it still needs to.
+ */
+export const DECISION_LOST_ERROR =
+  'chief-web restarted while this session was waiting for your decision, so the agent that asked ' +
+  'died with it and the question went unanswered. Nothing that was committed is gone — the ' +
+  'workspace is on the data volume. Retrying resumes at the first story that is not done, and the ' +
+  'agent can ask again if it still needs to.';
+
 export const FEEDBACK_LOST_ERROR =
   'chief-web restarted while the feedback run on this session\'s review findings was running, ' +
   'so the run died with it. Nothing that was committed is gone — the branch is pushed and the ' +
@@ -79,9 +94,11 @@ export interface ReconciliationPlan {
 const TERMINAL_STATUSES = new Set(['finished', 'pr-open', 'merged', 'failed']);
 
 /**
- * The two states whose work only ever lived in this process, by what a restart
- * has to fail them at (US-002). Both are delivery stages, so a retry re-runs
- * the delivery from the review and never a single story.
+ * The states whose work only ever lived in this process, by what a restart has
+ * to fail them at (US-002). `reviewing` and `fixing` fail at a delivery stage,
+ * so a retry re-runs the delivery from the review and never a single story;
+ * `deciding` (decisions US-007) fails at `agent`, because what it lost was an
+ * iteration, and the retry is a build that resumes from the PRD.
  */
 const LOST_ON_RESTART: Partial<
   Record<
@@ -91,6 +108,7 @@ const LOST_ON_RESTART: Partial<
 > = {
   reviewing: { stage: 'review', error: REVIEW_LOST_ERROR, reason: 'review lost' },
   fixing: { stage: 'feedback', error: FEEDBACK_LOST_ERROR, reason: 'feedback run lost' },
+  deciding: { stage: 'agent', error: DECISION_LOST_ERROR, reason: 'the agent waiting on a decision was lost' },
 };
 
 /**
@@ -106,6 +124,11 @@ const LOST_ON_RESTART: Partial<
  *   that is still there, so a session whose container is gone has nothing left
  *   to resume into. One whose container is still up simply stays `waiting`,
  *   and the next scheduler tick resumes it when its hold is up.
+ * - A `deciding` session (decisions US-007) is `failed` whatever became of its
+ *   container, for the same reason `reviewing` is: the agent it was waiting on
+ *   was blocked inside an exec *this process* was holding open, and no restart
+ *   can get back into that. A surviving container is still adopted, so the
+ *   retry resumes on the same workspace at the first story that is not done.
  * - A `reviewing` or `fixing` session is `failed` whatever became of its
  *   container (US-002), because what drove it — the delivery's review, its wait
  *   for the feedback run, and the undraft at the end — only ever existed in

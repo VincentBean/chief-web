@@ -15,6 +15,7 @@ import {
   createAgentRunner,
   createBuildLogStore,
   createBuildService,
+  DecisionWatcher,
 } from './build/index.js';
 import {
   type ClaudeService,
@@ -272,6 +273,9 @@ export function createApp(
   // so is a build, which is a headless one.
   api.post('/sessions/:id/planning', guard);
   api.post('/sessions/:id/build', guard);
+  // Answering a question is deliberately *not* guarded (decisions US-006): it
+  // starts no agent at all — it unblocks one that is already running — and
+  // being unable to answer a build you could not have started is a trap.
   // Answering review feedback is a headless `claude` too (US-021). Reading the
   // list and stopping a run are not guarded: being unable to stop something you
   // could not start is a trap.
@@ -351,9 +355,25 @@ export function createApp(
       events,
     );
   const buildLogs = deps.buildLogs ?? createBuildLogStore(config, db);
+  // The operator's half of a build agent's `ask_operator` (decisions US-004).
+  // It talks to the Docker socket directly, like every other relay to the
+  // `chief` MCP server, so it is built on the real client rather than on the
+  // narrow executor a test may inject — an install without one simply cannot
+  // be asked a question.
+  const decisions = new DecisionWatcher({ db, docker, events });
   const builds =
     deps.builds ??
-    createBuildService(config, db, orchestrator, createAgentRunner(exec), delivery, buildLogs, hold, events);
+    createBuildService(
+      config,
+      db,
+      orchestrator,
+      createAgentRunner(exec),
+      delivery,
+      buildLogs,
+      hold,
+      events,
+      decisions,
+    );
   // Recurring tasks (US-004): the scheduler's other due-query. It fires each
   // task into an ordinary session, which means it needs the session service —
   // built further down, because *that* needs the scheduler. The thunk is what

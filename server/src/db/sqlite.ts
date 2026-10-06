@@ -54,6 +54,12 @@ export function integer(row: Row, column: string): number {
   return value;
 }
 
+export function nullableInteger(row: Row, column: string): number | null {
+  const value = row[column];
+  if (value === null || value === undefined) return null;
+  return integer(row, column);
+}
+
 /** A `REAL` column; SQLite hands back a whole-valued one as a plain number too. */
 export function real(row: Row, column: string): number {
   const value = row[column];
