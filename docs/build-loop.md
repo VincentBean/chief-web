@@ -162,9 +162,14 @@ written is a warning, not a failed build.
 Nothing about a run is stored in memory that matters: the statuses are in
 `prd.md` on the data volume, the work is in commits, and the learnings are in
 `progress.md`. A server restart therefore loses at most the iteration that was
-in flight — startup reconciliation marks such a session `failed` at the
-`container_lost` stage, and retrying it starts a fresh container on the very
-same workspace.
+in flight. A session whose container survived the restart is picked back up by
+itself: the scheduler's first tick after boot finds it `building` with no loop
+behind it and starts the loop again in the same container — reaping the agent
+the old process left there first, and taking the story from `prd.md`. (Under
+the [usage-limit hold](#the-usage-limit-hold) it is parked `waiting` instead
+and resumed with the rest.) A session whose container went with the restart
+is marked `failed` at the `container_lost` stage by startup reconciliation,
+and retrying it starts a fresh container on the very same workspace.
 
 **A feedback session's screenshots travel with the branch.** When the voice
 session agent looked at the problem in the browser while planning, its

@@ -47,6 +47,13 @@ export interface ScheduledBuilds {
    */
   resumeHeld(now?: string): Promise<unknown>;
   /**
+   * Restarts the loop of every `building` session no loop of this process is
+   * running — the server was restarted under it. The first tick runs at boot,
+   * so that is where it normally happens; later ticks retry one whose
+   * container could not be reached yet.
+   */
+  resumeOrphaned(): Promise<unknown>;
+  /**
    * Gives any free build slot to the head of the FIFO queue (US-018). The
    * queue is a column too, so the same tick that catches up on schedules is
    * what picks it up again after a restart.
@@ -128,7 +135,17 @@ export class SchedulerService implements SessionScheduler {
   }
 
   private async runTick(now: string): Promise<number> {
-    // Held sessions first (US-006). They are mid-story and never gave their
+    // Builds a restart cut off, before anything else: they already hold their
+    // slots, and nobody else will ever start them again.
+    try {
+      await this.builds.resumeOrphaned();
+    } catch (cause) {
+      logger.warn('could not restart the builds left by a previous process', {
+        error: describe(cause),
+      });
+    }
+
+    // Held sessions next (US-006). They are mid-story and never gave their
     // build slots back, so resuming them cannot take a slot from a schedule —
     // whereas a schedule fired first could take one from them.
     try {

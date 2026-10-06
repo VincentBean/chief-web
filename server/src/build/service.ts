@@ -659,6 +659,55 @@ export class BuildService {
     return resumed;
   }
 
+  /**
+   * Restarts the loop of every `building` session this process is not running
+   * (the server was restarted mid-build). Returns how many were started;
+   * called from the scheduler's tick, whose first pass runs at boot.
+   *
+   * Reconciliation has already failed the sessions whose container went with
+   * the restart, so what is left here still has its container and its
+   * workspace. Nothing about the run is lost that matters — the statuses are
+   * in `prd.md` and the work is in commits — so this is the same continuation
+   * a stop and a start would be, minus the operator. The in-flight iteration
+   * is the only thing given up: the loop's first act is to reap the agent the
+   * last process left behind, and the story is picked again from the file.
+   *
+   * No cap check: a `building` session never gave its slot back. Under the
+   * hold it is parked instead, exactly as {@link holdOthers} would have done,
+   * and resumed with the rest when the hold lifts.
+   */
+  async resumeOrphaned(): Promise<number> {
+    let resumed = 0;
+    for (const session of listSessions(this.db, { status: 'building' })) {
+      if (this.runs.has(session.id) || this.isStarting('session', session.id)) continue;
+
+      const until = this.hold.until();
+      if (until !== null) {
+        this.park(session, null, until);
+        continue;
+      }
+
+      try {
+        await this.launch(session);
+        resumed += 1;
+        logger.info('build restarted after a server restart', {
+          session: session.id,
+          name: session.name,
+        });
+      } catch (cause) {
+        // Docker is not answering yet, most likely because it is coming up
+        // with this server. The session stays `building` and the next tick
+        // tries again.
+        logger.warn('could not restart a build left by a previous process', {
+          session: session.id,
+          name: session.name,
+          error: describe(cause),
+        });
+      }
+    }
+    return resumed;
+  }
+
   /** The shared body of both resumes: cap first, queue for the overflow. */
   private async resume(sessions: readonly Session[]): Promise<number> {
     let resumed = 0;

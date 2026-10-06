@@ -1309,6 +1309,39 @@ describe('the build loop', () => {
     assert.deepEqual(world.containerStarts, [world.session.id, world.session.id]);
   });
 
+  it('restarts a build a server restart left with no loop behind it', async () => {
+    const world = new World();
+    const builds = serviceFor(world);
+    // What the previous process left: `building`, container still up, and no
+    // loop in this one.
+    updateSession(world.db, world.session.id, { status: 'building' });
+    world.runner.behaviour = (): void => {
+      world.markDone('US-002');
+      world.markDone('US-001');
+      world.runner.commit();
+    };
+
+    assert.equal(await builds.resumeOrphaned(), 1);
+    // A second sweep while the loop is running leaves it alone.
+    assert.equal(await builds.resumeOrphaned(), 0);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.deepEqual(world.containerStarts, [world.session.id, world.session.id]);
+  });
+
+  it('parks an orphaned build instead of restarting it while the hold is on', async () => {
+    const world = new World();
+    const builds = serviceFor(world);
+    updateSession(world.db, world.session.id, { status: 'building' });
+    const until = new UsageLimitHold(world.db).arm();
+
+    assert.equal(await builds.resumeOrphaned(), 0);
+    assert.equal(world.status(), 'waiting');
+    assert.equal(getSession(world.db, world.session.id)?.waitingUntil, until);
+    assert.equal(world.containerStarts.length, 0);
+  });
+
   it('writes each iteration to the log file in the workspace', async () => {
     const world = new World();
     world.runner.behaviour = (invocation): void => {

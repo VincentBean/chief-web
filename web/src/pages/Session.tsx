@@ -460,8 +460,8 @@ export function Session() {
       )}
       {status === 'building' && !build.running && (
         <Notice kind="warn">
-          This session is marked building but no loop is running here, which means the server was restarted. Stop the
-          build to return it to ready, then start it again.
+          The server was restarted while this session was building. Its build restarts by itself within a minute; stop
+          the build if you would rather it did not.
         </Notice>
       )}
       {session.lastError !== null && status !== 'failed' && status !== 'waiting' && <Notice kind="error">{session.lastError}</Notice>}

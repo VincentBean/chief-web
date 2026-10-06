@@ -43,6 +43,8 @@ class FakeBuilds implements ScheduledBuilds {
   readonly started: string[] = [];
   /** How often the tick asked the build queue to move (US-018). */
   pumps = 0;
+  /** How often the tick looked for builds a restart cut off. */
+  orphanSweeps = 0;
   /** Session ids the build refuses to start, and why. */
   readonly refuse = new Map<string, string>();
   /** The held sessions the tick resumed, in order (US-006). */
@@ -69,6 +71,12 @@ class FakeBuilds implements ScheduledBuilds {
       updateSession(this.db, session.id, { status: 'building', waitingUntil: null });
     }
     return Promise.resolve({});
+  }
+
+  /** Stands in for `BuildService.resumeOrphaned`: nothing here is orphaned. */
+  resumeOrphaned(): Promise<unknown> {
+    this.orphanSweeps += 1;
+    return Promise.resolve(0);
   }
 
   pump(): Promise<unknown> {
@@ -270,6 +278,14 @@ describe('the session scheduler', () => {
     w.session({ at: PAST });
     await w.scheduler.tick();
     assert.equal(w.builds.pumps, 2);
+  });
+
+  it('restarts the builds a restart cut off on every tick', async () => {
+    const w = world();
+    await w.scheduler.tick();
+    assert.equal(w.builds.orphanSweeps, 1);
+    await w.scheduler.tick();
+    assert.equal(w.builds.orphanSweeps, 2);
   });
 
   it('resumes the sessions whose usage-limit hold has run out (US-006)', async () => {
