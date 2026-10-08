@@ -157,3 +157,38 @@ describe("agent token api", () => {
     });
   }
 });
+
+describe("agent token api with PUBLIC_URL", () => {
+  it("returns the configured public URL with a generated token", async () => {
+    const config = loadConfig({
+      CHIEF_WEB_PASSWORD: PASSWORD,
+      PUBLIC_URL: "https://chief.example/",
+    });
+    const db = openDatabase(IN_MEMORY);
+    const server = createApp(config, createAuthService(config, db), db).listen(
+      0,
+      "127.0.0.1",
+    );
+    try {
+      await new Promise((resolve) => server.once("listening", resolve));
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const login = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: PASSWORD }),
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+
+      const res = await fetch(`${baseUrl}${URL_PATH}`, {
+        method: "POST",
+        headers: { cookie },
+      });
+      assert.equal(res.status, 201);
+      const body = (await res.json()) as { publicUrl: string };
+      assert.equal(body.publicUrl, "https://chief.example");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      closeDatabase(db);
+    }
+  });
+});
