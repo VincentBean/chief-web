@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { generateToken, revokeToken, tokenStatus } from "../agentapi/index.js";
+import type { Config } from "../config.js";
 import type { Database } from "../db/index.js";
 
 /**
@@ -9,7 +10,10 @@ import type { Database } from "../db/index.js";
  * Mounted behind the cookie guard only: the bearer token itself is never
  * accepted here, so a leaked token cannot rotate or revoke itself.
  */
-export function createAgentTokenRouter(db: Database): Router {
+export function createAgentTokenRouter(
+  db: Database,
+  config: Pick<Config, "publicUrl">,
+): Router {
   const router = Router();
 
   router.get("/settings/agent-token", (_req, res) => {
@@ -17,11 +21,16 @@ export function createAgentTokenRouter(db: Database): Router {
   });
 
   // The only response that ever carries the plaintext; regenerating replaces
-  // the old token, which stops verifying at once.
+  // the old token, which stops verifying at once. `publicUrl` lets the page
+  // offer the `CHIEF_WEB_URL` line; empty means "use your own origin".
   router.post("/settings/agent-token", (_req, res) => {
     const token = generateToken(db);
     res.setHeader("Cache-Control", "no-store");
-    res.status(201).json({ token, createdAt: tokenStatus(db).createdAt });
+    res.status(201).json({
+      token,
+      createdAt: tokenStatus(db).createdAt,
+      publicUrl: config.publicUrl,
+    });
   });
 
   // Idempotent: revoking when nothing is configured is still a 204.

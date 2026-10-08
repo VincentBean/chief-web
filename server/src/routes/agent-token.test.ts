@@ -69,8 +69,17 @@ describe("agent token api", () => {
     const res = await call("POST");
     assert.equal(res.status, 201);
     assert.equal(res.headers.get("cache-control"), "no-store");
-    const body = (await res.json()) as { token: string; createdAt: string };
-    assert.deepEqual(Object.keys(body).sort(), ["createdAt", "token"]);
+    const body = (await res.json()) as {
+      token: string;
+      createdAt: string;
+      publicUrl: string;
+    };
+    assert.deepEqual(Object.keys(body).sort(), [
+      "createdAt",
+      "publicUrl",
+      "token",
+    ]);
+    assert.equal(body.publicUrl, "");
     assert.match(body.token, /^chief_[A-Za-z0-9_-]{43}$/);
     assert.equal(body.createdAt, getSetting(db, "agent_api_token_created_at"));
     assert.ok(verifyToken(db, body.token));

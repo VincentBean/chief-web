@@ -33,6 +33,7 @@ import { Icon } from '../Icon.tsx';
 import { Link } from '../router.tsx';
 import { useToast } from '../toast.tsx';
 import { Badge, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { AgentTokenPanel } from './AgentToken.tsx';
 import { ClaudeAccountsPanel } from './ClaudeAccounts.tsx';
 import { playPcm16 } from '../voice/pcm.ts';
 import { recordWav } from '../voice/wav.ts';
@@ -388,6 +389,8 @@ export function Settings() {
       <PageHeader title="Settings" subtitle="Applies to every repository and session. Changes take effect at the next iteration; nothing running is interrupted." />
 
       <ClaudeAccountsPanel />
+
+      <AgentTokenPanel />
 
       <form onSubmit={onSubmit} className="stack">
         <Panel

@@ -243,7 +243,7 @@ export function createApp(
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
   // Managing the agent API token is cookie-only; the token never authorises it.
-  api.use(createAgentTokenRouter(db));
+  api.use(createAgentTokenRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the
