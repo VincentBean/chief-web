@@ -40,6 +40,7 @@ import { createSessionOrchestrator, HostPaths } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
 import { createReviewService, GithubReviewPublisher } from './review/index.js';
+import { createAgentTokenRouter } from './routes/agent-token.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
@@ -241,6 +242,8 @@ export function createApp(
   // from inside a request — by which point everything below exists. Raising
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
+  // Managing the agent API token is cookie-only; the token never authorises it.
+  api.use(createAgentTokenRouter(db));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the
