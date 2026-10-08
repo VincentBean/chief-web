@@ -4,7 +4,7 @@ import type { LoginRateLimiter } from '../auth/index.js';
 import type { Database } from '../db/index.js';
 import { matchRemote } from './match.js';
 import { requireAgentToken } from './middleware.js';
-import { type AgentSessionDeps, createAgentSession } from './sessions.js';
+import { type AgentSessionDeps, createAgentSession, readAgentSession } from './sessions.js';
 
 /**
  * Collaborators built after the agent router is mounted in `createApp`; each
@@ -69,6 +69,9 @@ export function createAgentRouter(
     (req, res, next) => deps.claudeGuard()(req, res, next),
     createAgentSession(db, deps),
   );
+
+  // A session's status and where to review it (US-007).
+  router.get('/sessions/:id', readAgentSession(db, deps));
 
   // Same body as the app's unknown-API fallback.
   router.use((_req, res) => {

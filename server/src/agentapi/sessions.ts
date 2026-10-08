@@ -112,6 +112,35 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
   };
 }
 
+/**
+ * `GET /api/agent/sessions/:id` (send-to-chief US-007): enough for the agent
+ * to tell the operator whether setup worked and where to review the session.
+ * Fields are picked explicitly — no workspace paths, container ids, logs or
+ * PRD content reach the token holder.
+ */
+export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'config'>): RequestHandler {
+  return (req, res) => {
+    const id = String(req.params.id);
+    const session = getSession(db, id);
+    if (session === null) {
+      res.status(404).json({ error: 'session_not_found', message: 'No such session.' });
+      return;
+    }
+    res.json({
+      session: {
+        id: session.id,
+        name: session.name,
+        status: session.status,
+        branch: session.featureBranch,
+        setupError: session.lastError,
+        scheduledStartAt: session.scheduledStartAt,
+        pullRequestUrl: session.prUrl,
+      },
+      url: sessionUrl(deps.config, req, session.id),
+    });
+  };
+}
+
 /** `<PUBLIC_URL>/sessions/<id>`, or the request's own origin when PUBLIC_URL is unset. */
 export function sessionUrl(config: Pick<Config, 'publicUrl'>, req: Request, id: string): string {
   const origin =
