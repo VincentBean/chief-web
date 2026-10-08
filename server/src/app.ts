@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import express, { type Express } from 'express';
 
+import { createAgentRouter } from './agentapi/index.js';
 import {
   type AuthService,
   createLoginRateLimiter,
@@ -229,6 +230,19 @@ export function createApp(
   api.use(
     createAuthRouter(
       auth,
+      createLoginRateLimiter({
+        maxAttempts: config.loginAttemptLimit,
+        windowMs: config.loginAttemptWindowMs,
+      }),
+    ),
+  );
+  // The agent API (send-to-chief US-004) authenticates with the bearer token
+  // only, so it sits before the cookie guard and answers every /agent path
+  // itself. Its failed attempts are counted apart from sign-in failures.
+  api.use(
+    '/agent',
+    createAgentRouter(
+      db,
       createLoginRateLimiter({
         maxAttempts: config.loginAttemptLimit,
         windowMs: config.loginAttemptWindowMs,
