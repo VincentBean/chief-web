@@ -33,7 +33,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import type { SessionContainerView, SessionStartOptions } from '../orchestrator/index.js';
-import { removeSessionWorkspace, sessionRepoDir } from '../orchestrator/index.js';
+import { removeSessionWorkspace, sessionRepoDir, writeSessionFile } from '../orchestrator/index.js';
 import {
   agentLogPathFor,
   type PrdStatus,
@@ -281,6 +281,12 @@ export interface CreateSessionRequest {
   readonly effort?: EffortLevel | null;
   /** The Claude account; omitted or null follows the default account. */
   readonly claudeAccountId?: string | null;
+  /**
+   * A ready-written PRD (send-to-chief US-006), already parsed by the caller.
+   * Kept on the row and written into the clone by the first setup that
+   * succeeds, so a failed setup followed by **Retry setup** still delivers it.
+   */
+  readonly pendingPrd?: string | null;
 }
 
 /** The longest feedback a session is started from (voice feedback US-001), after trimming. */
@@ -409,6 +415,7 @@ export class SessionService {
         feedback: request.feedback ?? null,
         effort: request.effort ?? null,
         claudeAccountId: request.claudeAccountId ?? null,
+        pendingPrd: request.pendingPrd ?? null,
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -849,6 +856,7 @@ export class SessionService {
 
     if (result.ok) {
       updateSession(this.db, session.id, { lastError: null });
+      if (session.pendingPrd !== null) this.writePendingPrd(session, session.pendingPrd);
       logger.info('session repository ready', {
         session: session.id,
         featureBranch: session.featureBranch,
@@ -874,6 +882,22 @@ export class SessionService {
     });
     const updated = getSession(this.db, session.id) ?? session;
     return { session: this.toView(updated), setup: result };
+  }
+
+  /**
+   * Writes the PRD a session was created with into its fresh clone and clears
+   * it from the row. A write that fails keeps it there, with the reason as the
+   * session's error, so the next **Retry setup** tries again.
+   */
+  private writePendingPrd(session: Session, prd: string): void {
+    try {
+      writeSessionFile(this.config, session.id, prdPathFor(session.name), prd);
+      updateSession(this.db, session.id, { pendingPrd: null });
+    } catch (cause) {
+      const message = `The PRD could not be written into the session's workspace: ${describe(cause)}`;
+      updateSession(this.db, session.id, { lastError: message });
+      logger.warn('session prd not written', { session: session.id, error: describe(cause) });
+    }
   }
 
   /** Never throws: an unreachable daemon is reported the same way git is. */

@@ -86,6 +86,23 @@ not a story, so [Mark ready](#marking-a-session-ready) ignores it; the
 [build loop](build-loop.md) tells every iteration to read it. Past planning, a
 feedback session is an ordinary session.
 
+## Sessions sent from Claude Code
+
+[Send to chief](send-to-chief.md) creates a session from outside chief-web: a
+Claude Code conversation in another project writes the PRD, and the
+`/send-to-chief` skill sends it with `POST /api/agent/sessions`, authenticated
+by the agent API token. The session is created exactly like one from the
+dashboard — row, container, clone, feature branch — and two things differ:
+
+- **it arrives with a PRD.** The PRD is validated with the same parser as
+  [Mark ready](#marking-a-session-ready) before the session exists, kept on the
+  session, and written to `.chief/prds/<session-name>/prd.md` as soon as setup
+  succeeds. When setup fails it waits on the session, and **Retry setup**
+  writes it.
+- **it is never marked ready for you.** Unlike a recurring run, it stays
+  `pending` until you have reviewed the PRD and clicked **Mark ready**. Code
+  review is off unless the request asked for it.
+
 ## Session states
 
 A session is in exactly one of seven states, and the badge on the

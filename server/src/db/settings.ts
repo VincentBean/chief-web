@@ -149,6 +149,15 @@ export const SETTING_KEYS = [
   'pr_automation_claude_account_id',
   /** The Claude account Sentry plans and fix sessions run on (US-013); unset means the default. */
   'sentry_claude_account_id',
+  /**
+   * The install-wide agent API token (send-to-chief US-001), read and written
+   * only through `agentapi/token.ts`. Only the token's SHA-256 hex digest is
+   * stored; the plaintext is shown once, on generation. Both timestamps are
+   * UTC ISO-8601; an absent `last_used_at` row means never used.
+   */
+  'agent_api_token_hash',
+  'agent_api_token_created_at',
+  'agent_api_token_last_used_at',
 ] as const;
 
 /**

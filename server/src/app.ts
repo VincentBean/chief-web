@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import express, { type Express } from 'express';
 
+import { createAgentRouter } from './agentapi/index.js';
 import {
   type AuthService,
   createLoginRateLimiter,
@@ -40,6 +41,7 @@ import { createSessionOrchestrator, HostPaths } from './orchestrator/index.js';
 import { createPlanningService, type PlanningService } from './planning/index.js';
 import { createRetryService } from './recovery/index.js';
 import { createReviewService, GithubReviewPublisher } from './review/index.js';
+import { createAgentTokenRouter } from './routes/agent-token.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createBuildRouter } from './routes/build.js';
 import { createClaudeRouter } from './routes/claude.js';
@@ -234,6 +236,21 @@ export function createApp(
       }),
     ),
   );
+  // The agent API (send-to-chief US-004) authenticates with the bearer token
+  // only, so it sits before the cookie guard and answers every /agent path
+  // itself. Its failed attempts are counted apart from sign-in failures.
+  api.use(
+    '/agent',
+    createAgentRouter(
+      db,
+      createLoginRateLimiter({
+        maxAttempts: config.loginAttemptLimit,
+        windowMs: config.loginAttemptWindowMs,
+      }),
+      // Both are built further down; nothing reads them before a request.
+      { config, sessions: () => sessions, claudeGuard: () => guard },
+    ),
+  );
   // Guard for every API route added below (and for unknown ones, which must
   // not reveal whether they exist).
   api.use(requireApiAuth(auth));
@@ -241,6 +258,8 @@ export function createApp(
   // from inside a request — by which point everything below exists. Raising
   // the concurrency cap has to drain the queue there and then (US-001).
   api.use(createSettingsRouter(db, config, { pump: () => void builds.pump() }));
+  // Managing the agent API token is cookie-only; the token never authorises it.
+  api.use(createAgentTokenRouter(db, config));
   api.use(createRepositoriesRouter(db, config, deps.runCommand));
   // Recurring task definitions (US-003). Database only — nothing here starts a
   // session, which is the scheduler's job (US-004) — so it needs none of the

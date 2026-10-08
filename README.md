@@ -289,6 +289,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Decisions](docs/decisions.md) | the question a build stops to ask you, answering it, and talking it through first |
 | [Code review](docs/code-review.md) | the automatic review, the per-repository context it gets, and reviewing a pull request by hand |
 | [Pull request descriptions](docs/pr-descriptions.md) | how the **What this does** section on every pull request gets written |
+| [Send to chief](docs/send-to-chief.md) | the API token, installing the `/send-to-chief` skill in another project, and the agent API |
 | [Scheduling and concurrency](docs/scheduling.md) | scheduled starts, recurring tasks and the build queue |
 | [Merge conflict fixer](docs/merge-conflicts.md) | how conflicts get resolved, and what letting it push means |
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |

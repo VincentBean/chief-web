@@ -19,7 +19,8 @@
 - Logging in sets `chief_session`, an `HttpOnly`, `SameSite=Lax` cookie holding an
   HMAC-signed, 7-day token. Changing the password invalidates every existing
   cookie. Everything requires it except `GET /api/health`, `POST /api/auth/login`,
-  the `/login` page and the static frontend bundle (which serves that page).
+  the `/login` page and the static frontend bundle (which serves that page);
+  `/api/agent` takes the [agent API token](#the-agent-api-token) instead.
   Unauthenticated page loads redirect to `/login`; API calls get `401`; WebSocket
   handshakes are closed with code `4401`.
 - A browser terminal is a shell inside a container with the same reach as the
@@ -47,6 +48,44 @@
   it touched before merging, or switch it off in Settings.
 - There is no HTTPS termination. Put a reverse proxy in front if you expose it
   beyond localhost.
+
+## The agent API token
+
+[Send to chief](send-to-chief.md) lets a Claude Code session in another project
+create sessions here, with a bearer token instead of the password.
+
+- **Hashed at rest.** The token is `chief_` plus 32 random bytes. chief-web
+  stores only its SHA-256 digest (plus when it was created and last used) and
+  compares digests in constant time. A copy of the database does not contain
+  a usable token.
+- **Shown once.** `POST /api/settings/agent-token` returns the plaintext in its
+  response (with `Cache-Control: no-store`) and nowhere else: the Settings
+  panel keeps it only in page state, so a reload hides it, and
+  `GET /api/settings/agent-token` reports only whether a token exists and its
+  timestamps. The token never appears in a log line.
+- **Scoped to `/api/agent` only.** The bearer guard is mounted on that path
+  alone, and that router answers its own unknown paths, so the token reaches
+  exactly three endpoints: match a remote to a repository, create a pending
+  session, read a session back. Every other route — including the routes that
+  generate, regenerate and revoke the token — accepts only the login cookie;
+  the token cannot rotate or revoke itself. Conversely the cookie is not
+  accepted on `/api/agent`. A session created with the token is **pending**, and
+  nothing builds until you click **Mark ready** in the UI; the read endpoint
+  returns no PRD, logs, paths or container ids.
+- **Rate limited.** Failed token attempts are throttled like sign-ins, with the
+  same `LOGIN_ATTEMPT_LIMIT` and `LOGIN_ATTEMPT_WINDOW_MS`, but their own
+  per-address counter: a refused caller gets `429` with `Retry-After` before
+  the token is even looked at, and a success clears the record. Every refusal
+  is the same `401`, whether the token is wrong, malformed, revoked or was
+  never configured.
+- **Rotate by regenerating or revoking.** **Regenerate** in **Settings → API
+  token** replaces the token and invalidates the old one immediately;
+  **Revoke** removes it, after which every agent request gets `401`. There is
+  one token per chief-web, so rotating it means updating `CHIEF_WEB_API_TOKEN`
+  in every project's `.env`. Keep those `.env` files out of git.
+- The token travels in an `Authorization` header, so the note about HTTPS above
+  applies: put chief-web behind a TLS proxy before you use the token from
+  another machine.
 
 ## Autonomous agents and untrusted error data
 

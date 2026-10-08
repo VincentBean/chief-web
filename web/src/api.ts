@@ -230,6 +230,33 @@ export async function validateGithubToken(token?: string): Promise<{ login: stri
   });
 }
 
+/** The agent API token as Settings sees it (send-to-chief US-002); never the token itself. */
+export interface AgentTokenStatus {
+  configured: boolean;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+}
+
+/** The one response that carries the plaintext; `publicUrl` is `PUBLIC_URL`, empty when unset. */
+export interface GeneratedAgentToken {
+  token: string;
+  createdAt: string;
+  publicUrl: string;
+}
+
+export async function fetchAgentToken(signal?: AbortSignal): Promise<AgentTokenStatus> {
+  return api<AgentTokenStatus>('/api/settings/agent-token', signal ? { signal } : {});
+}
+
+/** Generates or regenerates: the previous token stops working at once. */
+export async function generateAgentToken(): Promise<GeneratedAgentToken> {
+  return api<GeneratedAgentToken>('/api/settings/agent-token', { method: 'POST' });
+}
+
+export async function revokeAgentToken(): Promise<void> {
+  await api<void>('/api/settings/agent-token', { method: 'DELETE' });
+}
+
 /** One voice of the operator's ElevenLabs library (voice US-001). */
 export interface ElevenLabsVoice {
   voiceId: string;
