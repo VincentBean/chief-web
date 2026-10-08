@@ -206,7 +206,7 @@ export function createSessionsRouter(sessions: SessionService): Router {
   return router;
 }
 
-function respondWithFailure(res: Response, cause: unknown): void {
+export function respondWithFailure(res: Response, cause: unknown): void {
   if (cause instanceof SessionError) {
     res.status(cause.status).json({ error: cause.code, message: cause.message });
     return;
@@ -413,7 +413,7 @@ function parseEffort(input: Record<string, unknown>): { effort?: EffortLevel | n
   return { effort: raw };
 }
 
-function parseCreate(body: unknown): CreateSessionRequest | Invalid {
+export function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
   const input = body as Record<string, unknown>;

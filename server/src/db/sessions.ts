@@ -225,6 +225,12 @@ export interface Session {
    * own. Written by the orchestrator at each agent launch.
    */
   readonly failoverClaudeAccountId: string | null;
+  /**
+   * A PRD handed over with the session (send-to-chief US-006) that is still
+   * waiting for a successful setup to be written into the clone; null once
+   * it has been, and for every session created without one.
+   */
+  readonly pendingPrd: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -250,6 +256,8 @@ export interface CreateSessionInput {
   readonly effort?: EffortLevel | null;
   /** The Claude account; defaults to null, the default account. */
   readonly claudeAccountId?: string | null;
+  /** A PRD to write into the clone once setup succeeds; defaults to null. */
+  readonly pendingPrd?: string | null;
 }
 
 export interface UpdateSessionInput {
@@ -273,6 +281,7 @@ export interface UpdateSessionInput {
   readonly effort?: EffortLevel | null;
   readonly claudeAccountId?: string | null;
   readonly failoverClaudeAccountId?: string | null;
+  readonly pendingPrd?: string | null;
 }
 
 export interface ListSessionsFilter {
@@ -301,6 +310,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   effort: 'effort',
   claudeAccountId: 'claude_account_id',
   failoverClaudeAccountId: 'failover_claude_account_id',
+  pendingPrd: 'pending_prd',
 };
 
 export function isValidSessionName(name: string): boolean {
@@ -367,6 +377,7 @@ export function mapSession(row: Row): Session {
     effort: effortOf(row),
     claudeAccountId: nullableText(row, 'claude_account_id'),
     failoverClaudeAccountId: nullableText(row, 'failover_claude_account_id'),
+    pendingPrd: nullableText(row, 'pending_prd'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -399,6 +410,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     effort: input.effort ?? null,
     claudeAccountId: input.claudeAccountId ?? null,
     failoverClaudeAccountId: null,
+    pendingPrd: input.pendingPrd ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -408,8 +420,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
         waiting_until, code_review, open_pull_request, recurring_task_id, feedback,
-        effort, claude_account_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        effort, claude_account_id, pending_prd, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -430,6 +442,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.feedback,
     session.effort,
     session.claudeAccountId,
+    session.pendingPrd,
     session.createdAt,
     session.updatedAt,
   );

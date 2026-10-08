@@ -682,6 +682,7 @@ function session(overrides: Partial<Session>): Session {
     effort: null,
     claudeAccountId: null,
     failoverClaudeAccountId: null,
+    pendingPrd: null,
     createdAt: '2026-09-05T03:00:00.000Z',
     updatedAt: '2026-09-05T03:00:00.000Z',
     ...overrides,

@@ -247,6 +247,8 @@ export function createApp(
         maxAttempts: config.loginAttemptLimit,
         windowMs: config.loginAttemptWindowMs,
       }),
+      // Both are built further down; nothing reads them before a request.
+      { config, sessions: () => sessions, claudeGuard: () => guard },
     ),
   );
   // Guard for every API route added below (and for unknown ones, which must

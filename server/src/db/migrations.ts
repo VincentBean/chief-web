@@ -1405,6 +1405,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_decisions_session ON decisions(session_id, status);
     `,
   },
+  {
+    id: '0031_session_pending_prd',
+    sql: `
+      -- A PRD sent with a session through the agent API (send-to-chief
+      -- US-006) whose setup has not succeeded yet. A successful setup, first
+      -- or retried, writes it into the clone and clears it; NULL otherwise.
+      ALTER TABLE sessions ADD COLUMN pending_prd TEXT;
+    `,
+  },
 ];
 
 /**

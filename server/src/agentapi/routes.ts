@@ -1,9 +1,19 @@
-import { Router } from 'express';
+import { type RequestHandler, Router } from 'express';
 
 import type { LoginRateLimiter } from '../auth/index.js';
 import type { Database } from '../db/index.js';
 import { matchRemote } from './match.js';
 import { requireAgentToken } from './middleware.js';
+import { type AgentSessionDeps, createAgentSession } from './sessions.js';
+
+/**
+ * Collaborators built after the agent router is mounted in `createApp`; each
+ * is read at request time.
+ */
+export interface AgentRouterDeps extends AgentSessionDeps {
+  /** `requireClaudeAuth`, the same guard `POST /api/sessions` sits behind. */
+  readonly claudeGuard: () => RequestHandler;
+}
 
 /**
  * The agent API, mounted at `/api/agent` (send-to-chief US-004). Every route
@@ -11,7 +21,11 @@ import { requireAgentToken } from './middleware.js';
  * router answers unknown paths itself instead of falling through to the
  * cookie-guarded routes.
  */
-export function createAgentRouter(db: Database, attempts: LoginRateLimiter): Router {
+export function createAgentRouter(
+  db: Database,
+  attempts: LoginRateLimiter,
+  deps: AgentRouterDeps,
+): Router {
   const router = Router();
 
   router.use(requireAgentToken(db, attempts));
@@ -48,6 +62,13 @@ export function createAgentRouter(db: Database, attempts: LoginRateLimiter): Rou
       }
     }
   });
+
+  // A session with a ready-written PRD, left pending for the operator (US-006).
+  router.post(
+    '/sessions',
+    (req, res, next) => deps.claudeGuard()(req, res, next),
+    createAgentSession(db, deps),
+  );
 
   // Same body as the app's unknown-API fallback.
   router.use((_req, res) => {
