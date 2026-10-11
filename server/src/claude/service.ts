@@ -57,6 +57,13 @@ const CONTAINER_COMMAND_TIMEOUT_MS = 60_000;
 /** At most this many probe containers run at once when every account is checked. */
 export const CLAUDE_STATUS_PROBE_CONCURRENCY = 3;
 
+/**
+ * How long a probe's "signed in" is enough for the session guard on its own.
+ * Accounts are not signed out behind chief-web's back in minutes, while a probe
+ * container on a busy host can take longer than the request it would hold up.
+ */
+export const CLAUDE_SIGNED_IN_TRUST_MS = 10 * 60_000;
+
 export interface ClaudeLoginView {
   /** True while a login terminal is open and its process still running. */
   readonly active: boolean;
@@ -145,6 +152,8 @@ interface OpenLogin {
 export class ClaudeService {
   private readonly cached = new Map<string, ClaudeAuthStatus>();
   private readonly probing = new Map<string, Promise<ClaudeAuthStatus>>();
+  /** The last answer the CLI itself gave per account; a failed probe is not one. */
+  private readonly answered = new Map<string, ClaudeAuthStatus>();
   private login: OpenLogin | null = null;
 
   constructor(
@@ -171,7 +180,10 @@ export class ClaudeService {
       const current = (): boolean => this.probing.get(accountId) === started;
       const started: Promise<ClaudeAuthStatus> = this.probe(accountId)
         .then((status) => {
-          if (current()) this.cached.set(accountId, status);
+          if (current()) {
+            this.cached.set(accountId, status);
+            if (status.error === null) this.answered.set(accountId, status);
+          }
           return status;
         })
         .finally(() => {
@@ -181,6 +193,22 @@ export class ClaudeService {
       this.probing.set(accountId, started);
     }
     return probing;
+  }
+
+  /**
+   * Whether some account was reported signed in by a probe that answered
+   * within {@link CLAUDE_SIGNED_IN_TRUST_MS}. Never starts a probe. A probe
+   * that failed since does not undo it — it proves nothing either way — but
+   * one in which the CLI said "signed out" does, and so does a new login.
+   */
+  signedInRecently(): boolean {
+    const now = Date.now();
+    return listClaudeAccounts(this.db).some((account) => {
+      const answer = this.answered.get(account.id);
+      if (answer === undefined || !answer.authenticated) return false;
+      const age = now - Date.parse(answer.checkedAt);
+      return Number.isFinite(age) && age >= 0 && age < CLAUDE_SIGNED_IN_TRUST_MS;
+    });
   }
 
   /**
@@ -235,6 +263,7 @@ export class ClaudeService {
   /** Forgets an account's cached status, and any probe of it still running. */
   private invalidate(accountId: string): void {
     this.cached.delete(accountId);
+    this.answered.delete(accountId);
     this.probing.delete(accountId);
   }
 

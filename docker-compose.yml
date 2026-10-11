@@ -47,6 +47,8 @@ services:
       # 4 requests an hour per open PR against a 5000/hour budget.
       # Only the default: a value saved on the settings page wins (US-004).
       PR_SYNC_INTERVAL_MS: ${PR_SYNC_INTERVAL_MS:-900000}
+      # Cap on one `claude auth status` probe container, start to finish.
+      CLAUDE_PROBE_TIMEOUT_MS: ${CLAUDE_PROBE_TIMEOUT_MS:-90000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # Application data: SQLite database, SSH deploy keys, session workspaces

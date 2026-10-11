@@ -7,6 +7,7 @@ import { logger } from '../lib/logger.js';
 import { claudeAccountBind, claudeAccountDir, type HostPathTranslator } from '../runner/index.js';
 import { type CommandRunner, spawnCommand } from '../ssh/index.js';
 import { CLAUDE_CREDENTIALS_FILE } from './accounts.js';
+import { claudeProbeContainerName, removeTimedOutProbe } from './status.js';
 
 /**
  * How much of each account's 5-hour and 7-day plan limit is used (multiple
@@ -195,10 +196,13 @@ export async function claudeRefreshArgs(
   paths: HostPathTranslator,
   accountId: string,
   cliArgs: readonly string[],
+  name: string = claudeProbeContainerName(accountId),
 ): Promise<string[]> {
   return [
     'run',
     '--rm',
+    '--name',
+    name,
     '--label',
     CLAUDE_REFRESH_LABEL,
     '--volume',
@@ -441,9 +445,13 @@ export class ClaudeUsageService {
   }
 
   private async runCli(accountId: string, cliArgs: readonly string[], timeoutMs: number): Promise<void> {
-    const args = await claudeRefreshArgs(this.config, this.paths, accountId, cliArgs);
+    const name = claudeProbeContainerName(accountId);
+    const args = await claudeRefreshArgs(this.config, this.paths, accountId, cliArgs, name);
     const result = await this.run(this.config.dockerBin, args, '', timeoutMs);
-    if (result.timedOut) logger.warn('the claude token refresh probe timed out', { accountId });
+    if (result.timedOut) {
+      logger.warn('the claude token refresh probe timed out', { accountId });
+      void removeTimedOutProbe(this.config, this.run, name);
+    }
   }
 
   private coolingDown(accountId: string): boolean {

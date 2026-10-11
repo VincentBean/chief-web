@@ -103,6 +103,38 @@ describe('claude auth probe', () => {
     assert.match(status.error ?? '', /timed out/);
   });
 
+  it('names each probe container, and removes one that timed out', async () => {
+    const calls: string[][] = [];
+    let removed!: () => void;
+    const removal = new Promise<void>((resolve) => (removed = resolve));
+    const run: CommandRunner = (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === 'rm') removed();
+      return Promise.resolve({ code: null, stdout: '', stderr: '', timedOut: args[0] === 'run' });
+    };
+
+    await probe(configWith({}), run);
+    await removal;
+
+    const runArgs = calls[0] ?? [];
+    const name = runArgs[runArgs.indexOf('--name') + 1] ?? '';
+    assert.match(name, new RegExp(`^chief-web-claude-probe-${ACCOUNT}-[0-9a-f]{8}$`));
+    assert.deepEqual(calls[1], ['rm', '--force', name]);
+  });
+
+  it('leaves a probe that answered to --rm', async () => {
+    const calls: string[][] = [];
+    const run: CommandRunner = (_command, args) => {
+      calls.push([...args]);
+      return Promise.resolve({ code: 0, stdout: LOGGED_IN, stderr: '', timedOut: false });
+    };
+
+    await probe(configWith({}), run);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(calls.length, 1);
+  });
+
   it('fails closed when the command itself throws', async () => {
     const status = await probe(configWith({}), () =>
       Promise.reject(new Error('ENOENT docker')),

@@ -267,6 +267,34 @@ describe('claude service: per-account status', () => {
     assert.equal(result.passed, true);
   });
 
+  it('lets a launch through on a recent "signed in" without probing again', async () => {
+    service = fresh(0);
+    const a = addClaudeAccount(config, db);
+    signedIn.set(a.id, 'a@example.com');
+    await service.statuses();
+
+    // Every probe from now on would time out, as on a host whose disk is saturated.
+    gate = new Promise(() => undefined);
+    const result = await guard();
+
+    assert.equal(result.passed, true);
+    assert.deepEqual(probes, [a.id]);
+  });
+
+  it('probes again for a launch once the CLI has said the account is signed out', async () => {
+    service = fresh(0);
+    const a = addClaudeAccount(config, db);
+    signedIn.set(a.id, 'a@example.com');
+    await service.statuses();
+    signedIn.delete(a.id);
+    await service.status(a.id, true);
+
+    const result = await guard();
+
+    assert.equal(result.passed, false);
+    assert.deepEqual(probes, [a.id, a.id, a.id]);
+  });
+
   it('resolves the implicit default to the first signed-in account, and follows a sign-out (US-007)', async () => {
     service = fresh(0);
     const a = addClaudeAccount(config, db);

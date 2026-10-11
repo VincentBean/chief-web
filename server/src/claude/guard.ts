@@ -21,6 +21,10 @@ export const CLAUDE_NOT_AUTHENTICATED_MESSAGE =
  * Blocks a request while **no** Claude account is signed in (multiple accounts
  * US-004); which account a launch runs on is decided later.
  *
+ * A recent "signed in" from a probe is taken as is, so a launch does not wait
+ * on a probe container (`ClaudeService.signedInRecently`); only without one are
+ * the accounts probed.
+ *
  * The status is **409**, never 401: the frontend reads 401 as an expired
  * session cookie and redirects to the login page, which would hide the real
  * reason. A probe that could not run counts as signed out — chief-web fails
@@ -28,6 +32,10 @@ export const CLAUDE_NOT_AUTHENTICATED_MESSAGE =
  */
 export function requireClaudeAuth(claude: ClaudeService): RequestHandler {
   return (_req, res, next) => {
+    if (claude.signedInRecently()) {
+      next();
+      return;
+    }
     claude
       .statuses()
       .then((accounts) => {

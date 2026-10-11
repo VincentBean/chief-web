@@ -236,6 +236,8 @@ describe('claude api', () => {
   });
 
   it('blocks session creation while Claude is not authenticated', async () => {
+    // The CLI says so; a failed probe alone would not undo the earlier "signed in".
+    await state();
     const response = await call('POST', '/api/sessions', { name: 'demo' });
     const body = (await response.json()) as { error: string; message: string };
 

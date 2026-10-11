@@ -1,6 +1,10 @@
+import { randomBytes } from 'node:crypto';
+
 import type { Config } from '../config.js';
+import { logger } from '../lib/logger.js';
 import { claudeAccountBind, type HostPathTranslator } from '../runner/index.js';
 import type { CommandResult, CommandRunner } from '../ssh/index.js';
+import { removeContainerArgs } from './login.js';
 
 /**
  * Is Claude Code signed in? (US-008)
@@ -44,15 +48,50 @@ interface RawStatus {
   subscriptionType?: unknown;
 }
 
+/**
+ * A fresh name for one probe container, so one that timed out can be removed.
+ * Killing the `docker run` client does not stop its container, and `--rm` does
+ * nothing for a container the daemon never got round to starting — on a host
+ * whose disk is saturated, such containers otherwise pile up in `Created`.
+ */
+export function claudeProbeContainerName(accountId: string): string {
+  return `chief-web-claude-probe-${accountId}-${randomBytes(4).toString('hex')}`;
+}
+
+/** `docker rm -f` of a probe container that outlived its timeout. Never throws. */
+export async function removeTimedOutProbe(
+  config: Config,
+  run: CommandRunner,
+  name: string,
+): Promise<void> {
+  try {
+    const result = await run(config.dockerBin, removeContainerArgs(name), '', config.claudeProbeTimeoutMs);
+    if (result.code !== 0 && !/no such container/i.test(result.stderr)) {
+      logger.warn('could not remove a timed-out claude probe container', {
+        container: name,
+        error: result.timedOut ? 'timed out' : result.stderr.trim(),
+      });
+    }
+  } catch (cause) {
+    logger.warn('could not remove a timed-out claude probe container', {
+      container: name,
+      error: String(cause),
+    });
+  }
+}
+
 /** `docker run` arguments for the probe. Exported so tests can assert them. */
 export async function claudeProbeArgs(
   config: Config,
   paths: HostPathTranslator,
   accountId: string,
+  name: string = claudeProbeContainerName(accountId),
 ): Promise<string[]> {
   return [
     'run',
     '--rm',
+    '--name',
+    name,
     '--label',
     CLAUDE_PROBE_LABEL,
     '--volume',
@@ -73,15 +112,19 @@ export async function probeClaudeAuth(
   paths: HostPathTranslator,
   accountId: string,
 ): Promise<ClaudeAuthStatus> {
+  const name = claudeProbeContainerName(accountId);
   let result: CommandResult;
   try {
-    const args = await claudeProbeArgs(config, paths, accountId);
+    const args = await claudeProbeArgs(config, paths, accountId, name);
     result = await run(config.dockerBin, args, '', config.claudeProbeTimeoutMs);
   } catch (cause) {
     return failedClaudeStatus(`The Claude status check could not be started: ${String(cause)}`);
   }
 
   if (result.timedOut) {
+    // Not awaited: the answer is already known, and the removal waits on the
+    // same slow daemon that made the probe time out.
+    void removeTimedOutProbe(config, run, name);
     const seconds = Math.round(config.claudeProbeTimeoutMs / 1000);
     return failedClaudeStatus(`The Claude status check timed out after ${seconds}s.`);
   }

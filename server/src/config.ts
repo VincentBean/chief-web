@@ -271,7 +271,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workspacesDir: path.resolve(str('WORKSPACES_DIR', path.join(dataDir, 'workspaces'))),
     dataVolume: str('CHIEF_DATA_VOLUME', ''),
     claudeAuthDir: path.resolve(str('CLAUDE_AUTH_DIR', path.join(dataDir, 'claude-auth'))),
-    claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 30_000),
+    claudeProbeTimeoutMs: int('CLAUDE_PROBE_TIMEOUT_MS', 90_000),
     claudeStatusCacheMs: int('CLAUDE_STATUS_CACHE_MS', 15_000),
     claudeUsageUrl: str('CLAUDE_USAGE_URL', 'https://api.anthropic.com'),
     claudeUsageCacheMs: int('CLAUDE_USAGE_CACHE_MS', 60_000),

@@ -282,7 +282,9 @@ describe('claude usage', () => {
 
     await usages.refresh(id);
 
-    assert.deepEqual(seen.slice(0, 4), ['run', '--rm', '--label', CLAUDE_REFRESH_LABEL]);
+    assert.deepEqual(seen.slice(0, 2), ['run', '--rm']);
+    assert.equal(seen[seen.indexOf('--label') + 1], CLAUDE_REFRESH_LABEL);
+    assert.match(seen[seen.indexOf('--name') + 1] ?? '', new RegExp(`^chief-web-claude-probe-${id}-`));
     assert.equal(seen[seen.indexOf('--entrypoint') + 1], 'claude');
     assert.match(seen[seen.indexOf('--volume') + 1] ?? '', new RegExp(`${id}:/home/node/\\.claude$`));
   });
