@@ -312,14 +312,161 @@ What the `start` object means, and whether the operator has to do anything in ch
 Say the operator has to click **Mark ready** only in the rows that say so: a session that was
 started, queued or scheduled needs nothing from them in chief-web.
 
-To check on the session later:
+Keep `session.id` from the response: it is what every call in
+[Managing a session you sent](#managing-a-session-you-sent) needs, including checking on the
+session later.
+
+Finally remove the temporary directory (`rm -rf "$TMP"`).
+
+## Managing a session you sent
+
+Once a session exists, the operator can steer it from this conversation: "start the chief
+session you sent earlier", "schedule it for 06:00", "move it to 07:30", "don't start it after
+all", "un-start it", "how is it doing?". Each request is one call below.
+
+### Which session
+
+Every call takes the session **id**: `session.id` from the step 5 response (or from an earlier
+call below). If you do not know it — another conversation sent it, or the response is no
+longer in this one — say so and ask the operator for the session's URL in chief-web, e.g.
+`https://chief.example.com/sessions/3f2a…`. The id is its **last path segment** (everything
+after the final `/`, without a `?…` or `#…`). Never guess an id or pick one from a list.
+
+### Starting needs a yes
+
+Starting a session makes chief-web build it, so it follows the same rule as sending one:
+
+- Start only when the operator explicitly asks to start or build it now (see
+  [When to start](#when-to-start)).
+- When it is **not a session you sent in this conversation** — they gave you a URL or id, or
+  it was sent earlier elsewhere — read it first (see [Read](#read)), show its `name`, `status`
+  and `url`, and ask "Start <name> in chief-web? (yes / no)". **Start only after an explicit
+  yes**, exactly as in step 4.
+- Setting a schedule on a `ready` session also makes it build at that time; treat a schedule
+  for a session that is not yours the same way.
+
+Going back to planning and reading start nothing; do them when asked.
+
+### Start
+
+Marks a pending session ready (chief-web re-reads its PRD) and starts the build, or puts it on
+the build queue when no slot is free. A session that has a future `scheduledStartAt` is marked
+ready and starts at that time instead.
 
 ```bash
 set -a; [ -f .env ] && . ./.env; set +a
-curl -sS "${CHIEF_WEB_URL%/}/api/agent/sessions/<session id>" \
-  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" -w '\nHTTP %{http_code}\n'
+SESSION_ID='<session id>'   # session.id from the earlier response
+curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID/start" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
+  -w '\nHTTP %{http_code}\n'
 ```
 
-It answers `{ "session": { "id", "name", "status", "branch", "setupError", "scheduledStartAt", "pullRequestUrl" }, "url" }`.
+| Status | Body | Tell the operator |
+| --- | --- | --- |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "outcome": "started" \| "queued" \| "scheduled", "queued", "queuePosition", "message", "url" }` | As in the `start` table of step 6: `started` — it is **building**; `queued` — it is ready and **waiting for a build slot**, number `queuePosition` (quote `message`; a Claude usage-limit hold also answers `queued`); `scheduled` — it is ready and **starts at** `session.scheduledStartAt` (in their local time too). Nothing to do in chief-web. Give the `url`. |
+| 400 `invalid_prd` | `{ "error", "message", "errors": [{ "line", "message" }] }` | The PRD in the session does not parse, so it **stays pending**. List the `errors`; the PRD is fixed in chief-web (or ask whether you should prepare a corrected PRD for them to paste in). |
+| 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
+| 404 `session_not_found` | `{ "error", "message" }` | No session has this id: it was deleted, or the id is wrong. Ask the operator for the session URL again. |
+| 409 `session_not_startable` | `{ "error", "message" }` | Only a `pending` or `ready` session can be started; quote `message`, which names its status. A `building`/`waiting`/`deciding` session is already running; a `failed` one is retried with **Start build** in chief-web. |
+| 409 `claude_not_authenticated` | `{ "error", "message" }` | Nothing happened: chief-web has no working Claude login. The operator must sign in under **Settings → Claude Code**; then start again. |
+| 409 `session_not_cloned`, `session_has_no_stories`, `session_already_complete` | `{ "error", "message" }` | The session was marked **ready** but no build started; quote `message` (setup did not finish — **Retry setup**; no stories; or every story is already done). Read it to see its status. |
+| 429 `too_many_attempts` | `{ "error", "message" }` | As in step 2: too many failed token attempts; wait `Retry-After` seconds and fix the token first. |
+| 503 `sessions_unavailable`, other 5xx or no response | `{ "error", "message" }` | chief-web is still starting or could not do it; show the status and `message`, and try once more at most. |
 
-Finally remove the temporary directory (`rm -rf "$TMP"`).
+### Schedule
+
+Sets, changes or clears the time chief-web starts the session by itself. It only applies to a
+`pending` or `ready` session. On a `ready` session the build starts at that time; on a
+`pending` one the time is kept and only applies once it is started (with **Start** above or
+**Mark ready** in chief-web). Setting a schedule starts nothing right now.
+
+`scheduledStartAt` is UTC ISO-8601, ending in `Z`, e.g. `2026-10-14T06:00:00Z` (06:00 UTC).
+The operator says a local time ("06:00"), so convert it first: find their UTC offset (ask if
+you do not know their time zone; `date +%z` gives this machine's), and use the date they mean
+— tomorrow when 06:00 today has already passed. 06:00 on 14 October 2026 in Amsterdam
+(`+0200`, summer time) is `2026-10-14T04:00:00Z`:
+
+```bash
+# GNU date (Linux)
+date -u -d '2026-10-14 06:00 +0200' +%Y-%m-%dT%H:%M:%SZ
+# BSD date (macOS)
+date -j -u -f '%Y-%m-%d %H:%M %z' '2026-10-14 06:00 +0200' +%Y-%m-%dT%H:%M:%SZ
+```
+
+Both print `2026-10-14T04:00:00Z`. Tell the operator both times ("06:00 Amsterdam time,
+04:00 UTC") when you report back.
+
+```bash
+set -a; [ -f .env ] && . ./.env; set +a
+SESSION_ID='<session id>'               # session.id from the earlier response
+SCHEDULED_START='2026-10-14T04:00:00Z'  # the converted UTC time
+curl -sS -X PUT "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID/schedule" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data "$(jq -n --arg at "$SCHEDULED_START" '{scheduledStartAt: $at}')" \
+  -w '\nHTTP %{http_code}\n'
+```
+
+To **clear** the schedule ("don't start it at 06:00 after all"), send `null` instead:
+`--data '{"scheduledStartAt": null}'`. A cleared `ready` session stays ready without a time;
+it does not start right away.
+
+| Status | Body | Tell the operator |
+| --- | --- | --- |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "url" }` | The new start time, `session.scheduledStartAt`, in their local time and UTC — or that the schedule is cleared when it is `null`. Say it **builds at that time** when `status` is `ready`, and that it **stays pending** until started when `status` is `pending`. |
+| 400 `invalid_scheduled_start` | `{ "error", "message" }` | Nothing changed: the time was not an ISO-8601 timestamp (or `scheduledStartAt` was missing). Fix the conversion and send again. |
+| 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
+| 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |
+| 409 `session_not_schedulable` | `{ "error", "message" }` | Only a `pending` or `ready` session can be scheduled; quote `message`, which names its status (it is already building, or it has finished or failed). |
+| 429 `too_many_attempts` | `{ "error", "message" }` | As in step 2. |
+| 503 `sessions_unavailable`, other 5xx or no response | `{ "error", "message" }` | As in [Start](#start). |
+
+### Back to planning
+
+Undoes a start that has not begun building: a `ready` session goes back to **pending** and, if
+it was waiting for a build slot, leaves the build queue. Use it for "un-start it", "don't build
+it yet", "take it off the queue". A scheduled start is **kept**: clear it with
+[Schedule](#schedule) as well when the operator wants it gone, or it applies again the next
+time the session is started.
+
+```bash
+set -a; [ -f .env ] && . ./.env; set +a
+SESSION_ID='<session id>'   # session.id from the earlier response
+curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID/back-to-planning" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
+  -w '\nHTTP %{http_code}\n'
+```
+
+| Status | Body | Tell the operator |
+| --- | --- | --- |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "url" }` | It is **pending** again and will not build until it is started. Mention a `scheduledStartAt` that is still set. |
+| 400 | | Not returned: this call takes no body. |
+| 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
+| 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |
+| 409 `session_not_ready` | `{ "error", "message" }` | Only a `ready` session can go back to planning; quote `message`, which names its status. A `pending` one already is in planning. A `building`/`waiting`/`deciding` one has begun building: the agent API does not stop builds — the operator uses **Stop build** in chief-web. |
+| 429 `too_many_attempts` | `{ "error", "message" }` | As in step 2. |
+| 503 `sessions_unavailable`, other 5xx or no response | `{ "error", "message" }` | As in [Start](#start). |
+
+### Read
+
+Shows where the session is: its status, its place in the build queue, its schedule and, once
+delivered, its pull request. Use it for "how is it doing?" and before starting a session that
+is not yours.
+
+```bash
+set -a; [ -f .env ] && . ./.env; set +a
+SESSION_ID='<session id>'   # session.id from the earlier response
+curl -sS "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
+  -w '\nHTTP %{http_code}\n'
+```
+
+| Status | Body | Tell the operator |
+| --- | --- | --- |
+| 200 | `{ "session": { "id", "name", "status", "branch", "setupError", "scheduledStartAt", "pullRequestUrl", "queued", "queuePosition" }, "url" }` | Its `status` in words (`pending` — waiting to be started; `ready` — started, or starting at `scheduledStartAt`; `building` — building; `waiting` — held by Claude's usage limit; `deciding` — the build asks the operator a question in chief-web; then finished or failed). When `queued` is `true`, it is number `queuePosition` in the build queue. Quote `setupError` when set, and link `pullRequestUrl` once there is one. |
+| 400 | | Not returned: this call takes no body or query. |
+| 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
+| 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |
+| 409 | | Not returned: reading never conflicts with the session's state. |
+| 429 `too_many_attempts` | `{ "error", "message" }` | As in step 2. |
+| 5xx or no response | | As in [Start](#start). |
