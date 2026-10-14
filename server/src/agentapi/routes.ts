@@ -2,9 +2,11 @@ import { type RequestHandler, Router } from 'express';
 
 import type { LoginRateLimiter } from '../auth/index.js';
 import type { Database } from '../db/index.js';
+import { respondWithFailure } from '../routes/sessions.js';
 import { matchRemote } from './match.js';
 import { requireAgentToken } from './middleware.js';
-import { type AgentSessionDeps, createAgentSession, readAgentSession } from './sessions.js';
+import { type AgentSessionDeps, createAgentSession, readAgentSession, sessionUrl } from './sessions.js';
+import { startAgentSession } from './start.js';
 
 /**
  * Collaborators built after the agent router is mounted in `createApp`; each
@@ -72,6 +74,34 @@ export function createAgentRouter(
 
   // A session's status and where to review it (US-007).
   router.get('/sessions/:id', readAgentSession(db, deps));
+
+  // Mark ready and start (or queue) the build (extend-api US-001). A build
+  // runs `claude`, so this sits behind the same guard as creating one.
+  router.post(
+    '/sessions/:id/start',
+    (req, res, next) => deps.claudeGuard()(req, res, next),
+    (req, res) => {
+      const id = String(req.params.id);
+      startAgentSession(db, deps, id)
+        .then((result) => {
+          if (!result.ok) {
+            const { status, error, message, errors } = result;
+            res.status(status).json({ error, message, ...(errors === undefined ? {} : { errors }) });
+            return;
+          }
+          const { session, outcome, queued, queuePosition, message } = result;
+          res.json({
+            session,
+            outcome,
+            queued,
+            queuePosition,
+            message,
+            url: sessionUrl(deps.config, req, id),
+          });
+        })
+        .catch((cause: unknown) => respondWithFailure(res, cause));
+    },
+  );
 
   // Same body as the app's unknown-API fallback.
   router.use((_req, res) => {

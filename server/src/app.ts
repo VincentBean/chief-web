@@ -248,7 +248,7 @@ export function createApp(
         windowMs: config.loginAttemptWindowMs,
       }),
       // Both are built further down; nothing reads them before a request.
-      { config, sessions: () => sessions, claudeGuard: () => guard },
+      { config, sessions: () => sessions, builds: () => builds, claudeGuard: () => guard },
     ),
   );
   // Guard for every API route added below (and for unknown ones, which must

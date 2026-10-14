@@ -1,5 +1,6 @@
 import type { Request, RequestHandler } from 'express';
 
+import type { BuildService } from '../build/index.js';
 import type { Config } from '../config.js';
 import { type Database, getRepository, getSession } from '../db/index.js';
 import { parsePrd, prdParses } from '../prd/index.js';
@@ -17,6 +18,8 @@ export const MAX_AGENT_PRD_LENGTH = 200_000;
 export interface AgentSessionDeps {
   readonly config: Pick<Config, 'publicUrl'>;
   readonly sessions: () => SessionService | null;
+  /** Built after the agent router too; starting a session needs it (extend-api US-001). */
+  readonly builds: () => BuildService | null;
 }
 
 /**
