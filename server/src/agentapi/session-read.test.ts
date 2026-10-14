@@ -11,6 +11,7 @@ import {
   createRepository,
   createSession,
   type Database,
+  enqueueBuild,
   IN_MEMORY,
   openDatabase,
   runMigrations,
@@ -81,6 +82,8 @@ describe('GET /api/agent/sessions/:id', () => {
         setupError: 'Cloning the repository failed.',
         scheduledStartAt: '2026-10-09T06:00:00.000Z',
         pullRequestUrl: 'https://github.com/acme/demo/pull/7',
+        queued: false,
+        queuePosition: null,
       },
       url: `${baseUrl}/sessions/${id}`,
     });
@@ -103,6 +106,39 @@ describe('GET /api/agent/sessions/:id', () => {
     assert.equal(body.session.setupError, null);
     assert.equal(body.session.scheduledStartAt, null);
     assert.equal(body.session.pullRequestUrl, null);
+  });
+
+  it('answers queued: false and a null position for a session not on the build queue', async () => {
+    await start('');
+    const id = seed();
+    updateSession(db, id, { status: 'ready' });
+
+    const body = (await (await read(id)).json()) as { session: Record<string, unknown> };
+    assert.equal(body.session.status, 'ready');
+    assert.equal(body.session.queued, false);
+    assert.equal(body.session.queuePosition, null);
+  });
+
+  it('answers queued: true and the 1-based queue position for a session waiting for a slot', async () => {
+    await start('');
+    const repository = createRepository(db, { name: 'demo', sshUrl: 'git@github.com:acme/demo.git', githubSlug: 'acme/demo' });
+    const queue = (name: string): string => {
+      const session = createSession(db, { repositoryId: repository.id, name, baseBranch: 'main', prTargetBranch: 'main' });
+      updateSession(db, session.id, { status: 'ready' });
+      enqueueBuild(db, { kind: 'session', refId: session.id });
+      return session.id;
+    };
+    const first = queue('first');
+    const second = queue('second');
+
+    const firstBody = (await (await read(first)).json()) as { session: Record<string, unknown> };
+    assert.equal(firstBody.session.queued, true);
+    assert.equal(firstBody.session.queuePosition, 1);
+
+    const secondBody = (await (await read(second)).json()) as { session: Record<string, unknown> };
+    assert.equal(secondBody.session.status, 'ready');
+    assert.equal(secondBody.session.queued, true);
+    assert.equal(secondBody.session.queuePosition, 2);
   });
 
   it('builds the url from PUBLIC_URL when it is set', async () => {

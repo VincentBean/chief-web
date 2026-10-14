@@ -2,7 +2,7 @@ import type { Request, RequestHandler } from 'express';
 
 import type { BuildService } from '../build/index.js';
 import type { Config } from '../config.js';
-import { type Database, getRepository, getSession } from '../db/index.js';
+import { buildQueuePosition, type Database, getQueuedBuild, getRepository, getSession } from '../db/index.js';
 import { parsePrd, prdParses } from '../prd/index.js';
 import { parseCreate, respondWithFailure } from '../routes/sessions.js';
 import type { SessionService } from '../sessions/index.js';
@@ -164,7 +164,8 @@ function startView(result: AgentStartResult): Record<string, unknown> {
  * `GET /api/agent/sessions/:id` (send-to-chief US-007): enough for the agent
  * to tell the operator whether setup worked and where to review the session.
  * Fields are picked explicitly — no workspace paths, container ids, logs or
- * PRD content reach the token holder.
+ * PRD content reach the token holder. `queued`/`queuePosition` are read the
+ * way `BuildView` reads them (extend-api US-005).
  */
 export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'config'>): RequestHandler {
   return (req, res) => {
@@ -183,6 +184,8 @@ export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'con
         setupError: session.lastError,
         scheduledStartAt: session.scheduledStartAt,
         pullRequestUrl: session.prUrl,
+        queued: getQueuedBuild(db, 'session', session.id) !== null,
+        queuePosition: buildQueuePosition(db, 'session', session.id),
       },
       url: sessionUrl(deps.config, req, session.id),
     });
