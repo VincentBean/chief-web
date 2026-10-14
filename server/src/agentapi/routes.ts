@@ -6,6 +6,7 @@ import { respondWithFailure } from '../routes/sessions.js';
 import { matchRemote } from './match.js';
 import { requireAgentToken } from './middleware.js';
 import { type AgentSessionDeps, createAgentSession, readAgentSession, sessionUrl } from './sessions.js';
+import { scheduleAgentSession } from './schedule.js';
 import { startAgentSession } from './start.js';
 
 /**
@@ -102,6 +103,10 @@ export function createAgentRouter(
         .catch((cause: unknown) => respondWithFailure(res, cause));
     },
   );
+
+  // Set, change or clear (`null`) the scheduled start (extend-api US-003).
+  // It starts nothing by itself, so it is not behind the Claude guard.
+  router.put('/sessions/:id/schedule', scheduleAgentSession(db, deps));
 
   // Same body as the app's unknown-API fallback.
   router.use((_req, res) => {

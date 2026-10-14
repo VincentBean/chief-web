@@ -96,7 +96,7 @@ export async function startAgentSession(
     if (session.scheduledStartAt !== null && session.scheduledStartAt > nowIso()) {
       return {
         ok: true,
-        session: view(session),
+        session: agentSessionView(session),
         outcome: 'scheduled',
         queued: false,
         queuePosition: null,
@@ -112,7 +112,7 @@ export async function startAgentSession(
       const current = getSession(db, id) ?? found;
       return {
         ok: true,
-        session: view(current),
+        session: agentSessionView(current),
         outcome: 'queued',
         queued: true,
         queuePosition: builds.status(id).queuePosition,
@@ -129,7 +129,7 @@ export async function startAgentSession(
 /** The outcome of a build start, read back from the build service. */
 function fromBuild(db: Database, builds: BuildService, found: Session): AgentStartSuccess {
   const build = builds.status(found.id);
-  const shown = view(getSession(db, found.id) ?? found);
+  const shown = agentSessionView(getSession(db, found.id) ?? found);
   return build.queued
     ? {
         ok: true,
@@ -149,7 +149,8 @@ function fromBuild(db: Database, builds: BuildService, found: Session): AgentSta
       };
 }
 
-function view(session: Session): AgentStartSession {
+/** The only session fields the token holder sees after a start or a schedule change. */
+export function agentSessionView(session: Session): AgentStartSession {
   return {
     id: session.id,
     name: session.name,

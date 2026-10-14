@@ -277,7 +277,7 @@ function parseScheduledStart(raw: string): string | Invalid {
 }
 
 /** The body of `PUT /sessions/:id/schedule`. */
-function parseSchedule(body: unknown): { scheduledStartAt: string | null } | Invalid {
+export function parseSchedule(body: unknown): { scheduledStartAt: string | null } | Invalid {
   const badBody = invalidBody(body);
   if (badBody) return badBody;
   const input = body as Record<string, unknown>;
