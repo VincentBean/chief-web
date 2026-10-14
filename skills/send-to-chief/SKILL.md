@@ -1,14 +1,25 @@
 ---
 name: send-to-chief
-description: Hand the current piece of work to chief-web as a new pending session with a ready-written PRD. Use when the operator types /send-to-chief, or asks to "send this to chief", "hand this to chief", "let chief build this", "create a chief session for this" or "send this to chief-web".
+description: Hand the current piece of work to chief-web as a new session with a ready-written PRD, pending by default or started right away when the operator asks for it. Use when the operator types /send-to-chief, or asks to "send this to chief", "hand this to chief", "let chief build this", "create a chief session for this", "send this to chief-web", "send this to chief and build it", "send this to chief and start it" or "start it in chief".
 ---
 
 # Send to chief
 
 Turn the work discussed in this conversation into a chief-web session: match this repository
 in chief-web, write a PRD in chief-web's exact format, confirm it with the operator, and create
-the session through chief-web's agent API. The session is created **pending** — nothing builds
-until the operator reviews the PRD in chief-web and clicks **Mark ready**.
+the session through chief-web's agent API. By default the session is created **pending** —
+nothing builds until the operator reviews the PRD in chief-web and starts it. Only when the
+operator **explicitly asked** to start or build it (e.g. "send this to chief and build it",
+"start it in chief") does the same request also start it.
+
+### When to start
+
+Start the session only on an explicit request to build or start it now, in the operator's own
+words: "… and build it", "… and start it", "start it in chief", "build it right away". Anything
+else — "send this to chief", "hand this to chief", "let chief build this", "create a chief
+session for this" — is a plain hand-off: create it pending. When you are unsure, do not start;
+the summary in step 4 tells the operator how to ask for a start. Never start a session the
+operator did not ask you to start.
 
 Work through the steps in order. Stop at the first step that fails and tell the operator what
 to do; never guess past an error.
@@ -202,13 +213,28 @@ Before sending anything, show the operator:
 - **PR target:** `develop` when the base branch is `develop`, otherwise `main` (chief-web
   accepts only `develop` or `main`)
 - **Stories:** each story's id, title and number of acceptance criteria, in priority order
-- That the session will be created **pending** and nothing builds until they mark it ready
+- **Start:** one of
+  - "stays pending — nothing builds until you start it" — the default, whenever the operator
+    did not explicitly ask to start or build it (see [When to start](#when-to-start)); you may
+    add "say *and build it* if you want it to start right away";
+  - "builds right away (or joins the build queue)" — only when the operator explicitly asked
+    to start or build it;
+  - "starts at <time>" — when they asked to start it at a given time ("build it at 06:00");
+    show the time in their local time zone as well as the UTC `scheduledStartAt` you will send.
+    A scheduled start without a request to start keeps the first line: it stays pending, and
+    the time only applies once they start it in chief-web.
 
-Then ask them to confirm, e.g. "Send this to chief-web? (yes / change …)". The operator may
-change the repository, name, base branch, PR target or any story first; apply the change,
+Then ask them to confirm, e.g. "Send this to chief-web? (yes / change …)", or, when it will
+start, "Send this to chief-web and start it? (yes / change …)". The operator may change the
+repository, name, base branch, PR target, the start or any story first; apply the change,
 rewrite `$tmp/prd.md` if needed, and show the summary again. **Send only after an explicit
 yes.** Silence, a question or "looks interesting" is not a yes. If they decline, delete
 `$tmp` and stop.
+
+When the summary says it starts, that one explicit yes covers both creating and starting the
+session: do not ask a second question before sending. A yes to a summary that says "stays
+pending" never starts it; if the operator asks to start it only after confirming, show the
+summary again with the new **Start** line and wait for a new yes.
 
 ## Step 5: Create the session
 
@@ -224,8 +250,9 @@ jq -n \
   --arg name '<session name>' \
   --arg baseBranch '<base branch>' \
   --arg prTargetBranch '<develop or main>' \
+  --argjson start false \
   --rawfile prd "$TMP/prd.md" \
-  '{repositoryId: $repositoryId, name: $name, baseBranch: $baseBranch, prTargetBranch: $prTargetBranch, prd: $prd}' \
+  '{repositoryId: $repositoryId, name: $name, baseBranch: $baseBranch, prTargetBranch: $prTargetBranch, start: $start, prd: $prd}' \
   > "$TMP/body.json"
 curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions" \
   -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
@@ -233,6 +260,10 @@ curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions" \
   --data-binary @"$TMP/body.json" \
   -w '\nHTTP %{http_code}\n'
 ```
+
+Keep `--argjson start false` unless the summary the operator said yes to read "builds right
+away" or "starts at <time>"; only then write `--argjson start true`. `start` must be a JSON
+boolean — `--argjson`, not `--arg`, which would send the string `"true"` and be refused.
 
 `body.json` holds only the session fields and the PRD, never the token. Optional fields the
 API also accepts: `codeReview` (boolean, default `false`), `openPullRequest` (boolean, defaults
@@ -243,7 +274,9 @@ What the status means:
 
 | Status | Body | What to do |
 | --- | --- | --- |
-| 201 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "setup": { "ok", "message" }, "prdWritten", "url" }` | Go to step 6. |
+| 201 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "setup": { "ok", "message" }, "prdWritten", "url" }`, plus `"start"` when you sent `start: true` | The session was created — even when `start.ok` is `false`. Go to step 6; never send the create again. |
+| 201 `start` | `{ "ok": true, "outcome": "started" \| "queued" \| "scheduled", "queued", "queuePosition", "message" }` or `{ "ok": false, "error", "message" }` | Only present with `start: true`. The start never changes the HTTP status; read `start.ok` and `start.outcome` in step 6. On a successful start, `session.status` is already `building` or `ready`. |
+| 400 `invalid_start` | `{ "error", "message" }` | Nothing was created: `start` was not a JSON boolean. Rebuild `body.json` with `--argjson start true` or `--argjson start false` (never `--arg`) and send again. |
 | 400 `invalid_prd` | `{ "error", "errors": [{ "line", "message" }] }` (or a single `message`) | Nothing was created. Each `line` is a 1-based line of `prd.md`; fix exactly those problems (missing `- [ ]` criteria, a duplicated id, a bad priority or status), rebuild `body.json` and send again. Tell the operator what you fixed; if the fix changed the stories, confirm again first. |
 | 400 `invalid_session_name`, `invalid_base_branch`, `invalid_pr_target_branch`, `invalid_scheduled_start` | `{ "error", "message" }` | Nothing was created. Fix that field (quote `message`), confirm the new value with the operator, and send again. |
 | 401 / 429 | | As in step 2. |
@@ -257,14 +290,27 @@ What the status means:
 Tell the operator:
 
 - The session **URL** from the response (`url`), as a link.
-- That the session is **pending**: they must open it, review the PRD and click **Mark ready**
-  in chief-web; nothing builds before that.
+- Whether it is building, from the `start` object (table below).
 - If `setup.ok` is `false`: setup failed and the PRD was kept on the session; quote
   `setup.message` (git's message, e.g. that the branch `chief/<name>` already exists on
   origin). Once they fix the cause and click **Retry setup** in chief-web, the PRD is written
   into the clone.
 - If `setup.ok` is `true` but `prdWritten` is `false`, say the PRD could not be written into
   the workspace and that **Retry setup** in chief-web writes it.
+
+What the `start` object means, and whether the operator has to do anything in chief-web:
+
+| Response | Tell the operator | Anything to do in chief-web? |
+| --- | --- | --- |
+| no `start` (you sent `start: false`) | The session is **pending**: nothing builds until they start it. | Yes — open it, review the PRD and click **Mark ready**. |
+| `start.ok: true`, `outcome: "started"` | It is **building** now. | No. They can follow it at the URL. |
+| `start.ok: true`, `outcome: "queued"` | It is ready and **waiting for a build slot**: number `start.queuePosition` in the build queue. Quote `start.message` (a Claude usage-limit hold also answers `queued`). | No — it starts by itself when a slot frees up. |
+| `start.ok: true`, `outcome: "scheduled"` | It is ready and **starts at** `session.scheduledStartAt` (give the time in their local time zone too). | No — chief-web starts it at that time. |
+| `start.ok: false`, `error: "setup_failed"` | It was created but **not started**: setup or writing the PRD did not finish, so it stays **pending**. Explain the setup problem as in the list above. | Yes — fix the cause, click **Retry setup**, then **Mark ready**. |
+| `start.ok: false`, any other `error` | It was created but **did not start**; quote `start.error` and `start.message`. `session.status` says whether it is still `pending` or was already marked `ready`. | Yes — once the cause in `message` is fixed, open it and click **Mark ready** (pending) or **Start build** (ready). Never send the create again: the session exists. |
+
+Say the operator has to click **Mark ready** only in the rows that say so: a session that was
+started, queued or scheduled needs nothing from them in chief-web.
 
 To check on the session later:
 
