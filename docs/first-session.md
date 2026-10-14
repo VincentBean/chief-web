@@ -11,7 +11,7 @@ On the sessions page, open **New session**:
 
 | Field | Notes |
 | --- | --- |
-| **Repository** | one you registered in [step 5](../README.md#5-add-a-repository-and-its-deploy-key) |
+| **Repository** | one you registered in [step 5](../README.md#5-add-a-repository) |
 | **Session name** | a slug (`letters-numbers-hyphens`), unique per repository. It becomes the feature branch **`chief/<name>`** and the workspace directory — so name it after the feature: `rate-limiting`, not `test1` |
 | **Base branch** | what to branch from; defaults to the repository's |
 | **PR target branch** | where the pull request will be opened (`develop` or `main`) |
