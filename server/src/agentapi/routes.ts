@@ -3,6 +3,7 @@ import { type RequestHandler, Router } from 'express';
 import type { LoginRateLimiter } from '../auth/index.js';
 import type { Database } from '../db/index.js';
 import { respondWithFailure } from '../routes/sessions.js';
+import { backToPlanningAgentSession } from './back-to-planning.js';
 import { matchRemote } from './match.js';
 import { requireAgentToken } from './middleware.js';
 import { type AgentSessionDeps, createAgentSession, readAgentSession, sessionUrl } from './sessions.js';
@@ -107,6 +108,10 @@ export function createAgentRouter(
   // Set, change or clear (`null`) the scheduled start (extend-api US-003).
   // It starts nothing by itself, so it is not behind the Claude guard.
   router.put('/sessions/:id/schedule', scheduleAgentSession(db, deps));
+
+  // Undo a start before the build begins (extend-api US-004). It runs no
+  // `claude`, so it is not behind the Claude guard either.
+  router.post('/sessions/:id/back-to-planning', backToPlanningAgentSession(db, deps));
 
   // Same body as the app's unknown-API fallback.
   router.use((_req, res) => {
