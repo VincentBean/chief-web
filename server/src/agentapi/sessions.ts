@@ -1,10 +1,12 @@
 import type { Request, RequestHandler } from 'express';
 
+import type { BuildService } from '../build/index.js';
 import type { Config } from '../config.js';
-import { type Database, getRepository, getSession } from '../db/index.js';
+import { buildQueuePosition, type Database, getQueuedBuild, getRepository, getSession } from '../db/index.js';
 import { parsePrd, prdParses } from '../prd/index.js';
 import { parseCreate, respondWithFailure } from '../routes/sessions.js';
 import type { SessionService } from '../sessions/index.js';
+import { type AgentStartResult, startAgentSession } from './start.js';
 
 /** The longest PRD the agent API accepts, in characters. */
 export const MAX_AGENT_PRD_LENGTH = 200_000;
@@ -17,6 +19,8 @@ export const MAX_AGENT_PRD_LENGTH = 200_000;
 export interface AgentSessionDeps {
   readonly config: Pick<Config, 'publicUrl'>;
   readonly sessions: () => SessionService | null;
+  /** Built after the agent router too; starting a session needs it (extend-api US-001). */
+  readonly builds: () => BuildService | null;
 }
 
 /**
@@ -36,6 +40,11 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
       return;
     }
     const input = req.body as Record<string, unknown>;
+    if (input.start !== undefined && typeof input.start !== 'boolean') {
+      res.status(400).json({ error: 'invalid_start', message: 'start must be a boolean.' });
+      return;
+    }
+    const start = input.start === true;
 
     const repository = getRepository(db, parsed.repositoryId);
     if (repository === null) {
@@ -93,10 +102,13 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
           : { openPullRequest: parsed.openPullRequest }),
         pendingPrd: prd,
       })
-      .then(({ session, setup }) => {
+      .then(async ({ session, setup }) => {
         const prdWritten = setup.ok && getSession(db, session.id)?.pendingPrd === null;
+        const started = start ? await startCreated(db, deps, session.id, setup.ok && prdWritten) : null;
+        // A start moves the session on, so show it as it is now.
+        const shown = started?.ok === true ? started.session : null;
         res.status(201).json({
-          session: {
+          session: shown ?? {
             id: session.id,
             name: session.name,
             status: session.status,
@@ -106,6 +118,7 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
           setup: { ok: setup.ok, message: setup.message },
           prdWritten,
           url: sessionUrl(deps.config, req, session.id),
+          ...(started === null ? {} : { start: startView(started) }),
         });
       })
       .catch((cause: unknown) => respondWithFailure(res, cause));
@@ -113,10 +126,46 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
 }
 
 /**
+ * The start half of a create with `start: true` (extend-api US-002). Only a
+ * clone holding the PRD can build; otherwise the session stays pending for the
+ * operator to fix and **Retry setup**.
+ */
+async function startCreated(
+  db: Database,
+  deps: AgentSessionDeps,
+  id: string,
+  setUp: boolean,
+): Promise<AgentStartResult> {
+  if (!setUp) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'setup_failed',
+      message: 'Setup did not finish, so the session stays pending. Fix the cause and use Retry setup in chief-web.',
+    };
+  }
+  return startAgentSession(db, deps, id);
+}
+
+/** The `start` object of a create response: the outcome, never an HTTP status. */
+function startView(result: AgentStartResult): Record<string, unknown> {
+  return result.ok
+    ? {
+        ok: true,
+        outcome: result.outcome,
+        queued: result.queued,
+        queuePosition: result.queuePosition,
+        message: result.message,
+      }
+    : { ok: false, error: result.error, message: result.message };
+}
+
+/**
  * `GET /api/agent/sessions/:id` (send-to-chief US-007): enough for the agent
  * to tell the operator whether setup worked and where to review the session.
  * Fields are picked explicitly — no workspace paths, container ids, logs or
- * PRD content reach the token holder.
+ * PRD content reach the token holder. `queued`/`queuePosition` are read the
+ * way `BuildView` reads them (extend-api US-005).
  */
 export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'config'>): RequestHandler {
   return (req, res) => {
@@ -135,6 +184,8 @@ export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'con
         setupError: session.lastError,
         scheduledStartAt: session.scheduledStartAt,
         pullRequestUrl: session.prUrl,
+        queued: getQueuedBuild(db, 'session', session.id) !== null,
+        queuePosition: buildQueuePosition(db, 'session', session.id),
       },
       url: sessionUrl(deps.config, req, session.id),
     });

@@ -6,9 +6,15 @@
 another project. You talk a feature through with Claude Code on your own
 machine, type `/send-to-chief`, and the skill matches the project's git remote
 to a chief-web repository, writes a PRD in chief-web's format, shows it to you
-and — after you say yes — creates a **pending** session with that PRD through
-chief-web's agent API. Nothing builds until you open the session in chief-web,
-review the PRD and click **Mark ready**.
+and — after you say yes — creates a session with that PRD through chief-web's
+agent API.
+
+By default the session stays **pending**: nothing builds until you open it in
+chief-web, review the PRD and click **Mark ready**. When you ask for a build
+outright ("send this to chief and build it"), the skill creates **and starts**
+the session in one call, so it builds (or joins the build queue) while you
+carry on. The skill can also start, schedule or send back to planning a
+session it sent earlier — see [Managing a session you sent](#managing-a-session-you-sent).
 
 It needs three things: an API token from chief-web, two lines in the project's
 `.env`, and the skill file copied into the project (or into your home directory
@@ -48,7 +54,7 @@ instead; a value in `.env` wins.
 
 ### 3. Keep `.env` out of git
 
-The token can create sessions on your chief-web. Make sure `.env` is ignored
+The token can create and start sessions on your chief-web. Make sure `.env` is ignored
 before you commit anything:
 
 ```sh
@@ -96,15 +102,55 @@ skill:
 3. writes a PRD from the conversation and the code it can see — small stories
    in build order, in the exact format [Mark ready](sessions.md#marking-a-session-ready)
    parses;
-4. shows you the repository, session name, base branch, PR target and the list
-   of stories, and **waits for an explicit yes**. You can change any of them
-   first;
-5. creates the session, fixing and resending the PRD if chief-web rejects a line
-   of it;
-6. gives you the session's link.
+4. shows you the repository, session name, base branch, PR target, whether it
+   will **start** (stays pending, builds right away, or starts at a scheduled
+   time) and the list of stories, and **waits for an explicit yes**. You can
+   change any of them first;
+5. creates the session — and starts it, if you asked for that — fixing and
+   resending the PRD if chief-web rejects a line of it;
+6. gives you the session's link and, for a started session, whether it is
+   building, queued (with its place in the queue) or waiting for its scheduled
+   start.
 
 The skill never prints the token, never writes it to a file and sends it only
 to `CHIEF_WEB_URL`.
+
+### Pending by default, started on request
+
+A plain "send this to chief" creates a **pending** session: the skill never
+starts a build you did not ask for. Ask for it in the same breath — "send this
+to chief and build it", "start it in chief" — and the summary in step 4 says
+the session *builds right away (or joins the build queue)*; your single yes to
+that summary covers both creating and starting it, with no second question.
+With a scheduled start the summary says *starts at <time>* instead, and the
+session waits, ready, for that moment.
+
+Under the hood this is one `POST /api/agent/sessions` with `"start": true`
+(see [the create endpoint](#post-apiagentsessions)). If setup fails, nothing
+starts and the session stays pending, exactly as without `start`.
+
+### Managing a session you sent
+
+After sending, you can keep steering the session from the same conversation:
+
+- **"Start the chief session you sent"** — marks a pending session ready and
+  starts or queues its build, like **Mark ready** followed by **Start build**
+  ([`POST …/start`](#post-apiagentsessionsidstart)).
+- **"Schedule it for 06:00"** / **"clear the schedule"** — sets, changes or
+  clears the scheduled start; the skill converts your local time to UTC
+  ([`PUT …/schedule`](#put-apiagentsessionsidschedule)).
+- **"Un-start it"** — sends a `ready` session back to planning and takes it off
+  the build queue, as long as its build has not begun
+  ([`POST …/back-to-planning`](#post-apiagentsessionsidback-to-planning)).
+- **"How is it doing?"** — reads its status, queue position and pull request
+  link ([`GET …/sessions/:id`](#get-apiagentsessionsid)).
+
+The skill uses the session id from the response it got when it sent the
+session; if it no longer has it, it asks you for the session's URL, whose last
+path segment is the id. Starting a session it did not send in this
+conversation needs your explicit yes, the same as sending one. A build that
+has begun can only be stopped with **Stop build** in chief-web: the agent API
+does not stop builds.
 
 ## What happens after sending
 
@@ -114,6 +160,8 @@ feature branch `chief/<session-name>`. The difference is that the PRD the skill
 wrote is put into the clone at `.chief/prds/<session-name>/prd.md` as soon as
 setup succeeds, so no planning conversation is needed.
 
+For a session that was not started:
+
 1. **Pending.** The session waits on the dashboard as `pending`. Nothing
    builds yet, even if you gave it a scheduled start.
 2. **Review.** Open the link the skill gave you (or the session from the
@@ -121,6 +169,14 @@ setup succeeds, so no planning conversation is needed.
    change it — it is the same file a planned session has.
 3. **Mark ready.** **Mark ready** parses the PRD and queues the session for the
    [build loop](build-loop.md), exactly as for a session you planned yourself.
+
+A session that was started skips all three: it is `ready` and then
+`building` straight away, `ready` on the
+[build queue](scheduling.md#concurrency-and-the-build-queue) when every build
+slot is taken or Claude is on a
+[usage-limit hold](build-loop.md#the-usage-limit-hold), or `ready` until its
+[scheduled start](scheduling.md#scheduled-starts). Nothing needs clicking in
+chief-web; the session page shows the build as for any other.
 
 If setup failed — most often because `chief/<session-name>` already exists on
 `origin` — the session stays pending with the reason on screen, and the PRD is
@@ -133,8 +189,20 @@ default base branch is `develop`, otherwise `main`.
 
 ## The agent API
 
-The skill talks to three endpoints under `/api/agent`. You can call them
-yourself with any HTTP client. Every request needs
+The skill talks to six endpoints under `/api/agent`. You can call them
+yourself with any HTTP client:
+
+| Endpoint | What it does |
+| --- | --- |
+| [`GET /api/agent/repositories/match`](#get-apiagentrepositoriesmatch) | Finds the repository a git remote belongs to. |
+| [`POST /api/agent/sessions`](#post-apiagentsessions) | Creates a pending session with a ready-written PRD, and starts it with `"start": true`. |
+| [`GET /api/agent/sessions/:id`](#get-apiagentsessionsid) | Reads a session back, including its place in the build queue. |
+| [`POST /api/agent/sessions/:id/start`](#post-apiagentsessionsidstart) | Marks a session ready and starts or queues its build. |
+| [`PUT /api/agent/sessions/:id/schedule`](#put-apiagentsessionsidschedule) | Sets, changes or clears the scheduled start. |
+| [`POST /api/agent/sessions/:id/back-to-planning`](#post-apiagentsessionsidback-to-planning) | Returns a ready session to pending and takes it off the build queue. |
+
+Nothing under `/api/agent` stops a build, merges a pull request or changes a
+setting. Every request needs
 
 ```http
 Authorization: Bearer <token>
@@ -185,7 +253,8 @@ curl -sS -G "$CHIEF_WEB_URL/api/agent/repositories/match" \
 
 ### `POST /api/agent/sessions`
 
-Creates a pending session with a ready-written PRD.
+Creates a pending session with a ready-written PRD, and — with `"start": true`
+— starts it straight away.
 
 ```sh
 curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions" \
@@ -214,6 +283,7 @@ curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions" \
 | `scheduledStartAt` | no | ISO-8601 timestamp. Only a ready session starts, so a moment that passes while the session is still pending starts the build as soon as you mark it ready ([Scheduling](scheduling.md)). |
 | `codeReview` | no | Boolean, default `false`. |
 | `openPullRequest` | no | Boolean, defaults to the repository's setting. |
+| `start` | no | Boolean, default `false`. `true` starts the session once it is created, exactly as [`POST …/start`](#post-apiagentsessionsidstart) would. |
 
 `201`:
 
@@ -238,10 +308,47 @@ successful **Retry setup**. `prdWritten` is `true` only when the PRD is already
 in the clone. `url` starts with `PUBLIC_URL` when that is set, otherwise with
 the address the request came in on.
 
+With `"start": true` the response is still `201` with the same fields, plus a
+`start` object saying how the start went, and `session` shows the status after
+it (`ready` or `building`):
+
+```json
+{
+  "session": { "id": "a83d…", "name": "csv-export", "status": "building", "branch": "chief/csv-export", "scheduledStartAt": null },
+  "setup": { "ok": true, "message": "…" },
+  "prdWritten": true,
+  "start": {
+    "ok": true,
+    "outcome": "started",
+    "queued": false,
+    "queuePosition": null,
+    "message": "\"csv-export\" is building."
+  },
+  "url": "https://chief.example.com/sessions/a83d…"
+}
+```
+
+`start.outcome` is `"started"`, `"queued"` (with `queuePosition`) or
+`"scheduled"`, with the same meaning as for
+[`POST …/start`](#post-apiagentsessionsidstart). When the session cannot be
+started, the session is still created and the status is still `201`, but
+`start` is `{ "ok": false, "error", "message" }`:
+
+- `setup_failed` — setup did not finish or the PRD was not written into the
+  clone. The session stays **pending**; fix the cause and click **Retry setup**,
+  then **Mark ready**.
+- any other code from [`POST …/start`](#post-apiagentsessionsidstart) — the
+  start step itself failed. The session may already be `ready`; the session
+  page shows what is left to do (usually **Start build**).
+
+Without `start`, or with `"start": false`, there is no `start` key and the
+session is `pending`.
+
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `invalid_body` | The body is not a JSON object. |
 | 400 | `invalid_repository_id`, `invalid_session_name`, `invalid_base_branch`, `invalid_pr_target_branch`, `invalid_scheduled_start`, `invalid_code_review`, `invalid_open_pull_request` | That field is missing or malformed; `message` says how. |
+| 400 | `invalid_start` | `start` is present but not a boolean (`"yes"` and `null` included). |
 | 400 | `invalid_prd` | `prd` is missing, empty or too long (`message`), or does not parse. A parse failure lists every problem with its 1-based line: `{ "error": "invalid_prd", "errors": [{ "line": 18, "message": "…" }] }`. |
 | 400 | `repository_key_missing` | The repository has no private key, so nothing can be cloned. |
 | 404 | `repository_not_found` | No repository with that id. |
@@ -272,7 +379,9 @@ curl -sS "$CHIEF_WEB_URL/api/agent/sessions/a83d…" \
     "branch": "chief/csv-export",
     "setupError": null,
     "scheduledStartAt": null,
-    "pullRequestUrl": null
+    "pullRequestUrl": null,
+    "queued": false,
+    "queuePosition": null
   },
   "url": "https://chief.example.com/sessions/a83d…"
 }
@@ -281,9 +390,130 @@ curl -sS "$CHIEF_WEB_URL/api/agent/sessions/a83d…" \
 `status` is one of the [session states](sessions.md#session-states).
 `setupError` is the session's last error — a failed setup, but also a later
 build or delivery failure — or `null`. `pullRequestUrl` is set once a pull
-request is open. Nothing else is returned: no PRD, logs, workspace paths or
-container ids.
+request is open. `queued` is `true` while a `ready` session waits on the
+[build queue](scheduling.md#concurrency-and-the-build-queue) for a slot, and
+`queuePosition` is then its 1-based place in it (`null` otherwise). Nothing
+else is returned: no PRD, logs, workspace paths or container ids.
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 404 | `session_not_found` | No session with that id. |
+
+### `POST /api/agent/sessions/:id/start`
+
+Starts a session: **Mark ready** followed by **Start build**, in one call. A
+`pending` session has its PRD parsed and its stories synced, exactly as
+[Mark ready](sessions.md#marking-a-session-ready) does; a `ready` session goes
+straight to the build. The build starts when a slot is free and otherwise joins
+the [build queue](scheduling.md#concurrency-and-the-build-queue). A session
+whose scheduled start is still in the future is marked ready but not started:
+the scheduler starts it at that time. A schedule that has already passed starts
+it now. No body is needed.
+
+```sh
+curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions/a83d…/start" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN"
+```
+
+`200`:
+
+```json
+{
+  "session": {
+    "id": "a83d…",
+    "name": "csv-export",
+    "status": "ready",
+    "branch": "chief/csv-export",
+    "scheduledStartAt": null
+  },
+  "outcome": "queued",
+  "queued": true,
+  "queuePosition": 2,
+  "message": "\"csv-export\" is waiting for a build slot (#2 in the queue).",
+  "url": "https://chief.example.com/sessions/a83d…"
+}
+```
+
+| `outcome` | `session.status` | Meaning |
+| --- | --- | --- |
+| `started` | `building` | The build loop is running. |
+| `queued` | `ready` | Every build slot is taken, or Claude is on a [usage-limit hold](build-loop.md#the-usage-limit-hold); `queuePosition` is its place in the queue and it starts on its own. A hold is reported this way — `200` with the hold in `message` — never as a `429`. |
+| `scheduled` | `ready` | It starts at `scheduledStartAt`. |
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 400 | `invalid_prd` | The PRD in the clone does not parse. The session stays `pending`, and `errors` lists every problem with its line, as for the create endpoint. |
+| 404 | `session_not_found` | No session with that id. |
+| 409 | `session_not_startable` | The session is neither `pending` nor `ready`; `message` names its status. Nothing changes. |
+| 409 | `claude_not_authenticated` | chief-web has no working Claude login. Checked before anything else. |
+| 409 | `session_not_cloned`, `session_has_no_stories`, `session_already_complete` | The build cannot start. A pending session has already been marked ready by then, so it is left `ready`. |
+| 502 | `session_container_unavailable` | The session's container could not be started. |
+| 503 | `sessions_unavailable` | The server is still starting up; try again in a moment. |
+
+### `PUT /api/agent/sessions/:id/schedule`
+
+Sets, changes or clears the [scheduled start](scheduling.md#scheduled-starts)
+of a `pending` or `ready` session — the same as the schedule on the session
+page. The body is `{ "scheduledStartAt": "<ISO-8601>" }`, or
+`{ "scheduledStartAt": null }` to clear it. Send UTC (`2026-10-14T04:00:00Z`
+is 06:00 in Amsterdam in summer) or a timestamp with an explicit offset.
+
+```sh
+curl -sS -X PUT "$CHIEF_WEB_URL/api/agent/sessions/a83d…/schedule" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{ "scheduledStartAt": "2026-10-14T04:00:00Z" }'
+```
+
+`200`:
+
+```json
+{
+  "session": {
+    "id": "a83d…",
+    "name": "csv-export",
+    "status": "pending",
+    "branch": "chief/csv-export",
+    "scheduledStartAt": "2026-10-14T04:00:00.000Z"
+  },
+  "url": "https://chief.example.com/sessions/a83d…"
+}
+```
+
+A schedule only ever starts a `ready` session: on a `pending` one it waits
+until the session is marked ready or started, and a `ready` session starts when
+the moment comes — so setting a time that has already passed on a `ready`
+session starts it on the scheduler's next tick. This endpoint runs no build
+itself, so it is not behind the Claude login check.
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 400 | `invalid_body` | The body is not a JSON object. |
+| 400 | `invalid_scheduled_start` | `scheduledStartAt` is missing, or neither `null` nor an ISO-8601 timestamp. |
+| 404 | `session_not_found` | No session with that id. |
+| 409 | `session_not_schedulable` | The session is neither `pending` nor `ready`; `message` names its status. |
+| 503 | `sessions_unavailable` | The server is still starting up; try again in a moment. |
+
+### `POST /api/agent/sessions/:id/back-to-planning`
+
+Undoes a start that has not begun building: a `ready` session goes back to
+`pending`, the same as **Back to planning** on the session page. If it was
+waiting on the build queue it is taken off the queue first, so it can never
+start afterwards. Its scheduled start is left as it is; clear it with
+[`PUT …/schedule`](#put-apiagentsessionsidschedule) if it should not apply the
+next time the session is marked ready. No body is needed.
+
+```sh
+curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions/a83d…/back-to-planning" \
+  -H "Authorization: Bearer $CHIEF_WEB_API_TOKEN"
+```
+
+`200`: the same `{ "session": { "id", "name", "status", "branch",
+"scheduledStartAt" }, "url" }` as the schedule endpoint, with `status`
+`"pending"`.
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 404 | `session_not_found` | No session with that id. |
+| 409 | `session_not_ready` | The session is not `ready`; `message` names its status. For `building`, `waiting` or `deciding` it adds that the build has begun and only **Stop build** in chief-web stops it — the agent API does not stop builds. |
+| 503 | `sessions_unavailable` | The server is still starting up; try again in a moment. |

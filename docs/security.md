@@ -52,7 +52,7 @@
 ## The agent API token
 
 [Send to chief](send-to-chief.md) lets a Claude Code session in another project
-create sessions here, with a bearer token instead of the password.
+create and start sessions here, with a bearer token instead of the password.
 
 - **Hashed at rest.** The token is `chief_` plus 32 random bytes. chief-web
   stores only its SHA-256 digest (plus when it was created and last used) and
@@ -65,13 +65,29 @@ create sessions here, with a bearer token instead of the password.
   timestamps. The token never appears in a log line.
 - **Scoped to `/api/agent` only.** The bearer guard is mounted on that path
   alone, and that router answers its own unknown paths, so the token reaches
-  exactly three endpoints: match a remote to a repository, create a pending
-  session, read a session back. Every other route — including the routes that
-  generate, regenerate and revoke the token — accepts only the login cookie;
-  the token cannot rotate or revoke itself. Conversely the cookie is not
-  accepted on `/api/agent`. A session created with the token is **pending**, and
-  nothing builds until you click **Mark ready** in the UI; the read endpoint
-  returns no PRD, logs, paths or container ids.
+  exactly six endpoints: match a remote to a repository, create a session,
+  read a session back, start a session, set or clear its scheduled start, and
+  send a ready session back to planning
+  ([the list](send-to-chief.md#the-agent-api)). Every other route — including
+  the routes that generate, regenerate and revoke the token — accepts only the
+  login cookie. Conversely the cookie is not accepted on `/api/agent`. None of
+  the agent endpoints returns a PRD, logs, paths, container ids or the token.
+- **It can start builds.** A session created with the token is **pending** by
+  default, but the token can also start it — on create with `"start": true`,
+  or later through the start endpoint — and can give a session a scheduled
+  start that the scheduler then honours. A start marks the session ready and
+  runs the [build loop](build-loop.md) with no click in chief-web: it spends
+  your Claude usage and runs agent containers with the repository's push key,
+  exactly like **Start build**. It goes through the same gates as the UI —
+  the Claude login check, the concurrency cap and the
+  [build queue](scheduling.md#concurrency-and-the-build-queue), and the
+  usage-limit hold — but anyone holding the token can make chief-web build.
+  Treat it like the password.
+- **What it still cannot do.** The token cannot stop a build (only **Stop
+  build** in chief-web does that; it can send a session back to planning only
+  while it is `ready`, before the build begins), merge or close a pull
+  request, change settings, repositories or Claude accounts, or rotate or
+  revoke itself.
 - **Rate limited.** Failed token attempts are throttled like sign-ins, with the
   same `LOGIN_ATTEMPT_LIMIT` and `LOGIN_ATTEMPT_WINDOW_MS`, but their own
   per-address counter: a refused caller gets `429` with `Retry-After` before

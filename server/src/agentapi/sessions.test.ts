@@ -8,20 +8,26 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { createApp } from '../app.js';
 import { createAuthService } from '../auth/index.js';
+import { type AgentResult, type AgentRunner, BuildService } from '../build/index.js';
 import { addClaudeAccount } from '../claude/index.js';
 import { type Config, loadConfig } from '../config.js';
 import {
   closeDatabase,
   createRepository,
+  createSession,
   type Database,
   deleteClaudeAccount,
   deleteSession,
+  featureBranchFor,
+  getQueuedBuild,
   getSession,
   listClaudeAccounts,
   IN_MEMORY,
   listSessions,
   openDatabase,
+  removeQueuedBuild,
   type Repository,
+  setSettingNumber,
 } from '../db/index.js';
 import type { ExecOutput, ExecSpec } from '../docker/index.js';
 import { type SessionContainerView, sessionRepoDir } from '../orchestrator/index.js';
@@ -55,12 +61,23 @@ interface CreateBody {
   setup: { ok: boolean; message: string };
   prdWritten: boolean;
   url: string;
+  start?: {
+    ok: boolean;
+    outcome?: string;
+    queued?: boolean;
+    queuePosition?: number | null;
+    message: string;
+    error?: string;
+  };
   error?: string;
   errors?: { line: number; message: string }[];
 }
 
 /** What the scripted git commands answer with, keyed by setup step. */
 let gitExit: Record<string, Partial<ExecOutput>> = {};
+
+/** Whether the fake clone gets a `.git`; without one a build refuses to start. */
+let cloneHasGit = true;
 
 describe('POST /api/agent/sessions', () => {
   let baseUrl: string;
@@ -103,6 +120,15 @@ describe('POST /api/agent/sessions', () => {
     });
     writePrivateKey(config, repository.id, PRIVATE_KEY);
 
+    // The agent never answers, so a started session stays `building` for as
+    // long as the test looks at it.
+    const runner: AgentRunner = {
+      run: (): Promise<AgentResult> => new Promise<AgentResult>(() => undefined),
+      stop: (): Promise<void> => Promise.resolve(),
+      reap: (): Promise<void> => Promise.resolve(),
+      headSha: (): Promise<string | null> => Promise.resolve('sha-0'),
+    };
+
     const app = createApp(config, createAuthService(config, db), db, {
       runCommand: () =>
         Promise.resolve({
@@ -112,9 +138,11 @@ describe('POST /api/agent/sessions', () => {
           timedOut: false,
         }),
       orchestrator: {
-        // The real orchestrator creates the workspace the clone lands in.
+        // The real orchestrator creates the workspace the clone lands in; the
+        // `.git` stands in for the clone a build needs.
         start: (session): Promise<SessionContainerView> => {
-          fs.mkdirSync(sessionRepoDir(config, session.id), { recursive: true });
+          const repoDir = sessionRepoDir(config, session.id);
+          fs.mkdirSync(cloneHasGit ? path.join(repoDir, '.git') : repoDir, { recursive: true });
           return Promise.resolve({
             id: `container-${session.id.slice(0, 4)}`,
             name: `chief-web-${session.name}`,
@@ -124,6 +152,25 @@ describe('POST /api/agent/sessions', () => {
         },
         remove: (): Promise<void> => Promise.resolve(),
       },
+      builds: new BuildService(
+        config,
+        db,
+        {
+          start: (session) =>
+            Promise.resolve({
+              id: `container-${session.name}`,
+              name: `chief-web-${session.name}`,
+              running: true,
+              state: 'running',
+            }),
+          remove: () => Promise.resolve(),
+        },
+        runner,
+        {
+          push: (): Promise<void> => Promise.resolve(),
+          complete: (): Promise<void> => Promise.resolve(),
+        },
+      ),
       exec: {
         runExec: (_container, spec: ExecSpec): Promise<ExecOutput> => {
           const script = spec.cmd[2] ?? '';
@@ -164,8 +211,13 @@ describe('POST /api/agent/sessions', () => {
 
   beforeEach(() => {
     gitExit = {};
+    cloneHasGit = true;
     token = generateToken(db);
-    for (const session of listSessions(db)) deleteSession(db, session.id);
+    setSettingNumber(db, 'max_concurrent_sessions', 10);
+    for (const session of listSessions(db)) {
+      removeQueuedBuild(db, 'session', session.id);
+      deleteSession(db, session.id);
+    }
   });
 
   it('creates a pending session and writes the PRD into its clone', async () => {
@@ -186,6 +238,108 @@ describe('POST /api/agent/sessions', () => {
     const stored = getSession(db, body.session.id);
     assert.equal(stored?.status, 'pending');
     assert.equal(stored?.pendingPrd, null);
+  });
+
+  it('stays pending with start: false, exactly as without it', async () => {
+    const { status, body } = await create({ start: false });
+
+    assert.equal(status, 201);
+    assert.equal(body.session.status, 'pending');
+    assert.deepEqual(Object.keys(body).sort(), ['prdWritten', 'session', 'setup', 'url']);
+    assert.equal(getSession(db, body.session.id)?.status, 'pending');
+  });
+
+  it('creates and starts the build with start: true', async () => {
+    const { status, body } = await create({ start: true });
+
+    assert.equal(status, 201);
+    assert.equal(body.setup.ok, true);
+    assert.equal(body.prdWritten, true);
+    assert.equal(body.url, `${baseUrl}/sessions/${body.session.id}`);
+    assert.equal(body.session.status, 'building');
+    assert.deepEqual(body.start && { ...body.start, message: '' }, {
+      ok: true,
+      outcome: 'started',
+      queued: false,
+      queuePosition: null,
+      message: '',
+    });
+    assert.ok((body.start?.message ?? '').length > 0);
+    assert.equal(getSession(db, body.session.id)?.status, 'building');
+  });
+
+  it('queues the build of a created session when no slot is free', async () => {
+    setSettingNumber(db, 'max_concurrent_sessions', 1);
+    createSession(db, {
+      repositoryId: repository.id,
+      name: 'already-building',
+      baseBranch: 'main',
+      prTargetBranch: 'main',
+      featureBranch: featureBranchFor('already-building'),
+      status: 'building',
+    });
+
+    const { status, body } = await create({ start: true });
+
+    assert.equal(status, 201);
+    assert.equal(body.start?.ok, true);
+    assert.equal(body.start?.outcome, 'queued');
+    assert.equal(body.start?.queued, true);
+    assert.equal(body.start?.queuePosition, 1);
+    assert.equal(body.session.status, 'ready');
+    assert.notEqual(getQueuedBuild(db, 'session', body.session.id), null);
+  });
+
+  it('leaves a created session with a future schedule to the scheduler', async () => {
+    const later = new Date(Date.now() + 60 * 60_000).toISOString();
+
+    const { status, body } = await create({ start: true, scheduledStartAt: later });
+
+    assert.equal(status, 201);
+    assert.equal(body.start?.ok, true);
+    assert.equal(body.start?.outcome, 'scheduled');
+    assert.equal(body.start?.queued, false);
+    assert.equal(body.session.status, 'ready');
+    assert.equal(body.session.scheduledStartAt, later);
+    assert.equal(getSession(db, body.session.id)?.status, 'ready');
+    assert.equal(getQueuedBuild(db, 'session', body.session.id), null);
+  });
+
+  it('does not start a session whose setup failed', async () => {
+    gitExit['check-branch'] = { exitCode: 0, stdout: 'abc\trefs/heads/chief/add-login\n' };
+
+    const { status, body } = await create({ start: true });
+
+    assert.equal(status, 201);
+    assert.equal(body.setup.ok, false);
+    assert.equal(body.prdWritten, false);
+    assert.equal(body.start?.ok, false);
+    assert.equal(body.start?.error, 'setup_failed');
+    assert.ok((body.start?.message ?? '').length > 0);
+    assert.equal(body.session.status, 'pending');
+    assert.equal(getSession(db, body.session.id)?.status, 'pending');
+  });
+
+  it('still answers 201 with the session when the start itself fails', async () => {
+    cloneHasGit = false;
+
+    const { status, body } = await create({ start: true });
+
+    assert.equal(status, 201);
+    assert.equal(body.setup.ok, true);
+    assert.deepEqual(Object.keys(body.start ?? {}).sort(), ['error', 'message', 'ok']);
+    assert.equal(body.start?.ok, false);
+    assert.equal(body.start?.error, 'session_not_cloned');
+    assert.notEqual(getSession(db, body.session.id), null);
+  });
+
+  it('rejects a start that is not a boolean and creates nothing', async () => {
+    for (const start of ['yes', 1, null]) {
+      const { status, body } = await create({ start });
+      assert.equal(status, 400, String(start));
+      assert.equal(body.error, 'invalid_start');
+    }
+    assert.equal(listSessions(db).length, 0);
   });
 
   it('applies the defaults from the repository', async () => {

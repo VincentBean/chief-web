@@ -110,8 +110,8 @@ A session is in exactly one of seven states, and the badge on the
 
 | Status | What it means | What moves it on |
 | --- | --- | --- |
-| `pending` | Being set up, or being planned: there is no PRD chief-web can build yet | **Mark ready**, once `prd.md` parses |
-| `ready` | The PRD is parsed and the stories are in the database | **Start build**, a [scheduled start](scheduling.md#scheduled-starts), or its turn in the [queue](scheduling.md#concurrency-and-the-build-queue) |
+| `pending` | Being set up, or being planned: there is no PRD chief-web can build yet | **Mark ready**, once `prd.md` parses — or a start through the [agent API](send-to-chief.md#post-apiagentsessionsidstart), which marks it ready and starts the build in one go |
+| `ready` | The PRD is parsed and the stories are in the database | **Start build** (or a start through the [agent API](send-to-chief.md#the-agent-api)), a [scheduled start](scheduling.md#scheduled-starts), or its turn in the [queue](scheduling.md#concurrency-and-the-build-queue) |
 | `building` | The [build loop](build-loop.md) is running an agent on a story | The loop itself: completion, a failure, or **Stop build** |
 | `waiting` | Paused by Claude's [usage-limit hold](build-loop.md#the-usage-limit-hold); the container and the build slot are kept, and `waiting_until` says when it resumes | The scheduler when the hold expires or another account can take over ([failover](#claude-account)), **Resume now**, or **Stop build** |
 | `deciding` | The build agent asked you something it cannot decide itself and is waiting for the answer, holding its context, its container and its build slot ([Decisions](decisions.md)) | **Send decision**, the agent giving up on the wait, or **Stop build** |
@@ -284,8 +284,9 @@ against a PRD chief-web cannot read.
   criteria, a file with no stories at all). This is a `200` with `ok: false`,
   not an error response: it is a result to read, not a failed request.
 - **Back to planning** returns a ready session to `pending` so the PRD can be
-  edited again. The stories stay in the database until the next **Mark ready**
-  reconciles them with the file.
+  edited again (the [agent API](send-to-chief.md#post-apiagentsessionsidback-to-planning)
+  can do the same). The stories stay in the database until the next
+  **Mark ready** reconciles them with the file.
 
 The parser is a round trip. `setStoryStatus(content, id, status)` in
 `server/src/prd/write.ts` rewrites a single `**Status:**` line in place —
