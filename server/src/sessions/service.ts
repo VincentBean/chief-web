@@ -195,6 +195,12 @@ export interface SessionView {
    */
   readonly failoverClaudeAccountId: string | null;
   /**
+   * The most stories of this session that run at once (async stories US-001),
+   * from 1 to 10. Editable until every story is behind the session; a change
+   * during a build applies from the next story the scheduler starts.
+   */
+  readonly maxParallelStories: number;
+  /**
    * Story progress for the dashboard's `4/9 done`. Both are 0 until the
    * session has been marked ready and its PRD parsed into stories.
    */
@@ -287,6 +293,8 @@ export interface CreateSessionRequest {
    * succeeds, so a failed setup followed by **Retry setup** still delivers it.
    */
   readonly pendingPrd?: string | null;
+  /** The parallel-story limit; omitted takes the default of 3. */
+  readonly maxParallelStories?: number;
 }
 
 /** The longest feedback a session is started from (voice feedback US-001), after trimming. */
@@ -329,6 +337,21 @@ const OPEN_PULL_REQUEST_LOCKED: Partial<Record<SessionStatus, string>> = {
  */
 const EFFORT_LOCKED: Partial<Record<SessionStatus, string>> = {
   finished: 'this session has finished, so no agent will run for it again.',
+  merged: 'its pull request has already been merged.',
+};
+
+/**
+ * The statuses in which the parallel-story limit no longer changes (async
+ * stories US-001): every story is behind the session, so no scheduler will
+ * start another. Everything else can still reach the story loop — a hold, a
+ * question or a retry of a failed story all go back to it — and the scheduler
+ * reads the limit each time it starts a story.
+ */
+const MAX_PARALLEL_STORIES_LOCKED: Partial<Record<SessionStatus, string>> = {
+  reviewing: 'its stories are built and the review is running.',
+  fixing: 'its stories are built and the review feedback is being fixed.',
+  finished: 'this session has finished, so no story will run for it again.',
+  'pr-open': 'its stories are built and its pull request is open.',
   merged: 'its pull request has already been merged.',
 };
 
@@ -416,6 +439,9 @@ export class SessionService {
         effort: request.effort ?? null,
         claudeAccountId: request.claudeAccountId ?? null,
         pendingPrd: request.pendingPrd ?? null,
+        ...(request.maxParallelStories === undefined
+          ? {}
+          : { maxParallelStories: request.maxParallelStories }),
       });
     } catch (cause) {
       // The check above loses a race between two submissions; the unique index
@@ -685,6 +711,33 @@ export class SessionService {
       session: session.id,
       name: session.name,
       effort,
+    });
+    return this.toView(updated);
+  }
+
+  /**
+   * Sets how many of the session's stories may run at once (async stories
+   * US-001), from 1 to 10 — the route has already checked the range.
+   *
+   * Only the row changes. The scheduler reads the limit when it starts a
+   * story, so agents already running are never stopped by a lower one.
+   */
+  setMaxParallelStories(id: string, maxParallelStories: number): SessionView {
+    const session = this.requireSession(id);
+    const locked = MAX_PARALLEL_STORIES_LOCKED[session.status];
+    if (locked !== undefined) {
+      throw new SessionError(
+        409,
+        'max_parallel_stories_locked',
+        `The parallel-story limit of "${session.name}" can no longer be changed: ${locked}`,
+      );
+    }
+
+    const updated = updateSession(this.db, session.id, { maxParallelStories }) ?? session;
+    logger.info('session max parallel stories updated', {
+      session: session.id,
+      name: session.name,
+      maxParallelStories,
     });
     return this.toView(updated);
   }
@@ -975,6 +1028,7 @@ export class SessionService {
       claudeAccountId: session.claudeAccountId,
       effectiveClaudeAccountId: session.claudeAccountId ?? defaultAccountId,
       failoverClaudeAccountId: session.failoverClaudeAccountId,
+      maxParallelStories: session.maxParallelStories,
       stories: countStories(this.db, session.id),
       cloned: isCloned(this.config, session.id),
       createdAt: session.createdAt,

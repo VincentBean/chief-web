@@ -80,6 +80,33 @@ export interface BuildLogWriter {
   end(exitCode: number | null): void;
 }
 
+/**
+ * A writer that puts `[US-003] ` in front of every line (async stories
+ * US-012). Stories running in parallel write into the one log at once, so a
+ * line is only ever written whole: a chunk that ends mid-line is held until
+ * its newline comes, or until the section ends.
+ */
+export function storyPrefixedWriter(writer: BuildLogWriter, storyId: string): BuildLogWriter {
+  const prefix = `[${storyId}] `;
+  let pending = '';
+  const flush = (): void => {
+    if (pending === '') return;
+    writer.write(`${prefix}${pending}\n`);
+    pending = '';
+  };
+  return {
+    write: (text: string): void => {
+      const lines = (pending + text).split('\n');
+      pending = lines.pop() ?? '';
+      if (lines.length > 0) writer.write(lines.map((line) => `${prefix}${line}\n`).join(''));
+    },
+    end: (exitCode: number | null): void => {
+      flush();
+      writer.end(exitCode);
+    },
+  };
+}
+
 /** The slice of the store the build loop uses; tests pass {@link NullBuildLogs}. */
 export interface BuildLogs {
   begin(session: Session, iteration: number, storyId: string | null): BuildLogWriter;

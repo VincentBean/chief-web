@@ -1,7 +1,22 @@
 import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
+import { abortMerge, type VerifyResult, verifyResolution } from '../prconflicts/merge.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { AGENT_SIGNALLED, agentExecSpec, agentSignalSpec, headShaSpec } from './agent.js';
+import {
+  addStoryWorktreeSpec,
+  AGENT_SIGNALLED,
+  agentExecSpec,
+  agentSignalSpec,
+  headShaSpec,
+  mergeStorySpec,
+  RECOVERY_MERGE_ABORTED,
+  recoverStoryWorkspacesSpec,
+  removeStoryWorktreeSpec,
+  restoreWorkspaceSpec,
+  storyBranch,
+  type StoryTarget,
+  workspaceStatusSpec,
+} from './agent.js';
 import { type AgentToolCall, AgentOutputFormatter } from './stream.js';
 
 /**
@@ -63,6 +78,12 @@ export interface AgentInvocation {
    * block the stream — anything slow belongs in a promise of its own.
    */
   readonly onToolCall?: (call: AgentToolCall) => void;
+  /**
+   * The story worktree to run in (async stories US-006). Given one, the agent
+   * runs there and records its pid under the story and attempt instead of the
+   * iteration; `null`/absent runs it in the clone, as always.
+   */
+  readonly story?: StoryTarget | null;
 }
 
 export interface AgentResult {
@@ -87,16 +108,90 @@ export interface AgentExecutor extends SessionExecutor {
 export interface AgentRunner {
   /** Runs one iteration to completion. Rejects only if the daemon does. */
   run(invocation: AgentInvocation): Promise<AgentResult>;
-  /** Signals the running agent so it can shut down; never throws. */
-  stop(sessionId: string, containerId: string): Promise<void>;
+  /**
+   * Signals the running agent so it can shut down; never throws. With a
+   * `storyId`, only that story's agent (async stories US-006).
+   */
+  stop(sessionId: string, containerId: string, storyId?: string | null): Promise<void>;
   /**
    * Leaves no agent of this session running, whatever it takes: signalled,
    * given a moment, then killed. Never throws.
    */
-  reap(sessionId: string, containerId: string): Promise<void>;
-  /** HEAD of the clone, or `null` when there is no commit to read. */
-  headSha(containerId: string): Promise<string | null>;
+  reap(sessionId: string, containerId: string, storyId?: string | null): Promise<void>;
+  /**
+   * HEAD of the clone — or of the worktree at `workingDir` — or `null` when
+   * there is no commit to read.
+   */
+  headSha(containerId: string, workingDir?: string): Promise<string | null>;
+  /**
+   * `git status --porcelain` of the clone, `.chief/` aside, or `null` when it
+   * could not be read (async stories US-005). Optional: a runner without it
+   * cannot check the read-only dependency analysis, so the check is skipped.
+   */
+  workspaceStatus?(containerId: string): Promise<string | null>;
+  /** `git checkout -- . && git clean -fd`, `.chief/` aside. Never throws. */
+  restoreWorkspace?(containerId: string): Promise<void>;
+  /**
+   * Creates `/workspace/worktrees/<story-id>` on `chief-story/<session>/<story-id>`
+   * off the session branch's HEAD, after removing any leftover of either, and
+   * copies the PRD in (async stories US-006). Rejects when it could not.
+   * Optional: a runner without it runs every story in the clone.
+   */
+  addStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /** Removes a merged or abandoned story's worktree and branch. Never throws. */
+  removeStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /**
+   * `git merge --no-ff` of a finished story's branch into the session branch
+   * in `/workspace/repo` (async stories US-007). Never throws: a merge that
+   * did not happen is an outcome. A conflicted merge is left in place.
+   * Optional: without it, a finished story's worktree is left unmerged.
+   */
+  mergeStory?(containerId: string, sessionName: string, storyId: string, message: string): Promise<StoryMergeOutcome>;
+  /** `git merge --abort` in `/workspace/repo`. Never throws. */
+  abortStoryMerge?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /**
+   * The clean-up in front of every run (async stories US-011): aborts a merge
+   * left half-done in `/workspace/repo`, removes every story worktree and
+   * every `chief-story/<session>/*` branch, and says what it removed. Never
+   * throws. Optional: a runner without worktrees has nothing to clear.
+   */
+  recoverStoryWorkspaces?(containerId: string, sessionName: string): Promise<StoryWorkspaceRecovery>;
+  /**
+   * After a conflict-resolution agent (async stories US-008): stages `files`
+   * in `/workspace/repo`, checks nothing is unmerged and no conflict marker is
+   * left, and makes the merge commit — `verifyResolution` from
+   * `prconflicts/`. Never throws. Optional: without it, a conflicted merge is
+   * aborted straight away.
+   */
+  verifyStoryMerge?(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    files: readonly string[],
+  ): Promise<VerifyResult>;
 }
+
+/** What {@link AgentRunner.recoverStoryWorkspaces} cleared (async stories US-011). */
+export interface StoryWorkspaceRecovery {
+  /** A merge was in progress in the clone, and is aborted now. */
+  readonly abortedMerge: boolean;
+  /** The story ids whose worktree was removed. */
+  readonly worktrees: readonly string[];
+  /** The `chief-story/<session>/*` branches deleted. */
+  readonly branches: readonly string[];
+  /** Why part of it could not be done; `null` when all of it was. */
+  readonly error: string | null;
+}
+
+/** How a story's merge into the session branch went (async stories US-007). */
+export type StoryMergeOutcome =
+  | { readonly code: 'merged'; readonly mergeSha: string }
+  | /** Git stopped on conflicts in `files`; the merge is still in progress. */ {
+      readonly code: 'conflicted';
+      readonly files: readonly string[];
+      readonly message: string;
+    }
+  | /** Anything else; nothing was merged. */ { readonly code: 'failed'; readonly message: string };
 
 /** The {@link AgentRunner} that actually execs into the session container. */
 export class ContainerAgentRunner implements AgentRunner {
@@ -115,6 +210,7 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.advisor,
       invocation.effort,
       invocation.mcpConfigFile,
+      invocation.story,
     );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
@@ -152,10 +248,10 @@ export class ContainerAgentRunner implements AgentRunner {
     return { exitCode: result.exitCode, output, timedOut: result.timedOut };
   }
 
-  async stop(sessionId: string, containerId: string): Promise<void> {
+  async stop(sessionId: string, containerId: string, storyId?: string | null): Promise<void> {
     // SIGTERM only: the agent is mid-edit in a real working copy, and killing
     // it outright is how a half-written file survives into the next iteration.
-    await this.exec.runExec(containerId, agentSignalSpec(sessionId, 'TERM'), SIGNAL_TIMEOUT_MS);
+    await this.exec.runExec(containerId, agentSignalSpec(sessionId, 'TERM', { storyId }), SIGNAL_TIMEOUT_MS);
   }
 
   /**
@@ -171,11 +267,11 @@ export class ContainerAgentRunner implements AgentRunner {
    * in a real working copy. What is different here is that its answer is no
    * longer wanted, so the grace period is short and SIGKILL is the end of it.
    */
-  async reap(sessionId: string, containerId: string): Promise<void> {
+  async reap(sessionId: string, containerId: string, storyId?: string | null): Promise<void> {
     try {
       const termed = await this.exec.runExec(
         containerId,
-        agentSignalSpec(sessionId, 'TERM'),
+        agentSignalSpec(sessionId, 'TERM', { storyId }),
         SIGNAL_TIMEOUT_MS,
       );
       // Nothing was running: the sweep before a run and the one after a stop
@@ -189,7 +285,7 @@ export class ContainerAgentRunner implements AgentRunner {
       // sweep would aim at a recycled pid.
       await this.exec.runExec(
         containerId,
-        agentSignalSpec(sessionId, 'KILL', { remove: true }),
+        agentSignalSpec(sessionId, 'KILL', { remove: true, storyId }),
         SIGNAL_TIMEOUT_MS,
       );
     } catch (cause) {
@@ -202,17 +298,152 @@ export class ContainerAgentRunner implements AgentRunner {
     }
   }
 
-  async headSha(containerId: string): Promise<string | null> {
-    const result = await this.exec.runExec(containerId, headShaSpec(), HEAD_TIMEOUT_MS);
+  async headSha(containerId: string, workingDir?: string): Promise<string | null> {
+    const result = await this.exec.runExec(containerId, headShaSpec(workingDir), HEAD_TIMEOUT_MS);
     if (result.exitCode !== 0 || result.timedOut) return null;
     const sha = result.stdout.trim();
     return sha === '' ? null : sha;
+  }
+
+  async workspaceStatus(containerId: string): Promise<string | null> {
+    const result = await this.exec.runExec(containerId, workspaceStatusSpec(), HEAD_TIMEOUT_MS);
+    if (result.exitCode !== 0 || result.timedOut) return null;
+    return result.stdout;
+  }
+
+  async restoreWorkspace(containerId: string): Promise<void> {
+    try {
+      const result = await this.exec.runExec(containerId, restoreWorkspaceSpec(), HEAD_TIMEOUT_MS);
+      if (result.exitCode !== 0 || result.timedOut) {
+        logger.warn('could not restore the clone after the dependency analysis', {
+          container: containerId,
+          exitCode: result.exitCode,
+          stderr: result.stderr.trim(),
+        });
+      }
+    } catch (cause) {
+      logger.warn('could not restore the clone after the dependency analysis', {
+        container: containerId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
+
+  async addStoryWorktree(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    const result = await this.exec.runExec(containerId, addStoryWorktreeSpec(sessionName, storyId), WORKTREE_TIMEOUT_MS);
+    if (result.timedOut) throw new Error(`creating the worktree of ${storyId} timed out`);
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.trim();
+      throw new Error(
+        `creating the worktree of ${storyId} failed (exit ${String(result.exitCode)})${stderr === '' ? '' : `: ${stderr}`}`,
+      );
+    }
+  }
+
+  async removeStoryWorktree(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    try {
+      const result = await this.exec.runExec(
+        containerId,
+        removeStoryWorktreeSpec(sessionName, storyId),
+        WORKTREE_TIMEOUT_MS,
+      );
+      if (result.exitCode !== 0 || result.timedOut) {
+        logger.warn('could not remove a story worktree', {
+          container: containerId,
+          story: storyId,
+          exitCode: result.exitCode,
+          stderr: result.stderr.trim(),
+        });
+      }
+    } catch (cause) {
+      logger.warn('could not remove a story worktree', {
+        container: containerId,
+        story: storyId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
+
+  async mergeStory(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    message: string,
+  ): Promise<StoryMergeOutcome> {
+    let result: ExecOutput;
+    try {
+      result = await this.exec.runExec(containerId, mergeStorySpec(sessionName, storyId, message), WORKTREE_TIMEOUT_MS);
+    } catch (cause) {
+      return { code: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
+    }
+    const stdout = result.stdout.trim();
+    if (result.timedOut) return { code: 'failed', message: `merging ${storyId} timed out` };
+    if (result.exitCode === 0 && stdout !== '') return { code: 'merged', mergeSha: stdout };
+    const output = result.stderr.trim();
+    const files = stdout === '' ? [] : stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    return files.length > 0
+      ? { code: 'conflicted', files, message: output }
+      : { code: 'failed', message: output === '' ? `exit ${String(result.exitCode)}` : output };
+  }
+
+  async abortStoryMerge(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    const aborted = await abortMerge(this.exec, containerId, {
+      baseBranch: storyBranch(sessionName, storyId),
+      timeoutMs: WORKTREE_TIMEOUT_MS,
+    });
+    if (!aborted) logger.warn('could not abort a story merge', { container: containerId, story: storyId });
+  }
+
+  async recoverStoryWorkspaces(containerId: string, sessionName: string): Promise<StoryWorkspaceRecovery> {
+    let result: ExecOutput;
+    try {
+      result = await this.exec.runExec(containerId, recoverStoryWorkspacesSpec(sessionName), WORKTREE_TIMEOUT_MS);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      return { abortedMerge: false, worktrees: [], branches: [], error };
+    }
+    const lines = result.stdout.split('\n').map((line) => line.trim());
+    const after = (prefix: string): string[] =>
+      lines.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+    const stderr = result.stderr.trim();
+    return {
+      abortedMerge: lines.includes(RECOVERY_MERGE_ABORTED),
+      worktrees: after('worktree '),
+      branches: after('branch '),
+      error: result.timedOut
+        ? 'clearing the story worktrees timed out'
+        : result.exitCode === 0
+          ? null
+          : stderr === ''
+            ? `exit ${String(result.exitCode)}`
+            : stderr,
+    };
+  }
+
+  async verifyStoryMerge(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    files: readonly string[],
+  ): Promise<VerifyResult> {
+    try {
+      return await verifyResolution(this.exec, containerId, {
+        baseBranch: storyBranch(sessionName, storyId),
+        files,
+        timeoutMs: WORKTREE_TIMEOUT_MS,
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      return { ok: false, code: 'commit_failed', message: `The resolution could not be checked: ${message}`, stderr: '' };
+    }
   }
 }
 
 /** A clone with no commits at all answers nothing; neither takes long. */
 const HEAD_TIMEOUT_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 15_000;
+/** A worktree is a checkout of the whole tree; a big repository takes a while. */
+const WORKTREE_TIMEOUT_MS = 120_000;
 
 /**
  * The pause between a reap's SIGTERM and its SIGKILL. Long enough for the CLI

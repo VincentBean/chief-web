@@ -1414,6 +1414,50 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN pending_prd TEXT;
     `,
   },
+  {
+    id: '0032_session_max_parallel_stories',
+    sql: `
+      -- How many of this session's stories may run at the same time (async
+      -- stories US-001). 1 builds the PRD sequentially; existing rows get 3.
+      ALTER TABLE sessions ADD COLUMN max_parallel_stories INTEGER NOT NULL DEFAULT 3;
+    `,
+  },
+  {
+    id: '0033_story_dependencies',
+    sql: `
+      -- Which story waits for which (async stories US-003): one row per edge,
+      -- "story_id cannot start before depends_on is done". A story with no
+      -- dependencies has no rows. Written whole by the dependency analysis.
+      CREATE TABLE story_dependencies (
+        session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+        story_id   TEXT NOT NULL,
+        depends_on TEXT NOT NULL,
+        PRIMARY KEY (session_id, story_id, depends_on)
+      );
+      -- Where the stored plan came from: 'agent' (the analysis) or
+      -- 'fallback' (the sequential chain), NULL while there is none; and
+      -- why a fallback was used.
+      ALTER TABLE sessions ADD COLUMN dependency_plan_source TEXT;
+      ALTER TABLE sessions ADD COLUMN dependency_plan_reason TEXT;
+    `,
+  },
+  {
+    id: '0034_dependency_plan_story_ids',
+    sql: `
+      -- The story ids the stored plan was made for (async stories US-005), as
+      -- a JSON array, sorted. A resumed build reuses the plan only while
+      -- prd.md still has exactly these stories. NULL while there is no plan.
+      ALTER TABLE sessions ADD COLUMN dependency_plan_story_ids TEXT;
+    `,
+  },
+  {
+    id: '0035_story_merge_sha',
+    sql: `
+      -- The merge commit a parallel story landed on the session branch with
+      -- (async stories US-007). NULL for a story built in the clone.
+      ALTER TABLE stories ADD COLUMN merge_sha TEXT;
+    `,
+  },
 ];
 
 /**

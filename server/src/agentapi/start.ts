@@ -12,6 +12,7 @@ export interface AgentStartSession {
   readonly status: string;
   readonly branch: string;
   readonly scheduledStartAt: string | null;
+  readonly maxParallelStories: number;
 }
 
 export interface AgentStartSuccess {
@@ -157,5 +158,6 @@ export function agentSessionView(session: Session): AgentStartSession {
     status: session.status,
     branch: session.featureBranch,
     scheduledStartAt: session.scheduledStartAt,
+    maxParallelStories: session.maxParallelStories,
   };
 }

@@ -25,6 +25,11 @@ export interface Story {
   readonly status: StoryStatus;
   /** SHA of the commit that completed the story, when known. */
   readonly commitSha: string | null;
+  /**
+   * The merge commit that brought a parallel story's branch into the session
+   * branch (async stories US-007); null for a story built in the clone.
+   */
+  readonly mergeSha: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -43,6 +48,7 @@ export interface UpdateStoryInput {
   readonly priority?: number;
   readonly status?: StoryStatus;
   readonly commitSha?: string | null;
+  readonly mergeSha?: string | null;
 }
 
 const COLUMNS: Record<keyof UpdateStoryInput, string> = {
@@ -50,6 +56,7 @@ const COLUMNS: Record<keyof UpdateStoryInput, string> = {
   priority: 'priority',
   status: 'status',
   commitSha: 'commit_sha',
+  mergeSha: 'merge_sha',
 };
 
 export function mapStory(row: Row): Story {
@@ -61,6 +68,7 @@ export function mapStory(row: Row): Story {
     priority: integer(row, 'priority'),
     status: enumeration(row, 'status', STORY_STATUSES),
     commitSha: nullableText(row, 'commit_sha'),
+    mergeSha: nullableText(row, 'merge_sha'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };

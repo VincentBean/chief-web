@@ -15,4 +15,5 @@ export * from './settings.js';
 export * from './stats.js';
 export { type Database, nowIso, withTransaction } from './sqlite.js';
 export * from './stories.js';
+export * from './story-dependencies.js';
 export * from './voice.js';

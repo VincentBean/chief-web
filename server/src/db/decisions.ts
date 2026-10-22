@@ -159,13 +159,32 @@ export function closeDecision(
 }
 
 /**
- * Closes every open question of a session; returns how many. The sweep for a
- * run that is over, whatever ended it.
+ * Every question of this session still open, oldest first. A parallel run
+ * (async stories US-010) can have one per story waiting at the same time.
  */
-export function abandonDecisions(db: Database, sessionId: string): number {
-  const changed = db
-    .prepare("UPDATE decisions SET status = 'abandoned', closed_at = ? WHERE session_id = ? AND status = 'open'")
-    .run(nowIso(), sessionId);
+export function listSessionOpenDecisions(db: Database, sessionId: string): Decision[] {
+  return db
+    .prepare("SELECT * FROM decisions WHERE session_id = ? AND status = 'open' ORDER BY asked_at ASC, id ASC")
+    .all(sessionId)
+    .map(mapDecision);
+}
+
+/**
+ * Closes every open question of a session — or, given a story, only that
+ * story's (async stories US-010) — and returns how many. The sweep for a run,
+ * or one story attempt, that is over, whatever ended it.
+ */
+export function abandonDecisions(db: Database, sessionId: string, storyId?: string): number {
+  const changed =
+    storyId === undefined
+      ? db
+          .prepare("UPDATE decisions SET status = 'abandoned', closed_at = ? WHERE session_id = ? AND status = 'open'")
+          .run(nowIso(), sessionId)
+      : db
+          .prepare(
+            "UPDATE decisions SET status = 'abandoned', closed_at = ? WHERE session_id = ? AND story_id = ? AND status = 'open'",
+          )
+          .run(nowIso(), sessionId, storyId);
   return changeCount(changed);
 }
 

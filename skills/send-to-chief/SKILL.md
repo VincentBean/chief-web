@@ -267,14 +267,15 @@ boolean — `--argjson`, not `--arg`, which would send the string `"true"` and b
 
 `body.json` holds only the session fields and the PRD, never the token. Optional fields the
 API also accepts: `codeReview` (boolean, default `false`), `openPullRequest` (boolean, defaults
-to the repository's setting) and `scheduledStartAt` (UTC ISO-8601, e.g.
+to the repository's setting), `maxParallelStories` (integer 1–10, default `3`: how many stories
+run at once; `1` builds them one by one) and `scheduledStartAt` (UTC ISO-8601, e.g.
 `2026-10-09T06:00:00Z`) — add them with `--argjson` / `--arg` only when the operator asked.
 
 What the status means:
 
 | Status | Body | What to do |
 | --- | --- | --- |
-| 201 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "setup": { "ok", "message" }, "prdWritten", "url" }`, plus `"start"` when you sent `start: true` | The session was created — even when `start.ok` is `false`. Go to step 6; never send the create again. |
+| 201 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt", "maxParallelStories" }, "setup": { "ok", "message" }, "prdWritten", "url" }`, plus `"start"` when you sent `start: true` | The session was created — even when `start.ok` is `false`. Go to step 6; never send the create again. |
 | 201 `start` | `{ "ok": true, "outcome": "started" \| "queued" \| "scheduled", "queued", "queuePosition", "message" }` or `{ "ok": false, "error", "message" }` | Only present with `start: true`. The start never changes the HTTP status; read `start.ok` and `start.outcome` in step 6. On a successful start, `session.status` is already `building` or `ready`. |
 | 400 `invalid_start` | `{ "error", "message" }` | Nothing was created: `start` was not a JSON boolean. Rebuild `body.json` with `--argjson start true` or `--argjson start false` (never `--arg`) and send again. |
 | 400 `invalid_prd` | `{ "error", "errors": [{ "line", "message" }] }` (or a single `message`) | Nothing was created. Each `line` is a 1-based line of `prd.md`; fix exactly those problems (missing `- [ ]` criteria, a duplicated id, a bad priority or status), rebuild `body.json` and send again. Tell the operator what you fixed; if the fix changed the stories, confirm again first. |
@@ -363,7 +364,7 @@ curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID/start" \
 
 | Status | Body | Tell the operator |
 | --- | --- | --- |
-| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "outcome": "started" \| "queued" \| "scheduled", "queued", "queuePosition", "message", "url" }` | As in the `start` table of step 6: `started` — it is **building**; `queued` — it is ready and **waiting for a build slot**, number `queuePosition` (quote `message`; a Claude usage-limit hold also answers `queued`); `scheduled` — it is ready and **starts at** `session.scheduledStartAt` (in their local time too). Nothing to do in chief-web. Give the `url`. |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt", "maxParallelStories" }, "outcome": "started" \| "queued" \| "scheduled", "queued", "queuePosition", "message", "url" }` | As in the `start` table of step 6: `started` — it is **building**; `queued` — it is ready and **waiting for a build slot**, number `queuePosition` (quote `message`; a Claude usage-limit hold also answers `queued`); `scheduled` — it is ready and **starts at** `session.scheduledStartAt` (in their local time too). Nothing to do in chief-web. Give the `url`. |
 | 400 `invalid_prd` | `{ "error", "message", "errors": [{ "line", "message" }] }` | The PRD in the session does not parse, so it **stays pending**. List the `errors`; the PRD is fixed in chief-web (or ask whether you should prepare a corrected PRD for them to paste in). |
 | 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
 | 404 `session_not_found` | `{ "error", "message" }` | No session has this id: it was deleted, or the id is wrong. Ask the operator for the session URL again. |
@@ -413,7 +414,7 @@ it does not start right away.
 
 | Status | Body | Tell the operator |
 | --- | --- | --- |
-| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "url" }` | The new start time, `session.scheduledStartAt`, in their local time and UTC — or that the schedule is cleared when it is `null`. Say it **builds at that time** when `status` is `ready`, and that it **stays pending** until started when `status` is `pending`. |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt", "maxParallelStories" }, "url" }` | The new start time, `session.scheduledStartAt`, in their local time and UTC — or that the schedule is cleared when it is `null`. Say it **builds at that time** when `status` is `ready`, and that it **stays pending** until started when `status` is `pending`. |
 | 400 `invalid_scheduled_start` | `{ "error", "message" }` | Nothing changed: the time was not an ISO-8601 timestamp (or `scheduledStartAt` was missing). Fix the conversion and send again. |
 | 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
 | 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |
@@ -439,7 +440,7 @@ curl -sS -X POST "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID/back-to-plan
 
 | Status | Body | Tell the operator |
 | --- | --- | --- |
-| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt" }, "url" }` | It is **pending** again and will not build until it is started. Mention a `scheduledStartAt` that is still set. |
+| 200 | `{ "session": { "id", "name", "status", "branch", "scheduledStartAt", "maxParallelStories" }, "url" }` | It is **pending** again and will not build until it is started. Mention a `scheduledStartAt` that is still set. |
 | 400 | | Not returned: this call takes no body. |
 | 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
 | 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |
@@ -463,7 +464,7 @@ curl -sS "${CHIEF_WEB_URL%/}/api/agent/sessions/$SESSION_ID" \
 
 | Status | Body | Tell the operator |
 | --- | --- | --- |
-| 200 | `{ "session": { "id", "name", "status", "branch", "setupError", "scheduledStartAt", "pullRequestUrl", "queued", "queuePosition" }, "url" }` | Its `status` in words (`pending` — waiting to be started; `ready` — started, or starting at `scheduledStartAt`; `building` — building; `waiting` — held by Claude's usage limit; `deciding` — the build asks the operator a question in chief-web; then finished or failed). When `queued` is `true`, it is number `queuePosition` in the build queue. Quote `setupError` when set, and link `pullRequestUrl` once there is one. |
+| 200 | `{ "session": { "id", "name", "status", "branch", "setupError", "scheduledStartAt", "pullRequestUrl", "maxParallelStories", "queued", "queuePosition" }, "url" }` | Its `status` in words (`pending` — waiting to be started; `ready` — started, or starting at `scheduledStartAt`; `building` — building; `waiting` — held by Claude's usage limit; `deciding` — the build asks the operator a question in chief-web; then finished or failed). When `queued` is `true`, it is number `queuePosition` in the build queue. Quote `setupError` when set, and link `pullRequestUrl` once there is one. |
 | 400 | | Not returned: this call takes no body or query. |
 | 401 `unauthorized` | `{ "error", "message" }` | As in step 2. |
 | 404 `session_not_found` | `{ "error", "message" }` | As in [Start](#start). |

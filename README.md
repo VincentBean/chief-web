@@ -22,9 +22,10 @@ chief-web is a self-hosted web app that builds features for you.
 
 You describe a feature in a browser terminal running Claude Code, which writes
 it down as a **PRD** — a list of user stories. Then you press build. chief-web
-works through the stories one at a time, each in a fresh agent run, commits
-after each one, and opens a pull request when it is done. All of it happens in
-a Docker container on its own git branch, so your machine is never touched.
+works through the stories, each in a fresh agent run — several at once when
+they do not depend on each other — commits after each one, and opens a pull
+request when it is done. All of it happens in a Docker container on its own git
+branch, so your machine is never touched.
 
 It is a web version of [chief](https://github.com/minicodemonkey/chief). I made
 it because I wanted several features building at the same time, in the
@@ -37,6 +38,11 @@ background, instead of babysitting one terminal per feature.
 - **Builds a feature from a PRD.** Plan it, press build, get a pull request —
   one agent run per story, one commit per story.
   [How the loop works](docs/build-loop.md)
+- **Runs a session's stories in parallel.** An agent works out which stories
+  depend on which, and the independent ones build side by side, each in its own
+  git worktree, merged back into the session branch as they finish — up to
+  three at a time by default, configurable per session.
+  [Parallel stories](docs/build-loop.md#parallel-stories)
 - **Runs several builds at once.** Each one gets its own container, clone and
   branch. Anything over your limit waits in a queue. Closing the tab or
   restarting the server does not stop them.

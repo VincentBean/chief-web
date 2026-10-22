@@ -1221,6 +1221,18 @@
     justify-self: end;
   }
 
+  /* The stories a parallel story waits on, under its title (async stories US-012). */
+  .story__deps {
+    color: var(--color-fg-muted);
+    display: block;
+    font-size: var(--text-sm);
+  }
+
+  .plan-line {
+    font-size: var(--text-sm);
+    margin: 0;
+  }
+
   .prd-errors {
     background: --alpha(var(--color-status-danger) / 6%);
     border: 1px solid --alpha(var(--color-status-danger) / 35%);

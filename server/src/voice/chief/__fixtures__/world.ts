@@ -411,7 +411,16 @@ function buildView(db: Database, sessionId: string, pool: BuildPoolView): BuildV
     activeBuilds: pool.active,
     maxConcurrentBuilds: pool.max,
     decision: null,
+    decisions: [],
     decisionTimeoutMs: null,
+    storyPlan: stories.map((story) => ({
+      storyId: story.storyId,
+      dependsOn: [],
+      state: story.status === 'done' ? 'done' : story === current ? 'running' : 'ready',
+      attempts: 0,
+    })),
+    planSource: null,
+    planReason: null,
   };
 }
 

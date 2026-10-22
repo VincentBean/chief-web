@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { type BuildLogEvent, type BuildLogHistory, type BuildLogIteration, type BuildLogMessage, buildLogSocketUrl } from './api.ts';
 import { Icon } from './Icon.tsx';
@@ -39,6 +39,8 @@ export function BuildLog({ sessionId, building }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [following, setFollowing] = useState(true);
   const [expanded, setExpanded] = useState(false);
+  /** The one story whose lines are shown (async stories US-012); null shows everything. */
+  const [storyFilter, setStoryFilter] = useState<string | null>(null);
 
   const viewRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(following);
@@ -114,6 +116,8 @@ export function BuildLog({ sessionId, building }: Props) {
 
   const empty = iterations.length === 0;
   const state = label(connection, building);
+  const storyIds = useMemo(() => logStoryIds(iterations), [iterations]);
+  const shown = useMemo(() => (storyFilter === null ? iterations : filterByStory(iterations, storyFilter)), [iterations, storyFilter]);
 
   return (
     <Panel
@@ -133,6 +137,21 @@ export function BuildLog({ sessionId, building }: Props) {
       }
       actions={
         <>
+          {storyIds.length > 1 && (
+            <select
+              className="field__input field__input--inline"
+              aria-label="Show the log of one story"
+              value={storyFilter ?? ''}
+              onChange={(event) => setStoryFilter(event.target.value === '' ? null : event.target.value)}
+            >
+              <option value="">All stories</option>
+              {storyIds.map((storyId) => (
+                <option key={storyId} value={storyId}>
+                  {storyId}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             className="button button--small button--quiet"
@@ -160,7 +179,7 @@ export function BuildLog({ sessionId, building }: Props) {
         {empty ? (
           <p className="log__empty">{building ? 'Waiting for the first output of this iteration…' : 'No agent output yet. It appears here as soon as a build starts.'}</p>
         ) : (
-          iterations.map((iteration, index) => (
+          shown.map((iteration, index) => (
             <section className="log__section" key={`${String(index)}-${iteration.startedAt}`}>
               <h3 className="log__heading">
                 <span className="log__iteration">#{iteration.iteration}</span>
@@ -192,6 +211,42 @@ export function BuildLog({ sessionId, building }: Props) {
       )}
     </Panel>
   );
+}
+
+/**
+ * The `[US-003] ` a parallel story's agent puts in front of every line it
+ * writes (async stories US-012): stories running at once share one log, so
+ * the section a line lands in does not say whose it is; the prefix does.
+ */
+const STORY_PREFIX = /^\[([^\]\s]+)\] /;
+
+/** Every story the log has output for, in the order they first appear. */
+function logStoryIds(iterations: readonly BuildLogIteration[]): string[] {
+  const ids = new Set<string>();
+  for (const iteration of iterations) {
+    if (iteration.storyId !== null) ids.add(iteration.storyId);
+    for (const line of iteration.text.split('\n')) {
+      const match = STORY_PREFIX.exec(line);
+      if (match?.[1] !== undefined) ids.add(match[1]);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * The log of one story: its prefixed lines wherever they landed, and the
+ * unprefixed lines of its own sections (a sequential iteration writes none).
+ */
+function filterByStory(iterations: readonly BuildLogIteration[], storyId: string): BuildLogIteration[] {
+  return iterations.flatMap((iteration) => {
+    const own = iteration.storyId === storyId;
+    const lines = iteration.text.split('\n').filter((line) => {
+      const match = STORY_PREFIX.exec(line);
+      return match === null ? own && line !== '' : match[1] === storyId;
+    });
+    if (!own && lines.length === 0) return [];
+    return [{ ...iteration, text: lines.length === 0 ? '' : `${lines.join('\n')}\n` }];
+  });
 }
 
 /** Applies one live event to the sections already on screen. */

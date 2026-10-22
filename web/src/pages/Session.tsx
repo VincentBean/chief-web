@@ -21,6 +21,8 @@ import {
   fetchSettings,
   leaveQueue,
   markSessionReady,
+  MAX_PARALLEL_STORIES,
+  MIN_PARALLEL_STORIES,
   type Planning,
   recurringTaskPath,
   type PrdParseError,
@@ -32,6 +34,7 @@ import {
   setSessionClaudeAccount,
   setSessionCodeReview,
   setSessionEffort,
+  setSessionMaxParallelStories,
   setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
@@ -39,6 +42,8 @@ import {
   stopBuild,
   stopPlanning,
   type Story,
+  type StoryPlan,
+  type StoryPlanState,
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
@@ -56,7 +61,7 @@ import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import type { PaneStatus, TerminalPaneHandle } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
+import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge, type Tone } from '../ui.tsx';
 import { useCall } from '../voice/CallProvider.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
@@ -279,9 +284,9 @@ export function Session() {
       return 'Build stopped. Everything already committed is kept.';
     });
 
-  const onAnswerDecision = (answer: string): void =>
+  const onAnswerDecision = (decisionId: string, answer: string): void =>
     run('answer', async () => {
-      const next = await answerDecision(id, answer);
+      const next = await answerDecision(id, answer, decisionId);
       setBuild(next);
       applyStatus(next.status);
       // The discussion was about a question that is now settled, and its
@@ -471,16 +476,20 @@ export function Session() {
       {status === 'failed' && (
         <FailurePanel error={session.lastError} stage={session.failureStage} stories={stories} retryIsDelivery={retryIsDelivery} />
       )}
-      {build.decision !== null && (
+      {/* One card per open question: stories running in parallel can each be waiting on one (async stories US-010). */}
+      {build.decisions.map((decision) => (
         <DecisionPanel
-          decision={build.decision}
+          key={decision.id}
+          decision={decision}
+          // "Discuss this" opens a Claude on the newest question, so only its card offers it.
+          discussable={decision.id === build.decision?.id}
           planning={planning}
           busy={busy}
-          onAnswer={onAnswerDecision}
+          onAnswer={(answer) => onAnswerDecision(decision.id, answer)}
           onDiscuss={onDiscussDecision}
           onCloseDiscussion={onCloseDiscussion}
         />
-      )}
+      ))}
       {status === 'waiting' && <HoldPanel until={session.waitingUntil} />}
       {(status === 'reviewing' || status === 'fixing') && <DraftPanel status={status} prUrl={session.prUrl} />}
       {cleanRun && (
@@ -578,7 +587,13 @@ export function Session() {
                 </p>
               )}
               <Progress done={done} total={stories.length} tone={isEnded(session) ? SESSION_TONE[status] : status === 'failed' ? 'danger' : 'active'} label="Stories done" />
-              <StoryList stories={stories} currentStoryId={status === 'building' ? build.currentStoryId : null} />
+              {/* A session that builds one story at a time shows the list as it always has (async stories US-012). */}
+              {session.maxParallelStories > 1 && <PlanLine build={build} limit={session.maxParallelStories} />}
+              <StoryList
+                stories={stories}
+                currentStoryId={status === 'building' ? build.currentStoryId : null}
+                plan={session.maxParallelStories > 1 ? build.storyPlan : null}
+              />
             </Panel>
           )}
         </div>
@@ -624,6 +639,8 @@ export function Session() {
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
 
           <EffortPanel session={session} onSaved={setSession} />
+
+          <ParallelStoriesPanel session={session} onSaved={setSession} />
 
           <AccountPanel session={session} onSaved={setSession} />
         </aside>
@@ -1064,12 +1081,57 @@ function PrdErrors({ errors, title }: { readonly errors: readonly PrdParseError[
 
 /* --------------------------------------------------------------- stories */
 
-function StoryList({ stories, currentStoryId }: { readonly stories: readonly Story[]; readonly currentStoryId: string | null }) {
+/**
+ * What the parallel scheduler is doing (async stories US-012): how many of the
+ * session's places are taken, how many stories wait on the operator, and
+ * where the dependency plan came from. Nothing until a plan exists.
+ */
+function PlanLine({ build, limit }: { readonly build: Build; readonly limit: number }) {
+  if (build.planSource === null) return null;
+  if (build.planSource === 'fallback') {
+    return (
+      <p className="plan-line muted">
+        plan: sequential fallback — {build.planReason ?? 'no reason given'}
+      </p>
+    );
+  }
+  const running = build.storyPlan.filter((story) => story.state === 'running' || story.state === 'merging').length;
+  const waiting = build.storyPlan.filter((story) => story.state === 'deciding').length;
+  return (
+    <p className="plan-line muted">
+      Running {running} of {limit}
+      {waiting > 0 && ` · ${String(waiting)} waiting on you`} · plan by agent
+    </p>
+  );
+}
+
+const STORY_PLAN_TONE: Record<StoryPlanState, Tone> = {
+  'waiting on dependencies': 'neutral',
+  ready: 'ready',
+  running: 'active',
+  merging: 'active',
+  deciding: 'wait',
+  blocked: 'danger',
+  done: 'done',
+};
+
+function StoryList({
+  stories,
+  currentStoryId,
+  plan,
+}: {
+  readonly stories: readonly Story[];
+  readonly currentStoryId: string | null;
+  /** Each story's place in a parallel build; null builds one at a time, as before. */
+  readonly plan: readonly StoryPlan[] | null;
+}) {
   if (stories.length === 0) return <p className="muted">No stories parsed yet.</p>;
+  const planned = new Map((plan ?? []).map((entry) => [entry.storyId, entry]));
   return (
     <ol className="stories">
       {stories.map((story) => {
-        const current = story.storyId === currentStoryId;
+        const entry = plan === null ? undefined : planned.get(story.storyId);
+        const current = entry === undefined ? story.storyId === currentStoryId : entry.state === 'running' || entry.state === 'merging';
         return (
           <li className={`story${current ? ' story--current' : ''} story--${STORY_TONE[story.status]}`} key={story.storyId}>
             <span className="story__marker">
@@ -1078,9 +1140,18 @@ function StoryList({ stories, currentStoryId }: { readonly stories: readonly Sto
             <span className="story__id mono">{story.storyId}</span>
             <span className="story__title">
               {story.title}
-              {current && <span className="story__now"> · running now</span>}
+              {current && entry === undefined && <span className="story__now"> · running now</span>}
+              {entry !== undefined && entry.dependsOn.length > 0 && (
+                <span className="story__deps">Depends on {entry.dependsOn.join(', ')}</span>
+              )}
             </span>
             <span className="story__aside mono">
+              {entry !== undefined && (
+                <Badge tone={STORY_PLAN_TONE[entry.state]} pulse={entry.state === 'running'}>
+                  {entry.state}
+                  {entry.attempts > 0 && ` · attempt ${String(entry.attempts + 1)}`}
+                </Badge>
+              )}{' '}
               {story.commitSha === null ? <span className="muted">P{story.priority}</span> : story.commitSha.slice(0, 7)}
             </span>
           </li>
@@ -1147,6 +1218,7 @@ function FailurePanel({
  */
 function DecisionPanel({
   decision,
+  discussable,
   planning,
   busy,
   onAnswer,
@@ -1154,6 +1226,7 @@ function DecisionPanel({
   onCloseDiscussion,
 }: {
   readonly decision: Decision;
+  readonly discussable: boolean;
   readonly planning: Planning;
   readonly busy: Busy;
   readonly onAnswer: (answer: string) => void;
@@ -1179,7 +1252,7 @@ function DecisionPanel({
     setAnswer('');
   }, [decision.id]);
 
-  const discussing = planning.mode === 'decide' && planning.terminalId !== null;
+  const discussing = discussable && planning.mode === 'decide' && planning.terminalId !== null;
   const desktop = useMediaQuery(DESKTOP_QUERY);
   const expired = decision.waitingUntil !== null && new Date(decision.waitingUntil).getTime() <= now;
   const canSend = decision.waiting && !expired && answer.trim() !== '' && busy === null;
@@ -1197,7 +1270,7 @@ function DecisionPanel({
 
   return (
     <Panel
-      title="Needs your decision"
+      title={decision.storyId === null ? 'Needs your decision' : `${decision.storyId} needs your decision`}
       icon="comment"
       tone="warn"
       meta={
@@ -1215,7 +1288,8 @@ function DecisionPanel({
             {busy === 'stop' ? 'Closing…' : 'Close discussion'}
           </button>
         ) : (
-          decision.waiting && (
+          decision.waiting &&
+          discussable && (
             <button type="button" className="button" onClick={onDiscuss} disabled={busy !== null}>
               <Icon name="terminal" />
               {busy === 'discuss' ? 'Opening…' : 'Discuss this'}
@@ -1257,12 +1331,12 @@ function DecisionPanel({
 
       {decision.waiting ? (
         <form className="field" onSubmit={send}>
-          <label className="field__label" htmlFor="decision-answer">
+          <label className="field__label" htmlFor={`decision-answer-${decision.id}`}>
             Your decision
           </label>
           <textarea
             ref={box}
-            id="decision-answer"
+            id={`decision-answer-${decision.id}`}
             className="field__input"
             rows={3}
             value={answer}
@@ -1706,6 +1780,109 @@ function EffortPanel({
       </div>
       {message !== null && <Notice kind="ok">{message}</Notice>}
       {error !== null && <Notice kind="error">{error}</Notice>}
+    </Panel>
+  );
+}
+
+/* ------------------------------------------------------ parallel stories */
+
+/**
+ * Why the parallel-story limit is frozen, per status — the mirror of the
+ * server's `MAX_PARALLEL_STORIES_LOCKED` (async stories US-001): past the
+ * story loop no story runs for the session again.
+ */
+const MAX_PARALLEL_STORIES_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  reviewing: 'its stories are built and the review is running.',
+  fixing: 'its stories are built and the review feedback is being fixed.',
+  finished: 'this session has finished, so no story will run for it again.',
+  'pr-open': 'its stories are built and its pull request is open.',
+  merged: 'its pull request has already been merged.',
+};
+
+/**
+ * How many of this session's stories may build at the same time (async
+ * stories US-002). The number saves when the field loses focus or on Enter;
+ * a value the server refuses is reported as a toast and the field goes back
+ * to the saved value.
+ */
+function ParallelStoriesPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  const toast = useToast();
+  const saved = session.maxParallelStories;
+  /** What is typed, kept as text so the field can be cleared while editing. */
+  const [draft, setDraft] = useState(String(saved));
+  const [saving, setSaving] = useState(false);
+
+  // A poll or another tab can change the saved value under the field.
+  useEffect(() => setDraft(String(saved)), [saved]);
+
+  const locked = MAX_PARALLEL_STORIES_LOCKED[session.status];
+
+  const save = (): void => {
+    if (saving) return;
+    const trimmed = draft.trim();
+    // Clearing the field is not a value: put the saved one back.
+    if (trimmed === '' || Number(trimmed) === saved) {
+      setDraft(String(saved));
+      return;
+    }
+    setSaving(true);
+    setSessionMaxParallelStories(session.id, Number(trimmed))
+      .then((next) => {
+        onSaved(next);
+        setDraft(String(next.maxParallelStories));
+        toast.ok(
+          next.maxParallelStories === 1
+            ? 'Saved: this session now builds one story after another.'
+            : `Saved: up to ${next.maxParallelStories} stories of this session may build at the same time.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setDraft(String(saved));
+        toast.error(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel title="Parallel stories" icon="tasklist" meta={<Badge tone={saved === 1 ? 'neutral' : 'ready'}>{saved === 1 ? '1 at a time' : `up to ${saved}`}</Badge>}>
+      <form
+        className="field"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+      >
+        <label className="field__label" htmlFor="session-page-max-parallel-stories">
+          Stories building at once
+        </label>
+        <input
+          id="session-page-max-parallel-stories"
+          className="field__input"
+          type="number"
+          min={MIN_PARALLEL_STORIES}
+          max={MAX_PARALLEL_STORIES}
+          step={1}
+          value={draft}
+          disabled={locked !== undefined || saving}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+        />
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The limit can no longer be changed: ${locked}`
+            : 'How many stories may build at the same time. 1 builds one story after another.'}
+          {locked === undefined && session.status === 'building'
+            ? ' A build is running: a change applies from the next story it starts.'
+            : ''}
+        </p>
+      </form>
     </Panel>
   );
 }

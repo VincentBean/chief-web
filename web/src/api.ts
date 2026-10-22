@@ -825,6 +825,8 @@ export interface Session {
    * US-015); null when it runs on its own account.
    */
   failoverClaudeAccountId: string | null;
+  /** How many of its stories run at once (async stories US-001), 1 to 10. */
+  maxParallelStories: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -892,7 +894,17 @@ export interface SessionInput {
   effort?: EffortLevel | null;
   /** Omit or null to run on the default Claude account. */
   claudeAccountId?: string | null;
+  /**
+   * How many stories may build at the same time, `MIN_PARALLEL_STORIES` to
+   * `MAX_PARALLEL_STORIES`; omit for the server default of 3.
+   */
+  maxParallelStories?: number;
 }
+
+/** Mirror the server's parallel-story bounds and default (db/sessions.ts). */
+export const MIN_PARALLEL_STORIES = 1;
+export const MAX_PARALLEL_STORIES = 10;
+export const DEFAULT_PARALLEL_STORIES = 3;
 
 /** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */
 export const MAX_FEEDBACK_LENGTH = 4000;
@@ -1130,6 +1142,8 @@ export interface Story {
   priority: number;
   status: 'todo' | 'in-progress' | 'done';
   commitSha: string | null;
+  /** The merge commit of a parallel story on the session branch; null otherwise. */
+  mergeSha: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1200,6 +1214,18 @@ export async function setSessionEffort(id: string, effort: EffortLevel | null): 
 }
 
 /**
+ * Sets how many of this session's stories may build at the same time. It
+ * applies from the next story the build starts; refused (409) once the
+ * stories are built, and (400) outside 1–10.
+ */
+export async function setSessionMaxParallelStories(id: string, maxParallelStories: number): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/max-parallel-stories`, {
+    method: 'PUT',
+    body: JSON.stringify({ maxParallelStories }),
+  });
+}
+
+/**
  * Binds the session to a Claude account, or with `null` back to the default
  * account (multiple accounts US-012). Refused once no agent runs again.
  */
@@ -1259,8 +1285,32 @@ export interface Build {
   maxConcurrentBuilds: number;
   /** The question the agent stopped to ask (decisions US-010); null when none. */
   decision: Decision | null;
+  /**
+   * Every open question, oldest first (async stories US-010): a build running
+   * stories in parallel can have one per story waiting at once.
+   */
+  decisions: Decision[];
   /** How long a question stands before the agent gives up on it. */
   decisionTimeoutMs: number | null;
+  /** Every story as the scheduler sees it (async stories US-012). */
+  storyPlan: StoryPlan[];
+  /** Where the dependency plan came from; null while there is none yet. */
+  planSource: 'agent' | 'fallback' | null;
+  /** Why the plan fell back to the sequential chain; null for an agent plan. */
+  planReason: string | null;
+}
+
+/** Where one story stands in the build; mirrors the server's `StoryPlanState`. */
+export type StoryPlanState = 'waiting on dependencies' | 'ready' | 'running' | 'merging' | 'deciding' | 'blocked' | 'done';
+
+/** One story of `Build.storyPlan`; mirrors the server's `StoryPlanView`. */
+export interface StoryPlan {
+  storyId: string;
+  /** The stories it waits on, in priority order. */
+  dependsOn: string[];
+  state: StoryPlanState;
+  /** Failed attempts it has spent in the current run. */
+  attempts: number;
 }
 
 /**
@@ -1303,10 +1353,10 @@ export async function startBuild(id: string): Promise<Build> {
  * waiting for it (decisions US-010). The build is `building` again by the time
  * this answers.
  */
-export async function answerDecision(id: string, answer: string): Promise<Build> {
+export async function answerDecision(id: string, answer: string, decisionId?: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/decision`, {
     method: 'POST',
-    body: JSON.stringify({ answer }),
+    body: JSON.stringify(decisionId === undefined ? { answer } : { answer, decisionId }),
   });
 }
 

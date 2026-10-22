@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 import type { Config } from '../config.js';
 import {
@@ -12,8 +13,12 @@ import {
   type Database,
   enqueueBuild,
   failSession,
+  getDependencyPlan,
+  getDependencyPlanOrigin,
+  getDependencyPlanStoryIds,
   type FailureStage,
   type Decision,
+  type DependencyPlanSource,
   getQueuedBuild,
   getSession,
   listBuildQueue,
@@ -29,6 +34,7 @@ import {
   prRefId,
   removeBuildQueueEntry,
   removeQueuedBuild,
+  replaceDependencyPlan,
   type Session,
   type SessionStatus,
   type Story,
@@ -40,11 +46,13 @@ import {
 import { ExecDeadline } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
+import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import {
   type ParsedPrd,
   type PrdStatus,
   type PrdStory,
   prdPathFor,
+  progressPathFor,
   readPrdDocument,
   setStoryStatus,
 } from '../prd/index.js';
@@ -67,17 +75,23 @@ import {
   getStoredAdvisorModel,
   isAdvisorModel,
 } from '../settings/index.js';
+import { type StoryTarget, storyBranch, storyWorktreeDir } from './agent.js';
 import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
-import { type BuildLogs, NullBuildLogs } from './log.js';
+import { storyAskDir } from './mcp.js';
+import { type BuildLogs, type BuildLogWriter, NullBuildLogs, storyPrefixedWriter } from './log.js';
 import {
   classifyIteration,
   iterationCap,
   MAX_RETRIES,
   remainingStories,
   selectNextStory,
+  selectRunnableStories,
 } from './loop.js';
-import { agentPrompt } from './prompts.js';
-import type { AgentResult, AgentRunner } from './runner.js';
+import { StoryMerger } from './merge.js';
+import { describePlan, normalizePlan, parseDependencyAnswer, type RawPlan, sequentialPlan } from './plan.js';
+import { agentPrompt, dependencyAnalysisPrompt } from './prompts.js';
+import type { AgentResult, AgentRunner, StoryWorkspaceRecovery } from './runner.js';
+import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import type { VoiceEventSink } from '../voice/events.js';
 
 /**
@@ -150,8 +164,48 @@ export interface BuildView {
    * not be a poll behind it.
    */
   readonly decision: DecisionView | null;
+  /**
+   * Every open question of the session, oldest first (async stories US-010):
+   * a parallel run can have one per story waiting at once. `decision` is the
+   * newest of them.
+   */
+  readonly decisions: readonly DecisionView[];
   /** How long a question stands before the agent stops waiting for it. */
   readonly decisionTimeoutMs: number | null;
+  /**
+   * Every story of the PRD as the scheduler sees it (async stories US-012):
+   * what it waits on, what it is doing and how many attempts it has spent.
+   */
+  readonly storyPlan: readonly StoryPlanView[];
+  /** Where the dependency plan came from; `null` while there is none yet. */
+  readonly planSource: DependencyPlanSource | null;
+  /** Why the plan fell back to the sequential chain; `null` for an agent plan. */
+  readonly planReason: string | null;
+}
+
+/** What a story attempt of a parallel run is doing (async stories US-012). */
+type StoryPhase = 'running' | 'merging';
+
+/** Where one story stands in the build (async stories US-012). */
+export const STORY_PLAN_STATES = [
+  'waiting on dependencies',
+  'ready',
+  'running',
+  'merging',
+  'deciding',
+  'blocked',
+  'done',
+] as const;
+export type StoryPlanState = (typeof STORY_PLAN_STATES)[number];
+
+/** One story of {@link BuildView.storyPlan}. */
+export interface StoryPlanView {
+  readonly storyId: string;
+  /** The stories it waits on, in priority order; empty when it waits on none. */
+  readonly dependsOn: readonly string[];
+  readonly state: StoryPlanState;
+  /** Failed attempts it has spent in the current run; 0 when nothing runs. */
+  readonly attempts: number;
 }
 
 /** One question of the session, as the page renders it (decisions US-005). */
@@ -224,6 +278,29 @@ interface RunState {
   readonly startedAt: string;
   stopping: boolean;
   /**
+   * Whether this run has settled its dependency plan (async stories US-005):
+   * analysed, reused or not needed. Not part of {@link ParkedRun} on purpose —
+   * a resumed run checks the stored plan against `prd.md` again.
+   */
+  planned: boolean;
+  /**
+   * The failed attempts each story has spent in a parallel run (async stories
+   * US-009); the sequential loop counts its one story in {@link attempts}.
+   */
+  readonly storyAttempts: Map<string, number>;
+  /**
+   * What each story of a parallel run is doing right now (async stories
+   * US-012): an entry from the moment its attempt is registered until the
+   * scheduler has taken its outcome, `merging` while it waits for and goes
+   * through its merge. Read by the build view only.
+   */
+  readonly phases: Map<string, StoryPhase>;
+  /**
+   * Stories that used up their retries in this run (US-010). A Retry starts a
+   * new run, and a fresh budget.
+   */
+  readonly blocked: string[];
+  /**
    * The expiry of the global hold this run must park on (US-005), or null.
    *
    * The limit is on the account, so one session being refused takes every
@@ -232,6 +309,12 @@ interface RunState {
    * own bookkeeping is finished, exactly as it does for "Stop build".
    */
   holdUntil: string | null;
+  /**
+   * Re-runs the parallel scheduler (async stories US-010): a question opened
+   * or closed, so a story stopped or started counting toward the limit. A
+   * no-op outside a parallel run.
+   */
+  wake: () => void;
   /**
    * The Claude account the run's container was started on (multiple accounts
    * US-014): the one a refusal holds, and the one {@link BuildService.holdAll}
@@ -259,7 +342,55 @@ interface ParkedRun {
   readonly storyId: string | null;
   readonly maxIterations: number;
   readonly startedAt: string;
+  /** The per-story attempts of a parallel run (async stories US-009). */
+  readonly storyAttempts: ReadonlyMap<string, number>;
 }
+
+/**
+ * Where one story attempt works (async stories US-006): the clone, or — for a
+ * session that runs stories in parallel — the story's own worktree. The files
+ * are host paths on the data volume.
+ */
+interface StoryWorkspace {
+  /** The worktree the agent runs in; `null` for the clone. */
+  readonly story: StoryTarget | null;
+  /** `chief-story/<session>/<story-id>`; `null` for the clone. */
+  readonly branch: string | null;
+  readonly prdFile: string;
+  readonly progressFile: string;
+  /**
+   * The clone's `progress.md` as it was copied into the worktree: what the
+   * story's additions are measured against when it is merged (US-007).
+   */
+  readonly progressStart: string;
+}
+
+/** One story attempt of a parallel run, set up and about to start its agent (async stories US-009). */
+interface PreparedAttempt {
+  readonly iteration: number;
+  readonly containerId: string;
+  readonly workspace: StoryWorkspace;
+  /** The status the attempt is judged against: what the mark left. */
+  readonly before: StoryStatus;
+  readonly headBefore: string | null;
+}
+
+/**
+ * How one story attempt of a parallel run ended (async stories US-009). The
+ * scheduler alone turns these into the run's ending.
+ */
+type StoryOutcome =
+  | { readonly code: 'merged' }
+  /** Not finished, but not fruitless either: its retries start over. */
+  | { readonly code: 'progress' }
+  /** Stalled, out of time, or done but not merged: one of its retries spent. */
+  | { readonly code: 'failed'; readonly result: AgentResult; readonly mergeFailed: string | null }
+  /** Its agent (or resolution agent) was refused for the usage limit; the hold is armed. */
+  | { readonly code: 'held' }
+  /** Stopped or held from outside before it could be judged; nothing spent. */
+  | { readonly code: 'interrupted' }
+  /** Something the run cannot carry on from. */
+  | { readonly code: 'fatal'; readonly stage: FailureStage; readonly message: string };
 
 /** What one re-read of `prd.md` produced. */
 interface PrdSnapshot {
@@ -416,6 +547,8 @@ export class BuildService {
    * id. Written by {@link park} and spent by the launch that resumes them.
    */
   private readonly parked = new Map<string, ParkedRun>();
+  /** Merges finished parallel stories into the clone (async stories US-007). */
+  private readonly merger: StoryMerger;
   /** Serialises {@link pump}, so one freed slot is handed to one session. */
   private draining: Promise<void> = Promise.resolve();
 
@@ -443,6 +576,7 @@ export class BuildService {
      */
     private readonly decisions: DecisionWatcher | null = null,
   ) {
+    this.merger = new StoryMerger(config, db, runner);
     // Sessions are the one kind this service starts itself; reviews and
     // feedback runs register theirs from above.
     this.registerStart('session', {
@@ -1060,7 +1194,12 @@ export class BuildService {
         maxIterations: parked?.maxIterations ?? iterationCap(remainingStories(stories)),
         startedAt: parked?.startedAt ?? nowIso(),
         stopping: false,
+        planned: false,
+        storyAttempts: new Map(parked?.storyAttempts ?? []),
+        phases: new Map(),
+        blocked: [],
         holdUntil: null,
+        wake: () => undefined,
         // The account `start` just resolved for the container: the row as it
         // is now, which is what the orchestrator read and wrote — the failover
         // account while the session's own is held (US-015).
@@ -1167,8 +1306,10 @@ export class BuildService {
     // way back up signals what it holds. Sweeping the session's pid files
     // before the first iteration is what keeps that agent from meeting the one
     // this run is about to start. It costs one exec per run, and on the usual
-    // path there is nothing to find.
+    // path there is nothing to find. The session-wide glob takes every story
+    // agent's pid file too (async stories US-011).
     await this.runner.reap(sessionId, state.containerId);
+    await this.recoverStories(sessionId, state);
 
     for (;;) {
       const session = getSession(this.db, sessionId);
@@ -1200,9 +1341,25 @@ export class BuildService {
         return;
       }
 
-      const story = selectNextStory(snapshot.stories);
+      const story = this.nextStory(session, snapshot.stories);
       if (story === null) {
         await this.handOff(session, snapshot.stories);
+        return;
+      }
+
+      // Before any story agent starts, and once per run (async stories
+      // US-005). Back to the top afterwards: the analysis took a while, and
+      // the stop, the hold and the PRD are all checked again from scratch.
+      if (!state.planned) {
+        state.planned = true;
+        if (!(await this.planDependencies(session, snapshot, state))) return;
+        continue;
+      }
+
+      // Several stories at once (async stories US-009): a scheduler of its own
+      // takes the run from here, and the loop below stays exactly as it was.
+      if (this.runsInParallel(session)) {
+        await this.runParallel(sessionId, state);
         return;
       }
 
@@ -1246,6 +1403,583 @@ export class BuildService {
     }
   }
 
+  /**
+   * Clears what a parallel run left behind when it did not unwind (async
+   * stories US-011): the server was restarted under it, or the session was
+   * failed at the restart while one of its stories waited on a question and is
+   * now being retried. Runs in front of every run, after the sweep and before
+   * anything starts, whatever the limit is now — a limit lowered to 1 after a
+   * failed parallel run is exactly when an operator retries.
+   *
+   * A run that unwound normally leaves nothing to find: every attempt removes
+   * its own worktree, and a merged story's goes with the merge. So whatever is
+   * here belongs to a run that is gone. A half-done merge in the clone is
+   * aborted; every worktree and `chief-story/<session>/*` branch is removed,
+   * and the work committed only there with it. The stories that were running
+   * go back to `todo`, and the questions they had open are closed as
+   * abandoned — the agents that asked them are not coming back. Merged stories
+   * stay `done`, and the build continues with its stored plan.
+   */
+  private async recoverStories(sessionId: string, state: RunState): Promise<void> {
+    const session = getSession(this.db, sessionId);
+    if (session === null || this.runner.recoverStoryWorkspaces === undefined) return;
+
+    const recovery = await this.runner.recoverStoryWorkspaces(state.containerId, session.name);
+    const found = recovery.abortedMerge || recovery.worktrees.length > 0 || recovery.branches.length > 0;
+    // Only a parallel run leaves anything to find. A sequential story that was
+    // `in-progress` is still in progress in the clone itself, and carries on.
+    const reset = found
+      ? listStories(this.db, sessionId).filter((story) => story.status === 'in-progress' && story.mergeSha === null)
+      : [];
+    for (const story of reset) updateStory(this.db, sessionId, story.storyId, { status: 'todo' });
+    // Nothing of this session runs yet, so every open question is one whose
+    // agent is gone, whichever story it was for.
+    this.decisions?.abandon(sessionId);
+
+    if (recovery.error !== null) {
+      logger.warn('could not clear everything a previous run left in the clone', {
+        session: sessionId,
+        error: recovery.error,
+      });
+    }
+    if (!found && recovery.error === null) return;
+
+    logger.info('cleared what a previous run left behind', {
+      session: sessionId,
+      abortedMerge: recovery.abortedMerge,
+      worktrees: recovery.worktrees,
+      branches: recovery.branches,
+      reset: reset.map((story) => story.storyId),
+    });
+    const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+    log.write(recoveryLines(recovery, reset).map((line) => `${line}\n`).join(''));
+    log.end(recovery.error === null ? 0 : 1);
+  }
+
+  /**
+   * The story the loop runs next. Every pass of the loop asks again, after
+   * every merge included (async stories US-007). A session with a limit above
+   * 1 and a stored dependency plan asks the scheduler's rule (US-004) with the
+   * one place this loop has, so a story never starts before what it depends on
+   * is merged; without a plan, or when the rule finds nothing, it is the
+   * sequential pick.
+   */
+  private nextStory(session: Session, stories: readonly Story[]): Story | null {
+    const fallback = selectNextStory(stories);
+    if (fallback === null) return null;
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    if (limit <= 1 || getDependencyPlanOrigin(this.db, session.id).source === null) return fallback;
+    return selectRunnableStories(stories, getDependencyPlan(this.db, session.id), [], [], 1)[0] ?? fallback;
+  }
+
+  /**
+   * Whether this run schedules its stories side by side (async stories
+   * US-009): a limit above 1, read fresh, and a runner that can both make a
+   * story's worktree and merge it back. Without the merge a finished story
+   * would never reach the session's `prd.md`, and the scheduler would start it
+   * again forever.
+   */
+  private runsInParallel(session: Session): boolean {
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    return limit > 1 && this.runner.addStoryWorktree !== undefined && this.runner.mergeStory !== undefined;
+  }
+
+  /**
+   * The parallel scheduler (async stories US-009).
+   *
+   * Keeps up to `maxParallelStories` story agents busy, each in its own
+   * worktree, and asks {@link selectRunnableStories} again every time one of
+   * them comes back — finished and merged, or not. It is still one run, so the
+   * session takes one build slot however many agents it has going.
+   *
+   * Every attempt counts once against the run's iteration cap, and a failed
+   * one only against its own story's retries. An attempt never changes the
+   * session's status itself: it reports what happened, and this method alone
+   * decides how the run ends. A run that has to end — retries used up, the cap
+   * reached, a broken PRD — starts nothing more and lets the agents already
+   * running finish and merge first; a stop or a usage-limit hold signals them
+   * all. Either way it only ends once every attempt has unwound, so no agent
+   * and no worktree outlives it.
+   *
+   * A story whose agent asks the operator something (US-010) waits on its own:
+   * the session is `deciding`, the others carry on, and the waiting story does
+   * not count toward the limit until its question is closed. A story that has
+   * used up its retries is **blocked**: it is the run's ending, so nothing new
+   * starts — its dependents included — and the session fails once the agents
+   * still running have finished and been merged.
+   */
+  private async runParallel(sessionId: string, state: RunState): Promise<void> {
+    const active = new Map<string, Promise<{ readonly storyId: string; readonly outcome: StoryOutcome }>>();
+    /** Why the run fails once the attempts still running are done; the first reason wins. */
+    let ending: { readonly stage: FailureStage; readonly message: string } | null = null;
+    /** This run's own agent was refused, so the other sessions are held too. */
+    let refused = false;
+    const blocked = state.blocked;
+    // A question opened or closed resolves this, so the scheduler looks again
+    // even though no attempt has come back (US-010).
+    const nextWake = (): Promise<null> =>
+      new Promise<null>((resolve) => {
+        state.wake = () => resolve(null);
+      });
+    let woken = nextWake();
+
+    try {
+      for (;;) {
+        const session = getSession(this.db, sessionId);
+        // `deciding` is still building (US-010): one story waits, the rest go on.
+        const live = session !== null && (session.status === 'building' || session.status === 'deciding');
+        const winding = session === null || state.stopping || state.holdUntil !== null || !live;
+
+        if (session !== null && !winding && ending === null) {
+          const started = await this.startRunnable(session, state, active, blocked);
+          if (started.ending !== null) ending = started.ending;
+          if (started.handOff !== null && active.size === 0) {
+            await this.handOff(session, started.handOff);
+            return;
+          }
+        }
+
+        if (active.size === 0) {
+          if (session === null) return;
+          if (state.stopping) {
+            this.returnToReady(session);
+          } else if (state.holdUntil !== null) {
+            this.park(session, state, state.holdUntil, false);
+          } else if (live && ending !== null) {
+            this.fail(session, ending.stage, ending.message);
+          } else if (live) {
+            // Nothing running, nothing that may start, and the PRD not done:
+            // the only way here is a plan that waits on something that cannot
+            // happen. Failing says so; looping would spin.
+            this.fail(session, 'agent', 'No story can be started: every remaining story waits on another one.');
+          }
+          if (refused && state.holdUntil !== null) await this.holdOthers(sessionId, state.accountId, state.holdUntil);
+          return;
+        }
+
+        const next = await Promise.race([...active.values(), woken]);
+        if (next === null) {
+          // A question opened or closed: nothing came back, but what may start did.
+          woken = nextWake();
+          continue;
+        }
+        const { storyId, outcome } = next;
+        active.delete(storyId);
+        state.phases.delete(storyId);
+        const current = getSession(this.db, sessionId) ?? session;
+        if (current === null) continue;
+        const story = listStories(this.db, sessionId).find((candidate) => candidate.storyId === storyId);
+
+        switch (outcome.code) {
+          case 'merged': {
+            state.storyAttempts.delete(storyId);
+            await this.completion.push(current);
+            const stories = listStories(this.db, sessionId);
+            this.events?.publish({
+              kind: 'build.story_done',
+              sessionId,
+              name: current.name,
+              storyId,
+              done: stories.filter((candidate) => candidate.status === 'done').length,
+              total: stories.length,
+            });
+            break;
+          }
+          case 'progress':
+            state.storyAttempts.set(storyId, 0);
+            break;
+          case 'failed': {
+            const attempts = (state.storyAttempts.get(storyId) ?? 0) + 1;
+            state.storyAttempts.set(storyId, attempts);
+            if (attempts > MAX_RETRIES && story !== undefined) {
+              // Blocked (US-010): nothing new starts, its dependents least of
+              // all; the agents still running finish and are merged first.
+              blocked.push(storyId);
+              logger.warn('story blocked: its retries are used up; finishing the running stories first', {
+                session: sessionId,
+                story: storyId,
+                attempt: attempts,
+                running: [...active.keys()],
+              });
+              ending ??= {
+                stage: 'agent',
+                message:
+                  outcome.mergeFailed === null
+                    ? stalledMessage(story, attempts, outcome.result)
+                    : mergeFailedMessage(story, attempts, outcome.mergeFailed),
+              };
+            } else {
+              logger.warn(
+                outcome.mergeFailed !== null
+                  ? 'finished story could not be merged; retrying'
+                  : outcome.result.timedOut
+                    ? 'build iteration ran out of time; retrying'
+                    : 'build iteration produced nothing; retrying',
+                { session: sessionId, story: storyId, attempt: attempts, remainingRetries: MAX_RETRIES - attempts + 1 },
+              );
+            }
+            break;
+          }
+          case 'held':
+            // The attempt armed the hold; every other agent of the session comes
+            // off the account now, the same way "Stop build" takes them off.
+            refused = true;
+            state.iteration -= 1;
+            await this.signalAll(sessionId, state);
+            // As "Stop build" does: the stop timeout to unwind, then a reap for
+            // whatever did not take the hint.
+            await settle(
+              Promise.all(active.values()).then(() => undefined),
+              this.config.buildStopTimeoutMs,
+            );
+            await this.runner.reap(sessionId, state.containerId);
+            break;
+          case 'interrupted':
+            // Stopped or held from outside: nothing was judged, so nothing was spent.
+            state.iteration -= 1;
+            break;
+          case 'fatal':
+            ending ??= { stage: outcome.stage, message: outcome.message };
+            break;
+        }
+      }
+    } finally {
+      state.wake = () => undefined;
+    }
+  }
+
+  /**
+   * Starts every story the plan allows right now, one after the other, so two
+   * worktrees are never being added at the same moment. Returns the stories
+   * when the PRD is finished, and why the run must end when it has to.
+   */
+  private async startRunnable(
+    session: Session,
+    state: RunState,
+    active: Map<string, Promise<{ readonly storyId: string; readonly outcome: StoryOutcome }>>,
+    blocked: readonly string[],
+  ): Promise<{
+    readonly handOff: readonly Story[] | null;
+    readonly ending: { readonly stage: FailureStage; readonly message: string } | null;
+  }> {
+    let snapshot: PrdSnapshot;
+    try {
+      snapshot = this.readParallelPrd(session, [...active.keys()]);
+    } catch (cause) {
+      return { handOff: null, ending: { stage: 'prd', message: `The PRD could not be read: ${describe(cause)}` } };
+    }
+    if (!snapshot.synced) return { handOff: null, ending: { stage: 'prd', message: prdBrokenMessage(snapshot) } };
+    if (remainingStories(snapshot.stories) === 0) return { handOff: snapshot.stories, ending: null };
+
+    // Read fresh for every pass, so a limit changed mid-build applies from the
+    // next story started (US-001); nothing already running is touched.
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    // A story waiting on the operator holds no place (US-010): it is running,
+    // but it is not one of the stories counted against the limit.
+    const asking = new Set(this.decisions?.waitingStories(session.id) ?? []);
+    const running = [...active.keys()];
+    let runnable = selectRunnableStories(
+      snapshot.stories,
+      getDependencyPlan(this.db, session.id),
+      running.filter((storyId) => !asking.has(storyId)),
+      running.filter((storyId) => asking.has(storyId)),
+      limit,
+      blocked,
+    );
+    // Nothing running and nothing the plan allows: a plan that no longer fits
+    // the PRD must not stall the build, so the sequential pick goes instead.
+    if (runnable.length === 0 && active.size === 0) {
+      const next = selectNextStory(snapshot.stories);
+      if (next !== null) runnable = [next];
+    }
+
+    for (const story of runnable) {
+      if (state.stopping || state.holdUntil !== null) break;
+      if (state.iteration >= state.maxIterations) {
+        return {
+          handOff: null,
+          ending: {
+            stage: 'agent',
+            message:
+              `The build was stopped after ${String(state.maxIterations)} iterations with ` +
+              `${String(remainingStories(snapshot.stories))} of ${String(snapshot.stories.length)} ` +
+              `stories still outstanding (next ${story.storyId}). That is more than one and a ` +
+              'half passes over the PRD, so the loop is not converging.',
+          },
+        };
+      }
+      state.iteration += 1;
+      const iteration = state.iteration;
+      const attempts = state.storyAttempts.get(story.storyId) ?? 0;
+      state.storyId = story.storyId;
+      state.attempts = attempts;
+
+      let prepared: PreparedAttempt;
+      try {
+        prepared = await this.prepareAttempt(session, story, iteration, attempts + 1, state);
+      } catch (cause) {
+        updateStory(this.db, session.id, story.storyId, { status: 'todo' });
+        await this.runner.removeStoryWorktree?.(state.containerId, session.name, story.storyId);
+        return {
+          handOff: null,
+          ending: {
+            stage: 'agent',
+            message: `Iteration ${String(iteration)} (${story.storyId}) could not be run: ${describe(cause)}`,
+          },
+        };
+      }
+      state.phases.set(story.storyId, 'running');
+      active.set(
+        story.storyId,
+        this.attemptStory(session, story, snapshot, state, prepared).then((outcome) => ({
+          storyId: story.storyId,
+          outcome,
+        })),
+      );
+    }
+    return { handOff: null, ending: null };
+  }
+
+  /**
+   * Re-reads the clone's `prd.md` for the parallel scheduler. The clone never
+   * carries a running story's `in-progress` (only its worktree does), so the
+   * sync would put the rows of the running stories back to what the clone
+   * says; they are marked again here.
+   */
+  private readParallelPrd(session: Session, running: readonly string[]): PrdSnapshot {
+    const snapshot = this.readPrd(session);
+    if (!snapshot.synced || running.length === 0) return snapshot;
+    const stories = snapshot.stories.map((story) => {
+      if (!running.includes(story.storyId) || story.status === 'done') return story;
+      updateStory(this.db, session.id, story.storyId, { status: 'in-progress' });
+      return { ...story, status: 'in-progress' as const };
+    });
+    return { ...snapshot, stories };
+  }
+
+  /** Signals every agent of the session, story and resolution agents alike. */
+  private async signalAll(sessionId: string, state: RunState): Promise<void> {
+    try {
+      // Without a story id the signal covers the session's whole pid glob,
+      // which every story's and every resolution agent's file is under.
+      await this.runner.stop(sessionId, state.containerId);
+    } catch (cause) {
+      logger.warn('could not signal the build agents', { session: sessionId, error: describe(cause) });
+    }
+  }
+
+  /** The worktree, the mark and HEAD of one story attempt, before its agent runs. */
+  private async prepareAttempt(
+    session: Session,
+    story: Story,
+    iteration: number,
+    attempt: number,
+    state: RunState,
+  ): Promise<PreparedAttempt> {
+    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    const containerId = state.containerId;
+    const workspace = await this.storyWorkspace(session, story, containerId, attempt);
+    const before = this.markInProgress(session, story, workspace.prdFile);
+    const headBefore = await this.runner.headSha(containerId, workspace.story?.workingDir);
+    logger.info('build iteration started', {
+      session: session.id,
+      iteration,
+      maxIterations: state.maxIterations,
+      story: story.storyId,
+      attempt,
+    });
+    return { iteration, containerId, workspace, before, headBefore };
+  }
+
+  /**
+   * One story attempt of a parallel run, from its agent to its merge. It
+   * reports what happened and leaves the session's status alone; every ending
+   * but `merged` removes its worktree and puts the story's row back to `todo`.
+   */
+  private async attemptStory(
+    session: Session,
+    story: Story,
+    snapshot: PrdSnapshot,
+    state: RunState,
+    prepared: PreparedAttempt,
+  ): Promise<StoryOutcome> {
+    const { iteration, containerId, workspace } = prepared;
+    const storyId = story.storyId;
+    const giveUp = async (): Promise<void> => {
+      await this.abandonWorktree(session, { containerId }, workspace);
+      updateStory(this.db, session.id, storyId, { status: 'todo' });
+    };
+
+    // Stories running at once write into one log: every line says whose it is (US-012).
+    const log = storyPrefixedWriter(this.logs.begin(session, iteration, storyId), storyId);
+    const buildModel = getBuildModel(this.db);
+    const advisor = advisorFor(this.db);
+    if (advisor.dropped !== null) log.write(`${advisor.dropped}\n`);
+    const effort = effortFor(this.db, getSession(this.db, session.id) ?? session);
+    if (effort !== null) log.write(`Thinking effort: ${effort.level} (${effort.source})\n`);
+    const timeoutMs = getAgentTimeoutMs(this.db, this.config);
+    // Asking works per story (US-010): a config and an ask directory of the
+    // story's own, and a clock that stops while only this agent waits.
+    const deadline = this.decisions === null ? null : new ExecDeadline(timeoutMs);
+    const mcpConfigFile = (await this.decisions?.prepare(session.id, containerId, storyId)) ?? null;
+    let agentEnded = false;
+
+    let result: AgentResult;
+    try {
+      result = await this.runner.run({
+        sessionId: session.id,
+        containerId,
+        iteration,
+        prompt: agentPrompt({
+          sessionName: session.name,
+          story: promptStory(story, snapshot.parsed),
+          timeoutMs,
+          prd: snapshot.parsed,
+          progress: this.readProgress(session, workspace.progressFile),
+          canAsk: mcpConfigFile !== null,
+          worktree:
+            workspace.story === null || workspace.branch === null
+              ? null
+              : { dir: workspace.story.workingDir, branch: workspace.branch },
+        }),
+        timeoutMs,
+        model: buildModel,
+        advisor: advisor.model,
+        effort: effort?.level ?? null,
+        mcpConfigFile,
+        deadline,
+        story: workspace.story,
+        onOutput: (text) => log.write(text),
+        onToolCall: (call) => {
+          if (call.name !== ASK_OPERATOR_TOOL) return;
+          void this.asked(
+            session,
+            story,
+            state,
+            {
+              containerId,
+              iteration,
+              askDir: storyAskDir(storyId),
+              onClosed: () => state.wake(),
+              ended: () => agentEnded,
+            },
+            deadline,
+            log,
+          );
+        },
+      });
+    } catch (cause) {
+      // Only this story's question goes with it; its siblings' still stand.
+      agentEnded = true;
+      this.decisions?.abandon(session.id, storyId);
+      log.end(null);
+      await giveUp();
+      if (state.stopping || state.holdUntil !== null) return { code: 'interrupted' };
+      return {
+        code: 'fatal',
+        stage: 'agent',
+        message: `Iteration ${String(iteration)} (${storyId}) could not be run: ${describe(cause)}`,
+      };
+    }
+
+    agentEnded = true;
+    this.decisions?.abandon(session.id, storyId);
+
+    // Held while this agent ran — by another session, or by a sibling story
+    // that was refused — and so signalled: its output is not evidence.
+    if (state.holdUntil !== null) {
+      log.write(`\n${holdMessage(state.holdUntil)}\n`);
+      log.end(result.exitCode);
+      await this.runner.reap(session.id, containerId, storyId);
+      await giveUp();
+      return { code: 'interrupted' };
+    }
+    if (isUsageLimitRefusal(result)) {
+      // Set before anything is awaited, so no sibling arms a second hour.
+      const until = this.hold.arm(state.accountId);
+      state.holdUntil = until;
+      log.write(`\n${holdMessage(until)}\n`);
+      log.end(result.exitCode);
+      await this.runner.reap(session.id, containerId, storyId);
+      await giveUp();
+      return { code: 'held' };
+    }
+
+    const exitCode = result.timedOut ? null : result.exitCode;
+    try {
+      if (result.timedOut) await this.runner.reap(session.id, containerId, storyId);
+      const headAfter = await this.runner.headSha(containerId, workspace.story?.workingDir);
+      const after = this.readWorktreePrd(session, workspace.prdFile);
+      if (!after.synced) {
+        await giveUp();
+        return { code: 'fatal', stage: 'prd', message: prdBrokenMessage(after) };
+      }
+      const updated = after.stories.find((candidate) => candidate.storyId === storyId) ?? null;
+      const change = classifyIteration(prepared.before, updated?.status ?? null, prepared.headBefore, headAfter, result.timedOut);
+      if (change.commitSha !== null && updated !== null) {
+        updateStory(this.db, session.id, storyId, { commitSha: change.commitSha });
+      }
+
+      let mergeFailed: string | null = null;
+      if (updated?.status === 'done') {
+        state.phases.set(storyId, 'merging');
+        const merged = await this.merger.merge(session, containerId, {
+          storyId,
+          title: story.title,
+          description: promptStory(story, snapshot.parsed).description,
+          iteration,
+          commitSha: change.commitSha ?? story.commitSha,
+          prdFile: workspace.prdFile,
+          progressFile: workspace.progressFile,
+          progressStart: workspace.progressStart,
+          log,
+          interrupted: () => state.stopping || state.holdUntil !== null,
+        });
+        if (merged.code === 'merged') return { code: 'merged' };
+        state.phases.set(storyId, 'running');
+        await giveUp();
+        if (merged.code === 'held') {
+          // The resolution agent was refused: a hold, like a refused story.
+          if (state.holdUntil === null) {
+            state.holdUntil = this.hold.arm(state.accountId);
+            log.write(`\n${holdMessage(state.holdUntil)}\n`);
+            return { code: 'held' };
+          }
+          return { code: 'interrupted' };
+        }
+        mergeFailed = merged.reason;
+      } else {
+        await giveUp();
+      }
+
+      logger.info('build iteration finished', {
+        session: session.id,
+        iteration,
+        story: storyId,
+        status: updated?.status ?? 'gone',
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        commit: change.commitSha,
+        stalled: change.stalled,
+        mergeFailed,
+      });
+      // A stopped or held run is not judged: it goes to `ready` or `waiting`.
+      if (state.stopping || state.holdUntil !== null) return { code: 'interrupted' };
+      if (!change.stalled && mergeFailed === null) return { code: 'progress' };
+      return { code: 'failed', result, mergeFailed };
+    } catch (cause) {
+      await giveUp();
+      if (state.stopping || state.holdUntil !== null) return { code: 'interrupted' };
+      return {
+        code: 'fatal',
+        stage: 'agent',
+        message: `Iteration ${String(iteration)} (${storyId}) could not be finished: ${describe(cause)}`,
+      };
+    } finally {
+      log.end(exitCode);
+    }
+  }
+
   /** One iteration. Returns false when the loop must not continue. */
   private async iterate(
     session: Session,
@@ -1258,8 +1992,13 @@ export class BuildService {
     // chief marks the story in-progress before invoking the agent, and so does
     // this: the status the loop leaves behind is what the *next* read is
     // compared against, so the loop can never mistake its own write for work.
-    const before = this.markInProgress(session, story);
-    const headBefore = await this.runner.headSha(state.containerId);
+    //
+    // A parallel session's story runs in a worktree of its own (async stories
+    // US-006), so everything below — the mark, HEAD, the prompt's paths, the
+    // read-back — is that worktree's rather than the clone's.
+    const workspace = await this.storyWorkspace(session, story, state.containerId, state.attempts + 1);
+    const before = this.markInProgress(session, story, workspace.prdFile);
+    const headBefore = await this.runner.headSha(state.containerId, workspace.story?.workingDir);
 
     logger.info('build iteration started', {
       session: session.id,
@@ -1309,8 +2048,12 @@ export class BuildService {
           story: promptStory(story, snapshot.parsed),
           timeoutMs,
           prd: snapshot.parsed,
-          progress: this.readProgress(session),
+          progress: this.readProgress(session, workspace.progressFile),
           canAsk: mcpConfigFile !== null,
+          worktree:
+            workspace.story === null || workspace.branch === null
+              ? null
+              : { dir: workspace.story.workingDir, branch: workspace.branch },
         }),
         timeoutMs,
         model: buildModel,
@@ -1318,13 +2061,21 @@ export class BuildService {
         effort: effort?.level ?? null,
         mcpConfigFile,
         deadline,
+        story: workspace.story,
         onOutput: (text) => log.write(text),
         onToolCall: (call) => {
           if (call.name !== ASK_OPERATOR_TOOL) return;
           // Detached on purpose: this runs on the output stream, and finding
           // the request file is an exec into the container. The agent is
           // already blocked on its answer file, so nothing is racing us.
-          void this.asked(session, story, state, deadline, log);
+          void this.asked(
+            session,
+            story,
+            state,
+            { containerId: state.containerId, iteration: state.iteration },
+            deadline,
+            log,
+          );
         },
       });
     } catch (cause) {
@@ -1332,6 +2083,7 @@ export class BuildService {
       // iteration ended (decisions US-007).
       this.decisions?.abandon(session.id);
       log.end(null);
+      await this.abandonWorktree(session, state, workspace);
       throw cause;
     }
     this.decisions?.abandon(session.id);
@@ -1346,7 +2098,8 @@ export class BuildService {
       const held = state.holdUntil;
       log.write(`\n${holdMessage(held)}\n`);
       log.end(result.exitCode);
-      await this.runner.reap(session.id, state.containerId);
+      await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
+      await this.abandonWorktree(session, state, workspace);
       if (state.stopping) this.returnToReady(session);
       else this.park(session, state, held);
       return false;
@@ -1369,7 +2122,8 @@ export class BuildService {
       // The same reasoning as the timeout path: the loop is walking away from
       // this exec, and whatever the CLI left behind in the container must not
       // still be holding the workspace when the session resumes into it.
-      await this.runner.reap(session.id, state.containerId);
+      await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
+      await this.abandonWorktree(session, state, workspace);
 
       // "Stop build" pressed while the refused iteration was in flight still
       // wins — the hold is armed either way, because the limit is on the
@@ -1387,8 +2141,30 @@ export class BuildService {
       return false;
     }
 
-    log.end(result.timedOut ? null : result.exitCode);
+    // A worktree's section stays open until its merge is done, so the merge's
+    // lines land under the story that caused them (US-007).
+    const exitCode = result.timedOut ? null : result.exitCode;
+    if (workspace.story === null) log.end(exitCode);
+    try {
+      const description = promptStory(story, snapshot.parsed).description;
+      return await this.settle(session, story, description, state, result, workspace, before, headBefore, log);
+    } finally {
+      log.end(exitCode);
+    }
+  }
 
+  /** Judges a finished agent run and records what it did; see {@link iterate}. */
+  private async settle(
+    session: Session,
+    story: Story,
+    description: string,
+    state: RunState,
+    result: AgentResult,
+    workspace: StoryWorkspace,
+    before: StoryStatus,
+    headBefore: string | null,
+    log: BuildLogWriter,
+  ): Promise<boolean> {
     // A timed-out iteration is abandoned, not stopped: all a timeout can do is
     // close chief-web's end of the exec stream, and the Engine API has no way
     // to kill an exec — so the agent, and every test run, database server and
@@ -1400,14 +2176,14 @@ export class BuildService {
     //
     // It happens before HEAD and the PRD are read back, so what the iteration
     // is judged on is a workspace nothing is still writing to.
-    if (result.timedOut) await this.runner.reap(session.id, state.containerId);
+    if (result.timedOut) await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
 
     // The bookkeeping happens even when the operator pressed "Stop build"
     // while this iteration was running: the agent may well have committed the
     // story before it was signalled, and that has to be recorded before the
     // run unwinds or the work loses its commit.
-    const headAfter = await this.runner.headSha(state.containerId);
-    const after = this.readPrd(session);
+    const headAfter = await this.runner.headSha(state.containerId, workspace.story?.workingDir);
+    let after = workspace.story === null ? this.readPrd(session) : this.readWorktreePrd(session, workspace.prdFile);
     const updated = after.stories.find((candidate) => candidate.storyId === story.storyId) ?? null;
     const change = classifyIteration(
       before,
@@ -1420,11 +2196,56 @@ export class BuildService {
       updateStory(this.db, session.id, story.storyId, { commitSha: change.commitSha });
     }
 
+    // A story its worktree calls done is merged into the session branch
+    // straight away (US-007), before the push and before the stop check, for
+    // the same reason the push comes first: finished work is never left on a
+    // branch that a stop or the next attempt would delete. The merge removes
+    // the worktree; a runner that cannot merge leaves it where it is.
+    let finished = updated?.status === 'done';
+    let mergeFailed: string | null = null;
+    if (finished && workspace.story !== null && this.runner.mergeStory !== undefined) {
+      const merged = await this.merger.merge(session, state.containerId, {
+        storyId: story.storyId,
+        title: story.title,
+        description,
+        iteration: state.iteration,
+        commitSha: change.commitSha ?? story.commitSha,
+        prdFile: workspace.prdFile,
+        progressFile: workspace.progressFile,
+        progressStart: workspace.progressStart,
+        log,
+      });
+      if (merged.code === 'merged') {
+        after = this.readPrd(session);
+      } else {
+        finished = false;
+        // The story goes back to `todo` (US-008): its row was marked
+        // in-progress, and the clone's `prd.md`, which no worktree ever writes,
+        // still says what it said before the attempt.
+        updateStory(this.db, session.id, story.storyId, { status: 'todo' });
+        after = this.readPrd(session);
+        if (merged.code === 'held') {
+          // The conflict-resolution agent hit the usage limit: the same hold as
+          // a refused story iteration, and no attempt of the story is spent.
+          await this.abandonWorktree(session, state, workspace);
+          const until = this.hold.arm(state.accountId);
+          log.write(`\n${holdMessage(until)}\n`);
+          if (state.stopping) this.returnToReady(session);
+          else this.park(session, state, until);
+          await this.holdOthers(session.id, state.accountId, until);
+          return false;
+        }
+        mergeFailed = merged.reason;
+      }
+    }
+    // Any other ending abandons this attempt, and a retry starts afresh.
+    if (!finished) await this.abandonWorktree(session, state, workspace);
+
     // A story the agent finished is pushed straight away, so what `origin` has
     // is never more than one story behind what the container has — including
     // when the operator stops the build a moment later, which is why this comes
     // before the stop check rather than after it.
-    if (updated?.status === 'done') {
+    if (finished) {
       await this.completion.push(session);
       const stories = listStories(this.db, session.id);
       this.events?.publish({
@@ -1457,20 +2278,33 @@ export class BuildService {
       timedOut: result.timedOut,
       commit: change.commitSha,
       stalled: change.stalled,
+      mergeFailed,
     });
 
-    if (!change.stalled) {
+    // A merge that did not go through is a failed attempt like a stalled one:
+    // the story goes back to the session's `todo`, and its next attempt starts
+    // from the updated session branch — whether the merge conflicted and the
+    // resolution agent could not fix it (US-008), or git refused it outright.
+    if (!change.stalled && mergeFailed === null) {
       state.attempts = 0;
       return true;
     }
 
     state.attempts += 1;
     if (state.attempts > MAX_RETRIES) {
-      this.fail(session, 'agent', stalledMessage(story, state.attempts, result));
+      this.fail(
+        session,
+        'agent',
+        mergeFailed === null
+          ? stalledMessage(story, state.attempts, result)
+          : mergeFailedMessage(story, state.attempts, mergeFailed),
+      );
       return false;
     }
     logger.warn(
-      change.timedOut
+      mergeFailed !== null
+        ? 'finished story could not be merged; retrying'
+        : change.timedOut
         ? 'build iteration ran out of time; retrying'
         : 'build iteration produced nothing; retrying',
       {
@@ -1481,6 +2315,176 @@ export class BuildService {
       },
     );
     return true;
+  }
+
+  /**
+   * Settles the run's dependency plan before any story agent starts (async
+   * stories US-005). Returns false when the loop must not continue: the
+   * analysis was stopped, or put the session on the usage-limit hold.
+   *
+   * With a limit of 1, or one story left, there is nothing to run side by
+   * side and nothing happens. A stored plan made for exactly the stories in
+   * `prd.md` is reused, so a resumed build does not pay for the analysis
+   * twice. Otherwise one headless `claude -p` reads the PRD and answers with
+   * JSON — and whatever goes wrong with that, short of a stop or a hold, ends
+   * in the sequential fallback rather than in a failed build.
+   */
+  private async planDependencies(session: Session, snapshot: PrdSnapshot, state: RunState): Promise<boolean> {
+    const fresh = getSession(this.db, session.id) ?? session;
+    if (fresh.maxParallelStories <= 1 || remainingStories(snapshot.stories) <= 1) return true;
+
+    const storyIds = snapshot.stories.map((candidate) => candidate.storyId).sort();
+    const origin = getDependencyPlanOrigin(this.db, session.id);
+    const storedIds = getDependencyPlanStoryIds(this.db, session.id);
+    if (origin.source !== null && storedIds !== null && sameIds(storedIds, storyIds)) {
+      const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+      log.write(
+        `${planHeadline(origin.source, origin.reason)}\n` +
+          '(stored when this build first started; the stories in prd.md have not changed)\n' +
+          describePlan(snapshot.stories, getDependencyPlan(this.db, session.id)).map((line) => `${line}\n`).join(''),
+      );
+      log.end(0);
+      return true;
+    }
+
+    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+    logger.info('dependency analysis started', {
+      session: session.id,
+      stories: storyIds.length,
+      reanalysis: origin.source !== null,
+    });
+    if (origin.source !== null) {
+      log.write('The stories in prd.md changed since the stored plan was made, so it is worked out again.\n');
+    }
+
+    let prd: string;
+    try {
+      prd = fs.readFileSync(sessionPrdFile(this.config, session), 'utf8');
+    } catch (cause) {
+      this.storePlan(session, snapshot, log, null, `prd.md could not be read: ${describe(cause)}`);
+      log.end(null);
+      return true;
+    }
+
+    const before = (await this.runner.workspaceStatus?.(state.containerId)) ?? null;
+    let result: AgentResult | null = null;
+    let failure: string | null = null;
+    try {
+      result = await this.runner.run({
+        sessionId: session.id,
+        containerId: state.containerId,
+        iteration: ANALYSIS_ITERATION,
+        prompt: dependencyAnalysisPrompt({
+          sessionName: session.name,
+          prd,
+          storyIds: snapshot.stories.map((candidate) => candidate.storyId),
+        }),
+        timeoutMs: DEPENDENCY_ANALYSIS_TIMEOUT_MS,
+        model: getBuildModel(this.db),
+        mcpConfigFile: null,
+        deadline: null,
+        onOutput: (text) => log.write(text),
+      });
+    } catch (cause) {
+      failure = `the analysis agent could not be run: ${describe(cause)}`;
+    }
+
+    // Something else took the run off the agent while it was analysing: a
+    // hold armed by another session, the operator's stop, or this agent's own
+    // refusal. None of those is an answer, so no plan is stored — a fallback
+    // stored here would be reused by the resume for the rest of the build.
+    const refused = result !== null && isUsageLimitRefusal(result);
+    const interrupted = state.holdUntil !== null || state.stopping || refused;
+    if (interrupted || result?.timedOut === true) await this.runner.reap(session.id, state.containerId);
+    await this.discardAnalysisChanges(session, state, before, log);
+
+    if (state.holdUntil !== null) {
+      const held = state.holdUntil;
+      log.write(`\n${holdMessage(held)}\n`);
+      log.end(result?.exitCode ?? null);
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, held, false);
+      return false;
+    }
+    if (refused) {
+      const until = this.hold.arm(state.accountId);
+      log.write(`\n${holdMessage(until)}\n`);
+      log.end(result?.exitCode ?? null);
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, until, false);
+      await this.holdOthers(session.id, state.accountId, until);
+      return false;
+    }
+    if (state.stopping) {
+      log.end(result?.exitCode ?? null);
+      this.returnToReady(session);
+      return false;
+    }
+
+    if (result !== null && failure === null) {
+      if (result.timedOut) {
+        failure = `the analysis timed out after ${String(DEPENDENCY_ANALYSIS_TIMEOUT_MS / 60_000)} minutes`;
+      } else if (result.exitCode !== 0) {
+        failure = `the analysis agent exited with code ${String(result.exitCode)}`;
+      }
+    }
+    let raw: RawPlan | null = null;
+    if (failure === null && result !== null) {
+      const answer = parseDependencyAnswer(result.output);
+      if (answer.raw === null) failure = answer.error;
+      else raw = answer.raw;
+    }
+    this.storePlan(session, snapshot, log, raw, failure);
+    log.end(result?.timedOut === true ? null : (result?.exitCode ?? null));
+    return true;
+  }
+
+  /**
+   * The analysis agent is told not to change anything; this is what makes
+   * that true. Only a change *it* made is undone: the clone is compared with
+   * how it was before the agent started.
+   */
+  private async discardAnalysisChanges(
+    session: Session,
+    state: RunState,
+    before: string | null,
+    log: { write(text: string): void },
+  ): Promise<void> {
+    if (before === null || this.runner.workspaceStatus === undefined) return;
+    const after = await this.runner.workspaceStatus(state.containerId);
+    if (after === null || after === before) return;
+    logger.warn('the dependency analysis changed the clone; restoring it', { session: session.id });
+    log.write('\nThe analysis agent changed files it was told to leave alone; they were thrown away.\n');
+    await this.runner.restoreWorkspace?.(state.containerId);
+  }
+
+  /**
+   * Stores the agent's plan, or the sequential fallback when `failure` says
+   * why there is none or `normalizePlan` rejects it, and writes it to the log.
+   */
+  private storePlan(
+    session: Session,
+    snapshot: PrdSnapshot,
+    log: { write(text: string): void },
+    raw: RawPlan | null,
+    failure: string | null,
+  ): void {
+    const storyIds = snapshot.stories.map((candidate) => candidate.storyId);
+    let plan = sequentialPlan(snapshot.stories);
+    let reason = failure;
+    if (raw !== null && failure === null) {
+      const normalized = normalizePlan(snapshot.stories, raw);
+      plan = normalized.plan;
+      reason = normalized.fallbackReason;
+    }
+    const source = reason === null ? 'agent' : 'fallback';
+    replaceDependencyPlan(this.db, session.id, plan, source, reason, storyIds);
+    logger.info('dependency plan stored', { session: session.id, source, reason });
+    log.write(
+      `\n${planHeadline(source, reason)}\n` +
+        describePlan(snapshot.stories, plan).map((line) => `${line}\n`).join(''),
+    );
   }
 
   /**
@@ -1496,20 +2500,33 @@ export class BuildService {
     session: Session,
     story: Story,
     state: RunState,
+    at: {
+      readonly containerId: string;
+      readonly iteration: number;
+      /** A story agent of a parallel run asks from a directory of its own (US-010). */
+      readonly askDir?: string;
+      readonly onClosed?: () => void;
+      /** True once the attempt that asked is over (US-010). */
+      readonly ended?: () => boolean;
+    },
     deadline: ExecDeadline | null,
     log: { write(text: string): void },
   ): Promise<void> {
     try {
       const decision = await this.decisions?.asked({
         session,
-        containerId: state.containerId,
+        containerId: at.containerId,
         storyId: story.storyId,
-        iteration: state.iteration,
+        iteration: at.iteration,
         deadline,
-        stopped: () => state.stopping || state.holdUntil !== null,
+        stopped: () => state.stopping || state.holdUntil !== null || at.ended?.() === true,
+        ...(at.askDir === undefined ? {} : { askDir: at.askDir }),
+        ...(at.onClosed === undefined ? {} : { onClosed: at.onClosed }),
       });
       if (decision === null || decision === undefined) return;
       log.write(`\n${decisionMessage(decision)}\n`);
+      // The story waits now and no longer counts toward the limit (US-010).
+      state.wake();
     } catch (cause) {
       // A question that could not be taken down is not a failed build: the
       // agent's own wait runs out and it carries on with its best guess.
@@ -1536,8 +2553,11 @@ export class BuildService {
    * cannot be written leaves the story where it was — the comparison after the
    * iteration has to be against reality, not against an intention.
    */
-  private markInProgress(session: Session, story: Story): StoryStatus {
-    const file = sessionPrdFile(this.config, session);
+  private markInProgress(
+    session: Session,
+    story: Story,
+    file: string = sessionPrdFile(this.config, session),
+  ): StoryStatus {
     let content: string;
     try {
       content = fs.readFileSync(file, 'utf8');
@@ -1589,10 +2609,94 @@ export class BuildService {
     };
   }
 
+  /**
+   * A story worktree's `prd.md` as its agent left it (async stories US-006).
+   *
+   * Unlike {@link readPrd} it does not sync the `stories` table: the worktree
+   * speaks for its own story only, and what it says reaches the session's PRD
+   * through the merge (US-007). The rows are the table's, each carrying the
+   * status the worktree gives it; a story the worktree no longer has is left
+   * out, exactly as a synced read would drop it.
+   */
+  private readWorktreePrd(session: Session, file: string): PrdSnapshot {
+    const document = readPrdDocument(file, prdPathFor(session.name));
+    const rows = listStories(this.db, session.id);
+    if (document.parsed === null || !document.status.parses) {
+      return { stories: rows, parsed: document.parsed, status: document.status, synced: false };
+    }
+    const statuses = new Map(document.parsed.stories.map((parsed) => [parsed.id, parsed.status]));
+    const stories: Story[] = [];
+    for (const row of rows) {
+      const status = statuses.get(row.storyId);
+      if (status !== undefined) stories.push({ ...row, status });
+    }
+    return { stories, parsed: document.parsed, status: document.status, synced: true };
+  }
+
+  /**
+   * Where this attempt at `story` works (async stories US-006).
+   *
+   * A session that may run more than one story at a time gives every story a
+   * worktree of its own, created fresh off the session branch's HEAD — so the
+   * limit is read from a fresh row, like every other per-iteration setting. A
+   * limit of 1, or a runner that cannot make worktrees, works in the clone.
+   */
+  private async storyWorkspace(
+    session: Session,
+    story: Story,
+    containerId: string,
+    attempt: number,
+  ): Promise<StoryWorkspace> {
+    const clone: StoryWorkspace = {
+      story: null,
+      branch: null,
+      prdFile: sessionPrdFile(this.config, session),
+      progressFile: sessionProgressFile(this.config, session),
+      progressStart: '',
+    };
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    if (limit <= 1 || this.runner.addStoryWorktree === undefined) return clone;
+
+    // Read before the add copies it, so the merge knows which lines are the
+    // story's own; nothing else writes the clone's copy in between.
+    const progressStart = this.readProgress(session) ?? '';
+    await this.runner.addStoryWorktree(containerId, session.name, story.storyId);
+    const workingDir = storyWorktreeDir(story.storyId);
+    // `/workspace` in the container is the session's workspace on the data
+    // volume, so the worktree's files can be read from here directly.
+    const hostDir = path.join(
+      sessionWorkspaceDir(this.config, session.id),
+      path.posix.relative(RUNNER_WORKSPACE_DIR, workingDir),
+    );
+    return {
+      story: { storyId: story.storyId, attempt, workingDir },
+      branch: storyBranch(session.name, story.storyId),
+      prdFile: path.join(hostDir, prdPathFor(session.name)),
+      progressFile: path.join(hostDir, progressPathFor(session.name)),
+      progressStart,
+    };
+  }
+
+  /**
+   * Removes an abandoned attempt's worktree and story branch (async stories
+   * US-006); nothing for an attempt that ran in the clone. Never throws.
+   */
+  private async abandonWorktree(
+    session: Session,
+    state: Pick<RunState, 'containerId'>,
+    workspace: StoryWorkspace,
+  ): Promise<void> {
+    if (workspace.story === null) return;
+    await this.runner.removeStoryWorktree?.(state.containerId, session.name, workspace.story.storyId);
+  }
+
   /** The accumulated learnings, read from the data volume; `null` if absent. */
-  private readProgress(session: Session): string | null {
+  private readProgress(
+    session: Session,
+    file: string = sessionProgressFile(this.config, session),
+  ): string | null {
     try {
-      return fs.readFileSync(sessionProgressFile(this.config, session), 'utf8');
+      return fs.readFileSync(file, 'utf8');
     } catch {
       return null;
     }
@@ -1700,9 +2804,11 @@ export class BuildService {
    * continue rather than restart, and is why a `waiting` session goes on
    * counting against the concurrency cap (US-003).
    */
-  private park(session: Session, state: RunState | null, until: string): Session {
+  private park(session: Session, state: RunState | null, until: string, redo = true): Session {
     if (state !== null) {
-      state.iteration -= 1;
+      // The iteration the hold interrupted is run again; the dependency
+      // analysis (async stories US-005) was never one, so it costs nothing.
+      if (redo) state.iteration -= 1;
       // Kept for the resume (US-006), which continues this run rather than
       // starting a new one. The `RunState` is dropped the moment the loop
       // unwinds, so this is the only thing that remembers where it got to.
@@ -1712,6 +2818,7 @@ export class BuildService {
         storyId: state.storyId,
         maxIterations: state.maxIterations,
         startedAt: state.startedAt,
+        storyAttempts: new Map(state.storyAttempts),
       });
     }
     logger.warn('build held: the agent was refused for Claude’s usage limit', {
@@ -1780,6 +2887,8 @@ export class BuildService {
 
   private toView(session: Session): BuildView {
     const state = this.runs.get(session.id);
+    const stories = listStories(this.db, session.id);
+    const origin = getDependencyPlanOrigin(this.db, session.id);
     const document = readPrdDocument(
       sessionPrdFile(this.config, session),
       prdPathFor(session.name),
@@ -1790,10 +2899,10 @@ export class BuildService {
       status: session.status,
       running: state !== undefined,
       iteration: state?.iteration ?? 0,
-      maxIterations: state?.maxIterations ?? iterationCap(remainingStories(listStories(this.db, session.id))),
+      maxIterations: state?.maxIterations ?? iterationCap(remainingStories(stories)),
       currentStoryId: state?.storyId ?? null,
       attempts: state?.attempts ?? 0,
-      stories: listStories(this.db, session.id),
+      stories,
       prd: document.status,
       lastError: session.lastError,
       failureStage: session.failureStage,
@@ -1804,9 +2913,53 @@ export class BuildService {
       queuePosition: buildQueuePosition(this.db, 'session', session.id),
       activeBuilds: this.slotsInUse().length,
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
-      decision: this.decisionView(session),
+      ...this.decisionViews(session),
       decisionTimeoutMs: this.decisions?.timeoutMs ?? null,
+      storyPlan: this.storyPlanViews(session, state, stories),
+      planSource: origin.source,
+      planReason: origin.reason,
     };
+  }
+
+  /**
+   * Where each story stands (async stories US-012). The row says `done`; the
+   * run says blocked, running or merging; the decision watcher says which
+   * story waits on the operator; and the plan says whether what is left may
+   * start. A dependency that is not a story of the PRD counts as met, as it
+   * does for {@link selectRunnableStories}.
+   */
+  private storyPlanViews(session: Session, state: RunState | undefined, stories: readonly Story[]): StoryPlanView[] {
+    const plan = getDependencyPlan(this.db, session.id);
+    const deciding = new Set(state === undefined ? [] : (this.decisions?.waitingStories(session.id) ?? []));
+    const done = new Set(stories.filter((story) => story.status === 'done').map((story) => story.storyId));
+    const known = new Set(stories.map((story) => story.storyId));
+    return stories.map((story) => {
+      const dependsOn = plan.get(story.storyId) ?? [];
+      const phase = state?.phases.get(story.storyId);
+      const standing: StoryPlanState =
+        story.status === 'done'
+          ? 'done'
+          : state?.blocked.includes(story.storyId) === true
+            ? 'blocked'
+            : deciding.has(story.storyId)
+              ? 'deciding'
+              : phase !== undefined
+                ? phase
+                : // The sequential loop keeps no phases: its one story is the current one.
+                  state !== undefined &&
+                    state.phases.size === 0 &&
+                    state.storyId === story.storyId &&
+                    story.status === 'in-progress'
+                  ? 'running'
+                  : dependsOn.some((id) => known.has(id) && !done.has(id))
+                    ? 'waiting on dependencies'
+                    : 'ready';
+      const attempts =
+        state === undefined
+          ? 0
+          : (state.storyAttempts.get(story.storyId) ?? (state.storyId === story.storyId ? state.attempts : 0));
+      return { storyId: story.storyId, dependsOn, state: standing, attempts };
+    });
   }
 
   /**
@@ -1819,10 +2972,13 @@ export class BuildService {
    * agent's own wait runs out, and that is `asked_at` plus the timeout both
    * ends were given.
    */
-  private decisionView(session: Session): DecisionView | null {
-    const open = this.decisions?.open(session.id) ?? null;
-    if (open === null) return null;
-    const waiting = this.decisions?.isWaiting(session.id) === true;
+  private decisionViews(session: Session): { decision: DecisionView | null; decisions: DecisionView[] } {
+    const decisions = (this.decisions?.openAll(session.id) ?? []).map((open) => this.decisionView(open));
+    return { decision: decisions.at(-1) ?? null, decisions };
+  }
+
+  private decisionView(open: Decision): DecisionView {
+    const waiting = this.decisions?.isPending(open.id) === true;
     const timeoutMs = this.decisions?.timeoutMs ?? null;
     return {
       id: open.id,
@@ -1846,7 +3002,7 @@ export class BuildService {
    * answer typed into a question whose agent has gone would read as accepted
    * and change nothing.
    */
-  async answerDecision(sessionId: string, answer: string): Promise<BuildView> {
+  async answerDecision(sessionId: string, answer: string, decisionId?: string): Promise<BuildView> {
     const session = this.requireSession(sessionId);
     if (this.decisions === null) {
       throw new BuildError(409, 'decisions_unavailable', 'This server cannot relay answers to a build agent.');
@@ -1862,7 +3018,7 @@ export class BuildService {
         `Keep the answer under ${String(MAX_DECISION_ANSWER_CHARS)} characters; it is a decision, not a document.`,
       );
     }
-    if (!this.decisions.isWaiting(sessionId)) {
+    if (decisionId === undefined ? !this.decisions.isWaiting(sessionId) : !this.decisions.isPending(decisionId)) {
       throw new BuildError(
         409,
         'decision_not_open',
@@ -1872,7 +3028,7 @@ export class BuildService {
 
     let answered: Decision | null;
     try {
-      answered = await this.decisions.answer(sessionId, text);
+      answered = await this.decisions.answer(sessionId, text, decisionId);
     } catch (cause) {
       throw new BuildError(502, 'decision_answer_failed', describe(cause));
     }
@@ -1993,6 +3149,36 @@ function decisionMessage(decision: Decision): string {
   );
 }
 
+/** The pid file and log section of the dependency analysis: before iteration 1. */
+const ANALYSIS_ITERATION = 0;
+
+/** The analysis agent's own fixed budget (async stories US-005). */
+export const DEPENDENCY_ANALYSIS_TIMEOUT_MS = 30 * 60_000;
+
+/** The build log's account of what a run cleared before it started (async stories US-011). */
+function recoveryLines(recovery: StoryWorkspaceRecovery, reset: readonly Story[]): string[] {
+  const lines = ['Recovered what the previous run left behind:'];
+  if (recovery.abortedMerge) lines.push('- aborted the story merge that was in progress in the clone');
+  if (recovery.worktrees.length > 0) lines.push(`- removed the worktrees of ${recovery.worktrees.join(', ')}`);
+  if (recovery.branches.length > 0) lines.push(`- deleted ${recovery.branches.join(', ')}`);
+  if (reset.length > 0) {
+    lines.push(
+      `- back to todo, starting again from the session branch: ${reset.map((story) => story.storyId).join(', ')}`,
+    );
+  }
+  if (recovery.error !== null) lines.push(`- not everything could be cleared: ${recovery.error}`);
+  return lines;
+}
+
+/** `Dependency plan: agent`, or `Dependency plan: fallback (<reason>)`. */
+function planHeadline(source: DependencyPlanSource, reason: string | null): string {
+  return source === 'agent' ? 'Dependency plan: agent' : `Dependency plan: fallback (${reason ?? 'no reason given'})`;
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
 function holdMessage(until: string): string {
   return (
     'Claude’s usage limit was reached, so this build is held until ' +
@@ -2047,6 +3233,14 @@ function stalledMessage(story: Story, attempts: number, result: AgentResult): st
     `${story.storyId} ("${story.title}") made no progress in ${String(attempts)} attempts: ` +
     `no commit was made and its status in prd.md did not change. On the last attempt ${how}.` +
     (tail === '' ? '' : `\n\n${tail}`)
+  );
+}
+
+/** The failure of a story whose last attempt finished but could not be merged (US-008). */
+function mergeFailedMessage(story: Story, attempts: number, reason: string): string {
+  return (
+    `${story.storyId} ("${story.title}") could not be finished in ${String(attempts)} attempts. ` +
+    `On the last attempt the story was done in its worktree, but ${reason}.`
   );
 }
 

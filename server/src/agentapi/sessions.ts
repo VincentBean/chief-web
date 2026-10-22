@@ -100,6 +100,9 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
         ...(parsed.openPullRequest === undefined
           ? {}
           : { openPullRequest: parsed.openPullRequest }),
+        ...(parsed.maxParallelStories === undefined
+          ? {}
+          : { maxParallelStories: parsed.maxParallelStories }),
         pendingPrd: prd,
       })
       .then(async ({ session, setup }) => {
@@ -114,6 +117,7 @@ export function createAgentSession(db: Database, deps: AgentSessionDeps): Reques
             status: session.status,
             branch: session.featureBranch,
             scheduledStartAt: session.scheduledStartAt,
+            maxParallelStories: session.maxParallelStories,
           },
           setup: { ok: setup.ok, message: setup.message },
           prdWritten,
@@ -184,6 +188,7 @@ export function readAgentSession(db: Database, deps: Pick<AgentSessionDeps, 'con
         setupError: session.lastError,
         scheduledStartAt: session.scheduledStartAt,
         pullRequestUrl: session.prUrl,
+        maxParallelStories: session.maxParallelStories,
         queued: getQueuedBuild(db, 'session', session.id) !== null,
         queuePosition: buildQueuePosition(db, 'session', session.id),
       },

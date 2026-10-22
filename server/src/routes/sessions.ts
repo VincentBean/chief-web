@@ -4,6 +4,9 @@ import {
   EFFORT_LEVELS,
   type EffortLevel,
   isEffortLevel,
+  isValidMaxParallelStories,
+  MAX_PARALLEL_STORIES,
+  MIN_PARALLEL_STORIES,
   PR_TARGET_BRANCHES,
   type PrTargetBranch,
   SESSION_NAME_PATTERN,
@@ -163,6 +166,22 @@ export function createSessionsRouter(sessions: SessionService): Router {
     }
     try {
       res.status(200).json(sessions.setEffort(req.params.id, parsed.effort));
+    } catch (cause: unknown) {
+      respondWithFailure(res, cause);
+    }
+  });
+
+  // Sets how many stories of the session run at once (async stories US-001).
+  // Refused once every story is behind the session; a change during a build
+  // applies from the next story the scheduler starts.
+  router.put('/sessions/:id/max-parallel-stories', (req, res) => {
+    const parsed = parseSetMaxParallelStories(req.body);
+    if ('error' in parsed) {
+      res.status(400).json(parsed);
+      return;
+    }
+    try {
+      res.status(200).json(sessions.setMaxParallelStories(req.params.id, parsed.maxParallelStories));
     } catch (cause: unknown) {
       respondWithFailure(res, cause);
     }
@@ -355,6 +374,34 @@ function parseSetClaudeAccount(body: unknown): { claudeAccountId: string | null 
   return { claudeAccountId: parsed.claudeAccountId };
 }
 
+const INVALID_MAX_PARALLEL_STORIES: Invalid = {
+  error: 'invalid_max_parallel_stories',
+  message: `maxParallelStories must be an integer from ${MIN_PARALLEL_STORIES} to ${MAX_PARALLEL_STORIES}.`,
+};
+
+/** Absent means "the default"; anything present, `null` included, must be 1–10. */
+function parseMaxParallelStories(
+  input: Record<string, unknown>,
+): { maxParallelStories?: number } | Invalid {
+  const raw = input.maxParallelStories;
+  if (raw === undefined) return {};
+  if (!isValidMaxParallelStories(raw)) return INVALID_MAX_PARALLEL_STORIES;
+  return { maxParallelStories: raw };
+}
+
+/** The body of `PUT /sessions/:id/max-parallel-stories`: the field is required. */
+function parseSetMaxParallelStories(body: unknown): { maxParallelStories: number } | Invalid {
+  const badBody = invalidBody(body);
+  if (badBody) return { ...badBody, error: 'invalid_max_parallel_stories' };
+
+  const parsed = parseMaxParallelStories(body as Record<string, unknown>);
+  if ('error' in parsed) return parsed;
+  if (parsed.maxParallelStories === undefined) {
+    return { ...INVALID_MAX_PARALLEL_STORIES, message: 'maxParallelStories is required.' };
+  }
+  return { maxParallelStories: parsed.maxParallelStories };
+}
+
 /** Absent and `null` both mean "use the default account"; anything else must be a string id. */
 function parseClaudeAccountId(
   input: Record<string, unknown>,
@@ -482,6 +529,9 @@ export function parseCreate(body: unknown): CreateSessionRequest | Invalid {
   const claudeAccount = parseClaudeAccountId(input);
   if ('error' in claudeAccount) return claudeAccount;
 
+  const maxParallelStories = parseMaxParallelStories(input);
+  if ('error' in maxParallelStories) return maxParallelStories;
+
   return {
     repositoryId,
     name,
@@ -496,6 +546,7 @@ export function parseCreate(body: unknown): CreateSessionRequest | Invalid {
     ...(feedback === undefined ? {} : { feedback }),
     ...effort,
     ...claudeAccount,
+    ...maxParallelStories,
   };
 }
 

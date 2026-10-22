@@ -45,12 +45,12 @@ export function createBuildRouter(builds: BuildService): Router {
    */
   router.post('/sessions/:id/decision', (req, res) => {
     const answer = parseAnswer(req.body);
-    if (typeof answer !== 'string') {
+    if ('error' in answer) {
       res.status(400).json(answer);
       return;
     }
     builds
-      .answerDecision(req.params.id, answer)
+      .answerDecision(req.params.id, answer.answer, answer.decisionId)
       .then((view) => res.status(200).json(view))
       .catch((cause: unknown) => respondWithFailure(res, cause));
   });
@@ -66,7 +66,9 @@ export function createBuildRouter(builds: BuildService): Router {
 }
 
 /** The answer, or the refusal to show; the length cap is the service's. */
-function parseAnswer(body: unknown): string | { error: string; message: string } {
+function parseAnswer(
+  body: unknown,
+): { answer: string; decisionId?: string } | { error: string; message: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { error: 'invalid_body', message: 'Expected a JSON object with an `answer`.' };
   }
@@ -74,7 +76,14 @@ function parseAnswer(body: unknown): string | { error: string; message: string }
   if (typeof answer !== 'string') {
     return { error: 'invalid_answer', message: 'answer must be a string.' };
   }
-  return answer;
+  // Which question, when a parallel run has several open (async stories
+  // US-010); without it, the newest.
+  const decisionId = (body as Record<string, unknown>)['decisionId'];
+  if (decisionId === undefined) return { answer };
+  if (typeof decisionId !== 'string' || decisionId === '') {
+    return { error: 'invalid_decision_id', message: 'decisionId must be a non-empty string.' };
+  }
+  return { answer, decisionId };
 }
 
 function respondWithFailure(res: Response, cause: unknown): void {

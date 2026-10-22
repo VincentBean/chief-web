@@ -1,4 +1,4 @@
-import type { Story, StoryStatus } from '../db/index.js';
+import type { DependencyPlan, Story, StoryStatus } from '../db/index.js';
 
 /**
  * The decisions the Ralph loop makes, as pure functions (US-013).
@@ -34,6 +34,54 @@ export function selectNextStory(stories: readonly Story[]): Story | null {
   }
   return next;
 }
+
+/**
+ * The stories a parallel build may start now (async stories US-004).
+ *
+ * `active` holds the ids of stories whose agent is working or being merged;
+ * they take a place under `limit`. `waiting` holds the ids of stories whose
+ * agent is blocked on an open `ask_operator` question: they are not started
+ * again, but they do not take a place, so another story may run in theirs.
+ * `blocked` holds the ids of stories that used up their retries (US-010);
+ * neither they nor anything depending on them is started, since a blocked
+ * story is never `done`.
+ *
+ * A story qualifies when it is not `done`, in none of those lists, and every
+ * story it depends on is `done`. A dependency on a story that is no longer in
+ * the PRD counts as satisfied: there is nothing left to wait for. A story
+ * missing from `plan` has no dependencies.
+ *
+ * Qualifying stories come lowest priority number first, story id breaking
+ * ties, and no more than `limit - active.length` of them. A limit lowered below
+ * the number running returns nothing; stopping anyone is not this function's
+ * call.
+ */
+export function selectRunnableStories(
+  stories: readonly Story[],
+  plan: DependencyPlan,
+  active: readonly string[],
+  waiting: readonly string[],
+  limit: number,
+  blocked: readonly string[] = [],
+): Story[] {
+  const free = limit - active.length;
+  if (free <= 0) return [];
+  const statusOf = new Map(stories.map((story) => [story.storyId, story.status]));
+  const excluded = new Set([...active, ...waiting, ...blocked]);
+  return stories
+    .filter(
+      (story) =>
+        story.status !== 'done' &&
+        !excluded.has(story.storyId) &&
+        (plan.get(story.storyId) ?? []).every((dependency) => {
+          const status = statusOf.get(dependency);
+          return status === undefined || status === 'done';
+        }),
+    )
+    .sort((a, b) => a.priority - b.priority || (a.storyId < b.storyId ? -1 : a.storyId > b.storyId ? 1 : 0))
+    .slice(0, free);
+}
+
 
 export function remainingStories(stories: readonly Story[]): number {
   return stories.filter((story) => story.status !== 'done').length;
