@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 import type { Config } from '../config.js';
 import {
@@ -45,11 +46,13 @@ import {
 import { ExecDeadline } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
+import { sessionWorkspaceDir } from '../orchestrator/index.js';
 import {
   type ParsedPrd,
   type PrdStatus,
   type PrdStory,
   prdPathFor,
+  progressPathFor,
   readPrdDocument,
   setStoryStatus,
 } from '../prd/index.js';
@@ -72,6 +75,7 @@ import {
   getStoredAdvisorModel,
   isAdvisorModel,
 } from '../settings/index.js';
+import { type StoryTarget, storyBranch, storyWorktreeDir } from './agent.js';
 import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
 import { type BuildLogs, NullBuildLogs } from './log.js';
 import {
@@ -84,6 +88,7 @@ import {
 import { describePlan, normalizePlan, parseDependencyAnswer, type RawPlan, sequentialPlan } from './plan.js';
 import { agentPrompt, dependencyAnalysisPrompt } from './prompts.js';
 import type { AgentResult, AgentRunner } from './runner.js';
+import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import type { VoiceEventSink } from '../voice/events.js';
 
 /**
@@ -271,6 +276,20 @@ interface ParkedRun {
   readonly storyId: string | null;
   readonly maxIterations: number;
   readonly startedAt: string;
+}
+
+/**
+ * Where one story attempt works (async stories US-006): the clone, or — for a
+ * session that runs stories in parallel — the story's own worktree. The files
+ * are host paths on the data volume.
+ */
+interface StoryWorkspace {
+  /** The worktree the agent runs in; `null` for the clone. */
+  readonly story: StoryTarget | null;
+  /** `chief-story/<session>/<story-id>`; `null` for the clone. */
+  readonly branch: string | null;
+  readonly prdFile: string;
+  readonly progressFile: string;
 }
 
 /** What one re-read of `prd.md` produced. */
@@ -1280,8 +1299,13 @@ export class BuildService {
     // chief marks the story in-progress before invoking the agent, and so does
     // this: the status the loop leaves behind is what the *next* read is
     // compared against, so the loop can never mistake its own write for work.
-    const before = this.markInProgress(session, story);
-    const headBefore = await this.runner.headSha(state.containerId);
+    //
+    // A parallel session's story runs in a worktree of its own (async stories
+    // US-006), so everything below — the mark, HEAD, the prompt's paths, the
+    // read-back — is that worktree's rather than the clone's.
+    const workspace = await this.storyWorkspace(session, story, state);
+    const before = this.markInProgress(session, story, workspace.prdFile);
+    const headBefore = await this.runner.headSha(state.containerId, workspace.story?.workingDir);
 
     logger.info('build iteration started', {
       session: session.id,
@@ -1331,8 +1355,12 @@ export class BuildService {
           story: promptStory(story, snapshot.parsed),
           timeoutMs,
           prd: snapshot.parsed,
-          progress: this.readProgress(session),
+          progress: this.readProgress(session, workspace.progressFile),
           canAsk: mcpConfigFile !== null,
+          worktree:
+            workspace.story === null || workspace.branch === null
+              ? null
+              : { dir: workspace.story.workingDir, branch: workspace.branch },
         }),
         timeoutMs,
         model: buildModel,
@@ -1340,6 +1368,7 @@ export class BuildService {
         effort: effort?.level ?? null,
         mcpConfigFile,
         deadline,
+        story: workspace.story,
         onOutput: (text) => log.write(text),
         onToolCall: (call) => {
           if (call.name !== ASK_OPERATOR_TOOL) return;
@@ -1354,6 +1383,7 @@ export class BuildService {
       // iteration ended (decisions US-007).
       this.decisions?.abandon(session.id);
       log.end(null);
+      await this.abandonWorktree(session, state, workspace);
       throw cause;
     }
     this.decisions?.abandon(session.id);
@@ -1368,7 +1398,8 @@ export class BuildService {
       const held = state.holdUntil;
       log.write(`\n${holdMessage(held)}\n`);
       log.end(result.exitCode);
-      await this.runner.reap(session.id, state.containerId);
+      await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
+      await this.abandonWorktree(session, state, workspace);
       if (state.stopping) this.returnToReady(session);
       else this.park(session, state, held);
       return false;
@@ -1391,7 +1422,8 @@ export class BuildService {
       // The same reasoning as the timeout path: the loop is walking away from
       // this exec, and whatever the CLI left behind in the container must not
       // still be holding the workspace when the session resumes into it.
-      await this.runner.reap(session.id, state.containerId);
+      await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
+      await this.abandonWorktree(session, state, workspace);
 
       // "Stop build" pressed while the refused iteration was in flight still
       // wins — the hold is armed either way, because the limit is on the
@@ -1422,14 +1454,14 @@ export class BuildService {
     //
     // It happens before HEAD and the PRD are read back, so what the iteration
     // is judged on is a workspace nothing is still writing to.
-    if (result.timedOut) await this.runner.reap(session.id, state.containerId);
+    if (result.timedOut) await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
 
     // The bookkeeping happens even when the operator pressed "Stop build"
     // while this iteration was running: the agent may well have committed the
     // story before it was signalled, and that has to be recorded before the
     // run unwinds or the work loses its commit.
-    const headAfter = await this.runner.headSha(state.containerId);
-    const after = this.readPrd(session);
+    const headAfter = await this.runner.headSha(state.containerId, workspace.story?.workingDir);
+    const after = workspace.story === null ? this.readPrd(session) : this.readWorktreePrd(session, workspace.prdFile);
     const updated = after.stories.find((candidate) => candidate.storyId === story.storyId) ?? null;
     const change = classifyIteration(
       before,
@@ -1441,6 +1473,9 @@ export class BuildService {
     if (change.commitSha !== null && updated !== null) {
       updateStory(this.db, session.id, story.storyId, { commitSha: change.commitSha });
     }
+    // A finished story's worktree waits for its merge (US-007), which removes
+    // it; any other ending abandons this attempt, and a retry starts afresh.
+    if (updated?.status !== 'done') await this.abandonWorktree(session, state, workspace);
 
     // A story the agent finished is pushed straight away, so what `origin` has
     // is never more than one story behind what the container has — including
@@ -1728,8 +1763,11 @@ export class BuildService {
    * cannot be written leaves the story where it was — the comparison after the
    * iteration has to be against reality, not against an intention.
    */
-  private markInProgress(session: Session, story: Story): StoryStatus {
-    const file = sessionPrdFile(this.config, session);
+  private markInProgress(
+    session: Session,
+    story: Story,
+    file: string = sessionPrdFile(this.config, session),
+  ): StoryStatus {
     let content: string;
     try {
       content = fs.readFileSync(file, 'utf8');
@@ -1781,10 +1819,80 @@ export class BuildService {
     };
   }
 
+  /**
+   * A story worktree's `prd.md` as its agent left it (async stories US-006).
+   *
+   * Unlike {@link readPrd} it does not sync the `stories` table: the worktree
+   * speaks for its own story only, and what it says reaches the session's PRD
+   * through the merge (US-007). The rows are the table's, each carrying the
+   * status the worktree gives it; a story the worktree no longer has is left
+   * out, exactly as a synced read would drop it.
+   */
+  private readWorktreePrd(session: Session, file: string): PrdSnapshot {
+    const document = readPrdDocument(file, prdPathFor(session.name));
+    const rows = listStories(this.db, session.id);
+    if (document.parsed === null || !document.status.parses) {
+      return { stories: rows, parsed: document.parsed, status: document.status, synced: false };
+    }
+    const statuses = new Map(document.parsed.stories.map((parsed) => [parsed.id, parsed.status]));
+    const stories: Story[] = [];
+    for (const row of rows) {
+      const status = statuses.get(row.storyId);
+      if (status !== undefined) stories.push({ ...row, status });
+    }
+    return { stories, parsed: document.parsed, status: document.status, synced: true };
+  }
+
+  /**
+   * Where this attempt at `story` works (async stories US-006).
+   *
+   * A session that may run more than one story at a time gives every story a
+   * worktree of its own, created fresh off the session branch's HEAD — so the
+   * limit is read from a fresh row, like every other per-iteration setting. A
+   * limit of 1, or a runner that cannot make worktrees, works in the clone.
+   */
+  private async storyWorkspace(session: Session, story: Story, state: RunState): Promise<StoryWorkspace> {
+    const clone: StoryWorkspace = {
+      story: null,
+      branch: null,
+      prdFile: sessionPrdFile(this.config, session),
+      progressFile: sessionProgressFile(this.config, session),
+    };
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    if (limit <= 1 || this.runner.addStoryWorktree === undefined) return clone;
+
+    await this.runner.addStoryWorktree(state.containerId, session.name, story.storyId);
+    const workingDir = storyWorktreeDir(story.storyId);
+    // `/workspace` in the container is the session's workspace on the data
+    // volume, so the worktree's files can be read from here directly.
+    const hostDir = path.join(
+      sessionWorkspaceDir(this.config, session.id),
+      path.posix.relative(RUNNER_WORKSPACE_DIR, workingDir),
+    );
+    return {
+      story: { storyId: story.storyId, attempt: state.attempts + 1, workingDir },
+      branch: storyBranch(session.name, story.storyId),
+      prdFile: path.join(hostDir, prdPathFor(session.name)),
+      progressFile: path.join(hostDir, progressPathFor(session.name)),
+    };
+  }
+
+  /**
+   * Removes an abandoned attempt's worktree and story branch (async stories
+   * US-006); nothing for an attempt that ran in the clone. Never throws.
+   */
+  private async abandonWorktree(session: Session, state: RunState, workspace: StoryWorkspace): Promise<void> {
+    if (workspace.story === null) return;
+    await this.runner.removeStoryWorktree?.(state.containerId, session.name, workspace.story.storyId);
+  }
+
   /** The accumulated learnings, read from the data volume; `null` if absent. */
-  private readProgress(session: Session): string | null {
+  private readProgress(
+    session: Session,
+    file: string = sessionProgressFile(this.config, session),
+  ): string | null {
     try {
-      return fs.readFileSync(sessionProgressFile(this.config, session), 'utf8');
+      return fs.readFileSync(file, 'utf8');
     } catch {
       return null;
     }

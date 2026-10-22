@@ -1,4 +1,6 @@
 import type { ExecSpec } from '../docker/index.js';
+import { prdDirFor } from '../prd/index.js';
+import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
 import { agentCommand } from './prompts.js';
 
@@ -32,6 +34,23 @@ export const AGENT_PID_DIR = '/tmp/.chief-build';
  */
 export function agentPidFile(sessionId: string, iteration: number): string {
   return `${AGENT_PID_DIR}/${sessionId}-${String(iteration)}.pid`;
+}
+
+/**
+ * One pid file per story *attempt* (async stories US-006): with several story
+ * agents in one container, stop, a timeout's reap and the restart sweep each
+ * have to be able to aim at one story's agent and leave the others alone.
+ *
+ * Still under {@link agentPidGlob}, so the session-wide sweep finds it. It can
+ * never be mistaken for an iteration's file: a story id is not a number.
+ */
+export function storyAgentPidFile(sessionId: string, storyId: string, attempt: number): string {
+  return `${AGENT_PID_DIR}/${sessionId}-${storyId}-${String(attempt)}.pid`;
+}
+
+/** Every attempt's pid file of one story; a shell glob, not a path. */
+export function storyAgentPidGlob(sessionId: string, storyId: string): string {
+  return `${AGENT_PID_DIR}/${sessionId}-${storyId}-*.pid`;
 }
 
 /**
@@ -81,7 +100,20 @@ export function wrapWithPidFile(dir: string, file: string, label: string, comman
   return ['/bin/sh', '-c', `mkdir -p ${dir} 2>/dev/null; echo $$ > ${file}; exec "$@"`, label, ...command];
 }
 
-/** One headless `claude -p` iteration, in the clone. */
+/**
+ * Where a story agent runs when it does not run in the clone (async stories
+ * US-006): its own worktree, and a pid file keyed on the story and attempt.
+ */
+export interface StoryTarget {
+  readonly storyId: string;
+  readonly attempt: number;
+  readonly workingDir: string;
+}
+
+/**
+ * One headless `claude -p` iteration: in the clone, or — given a `story` — in
+ * that story's worktree.
+ */
 export function agentExecSpec(
   sessionId: string,
   iteration: number,
@@ -90,10 +122,15 @@ export function agentExecSpec(
   advisor?: string | null,
   effort?: string | null,
   mcpConfigFile?: string | null,
+  story?: StoryTarget | null,
 ): ExecSpec {
+  const command = agentCommand(prompt, model, advisor, effort, mcpConfigFile);
   return {
-    cmd: wrapAgentCommand(sessionId, iteration, agentCommand(prompt, model, advisor, effort, mcpConfigFile)),
-    workingDir: CONTAINER_REPO_DIR,
+    cmd:
+      story == null
+        ? wrapAgentCommand(sessionId, iteration, command)
+        : wrapWithPidFile(AGENT_PID_DIR, storyAgentPidFile(sessionId, story.storyId, story.attempt), 'chief-build', command),
+    workingDir: story?.workingDir ?? CONTAINER_REPO_DIR,
   };
 }
 
@@ -122,9 +159,11 @@ export function agentExecSpec(
 export function agentSignalSpec(
   sessionId: string,
   signal: string,
-  options: { readonly remove?: boolean } = {},
+  options: { readonly remove?: boolean; readonly storyId?: string | null | undefined } = {},
 ): ExecSpec {
-  return pidFileSignalSpec(agentPidGlob(sessionId), signal, options);
+  // With a story id, only that story's agents (async stories US-006).
+  const glob = options.storyId == null ? agentPidGlob(sessionId) : storyAgentPidGlob(sessionId, options.storyId);
+  return pidFileSignalSpec(glob, signal, options.remove === undefined ? {} : { remove: options.remove });
 }
 
 /**
@@ -156,9 +195,98 @@ export function pidFileSignalSpec(
   };
 }
 
-/** `git rev-parse HEAD` in the clone; the loop's evidence that a commit landed. */
-export function headShaSpec(): ExecSpec {
-  return { cmd: ['git', 'rev-parse', 'HEAD'], workingDir: CONTAINER_REPO_DIR };
+/**
+ * `git rev-parse HEAD` in the clone, or in a story's worktree; the loop's
+ * evidence that a commit landed.
+ */
+export function headShaSpec(workingDir: string = CONTAINER_REPO_DIR): ExecSpec {
+  return { cmd: ['git', 'rev-parse', 'HEAD'], workingDir };
+}
+
+/** Where the story worktrees live inside the container (async stories US-006). */
+export const WORKTREES_DIR = `${RUNNER_WORKSPACE_DIR}/worktrees`;
+
+/** `/workspace/worktrees/<story-id>`: one story's own checkout. */
+export function storyWorktreeDir(storyId: string): string {
+  return `${WORKTREES_DIR}/${storyId}`;
+}
+
+/** `chief-story/<session-name>/<story-id>`: the branch a story commits on. */
+export function storyBranch(sessionName: string, storyId: string): string {
+  return `chief-story/${sessionName}/${storyId}`;
+}
+
+/**
+ * The `.git/info/exclude` line for the worktrees directory. It sits beside the
+ * clone, not in it, so git would not see it anyway; the line makes sure of it
+ * should the layout ever change.
+ */
+export const WORKTREES_EXCLUDE = '/worktrees/';
+
+/**
+ * Removes the worktree and deletes the branch, whatever state either is in:
+ * the remove of a merged or abandoned story, and the "leftover from an earlier
+ * run" clean-up in front of every add.
+ */
+const REMOVE_WORKTREE_SCRIPT = `git worktree remove --force "$CHIEF_WORKTREE" 2>/dev/null || true
+rm -rf "$CHIEF_WORKTREE"
+git worktree prune
+git branch -D "$CHIEF_STORY_BRANCH" >/dev/null 2>&1 || true`;
+
+/**
+ * Creates the worktree a parallel story runs in (async stories US-006), off the
+ * session branch's HEAD in `/workspace/repo`.
+ *
+ * `.chief/` is never committed, so a fresh worktree has no `prd.md` and no
+ * `progress.md`: both are copied in from the clone, because the agent updates
+ * the worktree's copies and chief-web reads them back from there. A feedback
+ * session's screenshots come along; the live `agent.log` does not.
+ *
+ * Every value goes in through the environment, as in session setup, so nothing
+ * from a session name is ever parsed as shell.
+ */
+export function addStoryWorktreeSpec(sessionName: string, storyId: string): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `set -e
+mkdir -p .git/info
+grep -qxF "$CHIEF_EXCLUDE" .git/info/exclude 2>/dev/null || echo "$CHIEF_EXCLUDE" >> .git/info/exclude
+${REMOVE_WORKTREE_SCRIPT}
+mkdir -p "$CHIEF_WORKTREES"
+base=$(git rev-parse --verify HEAD)
+git worktree add "$CHIEF_WORKTREE" -b "$CHIEF_STORY_BRANCH" "$base"
+mkdir -p "$CHIEF_WORKTREE/$CHIEF_PRD_DIR"
+for file in prd.md progress.md; do
+    if [ -f "$CHIEF_PRD_DIR/$file" ]; then cp "$CHIEF_PRD_DIR/$file" "$CHIEF_WORKTREE/$CHIEF_PRD_DIR/$file"; fi
+done
+if [ -d "$CHIEF_PRD_DIR/screenshots" ]; then cp -R "$CHIEF_PRD_DIR/screenshots" "$CHIEF_WORKTREE/$CHIEF_PRD_DIR/"; fi`,
+    ],
+    env: [
+      ...worktreeEnv(sessionName, storyId),
+      `CHIEF_WORKTREES=${WORKTREES_DIR}`,
+      `CHIEF_PRD_DIR=${prdDirFor(sessionName)}`,
+      `CHIEF_EXCLUDE=${WORKTREES_EXCLUDE}`,
+    ],
+    workingDir: CONTAINER_REPO_DIR,
+  };
+}
+
+/**
+ * `git worktree remove --force` and `git branch -D` for a story that was merged
+ * or abandoned (async stories US-006).
+ */
+export function removeStoryWorktreeSpec(sessionName: string, storyId: string): ExecSpec {
+  return {
+    cmd: ['/bin/sh', '-c', REMOVE_WORKTREE_SCRIPT],
+    env: worktreeEnv(sessionName, storyId),
+    workingDir: CONTAINER_REPO_DIR,
+  };
+}
+
+function worktreeEnv(sessionName: string, storyId: string): string[] {
+  return [`CHIEF_WORKTREE=${storyWorktreeDir(storyId)}`, `CHIEF_STORY_BRANCH=${storyBranch(sessionName, storyId)}`];
 }
 
 /**

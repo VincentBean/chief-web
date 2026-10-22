@@ -2,11 +2,14 @@ import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../d
 import { logger } from '../lib/logger.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import {
+  addStoryWorktreeSpec,
   AGENT_SIGNALLED,
   agentExecSpec,
   agentSignalSpec,
   headShaSpec,
+  removeStoryWorktreeSpec,
   restoreWorkspaceSpec,
+  type StoryTarget,
   workspaceStatusSpec,
 } from './agent.js';
 import { type AgentToolCall, AgentOutputFormatter } from './stream.js';
@@ -70,6 +73,12 @@ export interface AgentInvocation {
    * block the stream — anything slow belongs in a promise of its own.
    */
   readonly onToolCall?: (call: AgentToolCall) => void;
+  /**
+   * The story worktree to run in (async stories US-006). Given one, the agent
+   * runs there and records its pid under the story and attempt instead of the
+   * iteration; `null`/absent runs it in the clone, as always.
+   */
+  readonly story?: StoryTarget | null;
 }
 
 export interface AgentResult {
@@ -94,15 +103,21 @@ export interface AgentExecutor extends SessionExecutor {
 export interface AgentRunner {
   /** Runs one iteration to completion. Rejects only if the daemon does. */
   run(invocation: AgentInvocation): Promise<AgentResult>;
-  /** Signals the running agent so it can shut down; never throws. */
-  stop(sessionId: string, containerId: string): Promise<void>;
+  /**
+   * Signals the running agent so it can shut down; never throws. With a
+   * `storyId`, only that story's agent (async stories US-006).
+   */
+  stop(sessionId: string, containerId: string, storyId?: string | null): Promise<void>;
   /**
    * Leaves no agent of this session running, whatever it takes: signalled,
    * given a moment, then killed. Never throws.
    */
-  reap(sessionId: string, containerId: string): Promise<void>;
-  /** HEAD of the clone, or `null` when there is no commit to read. */
-  headSha(containerId: string): Promise<string | null>;
+  reap(sessionId: string, containerId: string, storyId?: string | null): Promise<void>;
+  /**
+   * HEAD of the clone — or of the worktree at `workingDir` — or `null` when
+   * there is no commit to read.
+   */
+  headSha(containerId: string, workingDir?: string): Promise<string | null>;
   /**
    * `git status --porcelain` of the clone, `.chief/` aside, or `null` when it
    * could not be read (async stories US-005). Optional: a runner without it
@@ -111,6 +126,15 @@ export interface AgentRunner {
   workspaceStatus?(containerId: string): Promise<string | null>;
   /** `git checkout -- . && git clean -fd`, `.chief/` aside. Never throws. */
   restoreWorkspace?(containerId: string): Promise<void>;
+  /**
+   * Creates `/workspace/worktrees/<story-id>` on `chief-story/<session>/<story-id>`
+   * off the session branch's HEAD, after removing any leftover of either, and
+   * copies the PRD in (async stories US-006). Rejects when it could not.
+   * Optional: a runner without it runs every story in the clone.
+   */
+  addStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /** Removes a merged or abandoned story's worktree and branch. Never throws. */
+  removeStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
 }
 
 /** The {@link AgentRunner} that actually execs into the session container. */
@@ -130,6 +154,7 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.advisor,
       invocation.effort,
       invocation.mcpConfigFile,
+      invocation.story,
     );
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
@@ -167,10 +192,10 @@ export class ContainerAgentRunner implements AgentRunner {
     return { exitCode: result.exitCode, output, timedOut: result.timedOut };
   }
 
-  async stop(sessionId: string, containerId: string): Promise<void> {
+  async stop(sessionId: string, containerId: string, storyId?: string | null): Promise<void> {
     // SIGTERM only: the agent is mid-edit in a real working copy, and killing
     // it outright is how a half-written file survives into the next iteration.
-    await this.exec.runExec(containerId, agentSignalSpec(sessionId, 'TERM'), SIGNAL_TIMEOUT_MS);
+    await this.exec.runExec(containerId, agentSignalSpec(sessionId, 'TERM', { storyId }), SIGNAL_TIMEOUT_MS);
   }
 
   /**
@@ -186,11 +211,11 @@ export class ContainerAgentRunner implements AgentRunner {
    * in a real working copy. What is different here is that its answer is no
    * longer wanted, so the grace period is short and SIGKILL is the end of it.
    */
-  async reap(sessionId: string, containerId: string): Promise<void> {
+  async reap(sessionId: string, containerId: string, storyId?: string | null): Promise<void> {
     try {
       const termed = await this.exec.runExec(
         containerId,
-        agentSignalSpec(sessionId, 'TERM'),
+        agentSignalSpec(sessionId, 'TERM', { storyId }),
         SIGNAL_TIMEOUT_MS,
       );
       // Nothing was running: the sweep before a run and the one after a stop
@@ -204,7 +229,7 @@ export class ContainerAgentRunner implements AgentRunner {
       // sweep would aim at a recycled pid.
       await this.exec.runExec(
         containerId,
-        agentSignalSpec(sessionId, 'KILL', { remove: true }),
+        agentSignalSpec(sessionId, 'KILL', { remove: true, storyId }),
         SIGNAL_TIMEOUT_MS,
       );
     } catch (cause) {
@@ -217,8 +242,8 @@ export class ContainerAgentRunner implements AgentRunner {
     }
   }
 
-  async headSha(containerId: string): Promise<string | null> {
-    const result = await this.exec.runExec(containerId, headShaSpec(), HEAD_TIMEOUT_MS);
+  async headSha(containerId: string, workingDir?: string): Promise<string | null> {
+    const result = await this.exec.runExec(containerId, headShaSpec(workingDir), HEAD_TIMEOUT_MS);
     if (result.exitCode !== 0 || result.timedOut) return null;
     const sha = result.stdout.trim();
     return sha === '' ? null : sha;
@@ -247,11 +272,48 @@ export class ContainerAgentRunner implements AgentRunner {
       });
     }
   }
+
+  async addStoryWorktree(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    const result = await this.exec.runExec(containerId, addStoryWorktreeSpec(sessionName, storyId), WORKTREE_TIMEOUT_MS);
+    if (result.timedOut) throw new Error(`creating the worktree of ${storyId} timed out`);
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.trim();
+      throw new Error(
+        `creating the worktree of ${storyId} failed (exit ${String(result.exitCode)})${stderr === '' ? '' : `: ${stderr}`}`,
+      );
+    }
+  }
+
+  async removeStoryWorktree(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    try {
+      const result = await this.exec.runExec(
+        containerId,
+        removeStoryWorktreeSpec(sessionName, storyId),
+        WORKTREE_TIMEOUT_MS,
+      );
+      if (result.exitCode !== 0 || result.timedOut) {
+        logger.warn('could not remove a story worktree', {
+          container: containerId,
+          story: storyId,
+          exitCode: result.exitCode,
+          stderr: result.stderr.trim(),
+        });
+      }
+    } catch (cause) {
+      logger.warn('could not remove a story worktree', {
+        container: containerId,
+        story: storyId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
 }
 
 /** A clone with no commits at all answers nothing; neither takes long. */
 const HEAD_TIMEOUT_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 15_000;
+/** A worktree is a checkout of the whole tree; a big repository takes a while. */
+const WORKTREE_TIMEOUT_MS = 120_000;
 
 /**
  * The pause between a reap's SIGTERM and its SIGKILL. Long enough for the CLI

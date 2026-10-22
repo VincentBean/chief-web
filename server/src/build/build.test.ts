@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,10 +49,13 @@ import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/inde
 import { planRetry } from '../recovery/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
 import {
+  addStoryWorktreeSpec,
   AGENT_SIGNALLED,
   agentPidFile,
   agentPidGlob,
   agentSignalSpec,
+  removeStoryWorktreeSpec,
+  storyAgentPidFile,
   wrapAgentCommand,
 } from './agent.js';
 import {
@@ -517,6 +521,13 @@ class MockRunner implements AgentRunner {
   /** The clone as `git status` sees it; absent, like a runner that cannot look. */
   workspaceStatus?: (containerId: string) => Promise<string | null>;
   restoreWorkspace?: (containerId: string) => Promise<void>;
+  /** Story worktrees (async stories US-006); absent, every story runs in the clone. */
+  addStoryWorktree?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
+  removeStoryWorktree?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
+  /** Where each HEAD was read: `undefined` is the clone. */
+  readonly headDirs: (string | undefined)[] = [];
+  /** The story each reap was narrowed to: `undefined` is the whole session. */
+  readonly reapScopes: (string | null | undefined)[] = [];
 
   async run(invocation: AgentInvocation): Promise<AgentResult> {
     this.invocations.push(invocation);
@@ -529,12 +540,14 @@ class MockRunner implements AgentRunner {
     return Promise.resolve();
   }
 
-  reap(sessionId: string): Promise<void> {
+  reap(sessionId: string, _containerId?: string, storyId?: string | null): Promise<void> {
     this.reaps.push(sessionId);
+    this.reapScopes.push(storyId);
     return Promise.resolve();
   }
 
-  headSha(): Promise<string | null> {
+  headSha(_containerId?: string, workingDir?: string): Promise<string | null> {
+    this.headDirs.push(workingDir);
     return Promise.resolve(this.head);
   }
 
@@ -3015,5 +3028,290 @@ describe('the dependency analysis at build start (async stories US-005)', () => 
     assert.equal(world.status(), 'finished');
     assert.equal(getDependencyPlanOrigin(world.db, world.session.id).source, 'agent');
     assert.match(logOf(world), /changed files it was told to leave alone; they were thrown away/);
+  });
+});
+
+describe('story worktrees (async stories US-006)', () => {
+  const WORKTREE = '/workspace/worktrees/US-002';
+  const isAnalysis = (invocation: AgentInvocation): boolean => invocation.prompt.startsWith('# Dependency Analysis');
+  const ok = (output: string): AgentResult => ({ exitCode: 0, output, timedOut: false });
+  /** `/workspace/worktrees/<id>` as the server sees it on the data volume. */
+  const worktreePrd = (world: World, storyId: string): string =>
+    path.join(world.config.workspacesDir, world.session.id, 'worktrees', storyId, prdPathFor(world.session.name));
+  const statusIn = (file: string, storyId: string): string | undefined =>
+    parsePrd(fs.readFileSync(file, 'utf8')).stories.find((story) => story.id === storyId)?.status;
+
+  /** A runner that makes worktrees the way the container does: a copy of the PRD. */
+  function withWorktrees(world: World): { added: string[]; removed: string[] } {
+    const added: string[] = [];
+    const removed: string[] = [];
+    world.runner.addStoryWorktree = (containerId, sessionName, storyId): Promise<void> => {
+      added.push(`${containerId} ${sessionName} ${storyId}`);
+      const file = worktreePrd(world, storyId);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.copyFileSync(world.prdFile, file);
+      return Promise.resolve();
+    };
+    world.runner.removeStoryWorktree = (_containerId, _sessionName, storyId): Promise<void> => {
+      removed.push(storyId);
+      return Promise.resolve();
+    };
+    return { added, removed };
+  }
+
+  function recordingCompletion(): BuildCompletion & { pushes: number } {
+    return {
+      pushes: 0,
+      push(): Promise<void> {
+        this.pushes += 1;
+        return Promise.resolve();
+      },
+      complete(): Promise<void> {
+        return Promise.resolve();
+      },
+    };
+  }
+
+  it('runs a parallel session story in its own worktree and judges it from there', async () => {
+    const world = new World(PRD, 3);
+    const { added, removed } = withWorktrees(world);
+    const completion = recordingCompletion();
+    const builds = serviceFor(world, completion);
+    let stopped: Promise<unknown> | null = null;
+    world.runner.behaviour = async (invocation): Promise<void> => {
+      if (isAnalysis(invocation)) {
+        world.runner.result = ok('{"dependencies": {"US-001": [], "US-002": []}}');
+        return;
+      }
+      world.runner.result = ok('');
+      const file = worktreePrd(world, 'US-002');
+      // The mark went into the worktree's copy; the clone's is left alone.
+      assert.equal(statusIn(file, 'US-002'), 'in-progress');
+      assert.equal(statusIn(world.prdFile, 'US-002'), 'todo');
+      // Done in the worktree's `prd.md` only. No merge exists yet (US-007), so
+      // the test stops the build here rather than watching the clone re-run it.
+      fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), 'US-002', 'done').content);
+      world.runner.commit();
+      stopped = builds.stop(world.session.id);
+      await until('the agent was signalled', () => world.runner.stops.length > 0);
+    };
+
+    await builds.start(world.session.id);
+    await until('the stop was requested', () => stopped !== null);
+    await stopped;
+
+    assert.deepEqual(added, ['container-add-login add-login US-002']);
+    const story = world.runner.invocations.find((invocation) => !isAnalysis(invocation));
+    assert.ok(story);
+    assert.deepEqual(story.story, { storyId: 'US-002', attempt: 1, workingDir: WORKTREE });
+    assert.ok(story.prompt.includes(`${WORKTREE}/.chief/prds/add-login/prd.md`));
+    assert.ok(story.prompt.includes(`${WORKTREE}/.chief/prds/add-login/progress.md`));
+    assert.ok(story.prompt.includes('on the branch `chief-story/add-login/US-002`'));
+    assert.match(story.prompt, /commit there, on `chief-story\/add-login\/US-002`/);
+    assert.equal(story.prompt.includes(`${CONTAINER_REPO_DIR}/.chief/prds/add-login/prd.md`), false);
+    // HEAD before and after, both read in the worktree.
+    assert.deepEqual(world.runner.headDirs, [WORKTREE, WORKTREE]);
+    // `done` was read from the worktree: the story was pushed and its commit kept.
+    assert.equal(completion.pushes, 1);
+    assert.equal(world.stories().find((row) => row.storyId === 'US-002')?.commitSha, 'sha-2');
+    // A finished story keeps its worktree until it is merged.
+    assert.deepEqual(removed, []);
+  });
+
+  it('gives every attempt its own pid file, reaps only that story, and removes an abandoned worktree', async () => {
+    const world = new World(PRD, 3);
+    const { added, removed } = withWorktrees(world);
+    const builds = serviceFor(world);
+    world.runner.behaviour = (invocation): void => {
+      world.runner.result = isAnalysis(invocation)
+        ? ok('{"dependencies": {}}')
+        : { exitCode: null, output: '', timedOut: true };
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'failed');
+    const attempts = world.runner.invocations.filter((invocation) => !isAnalysis(invocation));
+    assert.deepEqual(
+      attempts.map((invocation) => invocation.story),
+      [1, 2, 3].map((attempt) => ({ storyId: 'US-002', attempt, workingDir: WORKTREE })),
+    );
+    // Every attempt starts from a fresh worktree, and every one is abandoned.
+    assert.equal(added.length, 3);
+    assert.deepEqual(removed, ['US-002', 'US-002', 'US-002']);
+    // The timed-out agents were reaped one story at a time; the sweep before
+    // the run (and the analysis, which did not time out) is session-wide.
+    assert.deepEqual(
+      world.runner.reapScopes.filter((scope) => scope !== undefined),
+      ['US-002', 'US-002', 'US-002'],
+    );
+  });
+
+  it('creates no worktree with a limit of 1', async () => {
+    const world = new World(PRD, 1);
+    const { added } = withWorktrees(world);
+    const builds = serviceFor(world);
+    world.runner.behaviour = (invocation): void => {
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.deepEqual(added, []);
+    for (const invocation of world.runner.invocations) {
+      assert.equal(invocation.story, null);
+      assert.ok(invocation.prompt.includes(`${CONTAINER_REPO_DIR}/.chief/prds/add-login/prd.md`));
+      assert.equal(invocation.prompt.includes('## chief-web: your worktree'), false);
+    }
+    assert.ok(world.runner.headDirs.every((dir) => dir === undefined));
+  });
+
+  it('adds the worktree off HEAD in the clone, after removing any leftover', () => {
+    const spec = addStoryWorktreeSpec('add-login', 'US-002');
+    const script = spec.cmd[2] ?? '';
+    assert.equal(spec.workingDir, CONTAINER_REPO_DIR);
+    assert.deepEqual(spec.env, [
+      `CHIEF_WORKTREE=${WORKTREE}`,
+      'CHIEF_STORY_BRANCH=chief-story/add-login/US-002',
+      'CHIEF_WORKTREES=/workspace/worktrees',
+      'CHIEF_PRD_DIR=.chief/prds/add-login',
+      'CHIEF_EXCLUDE=/worktrees/',
+    ]);
+    const add = script.indexOf('git worktree add "$CHIEF_WORKTREE" -b "$CHIEF_STORY_BRANCH" "$base"');
+    assert.ok(add > 0);
+    assert.ok(script.includes('base=$(git rev-parse --verify HEAD)'));
+    assert.ok(script.indexOf('git worktree remove --force "$CHIEF_WORKTREE"') < add);
+    assert.ok(script.indexOf('git branch -D "$CHIEF_STORY_BRANCH"') < add);
+    assert.match(script, /\.git\/info\/exclude/);
+
+    const remove = removeStoryWorktreeSpec('add-login', 'US-002');
+    assert.equal(remove.workingDir, CONTAINER_REPO_DIR);
+    assert.deepEqual(remove.env, spec.env.slice(0, 2));
+    assert.match(remove.cmd[2] ?? '', /git worktree remove --force "\$CHIEF_WORKTREE"/);
+    assert.match(remove.cmd[2] ?? '', /git branch -D "\$CHIEF_STORY_BRANCH"/);
+  });
+
+  it('really makes, re-makes and removes a worktree with git', () => {
+    // The scripts run against a real repository, with `/workspace` moved to a
+    // temporary directory: the one thing a spec assertion cannot show is that
+    // the shell does what it says.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-worktree-'));
+    tempDirs.push(root);
+    const repo = path.join(root, 'repo');
+    const git = (...args: string[]): string => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    fs.mkdirSync(repo);
+    git('init', '-q', '-b', 'chief/add-login');
+    git('-c', 'user.email=chief@example.com', '-c', 'user.name=chief', 'commit', '-q', '--allow-empty', '-m', 'init');
+    const prdDir = path.join(repo, '.chief/prds/add-login');
+    fs.mkdirSync(prdDir, { recursive: true });
+    fs.writeFileSync(path.join(prdDir, 'prd.md'), PRD);
+    fs.writeFileSync(path.join(prdDir, 'progress.md'), '## Codebase Patterns\n');
+    fs.writeFileSync(path.join(prdDir, 'agent.log'), 'live\n');
+    const run = (spec: ExecSpec): void => {
+      const env = Object.fromEntries(
+        (spec.env ?? []).map((entry) => {
+          const [key = '', value = ''] = entry.split(/=(.*)/s);
+          return [key, value.replace('/workspace/', `${root}/`)];
+        }),
+      );
+      execFileSync(spec.cmd[0] ?? '', spec.cmd.slice(1), { cwd: repo, env: { ...process.env, ...env }, stdio: 'pipe' });
+    };
+    const worktree = path.join(root, 'worktrees/US-002');
+
+    run(addStoryWorktreeSpec('add-login', 'US-002'));
+    // A leftover with the same name is replaced, not an error.
+    fs.writeFileSync(path.join(worktree, 'half-finished.txt'), 'x');
+    run(addStoryWorktreeSpec('add-login', 'US-002'));
+
+    assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: worktree, encoding: 'utf8' }).trim(), 'chief-story/add-login/US-002');
+    assert.equal(fs.existsSync(path.join(worktree, 'half-finished.txt')), false);
+    assert.equal(fs.readFileSync(path.join(worktree, '.chief/prds/add-login/prd.md'), 'utf8'), PRD);
+    assert.ok(fs.existsSync(path.join(worktree, '.chief/prds/add-login/progress.md')));
+    assert.equal(fs.existsSync(path.join(worktree, '.chief/prds/add-login/agent.log')), false);
+    const exclude = fs.readFileSync(path.join(repo, '.git/info/exclude'), 'utf8').split('\n');
+    assert.equal(exclude.filter((line) => line === '/worktrees/').length, 1, 'added once, however often it runs');
+
+    run(removeStoryWorktreeSpec('add-login', 'US-002'));
+    assert.equal(fs.existsSync(worktree), false);
+    assert.equal(git('branch', '--list', 'chief-story/*').trim(), '');
+  });
+
+  describe('through the container', () => {
+    let daemon: FakeDockerDaemon;
+    let docker: DockerApi;
+
+    before(async () => {
+      daemon = await FakeDockerDaemon.start();
+      daemon.addContainer({ id: 'container-1', name: 'chief-web-add-login' });
+      docker = new DockerApi(daemon.socketPath);
+    });
+
+    after(async () => {
+      await daemon.close();
+    });
+
+    it("execs a story's agent in its worktree, under the story's own pid file", async () => {
+      await createAgentRunner(docker).run({
+        sessionId: 'session-1',
+        containerId: 'container-1',
+        iteration: 4,
+        prompt: 'do the thing',
+        timeoutMs: 5000,
+        story: { storyId: 'US-002', attempt: 2, workingDir: WORKTREE },
+      });
+      const exec = daemon.execs().at(-1);
+      assert.ok(exec);
+      assert.equal(exec.workingDir, WORKTREE);
+      assert.ok((exec.cmd[2] ?? '').includes(`> ${storyAgentPidFile('session-1', 'US-002', 2)};`));
+      assert.equal(storyAgentPidFile('session-1', 'US-002', 2), '/tmp/.chief-build/session-1-US-002-2.pid');
+    });
+
+    it('creates and removes worktrees, and reads HEAD, in the right directories', async () => {
+      const runner = createAgentRunner(docker);
+      assert.ok(runner.addStoryWorktree && runner.removeStoryWorktree);
+      const before = daemon.execs().length;
+      await runner.addStoryWorktree('container-1', 'add-login', 'US-002');
+      await runner.headSha('container-1', WORKTREE);
+      await runner.removeStoryWorktree('container-1', 'add-login', 'US-002');
+
+      const [add, head, remove] = daemon.execs().slice(before);
+      assert.equal(add?.workingDir, CONTAINER_REPO_DIR);
+      assert.ok(add?.cmd.join(' ').includes('git worktree add "$CHIEF_WORKTREE" -b "$CHIEF_STORY_BRANCH"'));
+      assert.ok(add?.env.includes(`CHIEF_WORKTREE=${WORKTREE}`));
+      assert.ok(add?.env.includes('CHIEF_STORY_BRANCH=chief-story/add-login/US-002'));
+      assert.deepEqual(head?.cmd, ['git', 'rev-parse', 'HEAD']);
+      assert.equal(head?.workingDir, WORKTREE);
+      assert.equal(remove?.workingDir, CONTAINER_REPO_DIR);
+      assert.ok(remove?.cmd.join(' ').includes('git worktree remove --force "$CHIEF_WORKTREE"'));
+    });
+
+    it('rejects when the worktree could not be made', async () => {
+      daemon.onExec = () => ({ stdout: '', stderr: 'fatal: invalid reference\n', exitCode: 128 });
+      await assert.rejects(
+        createAgentRunner(docker).addStoryWorktree?.('container-1', 'add-login', 'US-002') ?? Promise.resolve(),
+        /creating the worktree of US-002 failed \(exit 128\): fatal: invalid reference/,
+      );
+      daemon.onExec = null;
+    });
+
+    it("stops and reaps one story's agents without touching the others", async () => {
+      const before = daemon.execs().length;
+      await createAgentRunner(docker).stop('session-1', 'container-1', 'US-002');
+      daemon.onExec = () => ({ stdout: `${AGENT_SIGNALLED}\n`, exitCode: 0 });
+      await createAgentRunner(docker, 5).reap('session-1', 'container-1', 'US-002');
+      daemon.onExec = null;
+
+      const scripts = daemon.execs().slice(before).map((exec) => exec.cmd[2] ?? '');
+      assert.equal(scripts.length, 3);
+      for (const script of scripts) {
+        assert.ok(script.includes('for file in /tmp/.chief-build/session-1-US-002-*.pid; do'), script);
+      }
+      // Without a story it is still the whole session: the restart sweep.
+      assert.ok((agentSignalSpec('session-1', 'TERM').cmd[2] ?? '').includes('/tmp/.chief-build/session-1*.pid'));
+    });
   });
 });

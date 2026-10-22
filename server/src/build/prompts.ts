@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import type { ParsedPrd, PrdStory } from '../prd/index.js';
 import { prdDirFor, prdPathFor, progressPathFor, screenshotsDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
@@ -17,9 +19,12 @@ import { AGENT_PROMPT_TEMPLATE, DEPENDENCY_ANALYSIS_PROMPT_TEMPLATE } from './te
  * the planning prompts do, which keeps the ported text comparable with chief's.
  */
 
-/** Learnings file next to the PRD; `{{PROGRESS_PATH}}` in chief's template. */
-export function containerProgressPath(sessionName: string): string {
-  return `${CONTAINER_REPO_DIR}/${progressPathFor(sessionName)}`;
+/**
+ * Learnings file next to the PRD; `{{PROGRESS_PATH}}` in chief's template. In
+ * the clone, or in the story worktree at `root` (async stories US-006).
+ */
+export function containerProgressPath(sessionName: string, root: string = CONTAINER_REPO_DIR): string {
+  return `${root}/${progressPathFor(sessionName)}`;
 }
 
 /** How much of `progress.md` is inlined; the file itself is always readable. */
@@ -56,6 +61,12 @@ export interface AgentPromptInput {
    * keep it from burning the iteration on things that are not the story.
    */
   readonly canAsk?: boolean;
+  /**
+   * The story's own worktree and branch, when it runs in one (async stories
+   * US-006). Every path the prompt names is then the worktree's, and the agent
+   * is told to commit there; absent, it works in `/workspace/repo` as always.
+   */
+  readonly worktree?: { readonly dir: string; readonly branch: string } | null;
 }
 
 /**
@@ -79,7 +90,7 @@ export function storyContext(story: PrdStory): string {
 
 /** chief's `GetPrompt` plus the chief-web addendum. */
 export function agentPrompt(input: AgentPromptInput): string {
-  const progressPath = containerProgressPath(input.sessionName);
+  const progressPath = containerProgressPath(input.sessionName, rootOf(input));
   const prompt = AGENT_PROMPT_TEMPLATE.replaceAll('{{PROGRESS_PATH}}', progressPath)
     .replaceAll('{{STORY_CONTEXT}}', storyContext(input.story))
     .replaceAll('{{STORY_ID}}', input.story.id)
@@ -164,9 +175,12 @@ export function agentCommand(
  * screenshots (voice feedback US-011) are named so no story's cleanup takes them.
  */
 function addendum(input: AgentPromptInput): string {
-  const prdPath = `${CONTAINER_REPO_DIR}/${prdDirFor(input.sessionName)}/prd.md`;
-  const screenshotsPath = `${CONTAINER_REPO_DIR}/${screenshotsDirFor(input.sessionName)}`;
-  const sections = [
+  const root = rootOf(input);
+  const prdPath = `${root}/${prdDirFor(input.sessionName)}/prd.md`;
+  const screenshotsPath = `${root}/${screenshotsDirFor(input.sessionName)}`;
+  const sections: string[] = [];
+  if (input.worktree != null) sections.push(worktreeSection(input.worktree));
+  sections.push(
     `
 
 ---
@@ -182,7 +196,7 @@ only evidence it has that anything happened. Before you finish, all four of thes
    acceptance criterion of that story is checked off (\`- [x]\`). Change nothing else in the file:
    do not renumber ids, reorder stories, or touch another story's status.
 4. A dated entry for ${input.story.id}, including its **Learnings for future iterations**, is
-   appended to \`${containerProgressPath(input.sessionName)}\`.
+   appended to \`${containerProgressPath(input.sessionName, root)}\`.
 
 If you cannot honestly complete the story, leave its \`**Status:**\` at \`in-progress\`, commit
 whatever partial work is worth keeping, and write down in \`progress.md\` what is blocking it —
@@ -206,7 +220,7 @@ something — three of those in a row end the whole run. So:
   last sweep of the suite. The commit is the only part of your work that survives being stopped.
 - If the budget is nearly gone, spend what is left on points 2 to 4 above — a committed
   half-story the next iteration can pick up is worth more than a finished one nobody recorded.`,
-  ];
+  );
 
   const context = prdContext(input.prd);
   if (context !== null) {
@@ -279,6 +293,35 @@ When you ask: say in one or two sentences what you have established, offer the c
 you can see, and recommend one. If nobody answers, you are told so — then take the most
 conservative option, write the question and the choice you made under \`## Open Questions\` in the
 PRD and in your \`progress.md\` entry, and finish the story on that basis.`;
+}
+
+/** Where this agent works: its story worktree, or the clone. */
+function rootOf(input: AgentPromptInput): string {
+  return input.worktree?.dir ?? CONTAINER_REPO_DIR;
+}
+
+/**
+ * Where a parallel story works (async stories US-006). Other agents are busy
+ * in `/workspace/repo` and in worktrees of their own at the same time, so the
+ * agent is told plainly that its checkout, and its branch, are the only ones
+ * that are its to change. chief-web merges the branch back itself.
+ */
+function worktreeSection(worktree: NonNullable<AgentPromptInput['worktree']>): string {
+  return `
+
+---
+
+## chief-web: your worktree
+
+Other stories of this PRD are being built at the same time, each in a checkout of its own. Yours
+is the git worktree at \`${worktree.dir}\`, on the branch \`${worktree.branch}\`:
+
+- Work in \`${worktree.dir}\` only, and commit there, on \`${worktree.branch}\`. Do not switch branches, and
+  do not merge, rebase or push — chief-web merges your branch into the session branch when you
+  are done.
+- Never change anything in \`${CONTAINER_REPO_DIR}\` or in another story's worktree under
+  \`${path.posix.dirname(worktree.dir)}/\`.
+- The \`prd.md\` and \`progress.md\` to update are the copies in your worktree, at the paths below.`;
 }
 
 function prdContext(prd: AgentPromptInput['prd']): string | null {
