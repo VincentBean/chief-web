@@ -90,7 +90,7 @@ import {
 import { StoryMerger } from './merge.js';
 import { describePlan, normalizePlan, parseDependencyAnswer, type RawPlan, sequentialPlan } from './plan.js';
 import { agentPrompt, dependencyAnalysisPrompt } from './prompts.js';
-import type { AgentResult, AgentRunner } from './runner.js';
+import type { AgentResult, AgentRunner, StoryWorkspaceRecovery } from './runner.js';
 import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import type { VoiceEventSink } from '../voice/events.js';
 
@@ -1258,8 +1258,10 @@ export class BuildService {
     // way back up signals what it holds. Sweeping the session's pid files
     // before the first iteration is what keeps that agent from meeting the one
     // this run is about to start. It costs one exec per run, and on the usual
-    // path there is nothing to find.
+    // path there is nothing to find. The session-wide glob takes every story
+    // agent's pid file too (async stories US-011).
     await this.runner.reap(sessionId, state.containerId);
+    await this.recoverStories(sessionId, state);
 
     for (;;) {
       const session = getSession(this.db, sessionId);
@@ -1351,6 +1353,57 @@ export class BuildService {
       }
       if (!keepGoing) return;
     }
+  }
+
+  /**
+   * Clears what a parallel run left behind when it did not unwind (async
+   * stories US-011): the server was restarted under it, or the session was
+   * failed at the restart while one of its stories waited on a question and is
+   * now being retried. Runs in front of every run, after the sweep and before
+   * anything starts, whatever the limit is now — a limit lowered to 1 after a
+   * failed parallel run is exactly when an operator retries.
+   *
+   * A run that unwound normally leaves nothing to find: every attempt removes
+   * its own worktree, and a merged story's goes with the merge. So whatever is
+   * here belongs to a run that is gone. A half-done merge in the clone is
+   * aborted; every worktree and `chief-story/<session>/*` branch is removed,
+   * and the work committed only there with it. The stories that were running
+   * go back to `todo`, and the questions they had open are closed as
+   * abandoned — the agents that asked them are not coming back. Merged stories
+   * stay `done`, and the build continues with its stored plan.
+   */
+  private async recoverStories(sessionId: string, state: RunState): Promise<void> {
+    const session = getSession(this.db, sessionId);
+    if (session === null || this.runner.recoverStoryWorkspaces === undefined) return;
+
+    const recovery = await this.runner.recoverStoryWorkspaces(state.containerId, session.name);
+    const reset = listStories(this.db, sessionId).filter(
+      (story) => story.status === 'in-progress' && story.mergeSha === null,
+    );
+    for (const story of reset) updateStory(this.db, sessionId, story.storyId, { status: 'todo' });
+    // Nothing of this session runs yet, so every open question is one whose
+    // agent is gone, whichever story it was for.
+    this.decisions?.abandon(sessionId);
+
+    if (recovery.error !== null) {
+      logger.warn('could not clear everything a previous run left in the clone', {
+        session: sessionId,
+        error: recovery.error,
+      });
+    }
+    const found = recovery.abortedMerge || recovery.worktrees.length > 0 || recovery.branches.length > 0;
+    if (!found && reset.length === 0 && recovery.error === null) return;
+
+    logger.info('cleared what a previous run left behind', {
+      session: sessionId,
+      abortedMerge: recovery.abortedMerge,
+      worktrees: recovery.worktrees,
+      branches: recovery.branches,
+      reset: reset.map((story) => story.storyId),
+    });
+    const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+    log.write(recoveryLines(recovery, reset).map((line) => `${line}\n`).join(''));
+    log.end(recovery.error === null ? 0 : 1);
   }
 
   /**
@@ -3001,6 +3054,21 @@ const ANALYSIS_ITERATION = 0;
 
 /** The analysis agent's own fixed budget (async stories US-005). */
 export const DEPENDENCY_ANALYSIS_TIMEOUT_MS = 30 * 60_000;
+
+/** The build log's account of what a run cleared before it started (async stories US-011). */
+function recoveryLines(recovery: StoryWorkspaceRecovery, reset: readonly Story[]): string[] {
+  const lines = ['Recovered what the previous run left behind:'];
+  if (recovery.abortedMerge) lines.push('- aborted the story merge that was in progress in the clone');
+  if (recovery.worktrees.length > 0) lines.push(`- removed the worktrees of ${recovery.worktrees.join(', ')}`);
+  if (recovery.branches.length > 0) lines.push(`- deleted ${recovery.branches.join(', ')}`);
+  if (reset.length > 0) {
+    lines.push(
+      `- back to todo, starting again from the session branch: ${reset.map((story) => story.storyId).join(', ')}`,
+    );
+  }
+  if (recovery.error !== null) lines.push(`- not everything could be cleared: ${recovery.error}`);
+  return lines;
+}
 
 /** `Dependency plan: agent`, or `Dependency plan: fallback (<reason>)`. */
 function planHeadline(source: DependencyPlanSource, reason: string | null): string {

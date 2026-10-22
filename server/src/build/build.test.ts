@@ -9,6 +9,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { type Config, loadConfig } from '../config.js';
 import {
+  askDecision,
   countSessionsByStatus,
   createPrConflictFix,
   createPrReview,
@@ -28,10 +29,12 @@ import {
   getSetting,
   IN_MEMORY,
   listBuildQueue,
+  listDecisions,
   listSessions,
   listStories,
   openDatabase,
   prRefId,
+  replaceDependencyPlan,
   type Session,
   setSetting,
   setSettingNumber,
@@ -40,6 +43,7 @@ import {
   updatePrReview,
   updatePrRun,
   updateSession,
+  updateStory,
 } from '../db/index.js';
 import { DockerApi, type ExecChunk, type ExecOutput, type ExecSpec } from '../docker/index.js';
 import { FakeDockerDaemon } from '../docker/fake-daemon.js';
@@ -71,7 +75,14 @@ import { ASK_OPERATOR_TOOL, DecisionWatcher } from './decisions.js';
 import { createBuildLogStore } from './log.js';
 import { agentCommand, agentPrompt, STORY_CONFLICT_PROMPT_HEADING, storyContext } from './prompts.js';
 import type { VerifyResult } from '../prconflicts/merge.js';
-import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner, type StoryMergeOutcome } from './runner.js';
+import {
+  type AgentInvocation,
+  type AgentResult,
+  type AgentRunner,
+  createAgentRunner,
+  type StoryMergeOutcome,
+  type StoryWorkspaceRecovery,
+} from './runner.js';
 import { BUILD_MCP_CONFIG_FILE, storyAskDir, storyMcpConfigFile } from './mcp.js';
 import { type BuildCompletion, BuildError, createBuildService, MAX_DECISION_ANSWER_CHARS } from './service.js';
 
@@ -540,6 +551,8 @@ class MockRunner implements AgentRunner {
     storyId: string,
     files: readonly string[],
   ) => Promise<VerifyResult>;
+  /** The clean-up in front of a run (async stories US-011); absent, there is none. */
+  recoverStoryWorkspaces?: (containerId: string, sessionName: string) => Promise<StoryWorkspaceRecovery>;
   /** Where each HEAD was read: `undefined` is the clone. */
   readonly headDirs: (string | undefined)[] = [];
   /** The story each reap was narrowed to: `undefined` is the whole session. */
@@ -3835,6 +3848,92 @@ describe('story worktrees (async stories US-006)', () => {
         assert.equal(statusOf(world, 'US-001'), 'done');
         assert.ok(events.includes('merge US-001'));
       });
+    });
+
+    it('cleans up what a restart left behind and resumes with the stored plan (US-011)', async () => {
+      // Before the restart: US-002 was merged, US-001 and US-003 were running
+      // in their worktrees, US-001's merge had stopped half-way, and US-003
+      // was waiting on a question.
+      const run = scheduling(THREE, 3, 'the analysis must not run again');
+      const { world, events, running, release } = run;
+      world.markDone('US-002');
+      world.sync();
+      updateStory(world.db, world.session.id, 'US-002', { mergeSha: 'merge-US-002' });
+      updateStory(world.db, world.session.id, 'US-001', { status: 'in-progress', commitSha: 'only-on-its-branch' });
+      updateStory(world.db, world.session.id, 'US-003', { status: 'in-progress' });
+      replaceDependencyPlan(
+        world.db,
+        world.session.id,
+        new Map([
+          ['US-001', ['US-002']],
+          ['US-003', ['US-002']],
+        ]),
+        'agent',
+        null,
+        ['US-001', 'US-002', 'US-003'],
+      );
+      const question = askDecision(world.db, {
+        id: randomUUID(),
+        sessionId: world.session.id,
+        storyId: 'US-003',
+        iteration: 3,
+        question: 'Which way?',
+      });
+      const worktrees = path.join(world.config.workspacesDir, world.session.id, 'worktrees');
+      for (const storyId of ['US-001', 'US-003']) {
+        fs.mkdirSync(path.dirname(worktreePrd(world, storyId)), { recursive: true });
+        fs.writeFileSync(worktreePrd(world, storyId), setStoryStatus(THREE, storyId, 'in-progress').content);
+      }
+      updateSession(world.db, world.session.id, { status: 'building' });
+
+      const order: string[] = [];
+      world.runner.recoverStoryWorkspaces = (_containerId, sessionName): Promise<StoryWorkspaceRecovery> => {
+        // After the sweep, before anything else.
+        order.push(`recover ${sessionName}`);
+        assert.deepEqual(world.runner.reapScopes, [undefined], 'the session-wide sweep came first');
+        assert.equal(world.runner.invocations.length, 0);
+        assert.equal(run.added.length, 0);
+        fs.rmSync(worktrees, { recursive: true, force: true });
+        return Promise.resolve({
+          abortedMerge: true,
+          worktrees: ['US-001', 'US-003'],
+          branches: [`chief-story/${sessionName}/US-001`, `chief-story/${sessionName}/US-003`],
+          error: null,
+        });
+      };
+      const builds = serviceFor(world, undefined, new DecisionWatcher({ db: world.db, docker: new AskingContainer() }));
+
+      assert.equal(await builds.resumeOrphaned(), 1);
+      await until('both reset stories are running again', () => running.size === 2);
+
+      assert.deepEqual(order, [`recover ${world.session.name}`]);
+      // Both started over, from the session branch, in fresh worktrees.
+      assert.deepEqual([...events].sort(), ['start US-001', 'start US-003']);
+      assert.deepEqual(run.added.map((entry) => entry.split(' ')[2]).sort(), ['US-001', 'US-003']);
+      for (const storyId of ['US-001', 'US-003']) {
+        assert.equal(statusIn(worktreePrd(world, storyId), 'US-002'), 'done', `${storyId} starts from the merged work`);
+      }
+      // The open question went with the agent that asked it.
+      assert.deepEqual(
+        listDecisions(world.db, world.session.id).map((decision) => [decision.id, decision.status]),
+        [[question.id, 'abandoned']],
+      );
+      assert.equal(world.status(), 'building');
+      // The stored plan carried on: no second analysis, and it is unchanged.
+      assert.equal(world.runner.invocations.filter(isAnalysis).length, 0);
+      assert.equal(getDependencyPlanOrigin(world.db, world.session.id).source, 'agent');
+      assert.match(logOf(world), /Recovered what the previous run left behind:\n- aborted the story merge that was in progress in the clone\n- removed the worktrees of US-001, US-003\n/);
+      assert.match(logOf(world), /- back to todo, starting again from the session branch: US-001, US-003\n/);
+
+      release('US-001');
+      release('US-003');
+      await builds.whenIdle(world.session.id);
+      assert.equal(world.status(), 'finished');
+      assert.deepEqual(world.stories().map((row) => [row.storyId, row.status, row.mergeSha]), [
+        ['US-002', 'done', 'merge-US-002'],
+        ['US-001', 'done', 'merge-US-001'],
+        ['US-003', 'done', 'merge-US-003'],
+      ]);
     });
   });
 

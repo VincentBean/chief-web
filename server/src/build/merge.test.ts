@@ -407,6 +407,55 @@ describe('StoryMerger with git (async stories US-007)', () => {
     assert.equal(fs.readFileSync(path.join(world.repo, '.chief/prds/demo/prd.md'), 'utf8'), prdBefore);
     assert.equal(getStory(world.db, world.session.id, 'US-002')?.mergeSha, null);
   });
+
+  it('clears a half-done merge, every worktree and every story branch after a restart (US-011)', async () => {
+    const world = workspace();
+    const one = await build(world, 'US-001', 'same.txt');
+    await build(world, 'US-002', 'same.txt');
+    assert.deepEqual(
+      await world.merger.merge(world.session, 'c', { storyId: 'US-001', title: 'First story', ...one }),
+      { code: 'merged' },
+    );
+    const head = world.git('rev-parse', 'HEAD');
+    // A third story was still running, and the server died in the middle of
+    // US-002's merge: git stopped on the conflict and nobody came back to it.
+    await build(world, 'US-003', 'three.txt');
+    const merging = await world.runner.mergeStory?.('c', world.session.name, 'US-002', 'Merge US-002 - Second story');
+    assert.equal(merging?.code, 'conflicted');
+    assert.ok(fs.existsSync(path.join(world.repo, '.git/MERGE_HEAD')));
+    // Another session's branches, and one whose name only starts the same, stay.
+    world.git('branch', 'chief-story/other/US-001');
+    world.git('branch', 'chief-story/demo-two/US-001');
+
+    const recovery = await world.runner.recoverStoryWorkspaces?.('c', world.session.name);
+
+    assert.deepEqual(recovery, {
+      abortedMerge: true,
+      worktrees: ['US-002', 'US-003'],
+      branches: ['chief-story/demo/US-002', 'chief-story/demo/US-003'],
+      error: null,
+    });
+    assert.equal(fs.existsSync(path.join(world.repo, '.git/MERGE_HEAD')), false);
+    assert.equal(world.git('rev-parse', 'HEAD'), head, 'the merged story stays merged');
+    assert.equal(world.git('status', '--porcelain'), '');
+    assert.equal(fs.existsSync(path.join(world.repo, 'three.txt')), false, "US-003's commit is gone with its branch");
+    assert.deepEqual(fs.readdirSync(path.join(path.dirname(world.repo), 'worktrees')), []);
+    assert.equal(world.git('worktree', 'list', '--porcelain').match(/^worktree /gm)?.length, 1);
+    assert.deepEqual(world.git('branch', '--list', 'chief-story/*', '--format=%(refname:short)').split('\n'), [
+      'chief-story/demo-two/US-001',
+      'chief-story/other/US-001',
+    ]);
+    // The PRD is untracked, and the clean-up never touches it.
+    assert.ok(fs.existsSync(path.join(world.repo, '.chief/prds/demo/prd.md')));
+
+    // Nothing left: a second pass finds nothing and says so.
+    assert.deepEqual(await world.runner.recoverStoryWorkspaces?.('c', world.session.name), {
+      abortedMerge: false,
+      worktrees: [],
+      branches: [],
+      error: null,
+    });
+  });
 });
 
 describe('mergeStorySpec', () => {

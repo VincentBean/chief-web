@@ -9,6 +9,8 @@ import {
   agentSignalSpec,
   headShaSpec,
   mergeStorySpec,
+  RECOVERY_MERGE_ABORTED,
+  recoverStoryWorkspacesSpec,
   removeStoryWorktreeSpec,
   restoreWorkspaceSpec,
   storyBranch,
@@ -148,6 +150,13 @@ export interface AgentRunner {
   /** `git merge --abort` in `/workspace/repo`. Never throws. */
   abortStoryMerge?(containerId: string, sessionName: string, storyId: string): Promise<void>;
   /**
+   * The clean-up in front of every run (async stories US-011): aborts a merge
+   * left half-done in `/workspace/repo`, removes every story worktree and
+   * every `chief-story/<session>/*` branch, and says what it removed. Never
+   * throws. Optional: a runner without worktrees has nothing to clear.
+   */
+  recoverStoryWorkspaces?(containerId: string, sessionName: string): Promise<StoryWorkspaceRecovery>;
+  /**
    * After a conflict-resolution agent (async stories US-008): stages `files`
    * in `/workspace/repo`, checks nothing is unmerged and no conflict marker is
    * left, and makes the merge commit — `verifyResolution` from
@@ -160,6 +169,18 @@ export interface AgentRunner {
     storyId: string,
     files: readonly string[],
   ): Promise<VerifyResult>;
+}
+
+/** What {@link AgentRunner.recoverStoryWorkspaces} cleared (async stories US-011). */
+export interface StoryWorkspaceRecovery {
+  /** A merge was in progress in the clone, and is aborted now. */
+  readonly abortedMerge: boolean;
+  /** The story ids whose worktree was removed. */
+  readonly worktrees: readonly string[];
+  /** The `chief-story/<session>/*` branches deleted. */
+  readonly branches: readonly string[];
+  /** Why part of it could not be done; `null` when all of it was. */
+  readonly error: string | null;
 }
 
 /** How a story's merge into the session branch went (async stories US-007). */
@@ -371,6 +392,32 @@ export class ContainerAgentRunner implements AgentRunner {
       timeoutMs: WORKTREE_TIMEOUT_MS,
     });
     if (!aborted) logger.warn('could not abort a story merge', { container: containerId, story: storyId });
+  }
+
+  async recoverStoryWorkspaces(containerId: string, sessionName: string): Promise<StoryWorkspaceRecovery> {
+    let result: ExecOutput;
+    try {
+      result = await this.exec.runExec(containerId, recoverStoryWorkspacesSpec(sessionName), WORKTREE_TIMEOUT_MS);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      return { abortedMerge: false, worktrees: [], branches: [], error };
+    }
+    const lines = result.stdout.split('\n').map((line) => line.trim());
+    const after = (prefix: string): string[] =>
+      lines.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+    const stderr = result.stderr.trim();
+    return {
+      abortedMerge: lines.includes(RECOVERY_MERGE_ABORTED),
+      worktrees: after('worktree '),
+      branches: after('branch '),
+      error: result.timedOut
+        ? 'clearing the story worktrees timed out'
+        : result.exitCode === 0
+          ? null
+          : stderr === ''
+            ? `exit ${String(result.exitCode)}`
+            : stderr,
+    };
   }
 
   async verifyStoryMerge(

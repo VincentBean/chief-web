@@ -360,3 +360,57 @@ git rev-parse HEAD`,
     workingDir: CONTAINER_REPO_DIR,
   };
 }
+
+/** What {@link recoverStoryWorkspacesSpec} prints for a merge it aborted. */
+export const RECOVERY_MERGE_ABORTED = 'merge-aborted';
+
+/**
+ * Clears what a parallel run that died with the server left in the clone
+ * (async stories US-011): a story merge git was still in the middle of
+ * (`MERGE_HEAD`), every worktree under `/workspace/worktrees` and every
+ * `chief-story/<session-name>/*` branch. A story's commits that only ever
+ * lived on its branch go with it; the story starts again from the session
+ * branch.
+ *
+ * The merge goes first, because it is the clone's own state and needs no
+ * branch to undo; the worktrees next, because `git branch -D` refuses a branch
+ * that is still checked out in one. Stdout has one line per thing removed:
+ * {@link RECOVERY_MERGE_ABORTED}, `worktree <story-id>`, `branch <branch>`.
+ */
+export function recoverStoryWorkspacesSpec(sessionName: string): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `status=0
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    if git merge --abort >/dev/null 2>&1 || git reset --merge >/dev/null 2>&1; then
+        echo "$CHIEF_MERGE_ABORTED"
+    else
+        echo "could not abort the merge in progress" >&2
+        status=1
+    fi
+fi
+if [ -d "$CHIEF_WORKTREES" ]; then
+    for dir in "$CHIEF_WORKTREES"/*; do
+        [ -e "$dir" ] || continue
+        git worktree remove --force "$dir" >/dev/null 2>&1 || true
+        rm -rf "$dir"
+        echo "worktree \${dir##*/}"
+    done
+fi
+git worktree prune
+for ref in $(git for-each-ref --format='%(refname)' "refs/heads/$CHIEF_BRANCH_PREFIX/"); do
+    branch=\${ref#refs/heads/}
+    if git branch -D "$branch" >/dev/null 2>&1; then echo "branch $branch"; else status=1; fi
+done
+exit $status`,
+    ],
+    env: [
+      `CHIEF_WORKTREES=${WORKTREES_DIR}`,
+      `CHIEF_BRANCH_PREFIX=chief-story/${sessionName}`,
+      `CHIEF_MERGE_ABORTED=${RECOVERY_MERGE_ABORTED}`,
+    ],
+    workingDir: CONTAINER_REPO_DIR,
+  };
+}
