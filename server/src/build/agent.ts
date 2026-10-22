@@ -160,3 +160,35 @@ export function pidFileSignalSpec(
 export function headShaSpec(): ExecSpec {
   return { cmd: ['git', 'rev-parse', 'HEAD'], workingDir: CONTAINER_REPO_DIR };
 }
+
+/**
+ * Paths a workspace check leaves alone: `.chief/` holds `prd.md`, `progress.md`
+ * and the screenshots, which are never committed, so they always show up as
+ * untracked — and a clean must never take them.
+ */
+const OUTSIDE_CHIEF = ['--', '.', ':(exclude).chief'];
+const QUOTED_OUTSIDE_CHIEF = OUTSIDE_CHIEF.map((part) => `'${part}'`).join(' ');
+
+/**
+ * `git status --porcelain` in the clone, `.chief/` aside: how chief-web sees
+ * whether the read-only dependency-analysis agent changed anything (async
+ * stories US-005).
+ */
+export function workspaceStatusSpec(): ExecSpec {
+  return { cmd: ['git', 'status', '--porcelain', ...OUTSIDE_CHIEF], workingDir: CONTAINER_REPO_DIR };
+}
+
+/**
+ * `git checkout -- . && git clean -fd`, `.chief/` aside: throws away what the
+ * analysis agent changed when it was told not to.
+ */
+export function restoreWorkspaceSpec(): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `git checkout ${QUOTED_OUTSIDE_CHIEF} && git clean -fd ${QUOTED_OUTSIDE_CHIEF}`,
+    ],
+    workingDir: CONTAINER_REPO_DIR,
+  };
+}

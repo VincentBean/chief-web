@@ -84,3 +84,45 @@ After implementing the story:
 - Keep CI green
 - Read the Codebase Patterns section in \`{{PROGRESS_PATH}}\` before starting
 `;
+
+/**
+ * The dependency-analysis agent (async stories US-005): run once at build
+ * start, before any story agent, to say which stories may build side by side.
+ *
+ * Placeholders: `{{REPO_DIR}}`, `{{PRD_PATH}}`, `{{STORY_IDS}}` and `{{PRD}}`.
+ * Substitution lives in `prompts.ts`.
+ */
+export const DEPENDENCY_ANALYSIS_PROMPT_TEMPLATE = `\
+# Dependency Analysis
+
+You are planning a build, not doing it. Several coding agents are about to implement the user stories of the PRD below, and stories that do not depend on each other will be built at the same time, each on its own branch. Your job is to say, for every story, which other stories must be finished before it can start.
+
+The repository is checked out at \`{{REPO_DIR}}\`. You may read it — files, \`git log\`, anything that helps you see what each story will touch — but this is **read-only**:
+
+- **Do NOT create, edit, move or delete any file**, and do not run anything that does (no installs, builds, formatters, code generators or tests).
+- Do not commit, check out, stash or otherwise change git state.
+
+Any change you make is thrown away.
+
+## When a story depends on another
+
+Story B depends on story A when B needs code, a database schema, configuration or files that A creates or changes — for example B calls a function A adds, extends a table A creates, edits the same component A rewrites, or tests behaviour A introduces. Two stories that edit the same files depend on each other in priority order: the later one depends on the earlier one.
+
+Stories that touch unrelated code are independent. But **when you are unsure, mark the dependency**: running two stories one after the other only costs time, while running two dependent stories at once costs a failed story and a merge conflict.
+
+Only use the story ids listed here: {{STORY_IDS}}. A story never depends on itself, and the dependencies must not form a cycle. Stories that are already \`done\` can still be listed as dependencies.
+
+## Your answer
+
+Reply with JSON only — no prose, no explanation, no code fence. Give every story a key, with \`[]\` for a story that depends on nothing:
+
+{"dependencies": {"US-002": ["US-001"], "US-003": []}}
+
+That example says US-002 cannot start before US-001 is done, and US-003 depends on nothing.
+
+## The PRD (\`{{PRD_PATH}}\`)
+
+<prd>
+{{PRD}}
+</prd>
+`;

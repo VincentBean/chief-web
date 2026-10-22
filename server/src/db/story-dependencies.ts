@@ -23,6 +23,10 @@ export interface DependencyPlanOrigin {
 /**
  * Replaces a session's whole plan, edges and origin together, in one
  * transaction: a reader sees the old plan or the new one, never a mix.
+ *
+ * `storyIds` is every story id the plan was made for (async stories US-005):
+ * a resumed build compares it with `prd.md` to decide whether the plan still
+ * fits. The edges alone cannot say, since a story with no dependencies has none.
  */
 export function replaceDependencyPlan(
   db: Database,
@@ -30,6 +34,7 @@ export function replaceDependencyPlan(
   plan: DependencyPlan,
   source: DependencyPlanSource,
   reason: string | null = null,
+  storyIds: readonly string[] | null = null,
 ): void {
   withTransaction(db, () => {
     db.prepare('DELETE FROM story_dependencies WHERE session_id = ?').run(sessionId);
@@ -39,11 +44,9 @@ export function replaceDependencyPlan(
     for (const [storyId, dependsOn] of plan) {
       for (const dependency of dependsOn) insert.run(sessionId, storyId, dependency);
     }
-    db.prepare('UPDATE sessions SET dependency_plan_source = ?, dependency_plan_reason = ? WHERE id = ?').run(
-      source,
-      reason,
-      sessionId,
-    );
+    db.prepare(
+      'UPDATE sessions SET dependency_plan_source = ?, dependency_plan_reason = ?, dependency_plan_story_ids = ? WHERE id = ?',
+    ).run(source, reason, storyIds === null ? null : JSON.stringify([...storyIds].sort()), sessionId);
   });
 }
 
@@ -82,12 +85,29 @@ export function getDependencyPlanOrigin(db: Database, sessionId: string): Depend
   };
 }
 
+/**
+ * The story ids the stored plan was made for, sorted; null when there is no
+ * plan, or the plan was stored without them.
+ */
+export function getDependencyPlanStoryIds(db: Database, sessionId: string): string[] | null {
+  const row = db.prepare('SELECT dependency_plan_story_ids FROM sessions WHERE id = ?').get(sessionId);
+  if (!row) return null;
+  const stored = nullableText(row, 'dependency_plan_story_ids');
+  if (stored === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    return Array.isArray(parsed) && parsed.every((id) => typeof id === 'string') ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Forgets a session's plan, edges and origin alike. */
 export function clearDependencyPlan(db: Database, sessionId: string): void {
   withTransaction(db, () => {
     db.prepare('DELETE FROM story_dependencies WHERE session_id = ?').run(sessionId);
     db.prepare(
-      'UPDATE sessions SET dependency_plan_source = NULL, dependency_plan_reason = NULL WHERE id = ?',
+      'UPDATE sessions SET dependency_plan_source = NULL, dependency_plan_reason = NULL, dependency_plan_story_ids = NULL WHERE id = ?',
     ).run(sessionId);
   });
 }

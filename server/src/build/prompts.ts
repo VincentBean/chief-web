@@ -1,7 +1,7 @@
 import type { ParsedPrd, PrdStory } from '../prd/index.js';
-import { prdDirFor, progressPathFor, screenshotsDirFor } from '../prd/index.js';
+import { prdDirFor, prdPathFor, progressPathFor, screenshotsDirFor } from '../prd/index.js';
 import { CONTAINER_REPO_DIR } from '../sessions/index.js';
-import { AGENT_PROMPT_TEMPLATE } from './templates.js';
+import { AGENT_PROMPT_TEMPLATE, DEPENDENCY_ANALYSIS_PROMPT_TEMPLATE } from './templates.js';
 
 /**
  * The prompt one iteration of the Ralph loop starts `claude -p` with (US-013).
@@ -85,6 +85,27 @@ export function agentPrompt(input: AgentPromptInput): string {
     .replaceAll('{{STORY_ID}}', input.story.id)
     .replaceAll('{{STORY_TITLE}}', input.story.title);
   return prompt + addendum(input);
+}
+
+export interface DependencyAnalysisPromptInput {
+  readonly sessionName: string;
+  /** The whole of `prd.md`, as it is on disk. */
+  readonly prd: string;
+  /** Every story id in the PRD, in priority order. */
+  readonly storyIds: readonly string[];
+}
+
+/**
+ * The prompt of the dependency-analysis agent (async stories US-005). The PRD
+ * goes in last and through a replacer function, so nothing in it — a `{{…}}`
+ * or a `$&` — is ever read as a placeholder or a replacement pattern.
+ */
+export function dependencyAnalysisPrompt(input: DependencyAnalysisPromptInput): string {
+  const ids = input.storyIds.map((id) => `\`${id}\``).join(', ');
+  return DEPENDENCY_ANALYSIS_PROMPT_TEMPLATE.replaceAll('{{REPO_DIR}}', () => CONTAINER_REPO_DIR)
+    .replaceAll('{{PRD_PATH}}', () => `${CONTAINER_REPO_DIR}/${prdPathFor(input.sessionName)}`)
+    .replaceAll('{{STORY_IDS}}', () => ids)
+    .replace('{{PRD}}', () => input.prd.trim());
 }
 
 /**

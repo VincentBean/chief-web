@@ -10,6 +10,7 @@ import {
   deleteSession,
   getDependencyPlan,
   getDependencyPlanOrigin,
+  getDependencyPlanStoryIds,
   IN_MEMORY,
   openDatabase,
   replaceDependencyPlan,
@@ -125,6 +126,20 @@ describe('story dependencies (async stories US-003)', () => {
     deleteSession(db, session.id);
 
     assert.equal(edgeCount(db, session.id), 0);
+    closeDatabase(db);
+  });
+
+  it('remembers the story ids a plan was made for, sorted, until it is cleared (US-005)', () => {
+    const { db, session } = fresh();
+    assert.equal(getDependencyPlanStoryIds(db, session.id), null);
+    replaceDependencyPlan(db, session.id, new Map(), 'agent', null, ['US-002', 'US-001']);
+    assert.deepEqual(getDependencyPlanStoryIds(db, session.id), ['US-001', 'US-002']);
+    // A plan stored without them says nothing about which stories it covers.
+    replaceDependencyPlan(db, session.id, new Map(), 'agent');
+    assert.equal(getDependencyPlanStoryIds(db, session.id), null);
+    replaceDependencyPlan(db, session.id, new Map(), 'agent', null, ['US-001']);
+    clearDependencyPlan(db, session.id);
+    assert.equal(getDependencyPlanStoryIds(db, session.id), null);
     closeDatabase(db);
   });
 });

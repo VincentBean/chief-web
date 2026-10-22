@@ -1441,6 +1441,15 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN dependency_plan_reason TEXT;
     `,
   },
+  {
+    id: '0034_dependency_plan_story_ids',
+    sql: `
+      -- The story ids the stored plan was made for (async stories US-005), as
+      -- a JSON array, sorted. A resumed build reuses the plan only while
+      -- prd.md still has exactly these stories. NULL while there is no plan.
+      ALTER TABLE sessions ADD COLUMN dependency_plan_story_ids TEXT;
+    `,
+  },
 ];
 
 /**

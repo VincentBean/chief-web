@@ -92,3 +92,75 @@ function findCycle(ordered: readonly PlanStory[], plan: ReadonlyMap<string, read
   }
   return null;
 }
+
+/** What {@link parseDependencyAnswer} made of the analysis agent's output. */
+export type ParsedDependencyAnswer =
+  | { readonly raw: RawPlan; readonly error: null }
+  | { readonly raw: null; readonly error: string };
+
+/**
+ * Finds the `{"dependencies": {...}}` document in the analysis agent's output
+ * (async stories US-005).
+ *
+ * The output is the rendered log, not the bare answer: tool lines with JSON of
+ * their own come before it and a `[claude] finished` line after it. So every
+ * fenced block is tried, last first, and then every `{` from the end of the
+ * text backwards up to the last `}`; the first candidate that is a document of
+ * the right shape wins. A document of the wrong shape is never salvaged.
+ */
+export function parseDependencyAnswer(output: string): ParsedDependencyAnswer {
+  const text = output.trim();
+  if (text === '') return { raw: null, error: 'the agent printed nothing' };
+
+  let error = 'the answer was not valid JSON';
+  for (const candidate of answerCandidates(text)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    const raw = readRawPlan(parsed);
+    if (raw !== null) return { raw, error: null };
+    error = 'the answer had no "dependencies" object of story id lists';
+  }
+  return { raw: null, error };
+}
+
+function answerCandidates(text: string): string[] {
+  const found: string[] = [];
+  for (const fence of [...text.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)].reverse()) {
+    const block = fence[1]?.trim();
+    if (block !== undefined && block !== '') found.push(block);
+  }
+  const last = text.lastIndexOf('}');
+  for (let open = text.lastIndexOf('{', last); open !== -1; open = text.lastIndexOf('{', open - 1)) {
+    found.push(text.slice(open, last + 1));
+    if (open === 0) break;
+  }
+  return found;
+}
+
+function readRawPlan(parsed: unknown): RawPlan | null {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const dependencies = (parsed as Record<string, unknown>)['dependencies'];
+  if (typeof dependencies !== 'object' || dependencies === null || Array.isArray(dependencies)) return null;
+  // No prototype, so a `__proto__` key is just a (bogus) story id.
+  const raw = Object.create(null) as Record<string, string[]>;
+  for (const [storyId, dependsOn] of Object.entries(dependencies)) {
+    if (!Array.isArray(dependsOn) || !dependsOn.every((id) => typeof id === 'string')) return null;
+    raw[storyId] = dependsOn;
+  }
+  return raw;
+}
+
+/**
+ * The plan as the build log shows it: one line per story, in priority order —
+ * `US-003 ← US-001, US-002`, or `US-002 (no dependencies)`.
+ */
+export function describePlan(stories: readonly PlanStory[], plan: ReadonlyMap<string, readonly string[]>): string[] {
+  return inPriorityOrder(stories).map(({ storyId }) => {
+    const dependsOn = plan.get(storyId) ?? [];
+    return dependsOn.length === 0 ? `${storyId} (no dependencies)` : `${storyId} ← ${dependsOn.join(', ')}`;
+  });
+}

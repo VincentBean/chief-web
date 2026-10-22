@@ -12,8 +12,12 @@ import {
   type Database,
   enqueueBuild,
   failSession,
+  getDependencyPlan,
+  getDependencyPlanOrigin,
+  getDependencyPlanStoryIds,
   type FailureStage,
   type Decision,
+  type DependencyPlanSource,
   getQueuedBuild,
   getSession,
   listBuildQueue,
@@ -29,6 +33,7 @@ import {
   prRefId,
   removeBuildQueueEntry,
   removeQueuedBuild,
+  replaceDependencyPlan,
   type Session,
   type SessionStatus,
   type Story,
@@ -76,7 +81,8 @@ import {
   remainingStories,
   selectNextStory,
 } from './loop.js';
-import { agentPrompt } from './prompts.js';
+import { describePlan, normalizePlan, parseDependencyAnswer, type RawPlan, sequentialPlan } from './plan.js';
+import { agentPrompt, dependencyAnalysisPrompt } from './prompts.js';
 import type { AgentResult, AgentRunner } from './runner.js';
 import type { VoiceEventSink } from '../voice/events.js';
 
@@ -223,6 +229,12 @@ interface RunState {
   readonly maxIterations: number;
   readonly startedAt: string;
   stopping: boolean;
+  /**
+   * Whether this run has settled its dependency plan (async stories US-005):
+   * analysed, reused or not needed. Not part of {@link ParkedRun} on purpose —
+   * a resumed run checks the stored plan against `prd.md` again.
+   */
+  planned: boolean;
   /**
    * The expiry of the global hold this run must park on (US-005), or null.
    *
@@ -1060,6 +1072,7 @@ export class BuildService {
         maxIterations: parked?.maxIterations ?? iterationCap(remainingStories(stories)),
         startedAt: parked?.startedAt ?? nowIso(),
         stopping: false,
+        planned: false,
         holdUntil: null,
         // The account `start` just resolved for the container: the row as it
         // is now, which is what the orchestrator read and wrote — the failover
@@ -1204,6 +1217,15 @@ export class BuildService {
       if (story === null) {
         await this.handOff(session, snapshot.stories);
         return;
+      }
+
+      // Before any story agent starts, and once per run (async stories
+      // US-005). Back to the top afterwards: the analysis took a while, and
+      // the stop, the hold and the PRD are all checked again from scratch.
+      if (!state.planned) {
+        state.planned = true;
+        if (!(await this.planDependencies(session, snapshot, state))) return;
+        continue;
       }
 
       if (state.iteration >= state.maxIterations) {
@@ -1484,6 +1506,176 @@ export class BuildService {
   }
 
   /**
+   * Settles the run's dependency plan before any story agent starts (async
+   * stories US-005). Returns false when the loop must not continue: the
+   * analysis was stopped, or put the session on the usage-limit hold.
+   *
+   * With a limit of 1, or one story left, there is nothing to run side by
+   * side and nothing happens. A stored plan made for exactly the stories in
+   * `prd.md` is reused, so a resumed build does not pay for the analysis
+   * twice. Otherwise one headless `claude -p` reads the PRD and answers with
+   * JSON — and whatever goes wrong with that, short of a stop or a hold, ends
+   * in the sequential fallback rather than in a failed build.
+   */
+  private async planDependencies(session: Session, snapshot: PrdSnapshot, state: RunState): Promise<boolean> {
+    const fresh = getSession(this.db, session.id) ?? session;
+    if (fresh.maxParallelStories <= 1 || remainingStories(snapshot.stories) <= 1) return true;
+
+    const storyIds = snapshot.stories.map((candidate) => candidate.storyId).sort();
+    const origin = getDependencyPlanOrigin(this.db, session.id);
+    const storedIds = getDependencyPlanStoryIds(this.db, session.id);
+    if (origin.source !== null && storedIds !== null && sameIds(storedIds, storyIds)) {
+      const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+      log.write(
+        `${planHeadline(origin.source, origin.reason)}\n` +
+          '(stored when this build first started; the stories in prd.md have not changed)\n' +
+          describePlan(snapshot.stories, getDependencyPlan(this.db, session.id)).map((line) => `${line}\n`).join(''),
+      );
+      log.end(0);
+      return true;
+    }
+
+    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
+    logger.info('dependency analysis started', {
+      session: session.id,
+      stories: storyIds.length,
+      reanalysis: origin.source !== null,
+    });
+    if (origin.source !== null) {
+      log.write('The stories in prd.md changed since the stored plan was made, so it is worked out again.\n');
+    }
+
+    let prd: string;
+    try {
+      prd = fs.readFileSync(sessionPrdFile(this.config, session), 'utf8');
+    } catch (cause) {
+      this.storePlan(session, snapshot, log, null, `prd.md could not be read: ${describe(cause)}`);
+      log.end(null);
+      return true;
+    }
+
+    const before = (await this.runner.workspaceStatus?.(state.containerId)) ?? null;
+    let result: AgentResult | null = null;
+    let failure: string | null = null;
+    try {
+      result = await this.runner.run({
+        sessionId: session.id,
+        containerId: state.containerId,
+        iteration: ANALYSIS_ITERATION,
+        prompt: dependencyAnalysisPrompt({
+          sessionName: session.name,
+          prd,
+          storyIds: snapshot.stories.map((candidate) => candidate.storyId),
+        }),
+        timeoutMs: DEPENDENCY_ANALYSIS_TIMEOUT_MS,
+        model: getBuildModel(this.db),
+        mcpConfigFile: null,
+        deadline: null,
+        onOutput: (text) => log.write(text),
+      });
+    } catch (cause) {
+      failure = `the analysis agent could not be run: ${describe(cause)}`;
+    }
+
+    // Something else took the run off the agent while it was analysing: a
+    // hold armed by another session, the operator's stop, or this agent's own
+    // refusal. None of those is an answer, so no plan is stored — a fallback
+    // stored here would be reused by the resume for the rest of the build.
+    const refused = result !== null && isUsageLimitRefusal(result);
+    const interrupted = state.holdUntil !== null || state.stopping || refused;
+    if (interrupted || result?.timedOut === true) await this.runner.reap(session.id, state.containerId);
+    await this.discardAnalysisChanges(session, state, before, log);
+
+    if (state.holdUntil !== null) {
+      const held = state.holdUntil;
+      log.write(`\n${holdMessage(held)}\n`);
+      log.end(result?.exitCode ?? null);
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, held, false);
+      return false;
+    }
+    if (refused) {
+      const until = this.hold.arm(state.accountId);
+      log.write(`\n${holdMessage(until)}\n`);
+      log.end(result?.exitCode ?? null);
+      if (state.stopping) this.returnToReady(session);
+      else this.park(session, state, until, false);
+      await this.holdOthers(session.id, state.accountId, until);
+      return false;
+    }
+    if (state.stopping) {
+      log.end(result?.exitCode ?? null);
+      this.returnToReady(session);
+      return false;
+    }
+
+    if (result !== null && failure === null) {
+      if (result.timedOut) {
+        failure = `the analysis timed out after ${String(DEPENDENCY_ANALYSIS_TIMEOUT_MS / 60_000)} minutes`;
+      } else if (result.exitCode !== 0) {
+        failure = `the analysis agent exited with code ${String(result.exitCode)}`;
+      }
+    }
+    let raw: RawPlan | null = null;
+    if (failure === null && result !== null) {
+      const answer = parseDependencyAnswer(result.output);
+      if (answer.raw === null) failure = answer.error;
+      else raw = answer.raw;
+    }
+    this.storePlan(session, snapshot, log, raw, failure);
+    log.end(result?.timedOut === true ? null : (result?.exitCode ?? null));
+    return true;
+  }
+
+  /**
+   * The analysis agent is told not to change anything; this is what makes
+   * that true. Only a change *it* made is undone: the clone is compared with
+   * how it was before the agent started.
+   */
+  private async discardAnalysisChanges(
+    session: Session,
+    state: RunState,
+    before: string | null,
+    log: { write(text: string): void },
+  ): Promise<void> {
+    if (before === null || this.runner.workspaceStatus === undefined) return;
+    const after = await this.runner.workspaceStatus(state.containerId);
+    if (after === null || after === before) return;
+    logger.warn('the dependency analysis changed the clone; restoring it', { session: session.id });
+    log.write('\nThe analysis agent changed files it was told to leave alone; they were thrown away.\n');
+    await this.runner.restoreWorkspace?.(state.containerId);
+  }
+
+  /**
+   * Stores the agent's plan, or the sequential fallback when `failure` says
+   * why there is none or `normalizePlan` rejects it, and writes it to the log.
+   */
+  private storePlan(
+    session: Session,
+    snapshot: PrdSnapshot,
+    log: { write(text: string): void },
+    raw: RawPlan | null,
+    failure: string | null,
+  ): void {
+    const storyIds = snapshot.stories.map((candidate) => candidate.storyId);
+    let plan = sequentialPlan(snapshot.stories);
+    let reason = failure;
+    if (raw !== null && failure === null) {
+      const normalized = normalizePlan(snapshot.stories, raw);
+      plan = normalized.plan;
+      reason = normalized.fallbackReason;
+    }
+    const source = reason === null ? 'agent' : 'fallback';
+    replaceDependencyPlan(this.db, session.id, plan, source, reason, storyIds);
+    logger.info('dependency plan stored', { session: session.id, source, reason });
+    log.write(
+      `\n${planHeadline(source, reason)}\n` +
+        describePlan(snapshot.stories, plan).map((line) => `${line}\n`).join(''),
+    );
+  }
+
+  /**
    * The iteration asked the operator something (decisions US-004).
    *
    * Everything that matters here is in {@link DecisionWatcher.asked}; what is
@@ -1700,9 +1892,11 @@ export class BuildService {
    * continue rather than restart, and is why a `waiting` session goes on
    * counting against the concurrency cap (US-003).
    */
-  private park(session: Session, state: RunState | null, until: string): Session {
+  private park(session: Session, state: RunState | null, until: string, redo = true): Session {
     if (state !== null) {
-      state.iteration -= 1;
+      // The iteration the hold interrupted is run again; the dependency
+      // analysis (async stories US-005) was never one, so it costs nothing.
+      if (redo) state.iteration -= 1;
       // Kept for the resume (US-006), which continues this run rather than
       // starting a new one. The `RunState` is dropped the moment the loop
       // unwinds, so this is the only thing that remembers where it got to.
@@ -1991,6 +2185,21 @@ function decisionMessage(decision: Decision): string {
     'Answer it on the session page. Nothing is lost while it waits: the iteration’s clock is stopped, ' +
     'and the agent carries on with the most conservative option if nobody answers.'
   );
+}
+
+/** The pid file and log section of the dependency analysis: before iteration 1. */
+const ANALYSIS_ITERATION = 0;
+
+/** The analysis agent's own fixed budget (async stories US-005). */
+export const DEPENDENCY_ANALYSIS_TIMEOUT_MS = 30 * 60_000;
+
+/** `Dependency plan: agent`, or `Dependency plan: fallback (<reason>)`. */
+function planHeadline(source: DependencyPlanSource, reason: string | null): string {
+  return source === 'agent' ? 'Dependency plan: agent' : `Dependency plan: fallback (${reason ?? 'no reason given'})`;
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
 function holdMessage(until: string): string {

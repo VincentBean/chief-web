@@ -18,6 +18,9 @@ import {
   type EffortLevel,
   failSession,
   enqueueBuild,
+  getDependencyPlan,
+  getDependencyPlanOrigin,
+  getDependencyPlanStoryIds,
   getQueuedBuild,
   getSession,
   getSetting,
@@ -401,7 +404,7 @@ class World {
   /** Every container start, in order: `docker` as the loop used it. */
   readonly containerStarts: string[] = [];
 
-  constructor(prd: string = PRD) {
+  constructor(prd: string = PRD, maxParallelStories = 1) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-build-'));
     tempDirs.push(dir);
     this.config = loadConfig({ DATA_DIR: dir });
@@ -429,11 +432,16 @@ class World {
       remove: (): Promise<void> => Promise.resolve(),
     };
     this.runner = new MockRunner();
-    this.session = this.addSession('add-login', prd);
+    this.session = this.addSession('add-login', prd, maxParallelStories);
   }
 
-  /** Another ready session on the same repository, with its own clone. */
-  addSession(name: string, prd: string = PRD): Session {
+  /**
+   * Another ready session on the same repository, with its own clone. One
+   * story at a time unless asked otherwise: the sequential loop is what most
+   * of these tests are about, and a wider limit adds the dependency analysis
+   * (async stories US-005) in front of the first story.
+   */
+  addSession(name: string, prd: string = PRD, maxParallelStories = 1): Session {
     const session =
       updateSession(
         this.db,
@@ -442,6 +450,7 @@ class World {
           name,
           baseBranch: 'main',
           prTargetBranch: 'main',
+          maxParallelStories,
         }).id,
         { status: 'ready' },
       ) ?? (undefined as never);
@@ -505,6 +514,9 @@ class MockRunner implements AgentRunner {
   /** Called for each iteration; whatever it does *is* what the agent did. */
   behaviour: (invocation: AgentInvocation, index: number) => void | Promise<void> = () => {};
   result: AgentResult = { exitCode: 0, output: '', timedOut: false };
+  /** The clone as `git status` sees it; absent, like a runner that cannot look. */
+  workspaceStatus?: (containerId: string) => Promise<string | null>;
+  restoreWorkspace?: (containerId: string) => Promise<void>;
 
   async run(invocation: AgentInvocation): Promise<AgentResult> {
     this.invocations.push(invocation);
@@ -2734,5 +2746,274 @@ describe('the container agent runner', () => {
     // The loop calls this on a path that has already given up on the agent;
     // a container that has gone away has no agent left in it either.
     await createAgentRunner(docker, 5).reap('session-1', 'no-such-container');
+  });
+});
+
+describe('the dependency analysis at build start (async stories US-005)', () => {
+  const THREE = `${PRD}
+### US-003: Third story
+**Status:** todo
+**Priority:** 3
+**Description:** As a user, I want the third thing.
+
+**Acceptance Criteria:**
+- [ ] It works too
+`;
+  const FOUR = `${THREE}
+### US-004: Fourth story
+**Status:** todo
+**Priority:** 4
+**Description:** As a user, I want the fourth thing.
+
+**Acceptance Criteria:**
+- [ ] It works as well
+`;
+
+  const isAnalysis = (invocation: AgentInvocation): boolean => invocation.prompt.startsWith('# Dependency Analysis');
+  const analyses = (world: World): AgentInvocation[] => world.runner.invocations.filter(isAnalysis);
+  const ok = (output: string): AgentResult => ({ exitCode: 0, output, timedOut: false });
+  const logOf = (world: World): string =>
+    fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+
+  /**
+   * A parallel session whose analysis answers `analysis` and whose story
+   * agents each finish their story. `onStory` runs before a story agent does.
+   */
+  function scripted(
+    prd: string,
+    analysis: AgentResult,
+    onStory: (invocation: AgentInvocation) => void | Promise<void> = () => {},
+  ): World {
+    const world = new World(prd, 3);
+    world.runner.behaviour = async (invocation): Promise<void> => {
+      if (isAnalysis(invocation)) {
+        world.runner.result = analysis;
+        return;
+      }
+      world.runner.result = ok('');
+      await onStory(invocation);
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+    return world;
+  }
+
+  it('runs one analysis before any story agent and stores the agent plan', async () => {
+    const world = scripted(
+      THREE,
+      ok('[tool] Read: {"file_path": "/workspace/repo/x.ts"}\n{"dependencies": {"US-001": ["US-002"], "US-003": []}}\n[claude] finished (2.0s)'),
+    );
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.equal(world.runner.invocations.length, 4);
+    const [analysis] = world.runner.invocations;
+    assert.ok(analysis !== undefined && isAnalysis(analysis), 'the analysis runs first');
+    assert.equal(analysis.timeoutMs, 30 * 60_000);
+    assert.equal(analysis.iteration, 0);
+    assert.equal(analysis.mcpConfigFile, null);
+    // The whole PRD, and the JSON-only answer.
+    assert.ok(analysis.prompt.includes('### US-003: Third story'));
+    assert.ok(analysis.prompt.includes('{"dependencies": {"US-002": ["US-001"], "US-003": []}}'));
+    assert.match(analysis.prompt, /Do NOT create, edit, move or delete any file/);
+    assert.match(analysis.prompt, /when you are unsure, mark the dependency/);
+
+    assert.deepEqual(getDependencyPlanOrigin(world.db, world.session.id), { source: 'agent', reason: null });
+    assert.deepEqual([...getDependencyPlan(world.db, world.session.id)], [['US-001', ['US-002']]]);
+    assert.deepEqual(getDependencyPlanStoryIds(world.db, world.session.id), ['US-001', 'US-002', 'US-003']);
+
+    const log = logOf(world);
+    assert.match(log, /Dependency plan: agent\nUS-002 \(no dependencies\)\nUS-001 ← US-002\nUS-003 \(no dependencies\)\n/);
+    // The story agents keep their own numbering: the analysis is not one.
+    assert.match(log, /=== chief-web iteration 0 \| - \|/);
+    assert.match(log, /=== chief-web iteration 1 \| US-002 \|/);
+  });
+
+  it('falls back to the sequential plan when the answer is not valid JSON', async () => {
+    const world = scripted(THREE, ok('US-003 depends on nothing, I think.'));
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished', 'the analysis never fails the build');
+    assert.deepEqual(getDependencyPlanOrigin(world.db, world.session.id), {
+      source: 'fallback',
+      reason: 'the answer was not valid JSON',
+    });
+    assert.deepEqual(
+      [...getDependencyPlan(world.db, world.session.id)],
+      [
+        ['US-001', ['US-002']],
+        ['US-003', ['US-001']],
+      ],
+    );
+    assert.match(
+      logOf(world),
+      /Dependency plan: fallback \(the answer was not valid JSON\)\nUS-002 \(no dependencies\)\nUS-001 ← US-002\nUS-003 ← US-001\n/,
+    );
+  });
+
+  it('falls back on a cycle, and on a non-zero exit', async () => {
+    const cyclic = scripted(THREE, ok('{"dependencies": {"US-001": ["US-003"], "US-003": ["US-001"]}}'));
+    const builds = serviceFor(cyclic);
+    await builds.start(cyclic.session.id);
+    await builds.whenIdle(cyclic.session.id);
+    assert.equal(cyclic.status(), 'finished');
+    assert.deepEqual(getDependencyPlanOrigin(cyclic.db, cyclic.session.id), {
+      source: 'fallback',
+      reason: 'cycle: US-001, US-003',
+    });
+
+    const crashed = scripted(THREE, { exitCode: 2, output: '{"dependencies": {}}', timedOut: false });
+    const crashedBuilds = serviceFor(crashed);
+    await crashedBuilds.start(crashed.session.id);
+    await crashedBuilds.whenIdle(crashed.session.id);
+    assert.equal(crashed.status(), 'finished');
+    assert.deepEqual(getDependencyPlanOrigin(crashed.db, crashed.session.id), {
+      source: 'fallback',
+      reason: 'the analysis agent exited with code 2',
+    });
+  });
+
+  it('falls back when the analysis times out, and reaps the agent it left behind', async () => {
+    const world = scripted(THREE, { exitCode: null, output: '', timedOut: true });
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.deepEqual(getDependencyPlanOrigin(world.db, world.session.id), {
+      source: 'fallback',
+      reason: 'the analysis timed out after 30 minutes',
+    });
+    // The sweep before the run, then the timed-out analysis.
+    assert.deepEqual(world.runner.reaps.slice(0, 2), [world.session.id, world.session.id]);
+    assert.match(logOf(world), /Dependency plan: fallback \(the analysis timed out after 30 minutes\)/);
+  });
+
+  /** Stops the build from inside its first story agent; resolves when it has. */
+  function stopInFirstStory(world: World, builds: ReturnType<typeof serviceFor>): () => Promise<void> {
+    let stopped: Promise<unknown> | null = null;
+    let stories = 0;
+    world.runner.behaviour = async (invocation): Promise<void> => {
+      if (isAnalysis(invocation)) {
+        world.runner.result = ok('{"dependencies": {"US-001": [], "US-002": [], "US-003": ["US-001"]}}');
+        return;
+      }
+      world.runner.result = ok('');
+      stories += 1;
+      if (stories === 1) {
+        stopped = builds.stop(world.session.id);
+        await until('the agent was signalled', () => world.runner.stops.length > 0);
+        return;
+      }
+      world.markDone(/"id": "(US-\d+)"/.exec(invocation.prompt)?.[1] ?? '');
+      world.runner.commit();
+    };
+    return async () => {
+      await until('the stop was requested', () => stopped !== null);
+      await stopped;
+    };
+  }
+
+  it('reuses the stored plan when a stopped build resumes with the same stories', async () => {
+    const world = new World(THREE, 3);
+    const builds = serviceFor(world);
+    const stopped = stopInFirstStory(world, builds);
+    await builds.start(world.session.id);
+    await stopped();
+    assert.equal(world.status(), 'ready');
+    assert.equal(analyses(world).length, 1);
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.equal(analyses(world).length, 1, 'the resume reused the plan');
+    assert.deepEqual(getDependencyPlanOrigin(world.db, world.session.id), { source: 'agent', reason: null });
+    const log = logOf(world);
+    assert.match(log, /have not changed\)\nUS-002 \(no dependencies\)\nUS-001 \(no dependencies\)\nUS-003 ← US-001\n/);
+    assert.equal(log.match(/Dependency plan: agent/g)?.length, 2);
+  });
+
+  it('analyses again when a resumed build finds the stories changed', async () => {
+    const world = new World(THREE, 3);
+    const builds = serviceFor(world);
+    const stopped = stopInFirstStory(world, builds);
+    await builds.start(world.session.id);
+    await stopped();
+    assert.equal(analyses(world).length, 1);
+
+    fs.writeFileSync(world.prdFile, FOUR);
+    world.sync();
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.equal(analyses(world).length, 2);
+    assert.ok(analyses(world)[1]?.prompt.includes('### US-004: Fourth story'));
+    assert.deepEqual(getDependencyPlanStoryIds(world.db, world.session.id), ['US-001', 'US-002', 'US-003', 'US-004']);
+    assert.match(logOf(world), /The stories in prd\.md changed since the stored plan was made/);
+  });
+
+  it('runs no analysis with a limit of 1, or with one story left', async () => {
+    const sequential = scripted(THREE, ok('{"dependencies": {}}'));
+    updateSession(sequential.db, sequential.session.id, { maxParallelStories: 1 });
+    const builds = serviceFor(sequential);
+    await builds.start(sequential.session.id);
+    await builds.whenIdle(sequential.session.id);
+    assert.equal(sequential.status(), 'finished');
+    assert.equal(analyses(sequential).length, 0);
+    assert.equal(getDependencyPlanOrigin(sequential.db, sequential.session.id).source, null);
+
+    const lastOne = scripted(THREE, ok('{"dependencies": {}}'));
+    lastOne.markDone('US-001');
+    lastOne.markDone('US-002');
+    lastOne.sync();
+    const lastBuilds = serviceFor(lastOne);
+    await lastBuilds.start(lastOne.session.id);
+    await lastBuilds.whenIdle(lastOne.session.id);
+    assert.equal(lastOne.status(), 'finished');
+    assert.equal(analyses(lastOne).length, 0);
+  });
+
+  it('puts the session on the usage-limit hold instead of falling back', async () => {
+    const world = scripted(THREE, { exitCode: 1, output: 'Claude AI usage limit reached|1756700000', timedOut: false });
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'waiting');
+    assert.equal(world.runner.invocations.length, 1, 'no story agent started');
+    assert.equal(getDependencyPlanOrigin(world.db, world.session.id).source, null, 'no plan stored');
+    assert.equal(new UsageLimitHold(world.db).until(world.accountId), getSession(world.db, world.session.id)?.waitingUntil);
+    assert.match(logOf(world), /usage limit was reached/i);
+  });
+
+  it('throws away whatever the analysis agent changed', async () => {
+    const world = scripted(THREE, ok('{"dependencies": {}}'));
+    const restored: string[] = [];
+    let status = '';
+    world.runner.workspaceStatus = (): Promise<string | null> => Promise.resolve(status);
+    world.runner.restoreWorkspace = (containerId: string): Promise<void> => {
+      restored.push(containerId);
+      status = '';
+      return Promise.resolve();
+    };
+    const story = world.runner.behaviour;
+    world.runner.behaviour = async (invocation, index): Promise<void> => {
+      if (isAnalysis(invocation)) status = ' M src/index.ts\n';
+      await story(invocation, index);
+    };
+    const builds = serviceFor(world);
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.deepEqual(restored, ['container-add-login']);
+    assert.equal(world.status(), 'finished');
+    assert.equal(getDependencyPlanOrigin(world.db, world.session.id).source, 'agent');
+    assert.match(logOf(world), /changed files it was told to leave alone; they were thrown away/);
   });
 });

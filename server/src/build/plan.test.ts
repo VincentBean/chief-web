@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { normalizePlan, type PlanStory, sequentialPlan } from './plan.js';
+import { describePlan, normalizePlan, parseDependencyAnswer, type PlanStory, sequentialPlan } from './plan.js';
 
 /** Deliberately out of order: plans follow priority, not array position. */
 const STORIES: PlanStory[] = [
@@ -105,5 +105,45 @@ describe('normalizePlan (async stories US-003)', () => {
   it('is not fooled by a key inherited from Object.prototype', () => {
     const result = normalizePlan([{ storyId: 'constructor', priority: 1 }], {});
     assert.deepEqual(entries(result.plan), [['constructor', []]]);
+  });
+});
+
+describe('the analysis agent’s answer (async stories US-005)', () => {
+  it('finds the document after tool lines with JSON of their own', () => {
+    const output = [
+      '[claude] started with opus in /workspace/repo',
+      '[tool] Read: {"file_path": "/workspace/repo/a.ts"}',
+      '{"dependencies": {"US-002": ["US-001"], "US-003": []}}',
+      '[claude] finished (3.0s, 4 turns)',
+    ].join('\n');
+    const answer = parseDependencyAnswer(output);
+    assert.equal(answer.error, null);
+    // Spread: the parsed object has no prototype, so a `__proto__` key is inert.
+    assert.deepEqual({ ...answer.raw }, { 'US-002': ['US-001'], 'US-003': [] });
+  });
+
+  it('reads a fenced answer', () => {
+    const answer = parseDependencyAnswer('Here it is:\n```json\n{"dependencies": {"US-001": []}}\n```\n');
+    assert.deepEqual({ ...answer.raw }, { 'US-001': [] });
+  });
+
+  it('rejects prose, an empty answer and the wrong shape', () => {
+    assert.equal(parseDependencyAnswer('No JSON here.').error, 'the answer was not valid JSON');
+    assert.equal(parseDependencyAnswer('  ').error, 'the agent printed nothing');
+    assert.equal(
+      parseDependencyAnswer('{"dependencies": {"US-002": "US-001"}}').error,
+      'the answer had no "dependencies" object of story id lists',
+    );
+    assert.equal(parseDependencyAnswer('{"plan": {}}').raw, null);
+  });
+
+  it('describes the plan one line per story, in priority order', () => {
+    const plan = new Map([['US-003', ['US-001', 'US-002']]]);
+    assert.deepEqual(describePlan(STORIES, plan), [
+      'US-001 (no dependencies)',
+      'US-002 (no dependencies)',
+      'US-003 ← US-001, US-002',
+      'US-004 (no dependencies)',
+    ]);
   });
 });

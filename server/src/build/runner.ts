@@ -1,7 +1,14 @@
 import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import type { SessionExecutor } from '../sessions/index.js';
-import { AGENT_SIGNALLED, agentExecSpec, agentSignalSpec, headShaSpec } from './agent.js';
+import {
+  AGENT_SIGNALLED,
+  agentExecSpec,
+  agentSignalSpec,
+  headShaSpec,
+  restoreWorkspaceSpec,
+  workspaceStatusSpec,
+} from './agent.js';
 import { type AgentToolCall, AgentOutputFormatter } from './stream.js';
 
 /**
@@ -96,6 +103,14 @@ export interface AgentRunner {
   reap(sessionId: string, containerId: string): Promise<void>;
   /** HEAD of the clone, or `null` when there is no commit to read. */
   headSha(containerId: string): Promise<string | null>;
+  /**
+   * `git status --porcelain` of the clone, `.chief/` aside, or `null` when it
+   * could not be read (async stories US-005). Optional: a runner without it
+   * cannot check the read-only dependency analysis, so the check is skipped.
+   */
+  workspaceStatus?(containerId: string): Promise<string | null>;
+  /** `git checkout -- . && git clean -fd`, `.chief/` aside. Never throws. */
+  restoreWorkspace?(containerId: string): Promise<void>;
 }
 
 /** The {@link AgentRunner} that actually execs into the session container. */
@@ -207,6 +222,30 @@ export class ContainerAgentRunner implements AgentRunner {
     if (result.exitCode !== 0 || result.timedOut) return null;
     const sha = result.stdout.trim();
     return sha === '' ? null : sha;
+  }
+
+  async workspaceStatus(containerId: string): Promise<string | null> {
+    const result = await this.exec.runExec(containerId, workspaceStatusSpec(), HEAD_TIMEOUT_MS);
+    if (result.exitCode !== 0 || result.timedOut) return null;
+    return result.stdout;
+  }
+
+  async restoreWorkspace(containerId: string): Promise<void> {
+    try {
+      const result = await this.exec.runExec(containerId, restoreWorkspaceSpec(), HEAD_TIMEOUT_MS);
+      if (result.exitCode !== 0 || result.timedOut) {
+        logger.warn('could not restore the clone after the dependency analysis', {
+          container: containerId,
+          exitCode: result.exitCode,
+          stderr: result.stderr.trim(),
+        });
+      }
+    } catch (cause) {
+      logger.warn('could not restore the clone after the dependency analysis', {
+        container: containerId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
   }
 }
 
