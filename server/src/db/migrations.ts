@@ -1422,6 +1422,25 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN max_parallel_stories INTEGER NOT NULL DEFAULT 3;
     `,
   },
+  {
+    id: '0033_story_dependencies',
+    sql: `
+      -- Which story waits for which (async stories US-003): one row per edge,
+      -- "story_id cannot start before depends_on is done". A story with no
+      -- dependencies has no rows. Written whole by the dependency analysis.
+      CREATE TABLE story_dependencies (
+        session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+        story_id   TEXT NOT NULL,
+        depends_on TEXT NOT NULL,
+        PRIMARY KEY (session_id, story_id, depends_on)
+      );
+      -- Where the stored plan came from: 'agent' (the analysis) or
+      -- 'fallback' (the sequential chain), NULL while there is none; and
+      -- why a fallback was used.
+      ALTER TABLE sessions ADD COLUMN dependency_plan_source TEXT;
+      ALTER TABLE sessions ADD COLUMN dependency_plan_reason TEXT;
+    `,
+  },
 ];
 
 /**
