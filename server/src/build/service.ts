@@ -78,7 +78,7 @@ import {
 import { type StoryTarget, storyBranch, storyWorktreeDir } from './agent.js';
 import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
 import { storyAskDir } from './mcp.js';
-import { type BuildLogs, type BuildLogWriter, NullBuildLogs } from './log.js';
+import { type BuildLogs, type BuildLogWriter, NullBuildLogs, storyPrefixedWriter } from './log.js';
 import {
   classifyIteration,
   iterationCap,
@@ -172,6 +172,40 @@ export interface BuildView {
   readonly decisions: readonly DecisionView[];
   /** How long a question stands before the agent stops waiting for it. */
   readonly decisionTimeoutMs: number | null;
+  /**
+   * Every story of the PRD as the scheduler sees it (async stories US-012):
+   * what it waits on, what it is doing and how many attempts it has spent.
+   */
+  readonly storyPlan: readonly StoryPlanView[];
+  /** Where the dependency plan came from; `null` while there is none yet. */
+  readonly planSource: DependencyPlanSource | null;
+  /** Why the plan fell back to the sequential chain; `null` for an agent plan. */
+  readonly planReason: string | null;
+}
+
+/** What a story attempt of a parallel run is doing (async stories US-012). */
+type StoryPhase = 'running' | 'merging';
+
+/** Where one story stands in the build (async stories US-012). */
+export const STORY_PLAN_STATES = [
+  'waiting on dependencies',
+  'ready',
+  'running',
+  'merging',
+  'deciding',
+  'blocked',
+  'done',
+] as const;
+export type StoryPlanState = (typeof STORY_PLAN_STATES)[number];
+
+/** One story of {@link BuildView.storyPlan}. */
+export interface StoryPlanView {
+  readonly storyId: string;
+  /** The stories it waits on, in priority order; empty when it waits on none. */
+  readonly dependsOn: readonly string[];
+  readonly state: StoryPlanState;
+  /** Failed attempts it has spent in the current run; 0 when nothing runs. */
+  readonly attempts: number;
 }
 
 /** One question of the session, as the page renders it (decisions US-005). */
@@ -254,6 +288,18 @@ interface RunState {
    * US-009); the sequential loop counts its one story in {@link attempts}.
    */
   readonly storyAttempts: Map<string, number>;
+  /**
+   * What each story of a parallel run is doing right now (async stories
+   * US-012): an entry from the moment its attempt is registered until the
+   * scheduler has taken its outcome, `merging` while it waits for and goes
+   * through its merge. Read by the build view only.
+   */
+  readonly phases: Map<string, StoryPhase>;
+  /**
+   * Stories that used up their retries in this run (US-010). A Retry starts a
+   * new run, and a fresh budget.
+   */
+  readonly blocked: string[];
   /**
    * The expiry of the global hold this run must park on (US-005), or null.
    *
@@ -1150,6 +1196,8 @@ export class BuildService {
         stopping: false,
         planned: false,
         storyAttempts: new Map(parked?.storyAttempts ?? []),
+        phases: new Map(),
+        blocked: [],
         holdUntil: null,
         wake: () => undefined,
         // The account `start` just resolved for the container: the row as it
@@ -1466,8 +1514,7 @@ export class BuildService {
     let ending: { readonly stage: FailureStage; readonly message: string } | null = null;
     /** This run's own agent was refused, so the other sessions are held too. */
     let refused = false;
-    /** Stories that used up their retries in this run (US-010). A Retry starts a new run, and a fresh budget. */
-    const blocked: string[] = [];
+    const blocked = state.blocked;
     // A question opened or closed resolves this, so the scheduler looks again
     // even though no attempt has come back (US-010).
     const nextWake = (): Promise<null> =>
@@ -1518,6 +1565,7 @@ export class BuildService {
         }
         const { storyId, outcome } = next;
         active.delete(storyId);
+        state.phases.delete(storyId);
         const current = getSession(this.db, sessionId) ?? session;
         if (current === null) continue;
         const story = listStories(this.db, sessionId).find((candidate) => candidate.storyId === storyId);
@@ -1680,6 +1728,7 @@ export class BuildService {
           },
         };
       }
+      state.phases.set(story.storyId, 'running');
       active.set(
         story.storyId,
         this.attemptStory(session, story, snapshot, state, prepared).then((outcome) => ({
@@ -1761,7 +1810,8 @@ export class BuildService {
       updateStory(this.db, session.id, storyId, { status: 'todo' });
     };
 
-    const log = this.logs.begin(session, iteration, storyId);
+    // Stories running at once write into one log: every line says whose it is (US-012).
+    const log = storyPrefixedWriter(this.logs.begin(session, iteration, storyId), storyId);
     const buildModel = getBuildModel(this.db);
     const advisor = advisorFor(this.db);
     if (advisor.dropped !== null) log.write(`${advisor.dropped}\n`);
@@ -1872,6 +1922,7 @@ export class BuildService {
 
       let mergeFailed: string | null = null;
       if (updated?.status === 'done') {
+        state.phases.set(storyId, 'merging');
         const merged = await this.merger.merge(session, containerId, {
           storyId,
           title: story.title,
@@ -1885,6 +1936,7 @@ export class BuildService {
           interrupted: () => state.stopping || state.holdUntil !== null,
         });
         if (merged.code === 'merged') return { code: 'merged' };
+        state.phases.set(storyId, 'running');
         await giveUp();
         if (merged.code === 'held') {
           // The resolution agent was refused: a hold, like a refused story.
@@ -2835,6 +2887,8 @@ export class BuildService {
 
   private toView(session: Session): BuildView {
     const state = this.runs.get(session.id);
+    const stories = listStories(this.db, session.id);
+    const origin = getDependencyPlanOrigin(this.db, session.id);
     const document = readPrdDocument(
       sessionPrdFile(this.config, session),
       prdPathFor(session.name),
@@ -2845,10 +2899,10 @@ export class BuildService {
       status: session.status,
       running: state !== undefined,
       iteration: state?.iteration ?? 0,
-      maxIterations: state?.maxIterations ?? iterationCap(remainingStories(listStories(this.db, session.id))),
+      maxIterations: state?.maxIterations ?? iterationCap(remainingStories(stories)),
       currentStoryId: state?.storyId ?? null,
       attempts: state?.attempts ?? 0,
-      stories: listStories(this.db, session.id),
+      stories,
       prd: document.status,
       lastError: session.lastError,
       failureStage: session.failureStage,
@@ -2861,7 +2915,51 @@ export class BuildService {
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
       ...this.decisionViews(session),
       decisionTimeoutMs: this.decisions?.timeoutMs ?? null,
+      storyPlan: this.storyPlanViews(session, state, stories),
+      planSource: origin.source,
+      planReason: origin.reason,
     };
+  }
+
+  /**
+   * Where each story stands (async stories US-012). The row says `done`; the
+   * run says blocked, running or merging; the decision watcher says which
+   * story waits on the operator; and the plan says whether what is left may
+   * start. A dependency that is not a story of the PRD counts as met, as it
+   * does for {@link selectRunnableStories}.
+   */
+  private storyPlanViews(session: Session, state: RunState | undefined, stories: readonly Story[]): StoryPlanView[] {
+    const plan = getDependencyPlan(this.db, session.id);
+    const deciding = new Set(state === undefined ? [] : (this.decisions?.waitingStories(session.id) ?? []));
+    const done = new Set(stories.filter((story) => story.status === 'done').map((story) => story.storyId));
+    const known = new Set(stories.map((story) => story.storyId));
+    return stories.map((story) => {
+      const dependsOn = plan.get(story.storyId) ?? [];
+      const phase = state?.phases.get(story.storyId);
+      const standing: StoryPlanState =
+        story.status === 'done'
+          ? 'done'
+          : state?.blocked.includes(story.storyId) === true
+            ? 'blocked'
+            : deciding.has(story.storyId)
+              ? 'deciding'
+              : phase !== undefined
+                ? phase
+                : // The sequential loop keeps no phases: its one story is the current one.
+                  state !== undefined &&
+                    state.phases.size === 0 &&
+                    state.storyId === story.storyId &&
+                    story.status === 'in-progress'
+                  ? 'running'
+                  : dependsOn.some((id) => known.has(id) && !done.has(id))
+                    ? 'waiting on dependencies'
+                    : 'ready';
+      const attempts =
+        state === undefined
+          ? 0
+          : (state.storyAttempts.get(story.storyId) ?? (state.storyId === story.storyId ? state.attempts : 0));
+      return { storyId: story.storyId, dependsOn, state: standing, attempts };
+    });
   }
 
   /**

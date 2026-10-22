@@ -84,6 +84,9 @@ export {
   MAX_DECISION_ANSWER_CHARS,
   type QueuedBuildView,
   type QueuedStart,
+  STORY_PLAN_STATES,
+  type StoryPlanState,
+  type StoryPlanView,
 } from './service.js';
 export {
   BUILD_LOG_WS_PATH,

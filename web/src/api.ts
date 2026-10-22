@@ -1292,6 +1292,25 @@ export interface Build {
   decisions: Decision[];
   /** How long a question stands before the agent gives up on it. */
   decisionTimeoutMs: number | null;
+  /** Every story as the scheduler sees it (async stories US-012). */
+  storyPlan: StoryPlan[];
+  /** Where the dependency plan came from; null while there is none yet. */
+  planSource: 'agent' | 'fallback' | null;
+  /** Why the plan fell back to the sequential chain; null for an agent plan. */
+  planReason: string | null;
+}
+
+/** Where one story stands in the build; mirrors the server's `StoryPlanState`. */
+export type StoryPlanState = 'waiting on dependencies' | 'ready' | 'running' | 'merging' | 'deciding' | 'blocked' | 'done';
+
+/** One story of `Build.storyPlan`; mirrors the server's `StoryPlanView`. */
+export interface StoryPlan {
+  storyId: string;
+  /** The stories it waits on, in priority order. */
+  dependsOn: string[];
+  state: StoryPlanState;
+  /** Failed attempts it has spent in the current run. */
+  attempts: number;
 }
 
 /**

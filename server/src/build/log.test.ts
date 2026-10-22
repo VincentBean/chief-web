@@ -26,6 +26,7 @@ import {
   createBuildLogStore,
   GIT_EXCLUDE_HEADER,
   parseLog,
+  storyPrefixedWriter,
 } from './log.js';
 import { buildLogSocketPath, type BuildLogMessage, createBuildLogSocketRoute } from './socket.js';
 import { AgentOutputFormatter, renderLine } from './stream.js';
@@ -77,6 +78,23 @@ class World {
     return fs.existsSync(this.logFile) ? fs.readFileSync(this.logFile, 'utf8') : '';
   }
 }
+
+describe('storyPrefixedWriter (async stories US-012)', () => {
+  it('prefixes every line once, holding a chunk that ends mid-line until its newline or the end', () => {
+    const written: string[] = [];
+    const ends: (number | null)[] = [];
+    const writer = storyPrefixedWriter({ write: (text) => written.push(text), end: (code) => ends.push(code) }, 'US-003');
+
+    writer.write('first li');
+    writer.write('ne\nsecond\n\nthi');
+    writer.write('rd');
+    writer.end(0);
+
+    assert.equal(written.join(''), '[US-003] first line\n[US-003] second\n[US-003] \n[US-003] third\n');
+    assert.ok(written.every((chunk) => chunk.endsWith('\n')));
+    assert.deepEqual(ends, [0]);
+  });
+});
 
 describe('the stream-json formatter', () => {
   it('renders an init event as the model and the working directory', () => {

@@ -42,6 +42,8 @@ import {
   stopBuild,
   stopPlanning,
   type Story,
+  type StoryPlan,
+  type StoryPlanState,
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
@@ -59,7 +61,7 @@ import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import type { PaneStatus, TerminalPaneHandle } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge } from '../ui.tsx';
+import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge, type Tone } from '../ui.tsx';
 import { useCall } from '../voice/CallProvider.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
@@ -585,7 +587,13 @@ export function Session() {
                 </p>
               )}
               <Progress done={done} total={stories.length} tone={isEnded(session) ? SESSION_TONE[status] : status === 'failed' ? 'danger' : 'active'} label="Stories done" />
-              <StoryList stories={stories} currentStoryId={status === 'building' ? build.currentStoryId : null} />
+              {/* A session that builds one story at a time shows the list as it always has (async stories US-012). */}
+              {session.maxParallelStories > 1 && <PlanLine build={build} limit={session.maxParallelStories} />}
+              <StoryList
+                stories={stories}
+                currentStoryId={status === 'building' ? build.currentStoryId : null}
+                plan={session.maxParallelStories > 1 ? build.storyPlan : null}
+              />
             </Panel>
           )}
         </div>
@@ -1073,12 +1081,57 @@ function PrdErrors({ errors, title }: { readonly errors: readonly PrdParseError[
 
 /* --------------------------------------------------------------- stories */
 
-function StoryList({ stories, currentStoryId }: { readonly stories: readonly Story[]; readonly currentStoryId: string | null }) {
+/**
+ * What the parallel scheduler is doing (async stories US-012): how many of the
+ * session's places are taken, how many stories wait on the operator, and
+ * where the dependency plan came from. Nothing until a plan exists.
+ */
+function PlanLine({ build, limit }: { readonly build: Build; readonly limit: number }) {
+  if (build.planSource === null) return null;
+  if (build.planSource === 'fallback') {
+    return (
+      <p className="plan-line muted">
+        plan: sequential fallback — {build.planReason ?? 'no reason given'}
+      </p>
+    );
+  }
+  const running = build.storyPlan.filter((story) => story.state === 'running' || story.state === 'merging').length;
+  const waiting = build.storyPlan.filter((story) => story.state === 'deciding').length;
+  return (
+    <p className="plan-line muted">
+      Running {running} of {limit}
+      {waiting > 0 && ` · ${String(waiting)} waiting on you`} · plan by agent
+    </p>
+  );
+}
+
+const STORY_PLAN_TONE: Record<StoryPlanState, Tone> = {
+  'waiting on dependencies': 'neutral',
+  ready: 'ready',
+  running: 'active',
+  merging: 'active',
+  deciding: 'wait',
+  blocked: 'danger',
+  done: 'done',
+};
+
+function StoryList({
+  stories,
+  currentStoryId,
+  plan,
+}: {
+  readonly stories: readonly Story[];
+  readonly currentStoryId: string | null;
+  /** Each story's place in a parallel build; null builds one at a time, as before. */
+  readonly plan: readonly StoryPlan[] | null;
+}) {
   if (stories.length === 0) return <p className="muted">No stories parsed yet.</p>;
+  const planned = new Map((plan ?? []).map((entry) => [entry.storyId, entry]));
   return (
     <ol className="stories">
       {stories.map((story) => {
-        const current = story.storyId === currentStoryId;
+        const entry = plan === null ? undefined : planned.get(story.storyId);
+        const current = entry === undefined ? story.storyId === currentStoryId : entry.state === 'running' || entry.state === 'merging';
         return (
           <li className={`story${current ? ' story--current' : ''} story--${STORY_TONE[story.status]}`} key={story.storyId}>
             <span className="story__marker">
@@ -1087,9 +1140,18 @@ function StoryList({ stories, currentStoryId }: { readonly stories: readonly Sto
             <span className="story__id mono">{story.storyId}</span>
             <span className="story__title">
               {story.title}
-              {current && <span className="story__now"> · running now</span>}
+              {current && entry === undefined && <span className="story__now"> · running now</span>}
+              {entry !== undefined && entry.dependsOn.length > 0 && (
+                <span className="story__deps">Depends on {entry.dependsOn.join(', ')}</span>
+              )}
             </span>
             <span className="story__aside mono">
+              {entry !== undefined && (
+                <Badge tone={STORY_PLAN_TONE[entry.state]} pulse={entry.state === 'running'}>
+                  {entry.state}
+                  {entry.attempts > 0 && ` · attempt ${String(entry.attempts + 1)}`}
+                </Badge>
+              )}{' '}
               {story.commitSha === null ? <span className="muted">P{story.priority}</span> : story.commitSha.slice(0, 7)}
             </span>
           </li>

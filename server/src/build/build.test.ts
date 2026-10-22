@@ -3234,7 +3234,7 @@ describe('story worktrees (async stories US-006)', () => {
       [['US-002', 1], ['US-002', 2], ['US-001', 1]],
     );
     assert.deepEqual(removed, ['US-002', 'US-002', 'US-001']);
-    assert.match(logOf(world), /US-002: merge conflict in src\/a\.ts\nUS-002: not resolved — retrying on the updated branch/);
+    assert.match(logOf(world), /US-002: merge conflict in src\/a\.ts\n\[US-002\] US-002: not resolved — retrying on the updated branch/);
   });
 
   describe('a conflicted merge (US-008)', () => {
@@ -3327,7 +3327,7 @@ describe('story worktrees (async stories US-006)', () => {
       assert.equal(statusIn(world.prdFile, 'US-002'), 'done');
       assert.match(
         logOf(world),
-        /US-002: merge conflict in src\/a\.ts\nUS-002: resolved\n\nUS-002: merged into the session branch as sha-resolved/,
+        /US-002: merge conflict in src\/a\.ts\n\[US-002\] US-002: resolved\n\[US-002\] \n\[US-002\] US-002: merged into the session branch as sha-resolved/,
       );
     });
 
@@ -3352,7 +3352,7 @@ describe('story worktrees (async stories US-006)', () => {
       assert.equal(world.runner.invocations.filter(isResolver).length, 1);
       assert.match(
         logOf(world),
-        /US-002: merge conflict in src\/a\.ts\nUS-002: not resolved — retrying on the updated branch \(Conflict markers were left behind in src\/a\.ts\.\)/,
+        /US-002: merge conflict in src\/a\.ts\n\[US-002\] US-002: not resolved — retrying on the updated branch \(Conflict markers were left behind in src\/a\.ts\.\)/,
       );
       assert.match(logOf(world), /US-002: merged into the session branch as merge-US-002/);
     });
@@ -3530,6 +3530,42 @@ describe('story worktrees (async stories US-006)', () => {
       assert.deepEqual(
         world.runner.invocations.filter((invocation) => !isAnalysis(invocation)).map((invocation) => invocation.iteration).sort(),
         [1, 2],
+      );
+    });
+
+    it("reports each story's dependencies, state and attempts, and the plan, in the build view (US-012)", async () => {
+      const { world, events, release } = scheduling(THREE, 3, '{"dependencies": {"US-001": ["US-002"]}}');
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('the independent stories are running', () => events.length === 2);
+      const view = builds.status(world.session.id);
+      assert.equal(view.planSource, 'agent');
+      assert.equal(view.planReason, null);
+      assert.deepEqual(
+        [...view.storyPlan].sort((a, b) => a.storyId.localeCompare(b.storyId)),
+        [
+          { storyId: 'US-001', dependsOn: ['US-002'], state: 'waiting on dependencies', attempts: 0 },
+          { storyId: 'US-002', dependsOn: [], state: 'running', attempts: 0 },
+          { storyId: 'US-003', dependsOn: [], state: 'running', attempts: 0 },
+        ],
+      );
+
+      release('US-003');
+      await until('US-003 is merged', () =>
+        builds.status(world.session.id).storyPlan.some((entry) => entry.storyId === 'US-003' && entry.state === 'done'),
+      );
+      release('US-002');
+      await until('US-001 started', () => events.includes('start US-001'));
+      assert.equal(
+        builds.status(world.session.id).storyPlan.find((entry) => entry.storyId === 'US-001')?.state,
+        'running',
+      );
+      release('US-001');
+      await builds.whenIdle(world.session.id);
+      assert.deepEqual(
+        builds.status(world.session.id).storyPlan.map((entry) => entry.state),
+        ['done', 'done', 'done'],
       );
     });
 
