@@ -1,6 +1,6 @@
 import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
-import { abortMerge } from '../prconflicts/merge.js';
+import { abortMerge, type VerifyResult, verifyResolution } from '../prconflicts/merge.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import {
   addStoryWorktreeSpec,
@@ -147,6 +147,19 @@ export interface AgentRunner {
   mergeStory?(containerId: string, sessionName: string, storyId: string, message: string): Promise<StoryMergeOutcome>;
   /** `git merge --abort` in `/workspace/repo`. Never throws. */
   abortStoryMerge?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /**
+   * After a conflict-resolution agent (async stories US-008): stages `files`
+   * in `/workspace/repo`, checks nothing is unmerged and no conflict marker is
+   * left, and makes the merge commit — `verifyResolution` from
+   * `prconflicts/`. Never throws. Optional: without it, a conflicted merge is
+   * aborted straight away.
+   */
+  verifyStoryMerge?(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    files: readonly string[],
+  ): Promise<VerifyResult>;
 }
 
 /** How a story's merge into the session branch went (async stories US-007). */
@@ -358,6 +371,24 @@ export class ContainerAgentRunner implements AgentRunner {
       timeoutMs: WORKTREE_TIMEOUT_MS,
     });
     if (!aborted) logger.warn('could not abort a story merge', { container: containerId, story: storyId });
+  }
+
+  async verifyStoryMerge(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    files: readonly string[],
+  ): Promise<VerifyResult> {
+    try {
+      return await verifyResolution(this.exec, containerId, {
+        baseBranch: storyBranch(sessionName, storyId),
+        files,
+        timeoutMs: WORKTREE_TIMEOUT_MS,
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      return { ok: false, code: 'commit_failed', message: `The resolution could not be checked: ${message}`, stderr: '' };
+    }
   }
 }
 

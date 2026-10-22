@@ -4,9 +4,13 @@ import type { Config } from '../config.js';
 import { type Database, type Session, updateStory } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { CodeFenceScanner, STORY_HEADING_PATTERN } from '../prd/parse.js';
-import { sessionPrdFile, sessionProgressFile } from '../sessions/index.js';
+import { isUsageLimitRefusal } from '../limits/index.js';
+import { CONTAINER_REPO_DIR, sessionPrdFile, sessionProgressFile } from '../sessions/index.js';
+import { getAgentTimeoutMs, getBuildModel } from '../settings/index.js';
 import type { BuildLogWriter } from './log.js';
-import type { AgentRunner } from './runner.js';
+import { storyBranch } from './agent.js';
+import { storyConflictPrompt } from './prompts.js';
+import type { AgentResult, AgentRunner } from './runner.js';
 
 /**
  * Bringing a finished parallel story back into the session (async stories
@@ -146,6 +150,10 @@ export class MergeQueue {
 export interface FinishedStory {
   readonly storyId: string;
   readonly title: string;
+  /** The story's description from `prd.md`; the conflict prompt quotes it (US-008). */
+  readonly description: string;
+  /** The loop iteration the story ran in; the resolution agent runs under it. */
+  readonly iteration: number;
   /** The story's own commit on its branch: HEAD of its worktree. */
   readonly commitSha: string | null;
   /** The worktree's `prd.md` and `progress.md`, on the host. */
@@ -156,6 +164,21 @@ export interface FinishedStory {
   /** The story's build-log section; the merge's lines go under it. */
   readonly log?: BuildLogWriter;
 }
+
+/** How bringing a finished story in went. */
+export type StoryMergeResult =
+  | { readonly code: 'merged' }
+  | /** Not merged, the clone as it was: a failed attempt of the story. */ {
+      readonly code: 'not_merged';
+      readonly reason: string;
+    }
+  | /**
+     * The conflict-resolution agent was refused for Claude's usage limit
+     * (US-008): not merged, and not the story's fault — the caller holds.
+     */ { readonly code: 'held'; readonly result: AgentResult };
+
+/** The pid-file attempt number of a story's conflict-resolution agent; story attempts start at 1. */
+export const RESOLUTION_ATTEMPT = 0;
 
 /**
  * Merges finished stories' branches into their session branch (async stories
@@ -172,17 +195,17 @@ export class StoryMerger {
   private readonly queue = new MergeQueue();
 
   constructor(
-    private readonly config: Pick<Config, 'workspacesDir'>,
+    private readonly config: Pick<Config, 'workspacesDir' | 'buildIterationTimeoutMs'>,
     private readonly db: Database,
     private readonly runner: AgentRunner,
   ) {}
 
   /**
-   * True when the story was merged. False when it was not — a conflict, or a
-   * merge git refused — in which case the merge is aborted, the clone and its
+   * `merged` when the story was merged, cleanly or after an agent resolved
+   * its conflicts (US-008). Otherwise the merge is aborted, the clone and its
    * `.chief/` files are as they were, and the worktree is left to the caller.
    */
-  merge(session: Pick<Session, 'id' | 'name'>, containerId: string, story: FinishedStory): Promise<boolean> {
+  merge(session: Pick<Session, 'id' | 'name'>, containerId: string, story: FinishedStory): Promise<StoryMergeResult> {
     return this.queue.run(session.id, () => this.mergeNow(session, containerId, story));
   }
 
@@ -190,23 +213,36 @@ export class StoryMerger {
     session: Pick<Session, 'id' | 'name'>,
     containerId: string,
     story: FinishedStory,
-  ): Promise<boolean> {
+  ): Promise<StoryMergeResult> {
     const { storyId } = story;
     const merge = this.runner.mergeStory;
-    if (merge === undefined) return false;
+    if (merge === undefined) return { code: 'not_merged', reason: 'this runner cannot merge' };
     const worktreePrd = fs.readFileSync(story.prdFile, 'utf8');
     const worktreeProgress = readOrEmpty(story.progressFile);
 
     const outcome = await merge.call(this.runner, containerId, session.name, storyId, mergeMessage(storyId, story.title));
-    if (outcome.code !== 'merged') {
+    let mergeSha: string;
+    if (outcome.code === 'merged') {
+      mergeSha = outcome.mergeSha;
+    } else if (outcome.code === 'failed') {
+      // Usually nothing was merged, but a merge cut short by its timeout can
+      // leave `MERGE_HEAD` behind, and that would refuse every later merge.
       await this.runner.abortStoryMerge?.(containerId, session.name, storyId);
-      story.log?.write(
-        outcome.code === 'conflicted'
-          ? `\n${storyId}: merge conflict in ${outcome.files.join(', ')}; the merge was aborted.\n`
-          : `\n${storyId}: the merge into the session branch failed: ${outcome.message}\n`,
-      );
+      story.log?.write(`\n${storyId}: the merge into the session branch failed: ${outcome.message}\n`);
       logger.warn('story merge did not go through', { session: session.id, story: storyId, outcome: outcome.code });
-      return false;
+      return { code: 'not_merged', reason: `the merge into the session branch failed: ${outcome.message}` };
+    } else {
+      story.log?.write(`\n${storyId}: merge conflict in ${outcome.files.join(', ')}\n`);
+      const resolved = await this.resolve(session, containerId, story, outcome.files);
+      if (resolved.code !== 'resolved') {
+        await this.runner.abortStoryMerge?.(containerId, session.name, storyId);
+        if (resolved.code === 'held') return resolved;
+        story.log?.write(`${storyId}: not resolved — retrying on the updated branch (${resolved.reason})\n`);
+        logger.warn('story merge conflict not resolved', { session: session.id, story: storyId, reason: resolved.reason });
+        return { code: 'not_merged', reason: `its merge conflicted in ${outcome.files.join(', ')}: ${resolved.reason}` };
+      }
+      story.log?.write(`${storyId}: resolved\n`);
+      mergeSha = resolved.mergeSha;
     }
 
     // Written in place, like the status mark, so the files keep the owner the
@@ -221,13 +257,87 @@ export class StoryMerger {
     updateStory(this.db, session.id, storyId, {
       status: 'done',
       commitSha: story.commitSha,
-      mergeSha: outcome.mergeSha,
+      mergeSha,
     });
-    story.log?.write(`\n${storyId}: merged into the session branch as ${outcome.mergeSha}\n`);
-    logger.info('story merged', { session: session.id, story: storyId, merge: outcome.mergeSha });
+    story.log?.write(`\n${storyId}: merged into the session branch as ${mergeSha}\n`);
+    logger.info('story merged', { session: session.id, story: storyId, merge: mergeSha });
     await this.runner.removeStoryWorktree?.(containerId, session.name, storyId);
-    return true;
+    return { code: 'merged' };
   }
+
+  /**
+   * Runs one conflict-resolution agent in the clone, with the merge still in
+   * progress, and lets `verifyResolution` decide (async stories US-008): only
+   * `ok` — nothing unmerged, no marker left, the merge commit made — counts.
+   * Leaves the merge in place on any other ending; the caller aborts it.
+   */
+  private async resolve(
+    session: Pick<Session, 'id' | 'name'>,
+    containerId: string,
+    story: FinishedStory,
+    files: readonly string[],
+  ): Promise<
+    | { readonly code: 'resolved'; readonly mergeSha: string }
+    | { readonly code: 'unresolved'; readonly reason: string }
+    | { readonly code: 'held'; readonly result: AgentResult }
+  > {
+    const verify = this.runner.verifyStoryMerge;
+    if (verify === undefined) return { code: 'unresolved', reason: 'this runner cannot check a resolution' };
+    // `.chief/` is never committed, so git cannot conflict on `prd.md` or
+    // `progress.md`; were one ever listed, it is not the agent's to merge.
+    const code = files.filter((file) => !file.startsWith('.chief/'));
+    if (code.length === 0) return { code: 'unresolved', reason: 'only chief-web files conflicted' };
+
+    const { storyId } = story;
+    const timeoutMs = getAgentTimeoutMs(this.db, this.config);
+    let result: AgentResult;
+    try {
+      result = await this.runner.run({
+        sessionId: session.id,
+        containerId,
+        iteration: story.iteration,
+        prompt: storyConflictPrompt({
+          storyId,
+          title: story.title,
+          description: story.description,
+          storyBranch: storyBranch(session.name, storyId),
+          files: code,
+          timeoutMs,
+        }),
+        timeoutMs,
+        model: getBuildModel(this.db),
+        mcpConfigFile: null,
+        deadline: null,
+        // Under the story's own pid glob, so a reap aims at this agent and no
+        // other story's; it works in the clone, where the merge is.
+        story: { storyId, attempt: RESOLUTION_ATTEMPT, workingDir: CONTAINER_REPO_DIR },
+        onOutput: (text) => story.log?.write(text),
+      });
+    } catch (cause) {
+      return { code: 'unresolved', reason: `the resolution agent could not run: ${describe(cause)}` };
+    }
+
+    if (isUsageLimitRefusal(result)) {
+      await this.runner.reap(session.id, containerId, storyId);
+      return { code: 'held', result };
+    }
+    if (result.timedOut) {
+      // The agent is still in there with the half-merged tree under it.
+      await this.runner.reap(session.id, containerId, storyId);
+      return { code: 'unresolved', reason: 'the resolution agent ran out of time' };
+    }
+
+    // Staged and checked over everything git stopped on, not just the code.
+    const verified = await verify.call(this.runner, containerId, session.name, storyId, files);
+    if (!verified.ok) return { code: 'unresolved', reason: verified.message };
+    const mergeSha = await this.runner.headSha(containerId);
+    if (mergeSha === null) return { code: 'unresolved', reason: 'the merge commit could not be read back' };
+    return { code: 'resolved', mergeSha };
+  }
+}
+
+function describe(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function readOrEmpty(file: string): string {

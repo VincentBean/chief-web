@@ -68,7 +68,8 @@ import {
 } from './loop.js';
 import { ASK_OPERATOR_TOOL, DecisionWatcher } from './decisions.js';
 import { createBuildLogStore } from './log.js';
-import { agentCommand, agentPrompt, storyContext } from './prompts.js';
+import { agentCommand, agentPrompt, STORY_CONFLICT_PROMPT_HEADING, storyContext } from './prompts.js';
+import type { VerifyResult } from '../prconflicts/merge.js';
 import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner, type StoryMergeOutcome } from './runner.js';
 import { BUILD_MCP_CONFIG_FILE } from './mcp.js';
 import { type BuildCompletion, BuildError, createBuildService, MAX_DECISION_ANSWER_CHARS } from './service.js';
@@ -528,6 +529,13 @@ class MockRunner implements AgentRunner {
   /** Merging a finished story (async stories US-007); absent, nothing is merged. */
   mergeStory?: (containerId: string, sessionName: string, storyId: string, message: string) => Promise<StoryMergeOutcome>;
   abortStoryMerge?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
+  /** Checking a conflict-resolution agent's work (async stories US-008); absent, a conflict is aborted at once. */
+  verifyStoryMerge?: (
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    files: readonly string[],
+  ) => Promise<VerifyResult>;
   /** Where each HEAD was read: `undefined` is the clone. */
   readonly headDirs: (string | undefined)[] = [];
   /** The story each reap was narrowed to: `undefined` is the whole session. */
@@ -3209,7 +3217,185 @@ describe('story worktrees (async stories US-006)', () => {
       [['US-002', 1], ['US-002', 2], ['US-001', 1]],
     );
     assert.deepEqual(removed, ['US-002', 'US-002', 'US-001']);
-    assert.match(logOf(world), /US-002: merge conflict in src\/a\.ts; the merge was aborted/);
+    assert.match(logOf(world), /US-002: merge conflict in src\/a\.ts\nUS-002: not resolved — retrying on the updated branch/);
+  });
+
+  describe('a conflicted merge (US-008)', () => {
+    const isResolver = (invocation: AgentInvocation): boolean =>
+      invocation.prompt.startsWith(STORY_CONFLICT_PROMPT_HEADING);
+    const VERIFIED: VerifyResult = { ok: true, code: 'ok', message: 'Resolved 1 file and committed the merge.', stderr: '' };
+    const MARKERS: VerifyResult = {
+      ok: false,
+      code: 'markers',
+      message: 'Conflict markers were left behind in src/a.ts.',
+      stderr: '',
+    };
+
+    /**
+     * A parallel world whose US-002 merge conflicts `conflicts` times, and
+     * whose resolution agent's work checks out as `verdict` says.
+     */
+    function conflicting(conflicts: number, verdict: VerifyResult) {
+      const world = new World(PRD, 3);
+      const { added, removed } = withWorktrees(world);
+      const events: string[] = [];
+      const verified: string[][] = [];
+      let left = conflicts;
+      world.runner.mergeStory = (_containerId, _sessionName, storyId): Promise<StoryMergeOutcome> => {
+        if (storyId === 'US-002' && left > 0) {
+          left -= 1;
+          return Promise.resolve({ code: 'conflicted', files: ['src/a.ts'], message: 'CONFLICT' });
+        }
+        return Promise.resolve({ code: 'merged', mergeSha: `merge-${storyId}` });
+      };
+      world.runner.abortStoryMerge = (_containerId, _sessionName, storyId): Promise<void> => {
+        events.push(`abort ${storyId}`);
+        return Promise.resolve();
+      };
+      world.runner.verifyStoryMerge = (_containerId, _sessionName, _storyId, files): Promise<VerifyResult> => {
+        verified.push([...files]);
+        return Promise.resolve(verdict);
+      };
+      const add = world.runner.addStoryWorktree;
+      world.runner.addStoryWorktree = (containerId, sessionName, storyId): Promise<void> => {
+        const row = world.stories().find((candidate) => candidate.storyId === storyId);
+        events.push(`add ${storyId} (${row?.status ?? 'gone'}, clone ${statusIn(world.prdFile, storyId) ?? 'gone'})`);
+        return add?.(containerId, sessionName, storyId) ?? Promise.resolve();
+      };
+      world.runner.behaviour = (invocation): void => {
+        world.runner.result = ok(isAnalysis(invocation) ? '{"dependencies": {}}' : '');
+        if (isAnalysis(invocation)) return;
+        if (isResolver(invocation)) {
+          // The resolution agent's merge commit is the clone's new HEAD.
+          world.runner.head = 'sha-resolved';
+          return;
+        }
+        const storyId = invocation.story?.storyId ?? '';
+        const file = worktreePrd(world, storyId);
+        fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done').content);
+        world.runner.commit();
+      };
+      return { world, added, removed, events, verified };
+    }
+
+    const storyAttempts = (world: World): (readonly [string, number] | null)[] =>
+      world.runner.invocations
+        .filter((invocation) => !isAnalysis(invocation) && !isResolver(invocation))
+        .map((invocation) => (invocation.story ? ([invocation.story.storyId, invocation.story.attempt] as const) : null));
+
+    it('has an agent resolve it in the clone, and merges the story', async () => {
+      const { world, removed, events, verified } = conflicting(1, VERIFIED);
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'finished');
+      const resolvers = world.runner.invocations.filter(isResolver);
+      assert.equal(resolvers.length, 1);
+      const resolver = resolvers[0];
+      assert.ok(resolver);
+      assert.deepEqual(resolver.story, { storyId: 'US-002', attempt: 0, workingDir: CONTAINER_REPO_DIR });
+      assert.ok(resolver.prompt.includes('As a user, I want the first thing.'), 'the story description');
+      assert.ok(resolver.prompt.includes('- `src/a.ts`'), 'the conflicting path');
+      assert.equal(resolver.mcpConfigFile, null);
+      assert.deepEqual(verified, [['src/a.ts']]);
+      // Resolved: no abort, no second attempt.
+      assert.equal(events.some((event) => event.startsWith('abort')), false);
+      assert.deepEqual(storyAttempts(world), [['US-002', 1], ['US-001', 1]]);
+      assert.deepEqual(removed, ['US-002', 'US-001']);
+      const row = world.stories().find((candidate) => candidate.storyId === 'US-002');
+      assert.equal(row?.status, 'done');
+      assert.equal(row?.mergeSha, 'sha-resolved');
+      assert.equal(statusIn(world.prdFile, 'US-002'), 'done');
+      assert.match(
+        logOf(world),
+        /US-002: merge conflict in src\/a\.ts\nUS-002: resolved\n\nUS-002: merged into the session branch as sha-resolved/,
+      );
+    });
+
+    it('aborts a failed resolution and sends the story back to todo for another attempt', async () => {
+      const { world, removed, events } = conflicting(1, MARKERS);
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'finished');
+      // Aborted, the worktree removed, and the story back to `todo` before
+      // its next attempt cut a fresh worktree off the updated session branch.
+      assert.deepEqual(events, [
+        'add US-002 (todo, clone todo)',
+        'abort US-002',
+        'add US-002 (todo, clone todo)',
+        'add US-001 (todo, clone todo)',
+      ]);
+      assert.deepEqual(storyAttempts(world), [['US-002', 1], ['US-002', 2], ['US-001', 1]]);
+      assert.deepEqual(removed, ['US-002', 'US-002', 'US-001']);
+      assert.equal(world.runner.invocations.filter(isResolver).length, 1);
+      assert.match(
+        logOf(world),
+        /US-002: merge conflict in src\/a\.ts\nUS-002: not resolved — retrying on the updated branch \(Conflict markers were left behind in src\/a\.ts\.\)/,
+      );
+      assert.match(logOf(world), /US-002: merged into the session branch as merge-US-002/);
+    });
+
+    it('aborts a resolution agent that ran out of time without checking its work', async () => {
+      const { world, events, verified } = conflicting(1, VERIFIED);
+      const behaviour = world.runner.behaviour;
+      world.runner.behaviour = (invocation, index): void => {
+        void behaviour(invocation, index);
+        if (isResolver(invocation)) world.runner.result = { exitCode: null, output: '', timedOut: true };
+      };
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'finished');
+      assert.deepEqual(verified, [], 'a timed-out resolution is never committed');
+      assert.ok(events.includes('abort US-002'));
+      assert.ok(world.runner.reapScopes.includes('US-002'), 'the resolution agent was reaped');
+      assert.deepEqual(storyAttempts(world), [['US-002', 1], ['US-002', 2], ['US-001', 1]]);
+      assert.match(logOf(world), /US-002: not resolved — retrying on the updated branch \(the resolution agent ran out of time\)/);
+    });
+
+    it('fails the build on the third merge that cannot be resolved (blocking the story is US-010)', async () => {
+      const { world, events } = conflicting(Number.POSITIVE_INFINITY, MARKERS);
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'failed');
+      // MAX_RETRIES = 2: the first attempt and two retries, each one merge.
+      assert.deepEqual(storyAttempts(world), [['US-002', 1], ['US-002', 2], ['US-002', 3]]);
+      assert.equal(events.filter((event) => event === 'abort US-002').length, 3);
+      assert.equal(world.runner.invocations.filter(isResolver).length, 3);
+      assert.equal(world.stories().find((candidate) => candidate.storyId === 'US-002')?.status, 'todo');
+      assert.match(
+        world.error() ?? '',
+        /^US-002 \("First story"\) could not be finished in 3 attempts\. .*its merge conflicted in src\/a\.ts: Conflict markers were left behind in src\/a\.ts\./,
+      );
+    });
+
+    it('holds the session when the resolution agent hits the usage limit, without spending an attempt', async () => {
+      const { world, events } = conflicting(1, VERIFIED);
+      const behaviour = world.runner.behaviour;
+      world.runner.behaviour = (invocation, index): void => {
+        void behaviour(invocation, index);
+        if (isResolver(invocation)) world.runner.result = { exitCode: 1, output: 'Claude AI usage limit reached|1756700000', timedOut: false };
+      };
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'waiting');
+      assert.ok(events.includes('abort US-002'));
+      assert.equal(world.stories().find((candidate) => candidate.storyId === 'US-002')?.status, 'todo');
+      assert.deepEqual(storyAttempts(world), [['US-002', 1]]);
+    });
   });
 
   it('gives every attempt its own pid file, reaps only that story, and removes an abandoned worktree', async () => {

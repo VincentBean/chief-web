@@ -171,6 +171,8 @@ describe('StoryMerger with git (async stories US-007)', () => {
     repo: string;
     runner: ReturnType<typeof createAgentRunner>;
     merges: string[];
+    /** The conflict-resolution agent: whatever this does to the clone is what it did. */
+    agent: { prompts: string[]; act: (repo: string) => void };
   } {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-merge-'));
     tempDirs.push(root);
@@ -216,11 +218,17 @@ describe('StoryMerger with git (async stories US-007)', () => {
     );
 
     const merges: string[] = [];
+    const agent = { prompts: [] as string[], act: (_repo: string): void => {} };
     const rewrite = (value: string): string => value.replace(/^\/workspace(?=\/|$)/, ws);
     const runner = createAgentRunner({
       runExec: (_container: string, spec: ExecSpec): Promise<ExecOutput> => {
         if (spec === undefined) throw new Error('no spec');
         const script = spec.cmd[2] ?? '';
+        if (spec.cmd.includes('claude')) {
+          agent.prompts.push(spec.cmd[spec.cmd.indexOf('-p') + 1] ?? '');
+          agent.act(repo);
+          return Promise.resolve({ exitCode: 0, stdout: '', stderr: '', timedOut: false });
+        }
         if (script.includes('git merge --no-ff')) merges.push(`start ${spec.env?.[1] ?? ''}`);
         const env = Object.fromEntries(
           (spec.env ?? []).map((entry) => {
@@ -242,8 +250,8 @@ describe('StoryMerger with git (async stories US-007)', () => {
         });
       },
     });
-    const merger = new StoryMerger({ workspacesDir: root }, db, runner);
-    return { db, session, merger, git, repo, runner, merges };
+    const merger = new StoryMerger({ workspacesDir: root, buildIterationTimeoutMs: 60_000 }, db, runner);
+    return { db, session, merger, git, repo, runner, merges, agent };
   }
 
   /** What a story agent does in its worktree: a file, a commit, its PRD copy done. */
@@ -251,7 +259,14 @@ describe('StoryMerger with git (async stories US-007)', () => {
     world: ReturnType<typeof workspace>,
     storyId: string,
     file: string,
-  ): Promise<{ commitSha: string; prdFile: string; progressFile: string; progressStart: string }> {
+  ): Promise<{
+    commitSha: string;
+    prdFile: string;
+    progressFile: string;
+    progressStart: string;
+    description: string;
+    iteration: number;
+  }> {
     const progressStart = fs.readFileSync(path.join(world.repo, '.chief/prds/demo/progress.md'), 'utf8');
     await world.runner.addStoryWorktree?.('c', world.session.name, storyId);
     const dir = path.join(path.dirname(world.repo), 'worktrees', storyId);
@@ -263,16 +278,16 @@ describe('StoryMerger with git (async stories US-007)', () => {
     const progressFile = path.join(dir, '.chief/prds/demo/progress.md');
     fs.appendFileSync(progressFile, `\n## ${storyId}\n- learned\n---\n`);
     const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
-    return { commitSha, prdFile, progressFile, progressStart };
+    return { commitSha, prdFile, progressFile, progressStart, description: `What ${storyId} is for.`, iteration: 1 };
   }
 
   it('merges a finished story cleanly and records both SHAs', async () => {
     const world = workspace();
     const finished = await build(world, 'US-002', 'two.txt');
 
-    assert.equal(
+    assert.deepEqual(
       await world.merger.merge(world.session, 'c', { storyId: 'US-002', title: 'Second story', ...finished }),
-      true,
+      { code: 'merged' },
     );
 
     const head = world.git('rev-parse', 'HEAD');
@@ -307,7 +322,7 @@ describe('StoryMerger with git (async stories US-007)', () => {
       world.merger.merge(world.session, 'c', { storyId: 'US-002', title: 'Second story', ...two }),
     ]);
 
-    assert.deepEqual(results, [true, true]);
+    assert.deepEqual(results, [{ code: 'merged' }, { code: 'merged' }]);
     // The second merge started only once the first had finished.
     assert.deepEqual(world.merges, [
       'start CHIEF_STORY_BRANCH=chief-story/demo/US-001',
@@ -332,15 +347,60 @@ describe('StoryMerger with git (async stories US-007)', () => {
     assert.equal(progress, '## Codebase Patterns\n\n## US-001\n- learned\n---\n\n## US-002\n- learned\n---\n');
   });
 
-  it('aborts a conflicting merge and leaves the session as it was', async () => {
+  it('has an agent resolve a conflict and commits the merge once it checks out (US-008)', async () => {
     const world = workspace();
     const one = await build(world, 'US-001', 'same.txt');
     const two = await build(world, 'US-002', 'same.txt');
-    assert.equal(await world.merger.merge(world.session, 'c', { storyId: 'US-001', title: 'First story', ...one }), true);
+    assert.deepEqual(
+      await world.merger.merge(world.session, 'c', { storyId: 'US-001', title: 'First story', ...one }),
+      { code: 'merged' },
+    );
+    const before = world.git('rev-parse', 'HEAD');
+    world.agent.act = (repo): void => {
+      // Mid-merge, the file has both sides in it; the agent keeps both.
+      assert.match(fs.readFileSync(path.join(repo, 'same.txt'), 'utf8'), /^<<<<<<< /m);
+      fs.writeFileSync(path.join(repo, 'same.txt'), 'US-001\nUS-002\n');
+    };
+
+    const result = await world.merger.merge(world.session, 'c', { storyId: 'US-002', title: 'Second story', ...two });
+
+    assert.deepEqual(result, { code: 'merged' });
+    assert.equal(world.agent.prompts.length, 1);
+    const prompt = world.agent.prompts[0] ?? '';
+    assert.ok(prompt.startsWith('# Merge conflicts merging US-002'));
+    assert.ok(prompt.includes('What US-002 is for.'), 'the story description');
+    assert.ok(prompt.includes('- `same.txt`'), 'the conflicting path');
+    const head = world.git('rev-parse', 'HEAD');
+    assert.equal(world.git('log', '-1', '--format=%s'), 'Merge US-002 - Second story');
+    assert.equal(world.git('rev-parse', 'HEAD^1'), before);
+    assert.equal(world.git('rev-parse', 'HEAD^2'), two.commitSha);
+    assert.equal(fs.readFileSync(path.join(world.repo, 'same.txt'), 'utf8'), 'US-001\nUS-002\n');
+    assert.equal(world.git('status', '--porcelain'), '');
+    const row = getStory(world.db, world.session.id, 'US-002');
+    assert.equal(row?.status, 'done');
+    assert.equal(row?.mergeSha, head);
+    const prd = fs.readFileSync(path.join(world.repo, '.chief/prds/demo/prd.md'), 'utf8');
+    assert.deepEqual(statuses(prd), { 'US-001': 'done', 'US-002': 'done' });
+    assert.equal(world.git('branch', '--list', 'chief-story/*'), '');
+  });
+
+  it('aborts a conflict the agent leaves unresolved and leaves the session as it was (US-008)', async () => {
+    const world = workspace();
+    const one = await build(world, 'US-001', 'same.txt');
+    const two = await build(world, 'US-002', 'same.txt');
+    assert.deepEqual(
+      await world.merger.merge(world.session, 'c', { storyId: 'US-001', title: 'First story', ...one }),
+      { code: 'merged' },
+    );
     const head = world.git('rev-parse', 'HEAD');
     const prdBefore = fs.readFileSync(path.join(world.repo, '.chief/prds/demo/prd.md'), 'utf8');
+    // The agent edits, but leaves a marker behind.
+    world.agent.act = (repo): void => fs.writeFileSync(path.join(repo, 'same.txt'), 'US-001\n=======\nUS-002\n');
 
-    assert.equal(await world.merger.merge(world.session, 'c', { storyId: 'US-002', title: 'Second story', ...two }), false);
+    const result = await world.merger.merge(world.session, 'c', { storyId: 'US-002', title: 'Second story', ...two });
+
+    assert.equal(result.code, 'not_merged');
+    assert.match(result.code === 'not_merged' ? result.reason : '', /same\.txt.*Conflict markers were left behind in same\.txt/);
 
     assert.equal(world.git('rev-parse', 'HEAD'), head);
     assert.equal(world.git('status', '--porcelain'), '');

@@ -1472,7 +1472,8 @@ export class BuildService {
     const exitCode = result.timedOut ? null : result.exitCode;
     if (workspace.story === null) log.end(exitCode);
     try {
-      return await this.settle(session, story, state, result, workspace, before, headBefore, log);
+      const description = promptStory(story, snapshot.parsed).description;
+      return await this.settle(session, story, description, state, result, workspace, before, headBefore, log);
     } finally {
       log.end(exitCode);
     }
@@ -1482,6 +1483,7 @@ export class BuildService {
   private async settle(
     session: Session,
     story: Story,
+    description: string,
     state: RunState,
     result: AgentResult,
     workspace: StoryWorkspace,
@@ -1526,22 +1528,40 @@ export class BuildService {
     // branch that a stop or the next attempt would delete. The merge removes
     // the worktree; a runner that cannot merge leaves it where it is.
     let finished = updated?.status === 'done';
-    let mergeFailed = false;
+    let mergeFailed: string | null = null;
     if (finished && workspace.story !== null && this.runner.mergeStory !== undefined) {
       const merged = await this.merger.merge(session, state.containerId, {
         storyId: story.storyId,
         title: story.title,
+        description,
+        iteration: state.iteration,
         commitSha: change.commitSha ?? story.commitSha,
         prdFile: workspace.prdFile,
         progressFile: workspace.progressFile,
         progressStart: workspace.progressStart,
         log,
       });
-      if (merged) {
+      if (merged.code === 'merged') {
         after = this.readPrd(session);
       } else {
         finished = false;
-        mergeFailed = true;
+        // The story goes back to `todo` (US-008): its row was marked
+        // in-progress, and the clone's `prd.md`, which no worktree ever writes,
+        // still says what it said before the attempt.
+        updateStory(this.db, session.id, story.storyId, { status: 'todo' });
+        after = this.readPrd(session);
+        if (merged.code === 'held') {
+          // The conflict-resolution agent hit the usage limit: the same hold as
+          // a refused story iteration, and no attempt of the story is spent.
+          await this.abandonWorktree(session, state, workspace);
+          const until = this.hold.arm(state.accountId);
+          log.write(`\n${holdMessage(until)}\n`);
+          if (state.stopping) this.returnToReady(session);
+          else this.park(session, state, until);
+          await this.holdOthers(session.id, state.accountId, until);
+          return false;
+        }
+        mergeFailed = merged.reason;
       }
     }
     // Any other ending abandons this attempt, and a retry starts afresh.
@@ -1589,19 +1609,28 @@ export class BuildService {
 
     // A merge that did not go through is a failed attempt like a stalled one:
     // the story goes back to the session's `todo`, and its next attempt starts
-    // from the updated session branch. (Resolving the conflict is US-008.)
-    if (!change.stalled && !mergeFailed) {
+    // from the updated session branch — whether the merge conflicted and the
+    // resolution agent could not fix it (US-008), or git refused it outright.
+    if (!change.stalled && mergeFailed === null) {
       state.attempts = 0;
       return true;
     }
 
     state.attempts += 1;
     if (state.attempts > MAX_RETRIES) {
-      this.fail(session, 'agent', stalledMessage(story, state.attempts, result));
+      this.fail(
+        session,
+        'agent',
+        mergeFailed === null
+          ? stalledMessage(story, state.attempts, result)
+          : mergeFailedMessage(story, state.attempts, mergeFailed),
+      );
       return false;
     }
     logger.warn(
-      change.timedOut
+      mergeFailed !== null
+        ? 'finished story could not be merged; retrying'
+        : change.timedOut
         ? 'build iteration ran out of time; retrying'
         : 'build iteration produced nothing; retrying',
       {
@@ -2443,6 +2472,14 @@ function stalledMessage(story: Story, attempts: number, result: AgentResult): st
     `${story.storyId} ("${story.title}") made no progress in ${String(attempts)} attempts: ` +
     `no commit was made and its status in prd.md did not change. On the last attempt ${how}.` +
     (tail === '' ? '' : `\n\n${tail}`)
+  );
+}
+
+/** The failure of a story whose last attempt finished but could not be merged (US-008). */
+function mergeFailedMessage(story: Story, attempts: number, reason: string): string {
+  return (
+    `${story.storyId} ("${story.title}") could not be finished in ${String(attempts)} attempts. ` +
+    `On the last attempt the story was done in its worktree, but ${reason}.`
   );
 }
 

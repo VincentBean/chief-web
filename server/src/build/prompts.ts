@@ -343,3 +343,77 @@ function minutes(timeoutMs: number): string {
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}\n\n… (truncated; read the file itself for the rest)`;
 }
+
+export interface StoryConflictPromptInput {
+  readonly storyId: string;
+  readonly title: string;
+  /** The story's description from `prd.md`; empty when it has none. */
+  readonly description: string;
+  /** The story branch being merged into the session branch. */
+  readonly storyBranch: string;
+  /** The paths git stopped on: the only ones that may be touched. */
+  readonly files: readonly string[];
+  readonly timeoutMs: number;
+}
+
+/** First line of {@link storyConflictPrompt}; how a log or a test tells it apart. */
+export const STORY_CONFLICT_PROMPT_HEADING = '# Merge conflicts merging';
+
+/**
+ * The prompt for resolving a finished story's merge conflicts in the clone
+ * (async stories US-008), in the style of `prconflicts/prompts.ts`: the
+ * conflict, what the story was for, and what the run may and may not do. The
+ * agent only edits files; chief-web stages, checks and commits the merge with
+ * `verifyResolution`, and aborts it when the check fails.
+ */
+export function storyConflictPrompt(input: StoryConflictPromptInput): string {
+  const files = input.files.map((file) => `- \`${file}\``).join('\n');
+  const description = input.description.trim() === '' ? '_The story has no description._' : input.description.trim();
+
+  return `${STORY_CONFLICT_PROMPT_HEADING} ${input.storyId}
+
+You are an autonomous coding agent resolving merge conflicts. Several stories of one PRD are
+built at the same time, each on a branch of its own. ${input.storyId} is finished, and its
+branch, \`${input.storyBranch}\`, has just been merged into the session branch checked out in
+\`${CONTAINER_REPO_DIR}\`. Git stopped part-way: the files below are in the working tree with
+conflict markers in them, and the merge is waiting for you to finish it.
+
+## The story being merged
+
+**${input.storyId}: ${input.title}**
+
+${description}
+
+## The conflicted files
+
+${files}
+
+## What resolving means here
+
+Both sides are right about something. The session branch moved on because other stories were
+merged into it while ${input.storyId} was being built, and ${input.storyId} was built for the
+reason written above. A resolution keeps both: read the surrounding code, work out what each side
+was trying to do, and write the version that does both. Deleting one side's work to make the
+markers go away is the one outcome that is worse than leaving the conflict.
+
+You have **${minutes(input.timeoutMs)}**. Spend it on the conflicted files and the code
+immediately around them; you do not need to run the project's whole test suite to merge two hunks.
+
+## chief-web: what this run may and may not do
+
+chief-web reads the working tree when you are done, and nothing else. Nothing you say in your
+reply is read.
+
+1. **Edit only the conflicted files listed above**, in \`${CONTAINER_REPO_DIR}\`. They are the
+   whole of the job.
+2. Remove every conflict marker (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) from those files, leaving
+   code that a person would have written.
+3. **Do not commit, do not \`git add\`, do not rebase, do not amend, do not create or switch
+   branches, and do not push.** chief-web stages the files and makes the merge commit itself,
+   after checking your work.
+4. Do not run \`git merge --abort\` or \`git reset\`. If the conflict cannot be resolved
+   faithfully, leave it alone and say so; chief-web aborts the merge itself and the story is
+   built again on the updated branch.
+5. Do not touch \`.chief/\`, and do not touch another story's worktree.
+`;
+}
