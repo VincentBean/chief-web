@@ -4,8 +4,10 @@ import {
   closeDecision,
   type Database,
   type Decision,
+  getDecision,
   getOpenDecision,
   getSession,
+  listSessionOpenDecisions,
   type Session,
   updateSession,
 } from '../db/index.js';
@@ -19,7 +21,13 @@ import {
 } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import type { VoiceEventSink } from '../voice/events.js';
-import { BUILD_MCP_CONFIG_FILE, buildMcpConfigWriteSpec, DECISION_ASK_DIR } from './mcp.js';
+import {
+  BUILD_MCP_CONFIG_FILE,
+  buildMcpConfigWriteSpec,
+  DECISION_ASK_DIR,
+  storyAskDir,
+  storyMcpConfigFile,
+} from './mcp.js';
 
 /**
  * The operator's half of `ask_operator` (decisions US-004).
@@ -85,15 +93,29 @@ export interface DecisionWatcherDeps {
 interface PendingDecision {
   readonly id: string;
   readonly sessionId: string;
+  /** The story whose agent asked; the key it is pending under. */
+  readonly storyId: string | null;
   readonly containerId: string;
+  /** Where its request was found, and so where its answer goes. */
+  readonly askDir: string;
+  /** Told when the wait ends, however it ends (async stories US-010). */
+  readonly onClosed: (() => void) | null;
   /** The iteration's clock, stopped for as long as the question stands. */
   readonly deadline: ExecDeadline | null;
   /** Fires when the agent will have stopped waiting; cleared when answered. */
   timer: NodeJS.Timeout | null;
 }
 
+/**
+ * The key a question is pending under: one per story agent, so a parallel run
+ * (async stories US-010) can have several agents waiting at once.
+ */
+function pendingKey(sessionId: string, storyId: string | null): string {
+  return `${sessionId}\u0000${storyId ?? ''}`;
+}
+
 export class DecisionWatcher {
-  /** At most one per session: its agent is blocked on the question it asked. */
+  /** At most one per story agent: it is blocked on the question it asked. */
   private readonly pending = new Map<string, PendingDecision>();
   /** Request ids already handled, so a file read twice is one question. */
   private readonly seen = new Set<string>();
@@ -105,9 +127,14 @@ export class DecisionWatcher {
     return this.deps.timeoutMs ?? DECISION_TIMEOUT_MS;
   }
 
-  /** The question this session is waiting on, from the database. */
+  /** The question this session is waiting on, from the database; the newest when there are several. */
   open(sessionId: string): Decision | null {
     return getOpenDecision(this.deps.db, sessionId);
+  }
+
+  /** Every open question of this session, oldest first (async stories US-010). */
+  openAll(sessionId: string): Decision[] {
+    return listSessionOpenDecisions(this.deps.db, sessionId);
   }
 
   /**
@@ -119,14 +146,18 @@ export class DecisionWatcher {
    * the story, and the one thing it cannot do is ask — which beats not
    * starting at all over a file in `/tmp`.
    */
-  async prepare(sessionId: string, containerId: string): Promise<string | null> {
+  async prepare(sessionId: string, containerId: string, storyId?: string): Promise<string | null> {
+    // A story of a parallel run gets a config and an ask directory of its own
+    // (async stories US-010), so two agents' questions can never be mixed up.
+    const file = storyId === undefined ? BUILD_MCP_CONFIG_FILE : storyMcpConfigFile(storyId);
+    const askDir = storyId === undefined ? DECISION_ASK_DIR : storyAskDir(storyId);
     try {
       const written = await this.deps.docker.runExec(
         containerId,
-        buildMcpConfigWriteSpec({ askTimeoutMs: this.timeoutMs }),
+        buildMcpConfigWriteSpec({ askTimeoutMs: this.timeoutMs, askDir, file }),
         MCP_WRITE_TIMEOUT_MS,
       );
-      if (written.exitCode === 0) return BUILD_MCP_CONFIG_FILE;
+      if (written.exitCode === 0) return file;
       logger.warn('could not write the iteration MCP config; it cannot ask anything', {
         session: sessionId,
         exitCode: written.exitCode,
@@ -143,7 +174,20 @@ export class DecisionWatcher {
 
   /** True while an agent of this session is actually blocked on a question. */
   isWaiting(sessionId: string): boolean {
-    return this.pending.has(sessionId);
+    return this.entriesOf(sessionId).length > 0;
+  }
+
+  /** True while the agent that asked this question is still blocked on it. */
+  isPending(decisionId: string): boolean {
+    for (const entry of this.pending.values()) if (entry.id === decisionId) return true;
+    return false;
+  }
+
+  /** The stories of this session whose agents are blocked on a question (async stories US-010). */
+  waitingStories(sessionId: string): string[] {
+    return this.entriesOf(sessionId)
+      .map((entry) => entry.storyId)
+      .filter((storyId): storyId is string => storyId !== null);
   }
 
   /**
@@ -163,14 +207,26 @@ export class DecisionWatcher {
     readonly deadline?: ExecDeadline | null;
     /** True once the loop has given up on this iteration; stops the search. */
     readonly stopped?: () => boolean;
+    /**
+     * The story agent's own ask directory (async stories US-010); the shared
+     * {@link DECISION_ASK_DIR} by default.
+     */
+    readonly askDir?: string;
+    /** Called once the wait ends: answered, expired or abandoned. */
+    readonly onClosed?: () => void;
   }): Promise<Decision | null> {
     const { session, containerId } = input;
-    if (this.pending.has(session.id)) {
-      logger.warn('a second question arrived while one was still open', { session: session.id });
+    const key = pendingKey(session.id, input.storyId);
+    if (this.pending.has(key)) {
+      logger.warn('a second question arrived while one was still open', { session: session.id, story: input.storyId });
       return null;
     }
-    const request = await this.findRequest(session.id, containerId, input.stopped ?? (() => false));
+    const askDir = input.askDir ?? DECISION_ASK_DIR;
+    const request = await this.findRequest(session.id, containerId, askDir, input.stopped ?? (() => false));
     if (request === null) return null;
+    // The iteration may have ended while the file was being read; a question
+    // recorded after that would have nobody left to answer it.
+    if (input.stopped?.() === true) return null;
 
     const decision = askDecision(this.deps.db, {
       id: request.id,
@@ -187,15 +243,24 @@ export class DecisionWatcher {
     // Stopped before the session is parked, so nothing can reap the agent
     // between the two.
     deadline?.pause();
-    const entry: PendingDecision = { id: decision.id, sessionId: session.id, containerId, deadline, timer: null };
+    const entry: PendingDecision = {
+      id: decision.id,
+      sessionId: session.id,
+      storyId: input.storyId,
+      containerId,
+      askDir,
+      onClosed: input.onClosed ?? null,
+      deadline,
+      timer: null,
+    };
     entry.timer = setTimeout(() => {
-      void this.giveUp(session.id, decision.id);
+      void this.giveUp(key, decision.id);
     }, this.timeoutMs);
     // A question stands for hours: it must not be the thing keeping the
     // process alive on the way down, and a server that is shutting down has
     // nothing useful to do about an unanswered one anyway.
     entry.timer.unref();
-    this.pending.set(session.id, entry);
+    this.pending.set(key, entry);
 
     updateSession(this.deps.db, session.id, { status: 'deciding' });
     logger.info('the build agent asked the operator a decision', {
@@ -224,22 +289,29 @@ export class DecisionWatcher {
    * what actually unblocks the agent; a row closed on an answer that never
    * reached it would leave the session `building` with nothing building.
    */
-  async answer(sessionId: string, answer: string): Promise<Decision | null> {
+  async answer(sessionId: string, answer: string, decisionId?: string): Promise<Decision | null> {
     const text = answer.trim();
     if (text === '') throw new Error('An answer cannot be empty.');
-    const entry = this.pending.get(sessionId);
-    const open = this.open(sessionId);
-    if (open === null) return null;
+    // Several can be open in a parallel run (async stories US-010); without an
+    // id it is the newest, as it always was.
+    const open = decisionId === undefined ? this.open(sessionId) : getDecision(this.deps.db, decisionId);
+    if (open?.sessionId !== sessionId || open.status !== 'open') return null;
+    const key = pendingKey(sessionId, open.storyId);
+    const entry = this.pending.get(key);
 
-    if (entry !== undefined) {
-      const written = await this.write(sessionId, entry.containerId, entry.id, { answered: true, answer: text });
+    if (entry?.id === open.id) {
+      const written = await this.write(sessionId, entry.containerId, entry.askDir, entry.id, {
+        answered: true,
+        answer: text,
+      });
       if (!written) {
         throw new Error('The answer could not be written into the session container.');
       }
     }
     const closed = closeDecision(this.deps.db, open.id, 'answered', text);
     if (closed === null) return null;
-    this.resume(sessionId, 'answered');
+    if (entry?.id === open.id) this.resume(key, 'answered');
+    else this.leaveDeciding(sessionId, 'answered');
     logger.info('the operator answered the build agent', { session: sessionId, decision: closed.id });
     return closed;
   }
@@ -249,13 +321,13 @@ export class DecisionWatcher {
    * agent to carry on, so the row is closed and the session goes back to
    * `building` — it is building again, with one assumption in it.
    */
-  private async giveUp(sessionId: string, decisionId: string): Promise<void> {
-    const entry = this.pending.get(sessionId);
+  private async giveUp(key: string, decisionId: string): Promise<void> {
+    const entry = this.pending.get(key);
     if (entry === undefined || entry.id !== decisionId) return;
     closeDecision(this.deps.db, decisionId, 'expired');
-    this.resume(sessionId, 'expired');
+    this.resume(key, 'expired');
     logger.warn('nobody answered the build agent; it was told to carry on', {
-      session: sessionId,
+      session: entry.sessionId,
       decision: decisionId,
       waitedMs: this.timeoutMs,
     });
@@ -272,34 +344,52 @@ export class DecisionWatcher {
    * clock is deliberately *not* resumed: there is no iteration left to charge
    * it to, and the deadline dies with the exec.
    */
-  abandon(sessionId: string): void {
-    this.clear(sessionId, { resumeClock: false });
-    const closed = abandonDecisions(this.deps.db, sessionId);
-    if (closed > 0) logger.info('open questions dropped with the run that asked them', { session: sessionId, closed });
+  abandon(sessionId: string, storyId?: string): void {
+    // Given a story, only that story's agent is gone (async stories US-010):
+    // the questions of its siblings in a parallel run still stand.
+    const keys =
+      storyId === undefined
+        ? this.entriesOf(sessionId).map((entry) => pendingKey(sessionId, entry.storyId))
+        : [pendingKey(sessionId, storyId)];
+    for (const key of keys) this.clear(key, { resumeClock: false });
+    const closed = abandonDecisions(this.deps.db, sessionId, storyId);
+    if (closed > 0) {
+      logger.info('open questions dropped with the run that asked them', { session: sessionId, story: storyId, closed });
+    }
     this.leaveDeciding(sessionId, 'the question was dropped');
   }
 
   /** Clears the wait and puts the session back to `building`, clock and all. */
-  private resume(sessionId: string, why: string): void {
-    this.clear(sessionId, { resumeClock: true });
-    this.leaveDeciding(sessionId, why);
+  private resume(key: string, why: string): void {
+    const sessionId = this.pending.get(key)?.sessionId;
+    this.clear(key, { resumeClock: true });
+    if (sessionId !== undefined) this.leaveDeciding(sessionId, why);
   }
 
   /** Drops the pending entry and its timer, optionally restarting the clock. */
-  private clear(sessionId: string, options: { readonly resumeClock: boolean }): void {
-    const entry = this.pending.get(sessionId);
+  private clear(key: string, options: { readonly resumeClock: boolean }): void {
+    const entry = this.pending.get(key);
     if (entry === undefined) return;
-    this.pending.delete(sessionId);
+    this.pending.delete(key);
     if (entry.timer !== null) clearTimeout(entry.timer);
     if (options.resumeClock) entry.deadline?.resume();
+    entry.onClosed?.();
+  }
+
+  /** The questions this session's agents are blocked on right now. */
+  private entriesOf(sessionId: string): PendingDecision[] {
+    return [...this.pending.values()].filter((entry) => entry.sessionId === sessionId);
   }
 
   /**
    * `deciding` is this class's status, in and out: nothing else ever writes
    * it, and nothing else takes it away. A session that has moved on by itself
-   * — stopped back to `ready`, failed, finished — is left exactly as it is.
+   * — stopped back to `ready`, failed, finished — is left exactly as it is,
+   * and so is one with another story still waiting on a question (async
+   * stories US-010): it stays `deciding` until the last one is closed.
    */
   private leaveDeciding(sessionId: string, why: string): void {
+    if (this.isWaiting(sessionId)) return;
     const session = getSession(this.deps.db, sessionId);
     if (session?.status !== 'deciding') return;
     updateSession(this.deps.db, sessionId, { status: 'building' });
@@ -310,6 +400,7 @@ export class DecisionWatcher {
   private async findRequest(
     sessionId: string,
     containerId: string,
+    askDir: string,
     stopped: () => boolean,
   ): Promise<AskRequest | null> {
     const deadline = Date.now() + (this.deps.discoveryMs ?? REQUEST_DISCOVERY_MS);
@@ -317,7 +408,7 @@ export class DecisionWatcher {
       if (stopped()) return null;
       let fresh;
       try {
-        fresh = (await listRequestFiles(this.deps.docker, containerId, DECISION_ASK_DIR, 'decision')).filter(
+        fresh = (await listRequestFiles(this.deps.docker, containerId, askDir, 'decision')).filter(
           (request) => !this.seen.has(request.id),
         );
       } catch (cause) {
@@ -348,8 +439,14 @@ export class DecisionWatcher {
     }
   }
 
-  private write(sessionId: string, containerId: string, id: string, answer: DecisionAnswer): Promise<boolean> {
-    return writeAnswerFile(this.deps.docker, containerId, DECISION_ASK_DIR, id, { id, ...answer }, {
+  private write(
+    sessionId: string,
+    containerId: string,
+    askDir: string,
+    id: string,
+    answer: DecisionAnswer,
+  ): Promise<boolean> {
+    return writeAnswerFile(this.deps.docker, containerId, askDir, id, { id, ...answer }, {
       what: 'decision',
       session: sessionId,
     });

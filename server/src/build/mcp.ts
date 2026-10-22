@@ -25,6 +25,20 @@ export const DECISION_ASK_DIR = `${AGENT_PID_DIR}/ask`;
 /** The `--mcp-config` file of a build iteration. */
 export const BUILD_MCP_CONFIG_FILE = `${AGENT_PID_DIR}/mcp.json`;
 
+/**
+ * One story's own ask directory in a parallel run (async stories US-010).
+ * Two agents asking at once would otherwise write their requests side by
+ * side, and the newest-unseen file is no proof of which agent wrote it.
+ */
+export function storyAskDir(storyId: string): string {
+  return `${DECISION_ASK_DIR}/${storyId}`;
+}
+
+/** The `--mcp-config` file of one story's agent in a parallel run (async stories US-010). */
+export function storyMcpConfigFile(storyId: string): string {
+  return `${AGENT_PID_DIR}/mcp-${storyId}.json`;
+}
+
 /** The build agent's user, and so its MCP server's: the runner image's `node`. */
 export const BUILD_AGENT_USER = '1000';
 
@@ -38,6 +52,10 @@ export interface BuildMcpConfigOptions {
    * there rather than defaulted twice.
    */
   readonly askTimeoutMs: number;
+  /** Where the request and answer files meet; {@link DECISION_ASK_DIR} by default. */
+  readonly askDir?: string;
+  /** Where the config is written; {@link BUILD_MCP_CONFIG_FILE} by default. */
+  readonly file?: string;
   /** Only `__fixtures__` and tests swap the argv. */
   readonly command?: readonly string[];
 }
@@ -53,7 +71,7 @@ export function buildMcpConfig(options: BuildMcpConfigOptions): string {
         args: argv.slice(1),
         env: {
           CHIEF_MCP_ASK_OPERATOR: '1',
-          CHIEF_MCP_ASK_DIR: DECISION_ASK_DIR,
+          CHIEF_MCP_ASK_DIR: options.askDir ?? DECISION_ASK_DIR,
           CHIEF_MCP_ASK_TIMEOUT_MS: String(options.askTimeoutMs),
           // Said out loud as well, though the server enforces it: a build
           // iteration is not a voice call — no browser, and nothing to build
@@ -75,7 +93,7 @@ export function buildMcpConfigWriteSpec(options: BuildMcpConfigOptions): ExecSpe
     cmd: [
       '/bin/sh',
       '-c',
-      `mkdir -p ${DECISION_ASK_DIR} && printf '%s' "$1" > ${BUILD_MCP_CONFIG_FILE}`,
+      `mkdir -p ${options.askDir ?? DECISION_ASK_DIR} && printf '%s' "$1" > ${options.file ?? BUILD_MCP_CONFIG_FILE}`,
       'chief-build-mcp',
       buildMcpConfig(options),
     ],

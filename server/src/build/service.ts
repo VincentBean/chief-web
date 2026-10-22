@@ -77,6 +77,7 @@ import {
 } from '../settings/index.js';
 import { type StoryTarget, storyBranch, storyWorktreeDir } from './agent.js';
 import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
+import { storyAskDir } from './mcp.js';
 import { type BuildLogs, type BuildLogWriter, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
@@ -163,6 +164,12 @@ export interface BuildView {
    * not be a poll behind it.
    */
   readonly decision: DecisionView | null;
+  /**
+   * Every open question of the session, oldest first (async stories US-010):
+   * a parallel run can have one per story waiting at once. `decision` is the
+   * newest of them.
+   */
+  readonly decisions: readonly DecisionView[];
   /** How long a question stands before the agent stops waiting for it. */
   readonly decisionTimeoutMs: number | null;
 }
@@ -256,6 +263,12 @@ interface RunState {
    * own bookkeeping is finished, exactly as it does for "Stop build".
    */
   holdUntil: string | null;
+  /**
+   * Re-runs the parallel scheduler (async stories US-010): a question opened
+   * or closed, so a story stopped or started counting toward the limit. A
+   * no-op outside a parallel run.
+   */
+  wake: () => void;
   /**
    * The Claude account the run's container was started on (multiple accounts
    * US-014): the one a refusal holds, and the one {@link BuildService.holdAll}
@@ -1138,6 +1151,7 @@ export class BuildService {
         planned: false,
         storyAttempts: new Map(parked?.storyAttempts ?? []),
         holdUntil: null,
+        wake: () => undefined,
         // The account `start` just resolved for the container: the row as it
         // is now, which is what the orchestrator read and wrote — the failover
         // account while the session's own is held (US-015).
@@ -1383,6 +1397,13 @@ export class BuildService {
    * running finish and merge first; a stop or a usage-limit hold signals them
    * all. Either way it only ends once every attempt has unwound, so no agent
    * and no worktree outlives it.
+   *
+   * A story whose agent asks the operator something (US-010) waits on its own:
+   * the session is `deciding`, the others carry on, and the waiting story does
+   * not count toward the limit until its question is closed. A story that has
+   * used up its retries is **blocked**: it is the run's ending, so nothing new
+   * starts — its dependents included — and the session fails once the agents
+   * still running have finished and been merged.
    */
   private async runParallel(sessionId: string, state: RunState): Promise<void> {
     const active = new Map<string, Promise<{ readonly storyId: string; readonly outcome: StoryOutcome }>>();
@@ -1390,107 +1411,137 @@ export class BuildService {
     let ending: { readonly stage: FailureStage; readonly message: string } | null = null;
     /** This run's own agent was refused, so the other sessions are held too. */
     let refused = false;
+    /** Stories that used up their retries in this run (US-010). A Retry starts a new run, and a fresh budget. */
+    const blocked: string[] = [];
+    // A question opened or closed resolves this, so the scheduler looks again
+    // even though no attempt has come back (US-010).
+    const nextWake = (): Promise<null> =>
+      new Promise<null>((resolve) => {
+        state.wake = () => resolve(null);
+      });
+    let woken = nextWake();
 
-    for (;;) {
-      const session = getSession(this.db, sessionId);
-      const winding = session === null || state.stopping || state.holdUntil !== null || session.status !== 'building';
+    try {
+      for (;;) {
+        const session = getSession(this.db, sessionId);
+        // `deciding` is still building (US-010): one story waits, the rest go on.
+        const live = session !== null && (session.status === 'building' || session.status === 'deciding');
+        const winding = session === null || state.stopping || state.holdUntil !== null || !live;
 
-      if (session !== null && !winding && ending === null) {
-        const started = await this.startRunnable(session, state, active);
-        if (started.ending !== null) ending = started.ending;
-        if (started.handOff !== null && active.size === 0) {
-          await this.handOff(session, started.handOff);
+        if (session !== null && !winding && ending === null) {
+          const started = await this.startRunnable(session, state, active, blocked);
+          if (started.ending !== null) ending = started.ending;
+          if (started.handOff !== null && active.size === 0) {
+            await this.handOff(session, started.handOff);
+            return;
+          }
+        }
+
+        if (active.size === 0) {
+          if (session === null) return;
+          if (state.stopping) {
+            this.returnToReady(session);
+          } else if (state.holdUntil !== null) {
+            this.park(session, state, state.holdUntil, false);
+          } else if (live && ending !== null) {
+            this.fail(session, ending.stage, ending.message);
+          } else if (live) {
+            // Nothing running, nothing that may start, and the PRD not done:
+            // the only way here is a plan that waits on something that cannot
+            // happen. Failing says so; looping would spin.
+            this.fail(session, 'agent', 'No story can be started: every remaining story waits on another one.');
+          }
+          if (refused && state.holdUntil !== null) await this.holdOthers(sessionId, state.accountId, state.holdUntil);
           return;
         }
-      }
 
-      if (active.size === 0) {
-        if (session === null) return;
-        if (state.stopping) {
-          this.returnToReady(session);
-        } else if (state.holdUntil !== null) {
-          this.park(session, state, state.holdUntil, false);
-        } else if (session.status === 'building' && ending !== null) {
-          this.fail(session, ending.stage, ending.message);
-        } else if (session.status === 'building') {
-          // Nothing running, nothing that may start, and the PRD not done:
-          // the only way here is a plan that waits on something that cannot
-          // happen. Failing says so; looping would spin.
-          this.fail(session, 'agent', 'No story can be started: every remaining story waits on another one.');
+        const next = await Promise.race([...active.values(), woken]);
+        if (next === null) {
+          // A question opened or closed: nothing came back, but what may start did.
+          woken = nextWake();
+          continue;
         }
-        if (refused && state.holdUntil !== null) await this.holdOthers(sessionId, state.accountId, state.holdUntil);
-        return;
-      }
+        const { storyId, outcome } = next;
+        active.delete(storyId);
+        const current = getSession(this.db, sessionId) ?? session;
+        if (current === null) continue;
+        const story = listStories(this.db, sessionId).find((candidate) => candidate.storyId === storyId);
 
-      const { storyId, outcome } = await Promise.race(active.values());
-      active.delete(storyId);
-      const current = getSession(this.db, sessionId) ?? session;
-      if (current === null) continue;
-      const story = listStories(this.db, sessionId).find((candidate) => candidate.storyId === storyId);
-
-      switch (outcome.code) {
-        case 'merged': {
-          state.storyAttempts.delete(storyId);
-          await this.completion.push(current);
-          const stories = listStories(this.db, sessionId);
-          this.events?.publish({
-            kind: 'build.story_done',
-            sessionId,
-            name: current.name,
-            storyId,
-            done: stories.filter((candidate) => candidate.status === 'done').length,
-            total: stories.length,
-          });
-          break;
-        }
-        case 'progress':
-          state.storyAttempts.set(storyId, 0);
-          break;
-        case 'failed': {
-          const attempts = (state.storyAttempts.get(storyId) ?? 0) + 1;
-          state.storyAttempts.set(storyId, attempts);
-          if (attempts > MAX_RETRIES && story !== undefined) {
-            ending ??= {
-              stage: 'agent',
-              message:
-                outcome.mergeFailed === null
-                  ? stalledMessage(story, attempts, outcome.result)
-                  : mergeFailedMessage(story, attempts, outcome.mergeFailed),
-            };
-          } else {
-            logger.warn(
-              outcome.mergeFailed !== null
-                ? 'finished story could not be merged; retrying'
-                : outcome.result.timedOut
-                  ? 'build iteration ran out of time; retrying'
-                  : 'build iteration produced nothing; retrying',
-              { session: sessionId, story: storyId, attempt: attempts, remainingRetries: MAX_RETRIES - attempts + 1 },
-            );
+        switch (outcome.code) {
+          case 'merged': {
+            state.storyAttempts.delete(storyId);
+            await this.completion.push(current);
+            const stories = listStories(this.db, sessionId);
+            this.events?.publish({
+              kind: 'build.story_done',
+              sessionId,
+              name: current.name,
+              storyId,
+              done: stories.filter((candidate) => candidate.status === 'done').length,
+              total: stories.length,
+            });
+            break;
           }
-          break;
+          case 'progress':
+            state.storyAttempts.set(storyId, 0);
+            break;
+          case 'failed': {
+            const attempts = (state.storyAttempts.get(storyId) ?? 0) + 1;
+            state.storyAttempts.set(storyId, attempts);
+            if (attempts > MAX_RETRIES && story !== undefined) {
+              // Blocked (US-010): nothing new starts, its dependents least of
+              // all; the agents still running finish and are merged first.
+              blocked.push(storyId);
+              logger.warn('story blocked: its retries are used up; finishing the running stories first', {
+                session: sessionId,
+                story: storyId,
+                attempt: attempts,
+                running: [...active.keys()],
+              });
+              ending ??= {
+                stage: 'agent',
+                message:
+                  outcome.mergeFailed === null
+                    ? stalledMessage(story, attempts, outcome.result)
+                    : mergeFailedMessage(story, attempts, outcome.mergeFailed),
+              };
+            } else {
+              logger.warn(
+                outcome.mergeFailed !== null
+                  ? 'finished story could not be merged; retrying'
+                  : outcome.result.timedOut
+                    ? 'build iteration ran out of time; retrying'
+                    : 'build iteration produced nothing; retrying',
+                { session: sessionId, story: storyId, attempt: attempts, remainingRetries: MAX_RETRIES - attempts + 1 },
+              );
+            }
+            break;
+          }
+          case 'held':
+            // The attempt armed the hold; every other agent of the session comes
+            // off the account now, the same way "Stop build" takes them off.
+            refused = true;
+            state.iteration -= 1;
+            await this.signalAll(sessionId, state);
+            // As "Stop build" does: the stop timeout to unwind, then a reap for
+            // whatever did not take the hint.
+            await settle(
+              Promise.all(active.values()).then(() => undefined),
+              this.config.buildStopTimeoutMs,
+            );
+            await this.runner.reap(sessionId, state.containerId);
+            break;
+          case 'interrupted':
+            // Stopped or held from outside: nothing was judged, so nothing was spent.
+            state.iteration -= 1;
+            break;
+          case 'fatal':
+            ending ??= { stage: outcome.stage, message: outcome.message };
+            break;
         }
-        case 'held':
-          // The attempt armed the hold; every other agent of the session comes
-          // off the account now, the same way "Stop build" takes them off.
-          refused = true;
-          state.iteration -= 1;
-          await this.signalAll(sessionId, state);
-          // As "Stop build" does: the stop timeout to unwind, then a reap for
-          // whatever did not take the hint.
-          await settle(
-            Promise.all(active.values()).then(() => undefined),
-            this.config.buildStopTimeoutMs,
-          );
-          await this.runner.reap(sessionId, state.containerId);
-          break;
-        case 'interrupted':
-          // Stopped or held from outside: nothing was judged, so nothing was spent.
-          state.iteration -= 1;
-          break;
-        case 'fatal':
-          ending ??= { stage: outcome.stage, message: outcome.message };
-          break;
       }
+    } finally {
+      state.wake = () => undefined;
     }
   }
 
@@ -1503,6 +1554,7 @@ export class BuildService {
     session: Session,
     state: RunState,
     active: Map<string, Promise<{ readonly storyId: string; readonly outcome: StoryOutcome }>>,
+    blocked: readonly string[],
   ): Promise<{
     readonly handOff: readonly Story[] | null;
     readonly ending: { readonly stage: FailureStage; readonly message: string } | null;
@@ -1519,12 +1571,17 @@ export class BuildService {
     // Read fresh for every pass, so a limit changed mid-build applies from the
     // next story started (US-001); nothing already running is touched.
     const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    // A story waiting on the operator holds no place (US-010): it is running,
+    // but it is not one of the stories counted against the limit.
+    const asking = new Set(this.decisions?.waitingStories(session.id) ?? []);
+    const running = [...active.keys()];
     let runnable = selectRunnableStories(
       snapshot.stories,
       getDependencyPlan(this.db, session.id),
-      [...active.keys()],
-      [],
+      running.filter((storyId) => !asking.has(storyId)),
+      running.filter((storyId) => asking.has(storyId)),
       limit,
+      blocked,
     );
     // Nothing running and nothing the plan allows: a plan that no longer fits
     // the PRD must not stall the build, so the sequential pick goes instead.
@@ -1656,6 +1713,11 @@ export class BuildService {
     const effort = effortFor(this.db, getSession(this.db, session.id) ?? session);
     if (effort !== null) log.write(`Thinking effort: ${effort.level} (${effort.source})\n`);
     const timeoutMs = getAgentTimeoutMs(this.db, this.config);
+    // Asking works per story (US-010): a config and an ask directory of the
+    // story's own, and a clock that stops while only this agent waits.
+    const deadline = this.decisions === null ? null : new ExecDeadline(timeoutMs);
+    const mcpConfigFile = (await this.decisions?.prepare(session.id, containerId, storyId)) ?? null;
+    let agentEnded = false;
 
     let result: AgentResult;
     try {
@@ -1669,10 +1731,7 @@ export class BuildService {
           timeoutMs,
           prd: snapshot.parsed,
           progress: this.readProgress(session, workspace.progressFile),
-          // Questions are kept per session, one at a time, so a story agent
-          // of a parallel run cannot ask yet: one story's ending would close
-          // another story's question (US-010 keys them per story).
-          canAsk: false,
+          canAsk: mcpConfigFile !== null,
           worktree:
             workspace.story === null || workspace.branch === null
               ? null
@@ -1682,12 +1741,32 @@ export class BuildService {
         model: buildModel,
         advisor: advisor.model,
         effort: effort?.level ?? null,
-        mcpConfigFile: null,
-        deadline: null,
+        mcpConfigFile,
+        deadline,
         story: workspace.story,
         onOutput: (text) => log.write(text),
+        onToolCall: (call) => {
+          if (call.name !== ASK_OPERATOR_TOOL) return;
+          void this.asked(
+            session,
+            story,
+            state,
+            {
+              containerId,
+              iteration,
+              askDir: storyAskDir(storyId),
+              onClosed: () => state.wake(),
+              ended: () => agentEnded,
+            },
+            deadline,
+            log,
+          );
+        },
       });
     } catch (cause) {
+      // Only this story's question goes with it; its siblings' still stand.
+      agentEnded = true;
+      this.decisions?.abandon(session.id, storyId);
       log.end(null);
       await giveUp();
       if (state.stopping || state.holdUntil !== null) return { code: 'interrupted' };
@@ -1697,6 +1776,9 @@ export class BuildService {
         message: `Iteration ${String(iteration)} (${storyId}) could not be run: ${describe(cause)}`,
       };
     }
+
+    agentEnded = true;
+    this.decisions?.abandon(session.id, storyId);
 
     // Held while this agent ran — by another session, or by a sibling story
     // that was refused — and so signalled: its output is not evidence.
@@ -1879,7 +1961,14 @@ export class BuildService {
           // Detached on purpose: this runs on the output stream, and finding
           // the request file is an exec into the container. The agent is
           // already blocked on its answer file, so nothing is racing us.
-          void this.asked(session, story, state, deadline, log);
+          void this.asked(
+            session,
+            story,
+            state,
+            { containerId: state.containerId, iteration: state.iteration },
+            deadline,
+            log,
+          );
         },
       });
     } catch (cause) {
@@ -2304,20 +2393,33 @@ export class BuildService {
     session: Session,
     story: Story,
     state: RunState,
+    at: {
+      readonly containerId: string;
+      readonly iteration: number;
+      /** A story agent of a parallel run asks from a directory of its own (US-010). */
+      readonly askDir?: string;
+      readonly onClosed?: () => void;
+      /** True once the attempt that asked is over (US-010). */
+      readonly ended?: () => boolean;
+    },
     deadline: ExecDeadline | null,
     log: { write(text: string): void },
   ): Promise<void> {
     try {
       const decision = await this.decisions?.asked({
         session,
-        containerId: state.containerId,
+        containerId: at.containerId,
         storyId: story.storyId,
-        iteration: state.iteration,
+        iteration: at.iteration,
         deadline,
-        stopped: () => state.stopping || state.holdUntil !== null,
+        stopped: () => state.stopping || state.holdUntil !== null || at.ended?.() === true,
+        ...(at.askDir === undefined ? {} : { askDir: at.askDir }),
+        ...(at.onClosed === undefined ? {} : { onClosed: at.onClosed }),
       });
       if (decision === null || decision === undefined) return;
       log.write(`\n${decisionMessage(decision)}\n`);
+      // The story waits now and no longer counts toward the limit (US-010).
+      state.wake();
     } catch (cause) {
       // A question that could not be taken down is not a failed build: the
       // agent's own wait runs out and it carries on with its best guess.
@@ -2702,7 +2804,7 @@ export class BuildService {
       queuePosition: buildQueuePosition(this.db, 'session', session.id),
       activeBuilds: this.slotsInUse().length,
       maxConcurrentBuilds: getMaxConcurrentSessions(this.db, this.config),
-      decision: this.decisionView(session),
+      ...this.decisionViews(session),
       decisionTimeoutMs: this.decisions?.timeoutMs ?? null,
     };
   }
@@ -2717,10 +2819,13 @@ export class BuildService {
    * agent's own wait runs out, and that is `asked_at` plus the timeout both
    * ends were given.
    */
-  private decisionView(session: Session): DecisionView | null {
-    const open = this.decisions?.open(session.id) ?? null;
-    if (open === null) return null;
-    const waiting = this.decisions?.isWaiting(session.id) === true;
+  private decisionViews(session: Session): { decision: DecisionView | null; decisions: DecisionView[] } {
+    const decisions = (this.decisions?.openAll(session.id) ?? []).map((open) => this.decisionView(open));
+    return { decision: decisions.at(-1) ?? null, decisions };
+  }
+
+  private decisionView(open: Decision): DecisionView {
+    const waiting = this.decisions?.isPending(open.id) === true;
     const timeoutMs = this.decisions?.timeoutMs ?? null;
     return {
       id: open.id,
@@ -2744,7 +2849,7 @@ export class BuildService {
    * answer typed into a question whose agent has gone would read as accepted
    * and change nothing.
    */
-  async answerDecision(sessionId: string, answer: string): Promise<BuildView> {
+  async answerDecision(sessionId: string, answer: string, decisionId?: string): Promise<BuildView> {
     const session = this.requireSession(sessionId);
     if (this.decisions === null) {
       throw new BuildError(409, 'decisions_unavailable', 'This server cannot relay answers to a build agent.');
@@ -2760,7 +2865,7 @@ export class BuildService {
         `Keep the answer under ${String(MAX_DECISION_ANSWER_CHARS)} characters; it is a decision, not a document.`,
       );
     }
-    if (!this.decisions.isWaiting(sessionId)) {
+    if (decisionId === undefined ? !this.decisions.isWaiting(sessionId) : !this.decisions.isPending(decisionId)) {
       throw new BuildError(
         409,
         'decision_not_open',
@@ -2770,7 +2875,7 @@ export class BuildService {
 
     let answered: Decision | null;
     try {
-      answered = await this.decisions.answer(sessionId, text);
+      answered = await this.decisions.answer(sessionId, text, decisionId);
     } catch (cause) {
       throw new BuildError(502, 'decision_answer_failed', describe(cause));
     }

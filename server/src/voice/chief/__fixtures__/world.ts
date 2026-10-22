@@ -411,6 +411,7 @@ function buildView(db: Database, sessionId: string, pool: BuildPoolView): BuildV
     activeBuilds: pool.active,
     maxConcurrentBuilds: pool.max,
     decision: null,
+    decisions: [],
     decisionTimeoutMs: null,
   };
 }
