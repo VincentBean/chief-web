@@ -57,7 +57,14 @@ A login form.
 `;
 
 interface CreateBody {
-  session: { id: string; name: string; status: string; branch: string; scheduledStartAt: string | null };
+  session: {
+    id: string;
+    name: string;
+    status: string;
+    branch: string;
+    scheduledStartAt: string | null;
+    maxParallelStories: number;
+  };
   setup: { ok: boolean; message: string };
   prdWritten: boolean;
   url: string;
@@ -338,6 +345,26 @@ describe('POST /api/agent/sessions', () => {
       const { status, body } = await create({ start });
       assert.equal(status, 400, String(start));
       assert.equal(body.error, 'invalid_start');
+    }
+    assert.equal(listSessions(db).length, 0);
+  });
+
+  it('takes the parallel-story limit from the request, 3 when unsaid', async () => {
+    const plain = await create();
+    assert.equal(plain.body.session.maxParallelStories, 3);
+    deleteSession(db, plain.body.session.id);
+
+    const sequential = await create({ maxParallelStories: 1, start: true });
+    assert.equal(sequential.status, 201);
+    assert.equal(sequential.body.session.maxParallelStories, 1);
+    assert.equal(getSession(db, sequential.body.session.id)?.maxParallelStories, 1);
+  });
+
+  it('rejects a parallel-story limit outside 1 to 10 and creates nothing', async () => {
+    for (const maxParallelStories of [0, 11, 2.5, '4']) {
+      const { status, body } = await create({ maxParallelStories });
+      assert.equal(status, 400, String(maxParallelStories));
+      assert.equal(body.error, 'invalid_max_parallel_stories');
     }
     assert.equal(listSessions(db).length, 0);
   });

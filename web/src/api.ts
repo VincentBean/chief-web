@@ -825,6 +825,8 @@ export interface Session {
    * US-015); null when it runs on its own account.
    */
   failoverClaudeAccountId: string | null;
+  /** How many of its stories run at once (async stories US-001), 1 to 10. */
+  maxParallelStories: number;
   createdAt: string;
   updatedAt: string;
 }

@@ -77,6 +77,9 @@ const SESSION_FEEDBACK_MIGRATION = '0018_session_feedback';
 /** The migration under test in 'adds `effort` to existing sessions'. */
 const SESSION_EFFORT_MIGRATION = '0024_session_effort';
 
+/** The migration under test in 'adds `max_parallel_stories` to existing sessions'. */
+const SESSION_MAX_PARALLEL_STORIES_MIGRATION = '0032_session_max_parallel_stories';
+
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
 }
@@ -643,6 +646,49 @@ describe('session effort migration', () => {
   });
 });
 
+describe('session max parallel stories migration', () => {
+  it('adds `max_parallel_stories` to existing sessions as 3', () => {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+
+    const index = MIGRATIONS.findIndex(
+      (migration) => migration.id === SESSION_MAX_PARALLEL_STORIES_MIGRATION,
+    );
+    assert.ok(index > 0, `${SESSION_MAX_PARALLEL_STORIES_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-10-22T00:00:00.000Z',
+      );
+    }
+
+    const repository = seedLegacyRepository(db);
+    const at = '2026-10-22T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'building', 'develop', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(SESSION_MAX_PARALLEL_STORIES_MIGRATION));
+    assert.equal(
+      db.prepare('SELECT max_parallel_stories FROM sessions WHERE id = ?').get(id)
+        ?.max_parallel_stories,
+      3,
+    );
+    assert.equal(getSession(db, id)?.maxParallelStories, 3);
+
+    assert.equal(updateSession(db, id, { maxParallelStories: 1 })?.maxParallelStories, 1);
+    assert.equal(updateSession(db, id, { status: 'ready' })?.maxParallelStories, 1);
+
+    closeDatabase(db);
+  });
+});
+
 describe('session open pull request migration', () => {
   it('adds `open_pull_request` to existing sessions as true', () => {
     const db = new DatabaseSync(IN_MEMORY) as Database;
@@ -905,6 +951,32 @@ describe('sessions', () => {
     // A hand-edited or retired level is not passed through.
     db.prepare('UPDATE sessions SET effort = ? WHERE id = ?').run('ultra', thinking.id);
     assert.equal(getSession(db, thinking.id)?.effort, null);
+  });
+
+  it('stores a parallel-story limit, 3 without one, and reads one out of range as 3', () => {
+    const base = { repositoryId: repository.id, baseBranch: 'develop', prTargetBranch: 'main' } as const;
+    const plain = createSession(db, { ...base, name: 'default-parallel' });
+    const sequential = createSession(db, { ...base, name: 'sequential', maxParallelStories: 1 });
+
+    assert.equal(plain.maxParallelStories, 3);
+    assert.equal(getSession(db, plain.id)?.maxParallelStories, 3);
+    assert.equal(sequential.maxParallelStories, 1);
+    assert.equal(getSession(db, sequential.id)?.maxParallelStories, 1);
+    assert.equal(updateSession(db, plain.id, { maxParallelStories: 10 })?.maxParallelStories, 10);
+    assert.equal(listSessions(db).find((s) => s.id === plain.id)?.maxParallelStories, 10);
+
+    // A hand-edited row never makes the scheduler run zero or a hundred stories.
+    for (const stored of [0, -2, 11, 100]) {
+      db.prepare('UPDATE sessions SET max_parallel_stories = ? WHERE id = ?').run(stored, plain.id);
+      assert.equal(getSession(db, plain.id)?.maxParallelStories, 3, String(stored));
+    }
+
+    // Writing one out of range through the API of this module is a bug.
+    assert.throws(() => updateSession(db, plain.id, { maxParallelStories: 0 }), /maxParallelStories/);
+    assert.throws(
+      () => createSession(db, { ...base, name: 'too-wide', maxParallelStories: 11 }),
+      /maxParallelStories/,
+    );
   });
 
   it('round-trips the code review flag', () => {

@@ -82,6 +82,7 @@ describe('GET /api/agent/sessions/:id', () => {
         setupError: 'Cloning the repository failed.',
         scheduledStartAt: '2026-10-09T06:00:00.000Z',
         pullRequestUrl: 'https://github.com/acme/demo/pull/7',
+        maxParallelStories: 3,
         queued: false,
         queuePosition: null,
       },
@@ -100,12 +101,14 @@ describe('GET /api/agent/sessions/:id', () => {
       name: 'plain',
       baseBranch: 'main',
       prTargetBranch: 'develop',
+      maxParallelStories: 1,
     });
 
     const body = (await (await read(session.id)).json()) as { session: Record<string, unknown> };
     assert.equal(body.session.setupError, null);
     assert.equal(body.session.scheduledStartAt, null);
     assert.equal(body.session.pullRequestUrl, null);
+    assert.equal(body.session.maxParallelStories, 1);
   });
 
   it('answers queued: false and a null position for a session not on the build queue', async () => {

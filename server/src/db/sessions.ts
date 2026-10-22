@@ -145,6 +145,24 @@ export function isEffortLevel(value: string): value is EffortLevel {
   return (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
+/**
+ * How many of a session's stories may run at the same time (async stories
+ * US-001): 1 builds the PRD one story after another, the upper bound keeps a
+ * single session from swallowing the machine.
+ */
+export const MIN_PARALLEL_STORIES = 1;
+export const MAX_PARALLEL_STORIES = 10;
+export const DEFAULT_PARALLEL_STORIES = 3;
+
+export function isValidMaxParallelStories(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_PARALLEL_STORIES &&
+    value <= MAX_PARALLEL_STORIES
+  );
+}
+
 /** Session names are slugs: letters, numbers, hyphens and underscores. */
 export const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -231,6 +249,13 @@ export interface Session {
    * it has been, and for every session created without one.
    */
   readonly pendingPrd: string | null;
+  /**
+   * The most stories of this session the scheduler runs at once (async
+   * stories US-001), always within {@link MIN_PARALLEL_STORIES}–
+   * {@link MAX_PARALLEL_STORIES}. Read each time a story is started, so a
+   * change during a build never stops an agent that is already running.
+   */
+  readonly maxParallelStories: number;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -258,6 +283,8 @@ export interface CreateSessionInput {
   readonly claudeAccountId?: string | null;
   /** A PRD to write into the clone once setup succeeds; defaults to null. */
   readonly pendingPrd?: string | null;
+  /** Defaults to {@link DEFAULT_PARALLEL_STORIES}. */
+  readonly maxParallelStories?: number;
 }
 
 export interface UpdateSessionInput {
@@ -282,6 +309,7 @@ export interface UpdateSessionInput {
   readonly claudeAccountId?: string | null;
   readonly failoverClaudeAccountId?: string | null;
   readonly pendingPrd?: string | null;
+  readonly maxParallelStories?: number;
 }
 
 export interface ListSessionsFilter {
@@ -311,10 +339,19 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   claudeAccountId: 'claude_account_id',
   failoverClaudeAccountId: 'failover_claude_account_id',
   pendingPrd: 'pending_prd',
+  maxParallelStories: 'max_parallel_stories',
 };
 
 export function isValidSessionName(name: string): boolean {
   return SESSION_NAME_PATTERN.test(name);
+}
+
+function assertValidMaxParallelStories(value: number): void {
+  if (!isValidMaxParallelStories(value)) {
+    throw new Error(
+      `Invalid maxParallelStories ${value}: use an integer from ${MIN_PARALLEL_STORIES} to ${MAX_PARALLEL_STORIES}`,
+    );
+  }
 }
 
 function assertValidSessionName(name: string): void {
@@ -353,6 +390,16 @@ function effortOf(row: Row): EffortLevel | null {
   return value !== null && isEffortLevel(value) ? value : null;
 }
 
+/**
+ * A stored limit outside {@link MIN_PARALLEL_STORIES}–{@link MAX_PARALLEL_STORIES}
+ * — only reachable by hand-editing the row — reads as the default, so the
+ * scheduler never runs zero stories or an unbounded number of them.
+ */
+function maxParallelStoriesOf(row: Row): number {
+  const value = integer(row, 'max_parallel_stories');
+  return isValidMaxParallelStories(value) ? value : DEFAULT_PARALLEL_STORIES;
+}
+
 export function mapSession(row: Row): Session {
   return {
     id: text(row, 'id'),
@@ -378,6 +425,7 @@ export function mapSession(row: Row): Session {
     claudeAccountId: nullableText(row, 'claude_account_id'),
     failoverClaudeAccountId: nullableText(row, 'failover_claude_account_id'),
     pendingPrd: nullableText(row, 'pending_prd'),
+    maxParallelStories: maxParallelStoriesOf(row),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at'),
   };
@@ -385,6 +433,7 @@ export function mapSession(row: Row): Session {
 
 export function createSession(db: Database, input: CreateSessionInput): Session {
   assertValidSessionName(input.name);
+  if (input.maxParallelStories !== undefined) assertValidMaxParallelStories(input.maxParallelStories);
 
   const now = nowIso();
   const session: Session = {
@@ -411,6 +460,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     claudeAccountId: input.claudeAccountId ?? null,
     failoverClaudeAccountId: null,
     pendingPrd: input.pendingPrd ?? null,
+    maxParallelStories: input.maxParallelStories ?? DEFAULT_PARALLEL_STORIES,
     createdAt: now,
     updatedAt: now,
   };
@@ -420,8 +470,8 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
        (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
         scheduled_start_at, container_id, pr_url, last_error, failure_stage,
         waiting_until, code_review, open_pull_request, recurring_task_id, feedback,
-        effort, claude_account_id, pending_prd, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        effort, claude_account_id, pending_prd, max_parallel_stories, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     session.id,
     session.repositoryId,
@@ -443,6 +493,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     session.effort,
     session.claudeAccountId,
     session.pendingPrd,
+    session.maxParallelStories,
     session.createdAt,
     session.updatedAt,
   );
@@ -565,6 +616,9 @@ export function updateSession(
   patch: UpdateSessionInput,
 ): Session | null {
   if (patch.name !== undefined) assertValidSessionName(patch.name);
+  if (patch.maxParallelStories !== undefined) {
+    assertValidMaxParallelStories(patch.maxParallelStories);
+  }
 
   const assignments: string[] = [];
   const params: Record<string, string | number | null> = { ':id': id, ':updated_at': nowIso() };

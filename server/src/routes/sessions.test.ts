@@ -355,6 +355,108 @@ describe('sessions api', () => {
     assert.equal(((await fetched.json()) as SessionView).effort, 'medium');
   });
 
+  describe('parallel-story limit (async stories US-001)', () => {
+    const limitUrl = (id: string): string => `/api/sessions/${id}/max-parallel-stories`;
+
+    it('defaults to 3 and returns the value from create, get and list', async () => {
+      const plain = await create();
+      assert.equal(plain.status, 201);
+      assert.equal(plain.body.session.maxParallelStories, 3);
+
+      const sequential = await create({ name: 'sequential', maxParallelStories: 1 });
+      assert.equal(sequential.status, 201);
+      assert.equal(sequential.body.session.maxParallelStories, 1);
+
+      const fetched = await call('GET', `/api/sessions/${sequential.body.session.id}`);
+      assert.equal(((await fetched.json()) as SessionView).maxParallelStories, 1);
+      const listed = (await (await call('GET', '/api/sessions')).json()) as {
+        sessions: SessionView[];
+      };
+      assert.equal(
+        listed.sessions.find((s) => s.id === plain.body.session.id)?.maxParallelStories,
+        3,
+      );
+    });
+
+    it('rejects a value that is not an integer from 1 to 10 and creates nothing', async () => {
+      for (const maxParallelStories of [0, 11, -1, 2.5, '3', null, true]) {
+        const { status, body } = await create({ name: 'rejected', maxParallelStories });
+        assert.equal(status, 400, JSON.stringify(maxParallelStories));
+        assert.equal(body.error, 'invalid_max_parallel_stories');
+        assert.match(body.message ?? '', /maxParallelStories/);
+      }
+      const listed = (await (await call('GET', '/api/sessions')).json()) as {
+        sessions: SessionView[];
+      };
+      assert.equal(listed.sessions.length, 0);
+    });
+
+    it('changes the limit in every status that can still run a story', async () => {
+      const { body } = await create();
+      for (const [status, value] of [
+        ['pending', 1],
+        ['ready', 10],
+        ['building', 5],
+        ['waiting', 2],
+        ['deciding', 7],
+        ['failed', 1],
+      ] as const) {
+        updateSession(db, body.session.id, { status });
+
+        const response = await call('PUT', limitUrl(body.session.id), { maxParallelStories: value });
+
+        assert.equal(response.status, 200, status);
+        assert.equal(((await response.json()) as SessionView).maxParallelStories, value, status);
+        const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+        assert.equal(((await fetched.json()) as SessionView).maxParallelStories, value, status);
+      }
+    });
+
+    it('rejects a missing or out-of-range limit and changes nothing', async () => {
+      const { body } = await create({ maxParallelStories: 4 });
+
+      for (const payload of [
+        {},
+        { maxParallelStories: 0 },
+        { maxParallelStories: 11 },
+        { maxParallelStories: 1.5 },
+        { maxParallelStories: '2' },
+        { maxParallelStories: null },
+        [],
+      ]) {
+        const response = await call('PUT', limitUrl(body.session.id), payload);
+        assert.equal(response.status, 400, JSON.stringify(payload));
+        const error = (await response.json()) as ErrorBody;
+        assert.equal(error.error, 'invalid_max_parallel_stories');
+        assert.match(error.message ?? '', /maxParallelStories|JSON object/);
+      }
+      const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+      assert.equal(((await fetched.json()) as SessionView).maxParallelStories, 4);
+    });
+
+    it('answers 404 for an unknown session', async () => {
+      const response = await call('PUT', limitUrl('nope'), { maxParallelStories: 2 });
+
+      assert.equal(response.status, 404);
+    });
+
+    it('refuses to change the limit once every story is behind the session', async () => {
+      const { body } = await create({ maxParallelStories: 2 });
+      for (const status of ['reviewing', 'fixing', 'finished', 'pr-open', 'merged'] as const) {
+        updateSession(db, body.session.id, { status });
+
+        const response = await call('PUT', limitUrl(body.session.id), { maxParallelStories: 6 });
+
+        assert.equal(response.status, 409, status);
+        const error = (await response.json()) as ErrorBody;
+        assert.equal(error.error, 'max_parallel_stories_locked', status);
+        assert.match(error.message ?? '', /can no longer be changed/);
+      }
+      const fetched = await call('GET', `/api/sessions/${body.session.id}`);
+      assert.equal(((await fetched.json()) as SessionView).maxParallelStories, 2);
+    });
+  });
+
   describe('claude account (multiple accounts US-009)', () => {
     /** An account the probe reports as signed in, or as signed out. */
     const account = (signedIn: boolean): string => {

@@ -267,7 +267,8 @@ boolean — `--argjson`, not `--arg`, which would send the string `"true"` and b
 
 `body.json` holds only the session fields and the PRD, never the token. Optional fields the
 API also accepts: `codeReview` (boolean, default `false`), `openPullRequest` (boolean, defaults
-to the repository's setting) and `scheduledStartAt` (UTC ISO-8601, e.g.
+to the repository's setting), `maxParallelStories` (integer 1–10, default `3`: how many stories
+run at once; `1` builds them one by one) and `scheduledStartAt` (UTC ISO-8601, e.g.
 `2026-10-09T06:00:00Z`) — add them with `--argjson` / `--arg` only when the operator asked.
 
 What the status means:

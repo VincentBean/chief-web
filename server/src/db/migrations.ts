@@ -1414,6 +1414,14 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN pending_prd TEXT;
     `,
   },
+  {
+    id: '0032_session_max_parallel_stories',
+    sql: `
+      -- How many of this session's stories may run at the same time (async
+      -- stories US-001). 1 builds the PRD sequentially; existing rows get 3.
+      ALTER TABLE sessions ADD COLUMN max_parallel_stories INTEGER NOT NULL DEFAULT 3;
+    `,
+  },
 ];
 
 /**

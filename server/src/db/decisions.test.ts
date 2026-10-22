@@ -183,7 +183,23 @@ describe(`${DECIDING_MIGRATION}`, () => {
 
     assert.ok(runMigrations(db).includes(DECIDING_MIGRATION));
 
-    assert.deepEqual(snapshot(), before, 'the rebuild moved nothing');
+    // runMigrations applies every later migration too, and those may add
+    // columns; compare only the columns the rows had before.
+    const after = snapshot();
+    const projected = Object.fromEntries(
+      Object.entries(before).map(([table, rows]) => [
+        table,
+        (after[table] ?? []).map((row, i) =>
+          Object.fromEntries(
+            Object.keys(rows[i] as object).map((column) => [
+              column,
+              (row as Record<string, unknown>)[column],
+            ]),
+          ),
+        ),
+      ]),
+    );
+    assert.deepEqual(projected, structuredClone(before), 'the rebuild moved nothing');
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 
     // The point of the rebuild: the new status is accepted, and the CHECK

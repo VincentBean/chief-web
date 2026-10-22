@@ -283,6 +283,7 @@ curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions" \
 | `scheduledStartAt` | no | ISO-8601 timestamp. Only a ready session starts, so a moment that passes while the session is still pending starts the build as soon as you mark it ready ([Scheduling](scheduling.md)). |
 | `codeReview` | no | Boolean, default `false`. |
 | `openPullRequest` | no | Boolean, defaults to the repository's setting. |
+| `maxParallelStories` | no | Integer from 1 to 10, default `3`: how many of the session's stories may run at the same time. `1` builds the PRD one story after another. |
 | `start` | no | Boolean, default `false`. `true` starts the session once it is created, exactly as [`POST …/start`](#post-apiagentsessionsidstart) would. |
 
 `201`:
@@ -294,7 +295,8 @@ curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions" \
     "name": "csv-export",
     "status": "pending",
     "branch": "chief/csv-export",
-    "scheduledStartAt": null
+    "scheduledStartAt": null,
+    "maxParallelStories": 3
   },
   "setup": { "ok": true, "message": "…" },
   "prdWritten": true,
@@ -347,7 +349,7 @@ session is `pending`.
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `invalid_body` | The body is not a JSON object. |
-| 400 | `invalid_repository_id`, `invalid_session_name`, `invalid_base_branch`, `invalid_pr_target_branch`, `invalid_scheduled_start`, `invalid_code_review`, `invalid_open_pull_request` | That field is missing or malformed; `message` says how. |
+| 400 | `invalid_repository_id`, `invalid_session_name`, `invalid_base_branch`, `invalid_pr_target_branch`, `invalid_scheduled_start`, `invalid_code_review`, `invalid_open_pull_request`, `invalid_max_parallel_stories` | That field is missing or malformed; `message` says how. |
 | 400 | `invalid_start` | `start` is present but not a boolean (`"yes"` and `null` included). |
 | 400 | `invalid_prd` | `prd` is missing, empty or too long (`message`), or does not parse. A parse failure lists every problem with its 1-based line: `{ "error": "invalid_prd", "errors": [{ "line": 18, "message": "…" }] }`. |
 | 400 | `repository_key_missing` | The repository has no private key, so nothing can be cloned. |
@@ -380,6 +382,7 @@ curl -sS "$CHIEF_WEB_URL/api/agent/sessions/a83d…" \
     "setupError": null,
     "scheduledStartAt": null,
     "pullRequestUrl": null,
+    "maxParallelStories": 3,
     "queued": false,
     "queuePosition": null
   },
@@ -390,7 +393,8 @@ curl -sS "$CHIEF_WEB_URL/api/agent/sessions/a83d…" \
 `status` is one of the [session states](sessions.md#session-states).
 `setupError` is the session's last error — a failed setup, but also a later
 build or delivery failure — or `null`. `pullRequestUrl` is set once a pull
-request is open. `queued` is `true` while a `ready` session waits on the
+request is open. `maxParallelStories` is how many of its stories may run at
+once. `queued` is `true` while a `ready` session waits on the
 [build queue](scheduling.md#concurrency-and-the-build-queue) for a slot, and
 `queuePosition` is then its 1-based place in it (`null` otherwise). Nothing
 else is returned: no PRD, logs, workspace paths or container ids.

@@ -51,7 +51,14 @@ const PRD = `# PRD: Demo
 `;
 
 interface StartBody {
-  session?: { id: string; name: string; status: string; branch: string; scheduledStartAt: string | null };
+  session?: {
+    id: string;
+    name: string;
+    status: string;
+    branch: string;
+    scheduledStartAt: string | null;
+    maxParallelStories: number;
+  };
   outcome?: string;
   queued?: boolean;
   queuePosition?: number | null;
@@ -195,6 +202,7 @@ describe('POST /api/agent/sessions/:id/start', () => {
       status: 'building',
       branch: session.featureBranch,
       scheduledStartAt: null,
+      maxParallelStories: 3,
     });
     assert.match(body.url ?? '', new RegExp(`/sessions/${session.id}$`));
     assert.equal(getSession(db, session.id)?.status, 'building');

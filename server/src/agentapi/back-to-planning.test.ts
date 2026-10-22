@@ -33,7 +33,14 @@ import { generateToken } from './index.js';
 const PASSWORD = 'correct horse battery staple';
 
 interface BackToPlanningBody {
-  session?: { id: string; name: string; status: string; branch: string; scheduledStartAt: string | null };
+  session?: {
+    id: string;
+    name: string;
+    status: string;
+    branch: string;
+    scheduledStartAt: string | null;
+    maxParallelStories: number;
+  };
   url?: string;
   error?: string;
   message?: string;
@@ -152,6 +159,7 @@ describe('POST /api/agent/sessions/:id/back-to-planning', () => {
       status: 'pending',
       branch: session.featureBranch,
       scheduledStartAt: null,
+      maxParallelStories: 3,
     });
     assert.deepEqual(Object.keys(body).sort(), ['session', 'url']);
     assert.match(body.url ?? '', new RegExp(`/sessions/${session.id}$`));
