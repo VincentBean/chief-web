@@ -1377,9 +1377,12 @@ export class BuildService {
     if (session === null || this.runner.recoverStoryWorkspaces === undefined) return;
 
     const recovery = await this.runner.recoverStoryWorkspaces(state.containerId, session.name);
-    const reset = listStories(this.db, sessionId).filter(
-      (story) => story.status === 'in-progress' && story.mergeSha === null,
-    );
+    const found = recovery.abortedMerge || recovery.worktrees.length > 0 || recovery.branches.length > 0;
+    // Only a parallel run leaves anything to find. A sequential story that was
+    // `in-progress` is still in progress in the clone itself, and carries on.
+    const reset = found
+      ? listStories(this.db, sessionId).filter((story) => story.status === 'in-progress' && story.mergeSha === null)
+      : [];
     for (const story of reset) updateStory(this.db, sessionId, story.storyId, { status: 'todo' });
     // Nothing of this session runs yet, so every open question is one whose
     // agent is gone, whichever story it was for.
@@ -1391,8 +1394,7 @@ export class BuildService {
         error: recovery.error,
       });
     }
-    const found = recovery.abortedMerge || recovery.worktrees.length > 0 || recovery.branches.length > 0;
-    if (!found && reset.length === 0 && recovery.error === null) return;
+    if (!found && recovery.error === null) return;
 
     logger.info('cleared what a previous run left behind', {
       session: sessionId,
