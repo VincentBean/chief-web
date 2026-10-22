@@ -163,6 +163,12 @@ export interface FinishedStory {
   readonly progressStart: string;
   /** The story's build-log section; the merge's lines go under it. */
   readonly log?: BuildLogWriter;
+  /**
+   * True once the build is being stopped or held (async stories US-009): a
+   * conflict found then is aborted rather than handed to a resolution agent
+   * that would start after every agent of the session was signalled.
+   */
+  readonly interrupted?: () => boolean;
 }
 
 /** How bringing a finished story in went. */
@@ -233,7 +239,10 @@ export class StoryMerger {
       return { code: 'not_merged', reason: `the merge into the session branch failed: ${outcome.message}` };
     } else {
       story.log?.write(`\n${storyId}: merge conflict in ${outcome.files.join(', ')}\n`);
-      const resolved = await this.resolve(session, containerId, story, outcome.files);
+      const resolved =
+        story.interrupted?.() === true
+          ? ({ code: 'unresolved', reason: 'the build is being stopped' } as const)
+          : await this.resolve(session, containerId, story, outcome.files);
       if (resolved.code !== 'resolved') {
         await this.runner.abortStoryMerge?.(containerId, session.name, storyId);
         if (resolved.code === 'held') return resolved;

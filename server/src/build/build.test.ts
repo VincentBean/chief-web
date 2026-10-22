@@ -517,8 +517,11 @@ class MockRunner implements AgentRunner {
   readonly stops: string[] = [];
   readonly reaps: string[] = [];
   head: string | null = 'sha-0';
-  /** Called for each iteration; whatever it does *is* what the agent did. */
-  behaviour: (invocation: AgentInvocation, index: number) => void | Promise<void> = () => {};
+  /**
+   * Called for each iteration; whatever it does *is* what the agent did. A
+   * result it returns is that agent's own, which concurrent agents need.
+   */
+  behaviour: (invocation: AgentInvocation, index: number) => void | AgentResult | Promise<void | AgentResult> = () => {};
   result: AgentResult = { exitCode: 0, output: '', timedOut: false };
   /** The clone as `git status` sees it; absent, like a runner that cannot look. */
   workspaceStatus?: (containerId: string) => Promise<string | null>;
@@ -543,8 +546,8 @@ class MockRunner implements AgentRunner {
 
   async run(invocation: AgentInvocation): Promise<AgentResult> {
     this.invocations.push(invocation);
-    await this.behaviour(invocation, this.invocations.length - 1);
-    return this.result;
+    const own = await this.behaviour(invocation, this.invocations.length - 1);
+    return own ?? this.result;
   }
 
   stop(sessionId: string): Promise<void> {
@@ -3198,7 +3201,7 @@ describe('story worktrees (async stories US-006)', () => {
     };
     const builds = serviceFor(world);
     world.runner.behaviour = (invocation): void => {
-      world.runner.result = isAnalysis(invocation) ? ok('{"dependencies": {}}') : ok('');
+      world.runner.result = isAnalysis(invocation) ? ok('{"dependencies": {"US-001": ["US-002"]}}') : ok('');
       if (isAnalysis(invocation)) return;
       const storyId = invocation.story?.storyId ?? '';
       const file = worktreePrd(world, storyId);
@@ -3263,7 +3266,7 @@ describe('story worktrees (async stories US-006)', () => {
         return add?.(containerId, sessionName, storyId) ?? Promise.resolve();
       };
       world.runner.behaviour = (invocation): void => {
-        world.runner.result = ok(isAnalysis(invocation) ? '{"dependencies": {}}' : '');
+        world.runner.result = ok(isAnalysis(invocation) ? '{"dependencies": {"US-001": ["US-002"]}}' : '');
         if (isAnalysis(invocation)) return;
         if (isResolver(invocation)) {
           // The resolution agent's merge commit is the clone's new HEAD.
@@ -3395,6 +3398,246 @@ describe('story worktrees (async stories US-006)', () => {
       assert.ok(events.includes('abort US-002'));
       assert.equal(world.stories().find((candidate) => candidate.storyId === 'US-002')?.status, 'todo');
       assert.deepEqual(storyAttempts(world), [['US-002', 1]]);
+    });
+  });
+
+  describe('the parallel scheduler (US-009)', () => {
+    const THREE = `${PRD}
+### US-003: Third story
+**Status:** todo
+**Priority:** 3
+**Description:** As a user, I want the third thing.
+
+**Acceptance Criteria:**
+- [ ] It works too
+`;
+
+    /**
+     * A parallel session whose analysis answers `plan`, and whose story agents
+     * each wait on their story's gate and then finish it — unless `onStory`
+     * returns a result of its own first. `events` records starts and merges in
+     * the order they happened.
+     */
+    function scheduling(
+      prd: string,
+      limit: number,
+      plan: string,
+      onStory: (storyId: string) => AgentResult | null | Promise<AgentResult | null> = () => null,
+    ) {
+      const world = new World(prd, limit);
+      const { added, removed } = withWorktrees(world);
+      const events: string[] = [];
+      const running = new Set<string>();
+      const gates = new Map<string, Gate>();
+      let peak = 0;
+      const gateOf = (storyId: string): Gate => {
+        const existing = gates.get(storyId);
+        if (existing !== undefined) return existing;
+        const created = gate();
+        gates.set(storyId, created);
+        return created;
+      };
+      world.runner.mergeStory = (_containerId, _sessionName, storyId): Promise<StoryMergeOutcome> => {
+        events.push(`merge ${storyId}`);
+        return Promise.resolve({ code: 'merged', mergeSha: `merge-${storyId}` });
+      };
+      world.runner.behaviour = async (invocation): Promise<AgentResult> => {
+        if (isAnalysis(invocation)) return ok(plan);
+        const storyId = invocation.story?.storyId ?? '';
+        events.push(`start ${storyId}`);
+        running.add(storyId);
+        peak = Math.max(peak, running.size);
+        try {
+          const own = await onStory(storyId);
+          if (own !== null) return own;
+          await gateOf(storyId).promise;
+          // Signalled by a stop or a hold: the agent leaves without finishing.
+          if (world.runner.stops.length > 0) return ok('');
+          const file = worktreePrd(world, storyId);
+          fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done').content);
+          world.runner.commit();
+          return ok('');
+        } finally {
+          running.delete(storyId);
+        }
+      };
+      return {
+        world,
+        added,
+        removed,
+        events,
+        running,
+        peak: (): number => peak,
+        release: (storyId: string): void => {
+          gateOf(storyId).release();
+        },
+      };
+    }
+
+    const statusOf = (world: World, storyId: string): string | undefined =>
+      world.stories().find((row) => row.storyId === storyId)?.status;
+
+    it('runs two independent stories at the same time, in one build slot', async () => {
+      const { world, added, removed, events, running, release } = scheduling(PRD, 3, '{"dependencies": {}}');
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('both agents are running', () => running.size === 2);
+
+      assert.deepEqual(events, ['start US-002', 'start US-001']);
+      // Each marked in-progress in its own worktree and in the table; the
+      // clone's prd.md is left alone until the merge.
+      for (const storyId of ['US-001', 'US-002']) {
+        assert.equal(statusIn(worktreePrd(world, storyId), storyId), 'in-progress');
+        assert.equal(statusOf(world, storyId), 'in-progress');
+        assert.equal(statusIn(world.prdFile, storyId), 'todo');
+      }
+      // Two agents, one session, one slot.
+      assert.deepEqual(builds.slotsInUse().map((slot) => slot.refId), [world.session.id]);
+      assert.equal(builds.status(world.session.id).activeBuilds, 1);
+      assert.equal(world.status(), 'building');
+
+      release('US-001');
+      release('US-002');
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'finished');
+      assert.deepEqual([...events].sort(), ['merge US-001', 'merge US-002', 'start US-001', 'start US-002']);
+      assert.deepEqual(world.stories().map((row) => [row.storyId, row.status, row.mergeSha]), [
+        ['US-002', 'done', 'merge-US-002'],
+        ['US-001', 'done', 'merge-US-001'],
+      ]);
+      // No worktree is left behind.
+      assert.deepEqual([...removed].sort(), added.map((entry) => entry.split(' ')[2]).sort());
+      // The analysis and one attempt per story, each its own iteration.
+      assert.deepEqual(
+        world.runner.invocations.filter((invocation) => !isAnalysis(invocation)).map((invocation) => invocation.iteration).sort(),
+        [1, 2],
+      );
+    });
+
+    it('holds a dependent story back until its dependency is merged', async () => {
+      const { world, events, release } = scheduling(THREE, 3, '{"dependencies": {"US-001": ["US-002"]}}');
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('the independent stories are running', () => events.length === 2);
+      assert.deepEqual(events, ['start US-002', 'start US-003']);
+
+      // A slot frees, but the only story left still waits on US-002.
+      release('US-003');
+      await until('US-003 is merged', () => events.includes('merge US-003'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(events.includes('start US-001'), false);
+      assert.equal(statusOf(world, 'US-001'), 'todo');
+
+      release('US-002');
+      await until('US-001 started', () => events.includes('start US-001'));
+      assert.ok(events.indexOf('merge US-002') < events.indexOf('start US-001'));
+      // Its worktree was cut after the merge, so it has its dependency's work.
+      assert.equal(statusIn(worktreePrd(world, 'US-001'), 'US-002'), 'done');
+
+      release('US-001');
+      await builds.whenIdle(world.session.id);
+      assert.equal(world.status(), 'finished');
+    });
+
+    it('never runs more stories than the limit, and fills a freed place at once', async () => {
+      const { world, events, running, peak, release } = scheduling(THREE, 2, '{"dependencies": {}}');
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('two agents are running', () => running.size === 2);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.deepEqual(events, ['start US-002', 'start US-001']);
+
+      release('US-001');
+      await until('US-003 took the freed place', () => events.includes('start US-003'));
+      assert.deepEqual(events, ['start US-002', 'start US-001', 'merge US-001', 'start US-003']);
+
+      release('US-002');
+      release('US-003');
+      await builds.whenIdle(world.session.id);
+      assert.equal(world.status(), 'finished');
+      assert.equal(peak(), 2);
+    });
+
+    it('spends only the failing story’s retries, and fails once the others are done', async () => {
+      const { world, events, release } = scheduling(PRD, 3, '{"dependencies": {}}', (storyId) =>
+        // US-002 never gets anywhere; US-001 waits on its gate.
+        storyId === 'US-002' ? ok('') : null,
+      );
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('US-002 used up its retries', () => events.filter((event) => event === 'start US-002').length === 3);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // US-001 is still running, so the run has not ended yet.
+      assert.equal(world.status(), 'building');
+      assert.equal(events.filter((event) => event === 'start US-001').length, 1);
+
+      release('US-001');
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'failed');
+      assert.match(world.error() ?? '', /US-002 \("First story"\) made no progress in 3 attempts/);
+      assert.equal(statusOf(world, 'US-001'), 'done');
+      assert.equal(statusOf(world, 'US-002'), 'todo');
+    });
+
+    it('stops every agent, removes every worktree, and keeps what was merged', async () => {
+      const { world, added, removed, events, running, release } = scheduling(THREE, 2, '{"dependencies": {}}');
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('two agents are running', () => running.size === 2);
+      release('US-002');
+      await until('US-003 is running', () => running.has('US-003'));
+      assert.ok(events.includes('merge US-002'));
+
+      const stopped = builds.stop(world.session.id);
+      await until('the agents were signalled', () => world.runner.stops.length > 0);
+      release('US-001');
+      release('US-003');
+      await stopped;
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'ready');
+      // One signal for the whole session, and a session-wide reap after it.
+      assert.deepEqual(world.runner.stops, [world.session.id]);
+      assert.equal(world.runner.reapScopes.at(-1), undefined);
+      assert.equal(statusOf(world, 'US-002'), 'done');
+      assert.equal(statusOf(world, 'US-001'), 'todo');
+      assert.equal(statusOf(world, 'US-003'), 'todo');
+      assert.deepEqual([...removed].sort(), added.map((entry) => entry.split(' ')[2]).sort());
+      assert.equal(events.includes('merge US-001') || events.includes('merge US-003'), false);
+    });
+
+    it('puts the whole session on the hold when one agent is refused, and stops the others', async () => {
+      const { world, added, removed, events, running, release } = scheduling(
+        PRD,
+        3,
+        '{"dependencies": {}}',
+        async (storyId) => {
+          if (storyId !== 'US-002') return null;
+          await until('US-001 is running', () => running.has('US-001'));
+          return { exitCode: 1, output: 'Claude AI usage limit reached|1756700000', timedOut: false };
+        },
+      );
+      const builds = serviceFor(world);
+
+      await builds.start(world.session.id);
+      await until('the other agent was signalled', () => world.runner.stops.length > 0);
+      // The gate stands in for the work a signalled agent walks away from.
+      release('US-001');
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'waiting');
+      assert.equal(new UsageLimitHold(world.db).until(world.accountId), getSession(world.db, world.session.id)?.waitingUntil);
+      assert.equal(statusOf(world, 'US-001'), 'todo');
+      assert.equal(statusOf(world, 'US-002'), 'todo');
+      assert.deepEqual([...removed].sort(), added.map((entry) => entry.split(' ')[2]).sort());
+      assert.equal(events.some((event) => event.startsWith('merge')), false);
     });
   });
 
