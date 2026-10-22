@@ -5,7 +5,7 @@ import type { Story } from '../db/index.js';
 import { selectRunnableStories } from './loop.js';
 
 function story(storyId: string, priority: number, status: Story['status'] = 'todo'): Story {
-  return { id: 0, sessionId: 's', storyId, title: storyId, priority, status, commitSha: null, createdAt: '', updatedAt: '' };
+  return { id: 0, sessionId: 's', storyId, title: storyId, priority, status, commitSha: null, mergeSha: null, createdAt: '', updatedAt: '' };
 }
 
 function ids(stories: readonly Story[]): string[] {

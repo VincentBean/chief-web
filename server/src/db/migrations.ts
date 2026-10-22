@@ -1450,6 +1450,14 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sessions ADD COLUMN dependency_plan_story_ids TEXT;
     `,
   },
+  {
+    id: '0035_story_merge_sha',
+    sql: `
+      -- The merge commit a parallel story landed on the session branch with
+      -- (async stories US-007). NULL for a story built in the clone.
+      ALTER TABLE stories ADD COLUMN merge_sha TEXT;
+    `,
+  },
 ];
 
 /**

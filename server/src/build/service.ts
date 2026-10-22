@@ -77,14 +77,16 @@ import {
 } from '../settings/index.js';
 import { type StoryTarget, storyBranch, storyWorktreeDir } from './agent.js';
 import { ASK_OPERATOR_TOOL, type DecisionWatcher } from './decisions.js';
-import { type BuildLogs, NullBuildLogs } from './log.js';
+import { type BuildLogs, type BuildLogWriter, NullBuildLogs } from './log.js';
 import {
   classifyIteration,
   iterationCap,
   MAX_RETRIES,
   remainingStories,
   selectNextStory,
+  selectRunnableStories,
 } from './loop.js';
+import { StoryMerger } from './merge.js';
 import { describePlan, normalizePlan, parseDependencyAnswer, type RawPlan, sequentialPlan } from './plan.js';
 import { agentPrompt, dependencyAnalysisPrompt } from './prompts.js';
 import type { AgentResult, AgentRunner } from './runner.js';
@@ -290,6 +292,11 @@ interface StoryWorkspace {
   readonly branch: string | null;
   readonly prdFile: string;
   readonly progressFile: string;
+  /**
+   * The clone's `progress.md` as it was copied into the worktree: what the
+   * story's additions are measured against when it is merged (US-007).
+   */
+  readonly progressStart: string;
 }
 
 /** What one re-read of `prd.md` produced. */
@@ -447,6 +454,8 @@ export class BuildService {
    * id. Written by {@link park} and spent by the launch that resumes them.
    */
   private readonly parked = new Map<string, ParkedRun>();
+  /** Merges finished parallel stories into the clone (async stories US-007). */
+  private readonly merger: StoryMerger;
   /** Serialises {@link pump}, so one freed slot is handed to one session. */
   private draining: Promise<void> = Promise.resolve();
 
@@ -474,6 +483,7 @@ export class BuildService {
      */
     private readonly decisions: DecisionWatcher | null = null,
   ) {
+    this.merger = new StoryMerger(config, db, runner);
     // Sessions are the one kind this service starts itself; reviews and
     // feedback runs register theirs from above.
     this.registerStart('session', {
@@ -1232,7 +1242,7 @@ export class BuildService {
         return;
       }
 
-      const story = selectNextStory(snapshot.stories);
+      const story = this.nextStory(session, snapshot.stories);
       if (story === null) {
         await this.handOff(session, snapshot.stories);
         return;
@@ -1285,6 +1295,22 @@ export class BuildService {
       }
       if (!keepGoing) return;
     }
+  }
+
+  /**
+   * The story the loop runs next. Every pass of the loop asks again, after
+   * every merge included (async stories US-007). A session with a limit above
+   * 1 and a stored dependency plan asks the scheduler's rule (US-004) with the
+   * one place this loop has, so a story never starts before what it depends on
+   * is merged; without a plan, or when the rule finds nothing, it is the
+   * sequential pick.
+   */
+  private nextStory(session: Session, stories: readonly Story[]): Story | null {
+    const fallback = selectNextStory(stories);
+    if (fallback === null) return null;
+    const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
+    if (limit <= 1 || getDependencyPlanOrigin(this.db, session.id).source === null) return fallback;
+    return selectRunnableStories(stories, getDependencyPlan(this.db, session.id), [], [], 1)[0] ?? fallback;
   }
 
   /** One iteration. Returns false when the loop must not continue. */
@@ -1441,8 +1467,28 @@ export class BuildService {
       return false;
     }
 
-    log.end(result.timedOut ? null : result.exitCode);
+    // A worktree's section stays open until its merge is done, so the merge's
+    // lines land under the story that caused them (US-007).
+    const exitCode = result.timedOut ? null : result.exitCode;
+    if (workspace.story === null) log.end(exitCode);
+    try {
+      return await this.settle(session, story, state, result, workspace, before, headBefore, log);
+    } finally {
+      log.end(exitCode);
+    }
+  }
 
+  /** Judges a finished agent run and records what it did; see {@link iterate}. */
+  private async settle(
+    session: Session,
+    story: Story,
+    state: RunState,
+    result: AgentResult,
+    workspace: StoryWorkspace,
+    before: StoryStatus,
+    headBefore: string | null,
+    log: BuildLogWriter,
+  ): Promise<boolean> {
     // A timed-out iteration is abandoned, not stopped: all a timeout can do is
     // close chief-web's end of the exec stream, and the Engine API has no way
     // to kill an exec — so the agent, and every test run, database server and
@@ -1461,7 +1507,7 @@ export class BuildService {
     // story before it was signalled, and that has to be recorded before the
     // run unwinds or the work loses its commit.
     const headAfter = await this.runner.headSha(state.containerId, workspace.story?.workingDir);
-    const after = workspace.story === null ? this.readPrd(session) : this.readWorktreePrd(session, workspace.prdFile);
+    let after = workspace.story === null ? this.readPrd(session) : this.readWorktreePrd(session, workspace.prdFile);
     const updated = after.stories.find((candidate) => candidate.storyId === story.storyId) ?? null;
     const change = classifyIteration(
       before,
@@ -1473,15 +1519,39 @@ export class BuildService {
     if (change.commitSha !== null && updated !== null) {
       updateStory(this.db, session.id, story.storyId, { commitSha: change.commitSha });
     }
-    // A finished story's worktree waits for its merge (US-007), which removes
-    // it; any other ending abandons this attempt, and a retry starts afresh.
-    if (updated?.status !== 'done') await this.abandonWorktree(session, state, workspace);
+
+    // A story its worktree calls done is merged into the session branch
+    // straight away (US-007), before the push and before the stop check, for
+    // the same reason the push comes first: finished work is never left on a
+    // branch that a stop or the next attempt would delete. The merge removes
+    // the worktree; a runner that cannot merge leaves it where it is.
+    let finished = updated?.status === 'done';
+    let mergeFailed = false;
+    if (finished && workspace.story !== null && this.runner.mergeStory !== undefined) {
+      const merged = await this.merger.merge(session, state.containerId, {
+        storyId: story.storyId,
+        title: story.title,
+        commitSha: change.commitSha ?? story.commitSha,
+        prdFile: workspace.prdFile,
+        progressFile: workspace.progressFile,
+        progressStart: workspace.progressStart,
+        log,
+      });
+      if (merged) {
+        after = this.readPrd(session);
+      } else {
+        finished = false;
+        mergeFailed = true;
+      }
+    }
+    // Any other ending abandons this attempt, and a retry starts afresh.
+    if (!finished) await this.abandonWorktree(session, state, workspace);
 
     // A story the agent finished is pushed straight away, so what `origin` has
     // is never more than one story behind what the container has — including
     // when the operator stops the build a moment later, which is why this comes
     // before the stop check rather than after it.
-    if (updated?.status === 'done') {
+    if (finished) {
       await this.completion.push(session);
       const stories = listStories(this.db, session.id);
       this.events?.publish({
@@ -1514,9 +1584,13 @@ export class BuildService {
       timedOut: result.timedOut,
       commit: change.commitSha,
       stalled: change.stalled,
+      mergeFailed,
     });
 
-    if (!change.stalled) {
+    // A merge that did not go through is a failed attempt like a stalled one:
+    // the story goes back to the session's `todo`, and its next attempt starts
+    // from the updated session branch. (Resolving the conflict is US-008.)
+    if (!change.stalled && !mergeFailed) {
       state.attempts = 0;
       return true;
     }
@@ -1857,10 +1931,14 @@ export class BuildService {
       branch: null,
       prdFile: sessionPrdFile(this.config, session),
       progressFile: sessionProgressFile(this.config, session),
+      progressStart: '',
     };
     const limit = (getSession(this.db, session.id) ?? session).maxParallelStories;
     if (limit <= 1 || this.runner.addStoryWorktree === undefined) return clone;
 
+    // Read before the add copies it, so the merge knows which lines are the
+    // story's own; nothing else writes the clone's copy in between.
+    const progressStart = this.readProgress(session) ?? '';
     await this.runner.addStoryWorktree(state.containerId, session.name, story.storyId);
     const workingDir = storyWorktreeDir(story.storyId);
     // `/workspace` in the container is the session's workspace on the data
@@ -1874,6 +1952,7 @@ export class BuildService {
       branch: storyBranch(session.name, story.storyId),
       prdFile: path.join(hostDir, prdPathFor(session.name)),
       progressFile: path.join(hostDir, progressPathFor(session.name)),
+      progressStart,
     };
   }
 

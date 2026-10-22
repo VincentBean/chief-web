@@ -55,6 +55,7 @@ function story(input: Partial<Story> & Pick<Story, 'storyId' | 'priority' | 'sta
     sessionId: 's',
     title: input.storyId,
     commitSha: null,
+    mergeSha: null,
     createdAt: '',
     updatedAt: '',
     ...input,

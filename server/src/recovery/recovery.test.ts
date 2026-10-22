@@ -28,6 +28,7 @@ function story(storyId: string, status: Story['status']): Story {
     priority: 1,
     status,
     commitSha: null,
+    mergeSha: null,
     createdAt: '',
     updatedAt: '',
   };

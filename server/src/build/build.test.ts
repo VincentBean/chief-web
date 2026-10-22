@@ -69,7 +69,7 @@ import {
 import { ASK_OPERATOR_TOOL, DecisionWatcher } from './decisions.js';
 import { createBuildLogStore } from './log.js';
 import { agentCommand, agentPrompt, storyContext } from './prompts.js';
-import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner } from './runner.js';
+import { type AgentInvocation, type AgentResult, type AgentRunner, createAgentRunner, type StoryMergeOutcome } from './runner.js';
 import { BUILD_MCP_CONFIG_FILE } from './mcp.js';
 import { type BuildCompletion, BuildError, createBuildService, MAX_DECISION_ANSWER_CHARS } from './service.js';
 
@@ -109,6 +109,7 @@ function story(input: Partial<Story> & Pick<Story, 'storyId' | 'priority' | 'sta
     sessionId: 's',
     title: input.storyId,
     commitSha: null,
+    mergeSha: null,
     createdAt: '',
     updatedAt: '',
     ...input,
@@ -524,6 +525,9 @@ class MockRunner implements AgentRunner {
   /** Story worktrees (async stories US-006); absent, every story runs in the clone. */
   addStoryWorktree?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
   removeStoryWorktree?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
+  /** Merging a finished story (async stories US-007); absent, nothing is merged. */
+  mergeStory?: (containerId: string, sessionName: string, storyId: string, message: string) => Promise<StoryMergeOutcome>;
+  abortStoryMerge?: (containerId: string, sessionName: string, storyId: string) => Promise<void>;
   /** Where each HEAD was read: `undefined` is the clone. */
   readonly headDirs: (string | undefined)[] = [];
   /** The story each reap was narrowed to: `undefined` is the whole session. */
@@ -3038,6 +3042,8 @@ describe('story worktrees (async stories US-006)', () => {
   /** `/workspace/worktrees/<id>` as the server sees it on the data volume. */
   const worktreePrd = (world: World, storyId: string): string =>
     path.join(world.config.workspacesDir, world.session.id, 'worktrees', storyId, prdPathFor(world.session.name));
+  const logOf = (world: World): string =>
+    fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
   const statusIn = (file: string, storyId: string): string | undefined =>
     parsePrd(fs.readFileSync(file, 'utf8')).stories.find((story) => story.id === storyId)?.status;
 
@@ -3116,6 +3122,94 @@ describe('story worktrees (async stories US-006)', () => {
     assert.equal(world.stories().find((row) => row.storyId === 'US-002')?.commitSha, 'sha-2');
     // A finished story keeps its worktree until it is merged.
     assert.deepEqual(removed, []);
+  });
+
+  it('merges each finished story into the session branch and moves on to the next (US-007)', async () => {
+    const world = new World(PRD, 3);
+    const { added, removed } = withWorktrees(world);
+    const completion = recordingCompletion();
+    const merges: string[] = [];
+    world.runner.mergeStory = (_containerId, _sessionName, storyId, message): Promise<StoryMergeOutcome> => {
+      merges.push(message);
+      return Promise.resolve({ code: 'merged', mergeSha: `merge-${storyId}` });
+    };
+    const builds = serviceFor(world, completion);
+    world.runner.behaviour = (invocation): void => {
+      if (isAnalysis(invocation)) {
+        // US-001 needs US-002: the merge of US-002 is what lets it start.
+        world.runner.result = ok('{"dependencies": {"US-001": ["US-002"], "US-002": []}}');
+        return;
+      }
+      world.runner.result = ok('');
+      const storyId = invocation.story?.storyId ?? '';
+      const file = worktreePrd(world, storyId);
+      // The worktree of a later story was cut after the earlier merge.
+      if (storyId === 'US-001') assert.equal(statusIn(file, 'US-002'), 'done');
+      fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done').content);
+      world.runner.commit();
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // Two story agents and the analysis: no story ran twice.
+    assert.equal(world.runner.invocations.length, 3);
+    assert.deepEqual(merges, ['Merge US-002 - First story', 'Merge US-001 - Second story']);
+    assert.deepEqual(added.map((entry) => entry.split(' ')[2]), ['US-002', 'US-001']);
+    assert.deepEqual(removed, ['US-002', 'US-001'], 'each worktree is removed once its story is merged');
+    assert.equal(completion.pushes, 2);
+    const rows = world.stories();
+    assert.deepEqual(
+      rows.map((row) => [row.storyId, row.status, row.commitSha, row.mergeSha]),
+      [
+        ['US-002', 'done', 'sha-2', 'merge-US-002'],
+        ['US-001', 'done', 'sha-3', 'merge-US-001'],
+      ],
+    );
+    // The clone's own `prd.md` now says both are done.
+    assert.equal(statusIn(world.prdFile, 'US-001'), 'done');
+    assert.equal(statusIn(world.prdFile, 'US-002'), 'done');
+    assert.match(logOf(world), /US-002: merged into the session branch as merge-US-002/);
+  });
+
+  it('sends a story whose merge failed back for another attempt (US-007)', async () => {
+    const world = new World(PRD, 3);
+    const { removed } = withWorktrees(world);
+    const aborted: string[] = [];
+    let refuse = true;
+    world.runner.mergeStory = (_containerId, _sessionName, storyId): Promise<StoryMergeOutcome> => {
+      if (refuse) {
+        refuse = false;
+        return Promise.resolve({ code: 'conflicted', files: ['src/a.ts'], message: 'CONFLICT' });
+      }
+      return Promise.resolve({ code: 'merged', mergeSha: `merge-${storyId}` });
+    };
+    world.runner.abortStoryMerge = (_containerId, _sessionName, storyId): Promise<void> => {
+      aborted.push(storyId);
+      return Promise.resolve();
+    };
+    const builds = serviceFor(world);
+    world.runner.behaviour = (invocation): void => {
+      world.runner.result = isAnalysis(invocation) ? ok('{"dependencies": {}}') : ok('');
+      if (isAnalysis(invocation)) return;
+      const storyId = invocation.story?.storyId ?? '';
+      const file = worktreePrd(world, storyId);
+      fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done').content);
+      world.runner.commit();
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    assert.deepEqual(aborted, ['US-002']);
+    const attempts = world.runner.invocations.filter((invocation) => !isAnalysis(invocation));
+    assert.deepEqual(
+      attempts.map((invocation) => invocation.story && [invocation.story.storyId, invocation.story.attempt]),
+      [['US-002', 1], ['US-002', 2], ['US-001', 1]],
+    );
+    assert.deepEqual(removed, ['US-002', 'US-002', 'US-001']);
+    assert.match(logOf(world), /US-002: merge conflict in src\/a\.ts; the merge was aborted/);
   });
 
   it('gives every attempt its own pid file, reaps only that story, and removes an abandoned worktree', async () => {

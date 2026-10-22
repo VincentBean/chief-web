@@ -1142,6 +1142,8 @@ export interface Story {
   priority: number;
   status: 'todo' | 'in-progress' | 'done';
   commitSha: string | null;
+  /** The merge commit of a parallel story on the session branch; null otherwise. */
+  mergeSha: string | null;
   createdAt: string;
   updatedAt: string;
 }

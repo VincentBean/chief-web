@@ -320,3 +320,43 @@ export function restoreWorkspaceSpec(): ExecSpec {
     workingDir: CONTAINER_REPO_DIR,
   };
 }
+
+/** How often a merge is tried while another git command holds `index.lock`. */
+export const MERGE_LOCK_ATTEMPTS = 5;
+
+/**
+ * `git merge --no-ff chief-story/<session>/<story-id> -m "Merge US-xxx - <title>"`
+ * in `/workspace/repo` (async stories US-007).
+ *
+ * The worktrees share the clone's `.git`, so a commit in one of them can hold
+ * `index.lock` for a moment; a merge that failed on that never started, and is
+ * tried again a few times. On success stdout is the merge commit's SHA. On any
+ * other failure the merge is left as git left it, and stdout lists the
+ * unmerged paths — none means it was not a conflict. The message carries the
+ * story's title, so it goes in through the environment, never into the script.
+ */
+export function mergeStorySpec(sessionName: string, storyId: string, message: string): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `attempt=1
+while ! out=$(git merge --no-ff "$CHIEF_STORY_BRANCH" -m "$CHIEF_MERGE_MESSAGE" 2>&1); do
+    case "$out" in
+        *index.lock*)
+            if [ "$attempt" -lt "$CHIEF_LOCK_ATTEMPTS" ]; then attempt=$((attempt + 1)); sleep 1; continue; fi ;;
+    esac
+    printf '%s\\n' "$out" >&2
+    git diff --name-only --diff-filter=U
+    exit 1
+done
+git rev-parse HEAD`,
+    ],
+    env: [
+      ...worktreeEnv(sessionName, storyId),
+      `CHIEF_MERGE_MESSAGE=${message}`,
+      `CHIEF_LOCK_ATTEMPTS=${String(MERGE_LOCK_ATTEMPTS)}`,
+    ],
+    workingDir: CONTAINER_REPO_DIR,
+  };
+}

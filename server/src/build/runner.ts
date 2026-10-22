@@ -1,5 +1,6 @@
 import type { ExecDeadline, ExecOutput, ExecSpec, StreamExecOptions } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
+import { abortMerge } from '../prconflicts/merge.js';
 import type { SessionExecutor } from '../sessions/index.js';
 import {
   addStoryWorktreeSpec,
@@ -7,8 +8,10 @@ import {
   agentExecSpec,
   agentSignalSpec,
   headShaSpec,
+  mergeStorySpec,
   removeStoryWorktreeSpec,
   restoreWorkspaceSpec,
+  storyBranch,
   type StoryTarget,
   workspaceStatusSpec,
 } from './agent.js';
@@ -135,7 +138,26 @@ export interface AgentRunner {
   addStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
   /** Removes a merged or abandoned story's worktree and branch. Never throws. */
   removeStoryWorktree?(containerId: string, sessionName: string, storyId: string): Promise<void>;
+  /**
+   * `git merge --no-ff` of a finished story's branch into the session branch
+   * in `/workspace/repo` (async stories US-007). Never throws: a merge that
+   * did not happen is an outcome. A conflicted merge is left in place.
+   * Optional: without it, a finished story's worktree is left unmerged.
+   */
+  mergeStory?(containerId: string, sessionName: string, storyId: string, message: string): Promise<StoryMergeOutcome>;
+  /** `git merge --abort` in `/workspace/repo`. Never throws. */
+  abortStoryMerge?(containerId: string, sessionName: string, storyId: string): Promise<void>;
 }
+
+/** How a story's merge into the session branch went (async stories US-007). */
+export type StoryMergeOutcome =
+  | { readonly code: 'merged'; readonly mergeSha: string }
+  | /** Git stopped on conflicts in `files`; the merge is still in progress. */ {
+      readonly code: 'conflicted';
+      readonly files: readonly string[];
+      readonly message: string;
+    }
+  | /** Anything else; nothing was merged. */ { readonly code: 'failed'; readonly message: string };
 
 /** The {@link AgentRunner} that actually execs into the session container. */
 export class ContainerAgentRunner implements AgentRunner {
@@ -306,6 +328,36 @@ export class ContainerAgentRunner implements AgentRunner {
         error: cause instanceof Error ? cause.message : String(cause),
       });
     }
+  }
+
+  async mergeStory(
+    containerId: string,
+    sessionName: string,
+    storyId: string,
+    message: string,
+  ): Promise<StoryMergeOutcome> {
+    let result: ExecOutput;
+    try {
+      result = await this.exec.runExec(containerId, mergeStorySpec(sessionName, storyId, message), WORKTREE_TIMEOUT_MS);
+    } catch (cause) {
+      return { code: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
+    }
+    const stdout = result.stdout.trim();
+    if (result.timedOut) return { code: 'failed', message: `merging ${storyId} timed out` };
+    if (result.exitCode === 0 && stdout !== '') return { code: 'merged', mergeSha: stdout };
+    const output = result.stderr.trim();
+    const files = stdout === '' ? [] : stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    return files.length > 0
+      ? { code: 'conflicted', files, message: output }
+      : { code: 'failed', message: output === '' ? `exit ${String(result.exitCode)}` : output };
+  }
+
+  async abortStoryMerge(containerId: string, sessionName: string, storyId: string): Promise<void> {
+    const aborted = await abortMerge(this.exec, containerId, {
+      baseBranch: storyBranch(sessionName, storyId),
+      timeoutMs: WORKTREE_TIMEOUT_MS,
+    });
+    if (!aborted) logger.warn('could not abort a story merge', { container: containerId, story: storyId });
   }
 }
 
