@@ -282,9 +282,9 @@ export function Session() {
       return 'Build stopped. Everything already committed is kept.';
     });
 
-  const onAnswerDecision = (answer: string): void =>
+  const onAnswerDecision = (decisionId: string, answer: string): void =>
     run('answer', async () => {
-      const next = await answerDecision(id, answer);
+      const next = await answerDecision(id, answer, decisionId);
       setBuild(next);
       applyStatus(next.status);
       // The discussion was about a question that is now settled, and its
@@ -474,16 +474,20 @@ export function Session() {
       {status === 'failed' && (
         <FailurePanel error={session.lastError} stage={session.failureStage} stories={stories} retryIsDelivery={retryIsDelivery} />
       )}
-      {build.decision !== null && (
+      {/* One card per open question: stories running in parallel can each be waiting on one (async stories US-010). */}
+      {build.decisions.map((decision) => (
         <DecisionPanel
-          decision={build.decision}
+          key={decision.id}
+          decision={decision}
+          // "Discuss this" opens a Claude on the newest question, so only its card offers it.
+          discussable={decision.id === build.decision?.id}
           planning={planning}
           busy={busy}
-          onAnswer={onAnswerDecision}
+          onAnswer={(answer) => onAnswerDecision(decision.id, answer)}
           onDiscuss={onDiscussDecision}
           onCloseDiscussion={onCloseDiscussion}
         />
-      )}
+      ))}
       {status === 'waiting' && <HoldPanel until={session.waitingUntil} />}
       {(status === 'reviewing' || status === 'fixing') && <DraftPanel status={status} prUrl={session.prUrl} />}
       {cleanRun && (
@@ -1152,6 +1156,7 @@ function FailurePanel({
  */
 function DecisionPanel({
   decision,
+  discussable,
   planning,
   busy,
   onAnswer,
@@ -1159,6 +1164,7 @@ function DecisionPanel({
   onCloseDiscussion,
 }: {
   readonly decision: Decision;
+  readonly discussable: boolean;
   readonly planning: Planning;
   readonly busy: Busy;
   readonly onAnswer: (answer: string) => void;
@@ -1184,7 +1190,7 @@ function DecisionPanel({
     setAnswer('');
   }, [decision.id]);
 
-  const discussing = planning.mode === 'decide' && planning.terminalId !== null;
+  const discussing = discussable && planning.mode === 'decide' && planning.terminalId !== null;
   const desktop = useMediaQuery(DESKTOP_QUERY);
   const expired = decision.waitingUntil !== null && new Date(decision.waitingUntil).getTime() <= now;
   const canSend = decision.waiting && !expired && answer.trim() !== '' && busy === null;
@@ -1202,7 +1208,7 @@ function DecisionPanel({
 
   return (
     <Panel
-      title="Needs your decision"
+      title={decision.storyId === null ? 'Needs your decision' : `${decision.storyId} needs your decision`}
       icon="comment"
       tone="warn"
       meta={
@@ -1220,7 +1226,8 @@ function DecisionPanel({
             {busy === 'stop' ? 'Closing…' : 'Close discussion'}
           </button>
         ) : (
-          decision.waiting && (
+          decision.waiting &&
+          discussable && (
             <button type="button" className="button" onClick={onDiscuss} disabled={busy !== null}>
               <Icon name="terminal" />
               {busy === 'discuss' ? 'Opening…' : 'Discuss this'}
@@ -1262,12 +1269,12 @@ function DecisionPanel({
 
       {decision.waiting ? (
         <form className="field" onSubmit={send}>
-          <label className="field__label" htmlFor="decision-answer">
+          <label className="field__label" htmlFor={`decision-answer-${decision.id}`}>
             Your decision
           </label>
           <textarea
             ref={box}
-            id="decision-answer"
+            id={`decision-answer-${decision.id}`}
             className="field__input"
             rows={3}
             value={answer}

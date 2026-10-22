@@ -1285,6 +1285,11 @@ export interface Build {
   maxConcurrentBuilds: number;
   /** The question the agent stopped to ask (decisions US-010); null when none. */
   decision: Decision | null;
+  /**
+   * Every open question, oldest first (async stories US-010): a build running
+   * stories in parallel can have one per story waiting at once.
+   */
+  decisions: Decision[];
   /** How long a question stands before the agent gives up on it. */
   decisionTimeoutMs: number | null;
 }
@@ -1329,10 +1334,10 @@ export async function startBuild(id: string): Promise<Build> {
  * waiting for it (decisions US-010). The build is `building` again by the time
  * this answers.
  */
-export async function answerDecision(id: string, answer: string): Promise<Build> {
+export async function answerDecision(id: string, answer: string, decisionId?: string): Promise<Build> {
   return api<Build>(`/api/sessions/${encodeURIComponent(id)}/decision`, {
     method: 'POST',
-    body: JSON.stringify({ answer }),
+    body: JSON.stringify(decisionId === undefined ? { answer } : { answer, decisionId }),
   });
 }
 
