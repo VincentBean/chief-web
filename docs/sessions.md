@@ -168,6 +168,42 @@ build log as `Thinking effort: <level> (session)` or `(default)`. Once a session
 is **finished** its effort can no longer be changed, because no agent will run
 for it again.
 
+## Parallel stories
+
+**Parallel stories** is how many of the session's stories may be built at the
+same time: a whole number from **1 to 10**, default **3**. Stories that do not
+depend on each other then run side by side, each in its own git worktree, and
+are merged back into the session branch as they finish; `1` builds them one
+after another in the clone, exactly as before the setting existed. How the
+build decides what may run together, and what happens on a conflict, a failure
+or a question, is in [Parallel stories](build-loop.md#parallel-stories).
+
+- **Where it is set.** The new-session form has a **Parallel stories** field
+  next to **Thinking effort**; a value that is not a whole number from 1 to 10
+  stops the submit. The session page has a **Parallel stories** card under the
+  thinking effort card, with a badge reading *1 at a time* or *up to N*; it
+  saves when you leave the field or press Enter. The
+  [agent API](send-to-chief.md) takes it as `maxParallelStories` on create, and
+  `PUT /api/sessions/<id>/max-parallel-stories` with
+  `{ "maxParallelStories": <n> }` changes it (`400
+  invalid_max_parallel_stories` for anything outside 1–10).
+- **A change applies from the next story the build starts.** Nothing running
+  is touched: lowering it lets the stories that are running finish and starts
+  nothing new until fewer than the new limit run; raising it starts more
+  runnable stories as soon as the build next looks.
+- **When it can be changed.** In every state that can still build stories:
+  `pending`, `ready`, `building`, `waiting`, `deciding` and `failed` — a failed
+  parallel run is exactly when dropping to `1` before **Retry** is useful. Once
+  the story loop is over (`reviewing`, `fixing`, `finished`, `pr-open`,
+  `merged`) it is locked (`409 max_parallel_stories_locked`).
+- **It never takes more than one build slot.** However many stories run, the
+  session uses one container and one
+  [build slot](scheduling.md#concurrency-and-the-build-queue).
+
+Sessions created without a value — by a
+[recurring task](#sessions-a-recurring-task-started), a Sentry fix or a voice
+action — get the default of 3.
+
 ## Claude account
 
 chief-web can have [several Claude accounts](claude-auth.md), and each session

@@ -215,6 +215,16 @@ How many may run at once is the **Max concurrent building sessions** setting
 is read on every start decision, so raising it takes effect at the next slot,
 without a restart.
 
+**A slot is a session, not an agent.** A session with
+[Parallel stories](build-loop.md#parallel-stories) above `1` runs several story
+agents at once, but all of them in its one container, on its one account, and
+it takes **one build slot** however many of its stories are running — the same
+as a sequential session. The cap counts sessions; the session's own setting
+decides how many agents run inside it. So with a cap of 2 and two sessions at
+3 parallel stories each, up to six story agents can be running, and a third
+session waits on the queue. Size the cap and the setting together against what
+the machine and the account can take.
+
 A start beyond the cap — pressed by hand, or fired by a schedule — is **not
 refused**: the session stays `ready` with a `queued_at` timestamp and waits its
 turn. `POST /api/sessions/<id>/build` answers `200` with `queued: true` and the

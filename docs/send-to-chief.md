@@ -316,7 +316,7 @@ it (`ready` or `building`):
 
 ```json
 {
-  "session": { "id": "a83d…", "name": "csv-export", "status": "building", "branch": "chief/csv-export", "scheduledStartAt": null },
+  "session": { "id": "a83d…", "name": "csv-export", "status": "building", "branch": "chief/csv-export", "scheduledStartAt": null, "maxParallelStories": 3 },
   "setup": { "ok": true, "message": "…" },
   "prdWritten": true,
   "start": {
@@ -428,7 +428,8 @@ curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions/a83d…/start" \
     "name": "csv-export",
     "status": "ready",
     "branch": "chief/csv-export",
-    "scheduledStartAt": null
+    "scheduledStartAt": null,
+    "maxParallelStories": 3
   },
   "outcome": "queued",
   "queued": true,
@@ -478,7 +479,8 @@ curl -sS -X PUT "$CHIEF_WEB_URL/api/agent/sessions/a83d…/schedule" \
     "name": "csv-export",
     "status": "pending",
     "branch": "chief/csv-export",
-    "scheduledStartAt": "2026-10-14T04:00:00.000Z"
+    "scheduledStartAt": "2026-10-14T04:00:00.000Z",
+    "maxParallelStories": 3
   },
   "url": "https://chief.example.com/sessions/a83d…"
 }
@@ -513,7 +515,7 @@ curl -sS -X POST "$CHIEF_WEB_URL/api/agent/sessions/a83d…/back-to-planning" \
 ```
 
 `200`: the same `{ "session": { "id", "name", "status", "branch",
-"scheduledStartAt" }, "url" }` as the schedule endpoint, with `status`
+"scheduledStartAt", "maxParallelStories" }, "url" }` as the schedule endpoint, with `status`
 `"pending"`.
 
 | Status | `error` | When |

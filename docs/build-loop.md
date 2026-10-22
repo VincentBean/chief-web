@@ -91,6 +91,211 @@ A **failed** session shows the stored reason at the top of its page, along with
 the **stage** it failed at, and one **Retry** button. See
 [Failure and recovery](#failure-and-recovery).
 
+Everything above is the loop with **Parallel stories** set to `1`. With a
+higher setting — the default is `3` — stories that do not depend on each other
+run side by side, each in a worktree of its own; see
+[Parallel stories](#parallel-stories).
+
+## Parallel stories
+
+A PRD's stories often touch unrelated code, and running them one after another
+leaves most of the build's time spent waiting. With **Parallel stories** above
+`1`, the loop works out which stories depend on which, starts every story whose
+dependencies are done, and merges each one back into the session branch as it
+finishes.
+
+### The setting
+
+**Parallel stories** is a per-session number from **1 to 10**, default **3**:
+how many of the session's stories may have an agent running at the same time.
+It is set on the new-session form and in the **Parallel stories** card on the
+session page, and through the agent API as `maxParallelStories` (see
+[Sessions](sessions.md#parallel-stories)).
+
+- **`1` is the loop described above, unchanged:** one story at a time in
+  `/workspace/repo`, no dependency analysis, no worktrees, no merges.
+- **It is read again every time a story is about to start**, so a change made
+  while the session is building applies from the next story the loop starts.
+  Lowering it never stops an agent that is already running; the running stories
+  finish, and nothing new starts until fewer than the new limit are running.
+- **It is a limit, not a target.** Only stories whose dependencies are done
+  can start, so a PRD whose stories build on each other still runs them one at
+  a time.
+
+### The dependency analysis
+
+Before the first story agent, one more headless `claude -p` reads the whole
+`prd.md` and answers with a JSON object naming, for each story, the stories it
+needs to be merged first. It is told to change nothing and to prefer a
+dependency when it is unsure; anything it changes in the clone anyway is
+thrown away when it finishes. It runs on the build model, without
+`ask_operator`, with a 30-minute limit of its own, and it costs no iteration
+and no retry. In the log it is the section `iteration 0`, ending in the plan:
+
+```
+Dependency plan: agent
+US-001 (no dependencies)
+US-002 (no dependencies)
+US-003 ← US-001, US-002
+```
+
+It is skipped when the setting is `1` or only one story is left to build. The
+plan is stored on the session, so a resumed build, a Retry or a run after a
+hold reuses it — the log says so — as long as the story ids in `prd.md` are
+still the same. A PRD whose stories changed (back to planning, a story added or
+removed) is analysed again.
+
+**When the analysis gives no usable answer, the build runs sequentially.** A
+timeout, a non-zero exit, output with no valid JSON document in it, an agent
+that could not be started at all, or an answer with a dependency cycle all
+fall back to a plan in which every story depends on the one before it in
+priority order, so the stories run one at a time — in worktrees, merged back
+one by one. The log reads `Dependency plan: fallback (<reason>)`, for example
+`fallback (cycle: US-002, US-003)`, and the session page shows the same reason.
+Unknown story ids, a story depending on itself and duplicates are dropped
+quietly. A stop or a usage-limit refusal during the analysis stores no plan at
+all: the next run analyses again.
+
+### Worktrees
+
+A parallel story never runs in `/workspace/repo`. When it starts, chief-web
+creates a git worktree for it at `/workspace/worktrees/<story-id>`, on a new
+branch `chief-story/<session-name>/<story-id>` taken from the session branch's
+current HEAD, and copies `prd.md`, `progress.md` and `screenshots/` into the
+worktree's own `.chief/prds/<session-name>/`. The agent is launched in that
+directory, inside the same session container, and its prompt points every path
+there: it works and commits on the story branch, and is told not to merge,
+rebase or push. Everything else about an iteration — the model, the effort,
+the advisor, the per-iteration timeout, the told budget — is as described
+above.
+
+All of a session's stories share its one container, its account and its
+[build slot](scheduling.md#concurrency-and-the-build-queue). Worktrees are
+created one at a time, so two story starts never race over git's own files.
+`/worktrees/` is added to the clone's `.git/info/exclude`, so a worktree is
+never committed into the session branch.
+
+The build log stays one file. Lines from a parallel story are prefixed with its
+id (`[US-003] …`), and the log view has a story selector to show one story's
+lines only. The session page lists every story with its state — *ready*,
+*waiting on dependencies*, *running*, *merging*, *deciding*, *blocked* or
+*done* — what it depends on, the attempt it is on, and *Running N of M* over
+the list.
+
+### Merge-back
+
+A story that is `done` in its worktree's `prd.md` is merged into the session
+branch in `/workspace/repo`:
+`git merge --no-ff chief-story/<session-name>/<story-id>`, with the message
+`Merge US-xxx - <title>`. Merges of one session are queued and run one at a
+time, in the order the stories finished, so the clone is never in two merges at
+once. Then:
+
+1. The story's block from the worktree's `prd.md` (its status and ticked
+   criteria) is spliced into the session's `prd.md`, and the lines the agent
+   added to `progress.md` are appended to the session's copy. Both files are
+   written into `/workspace/repo/.chief/prds/<session-name>/` and, like
+   everything under `.chief/`, **never committed**.
+2. The story's row becomes `done`, with its commit and merge SHAs.
+3. The worktree and the story branch are removed.
+4. The session branch is pushed, as after any completed story.
+5. The loop looks again for stories that can start now, so a dependent starts
+   the moment the story it waited on is merged.
+
+A story only ever counts as done once it is merged. When the last one is, the
+build hands off to [delivery](#push-and-pull-request) exactly as a sequential
+build does; the pull request has one merge commit per story.
+
+### Merge conflicts
+
+Two stories that ran side by side can still edit the same lines. A conflicted
+merge is left in place and handed to one more headless `claude -p` in
+`/workspace/repo`, told the story's title and description and the conflicted
+paths, and asked to edit only those files — not to commit, stage, abort or
+reset. It runs on the build model with the per-iteration timeout. chief-web
+then stages the files and checks the result itself: nothing left unmerged, no
+conflict marker in any file the merge touched, and a merge commit that
+completes. The log reads `US-xxx: merge conflict in <paths>`, then
+`US-xxx: resolved` or `US-xxx: not resolved — retrying on the updated branch
+(<reason>)`.
+
+A conflict that is not resolved — the agent timed out, failed, or left the
+files in a state the checks refuse — is aborted, the clone goes back to where
+it was, and the story's worktree is thrown away. That counts as a **failed
+attempt** of the story: it starts again in a fresh worktree from the updated
+session branch, which now contains the change it collided with. A resolver
+refused for the usage limit costs no attempt; the session goes on
+[hold](#the-usage-limit-hold).
+
+### Failure, questions and the iteration cap
+
+Attempts are counted **per story**. A parallel story that stalls, runs out of
+time or fails to merge is retried twice, like a sequential one, while the other
+stories carry on. An attempt that is not merged leaves nothing behind: its
+worktree and branch are removed and its next attempt starts from the current
+session branch, so commits it made in its worktree are discarded. A story that
+made progress without finishing has its count reset.
+
+**The third failure blocks the story**, and a blocked story ends the run, but
+not abruptly: **nothing new is started**, the stories that are already running
+finish and are merged, and only then is the session marked **failed**, at the
+`agent` stage, with the reason of the blocked story's last failure. Merged
+stories stay `done`. **Retry** starts a fresh run: every story gets its
+attempts back, the stored dependency plan is reused, and only what is not
+`done` is built.
+
+The iteration cap counts every story attempt started, in any worktree, and ends the run the same way: no new starts, running stories
+finish and merge, then **failed**.
+
+**A question pauses one story, not the build.** Each parallel story gets its
+own `ask_operator`. While a story waits for an answer, its agent keeps its
+context and its worktree, the session is **deciding**, and the other stories
+keep running. A waiting story **frees its place**: it does not count against
+the limit, so another runnable story starts in its place. The session page
+shows one decision box per open question, titled with the story it belongs to.
+Once answered, the story resumes at once, even if that puts the running count
+above the limit for a while; no new story starts until it is back below. The
+session goes back to **building** when its last open question is answered.
+
+### Usage limits
+
+A usage-limit refusal from any of the session's agents — a story or a merge
+resolver — puts the whole session on [hold](#the-usage-limit-hold): the other
+running stories are signalled and given the stop timeout, everything left is
+reaped, every worktree is removed, and the session is parked **waiting**. Every
+story that was not merged goes back to `todo`, and its work in the worktree is
+discarded; merged stories stay `done`. As with a sequential build, the hold
+costs no attempt and no iteration, and the stored plan is reused when it
+resumes.
+
+### Stop and restart
+
+**Stop build** signals every agent of the session at once — story agents and a
+merge resolver — waits for them, and reaps whatever is left. A merge that
+conflicts while the build is stopping is aborted rather than resolved. Every
+story's worktree and branch are removed and the session goes back to
+**ready**. Stories that were already merged stay `done`; **work a running story
+had committed in its worktree but not yet merged is discarded**, and the story
+starts over from the session branch next time. Unlike the sequential loop,
+where everything committed survives a stop, only merged work does.
+
+**A server restart** leaves no parallel run behind in memory, and the clone may
+still hold its traces: worktrees, story branches, a half-done merge. Before any
+run starts — a session picked back up after a restart, a Retry, a hold resume,
+an ordinary start — chief-web sweeps the container for leftover agents as
+described above, then clears those traces: it aborts an unfinished merge
+(`MERGE_HEAD`), removes every directory under `/workspace/worktrees`, prunes the
+worktree list, deletes every `chief-story/<session-name>/*` branch, puts every
+story that was in progress but never merged back to `todo`, and closes the
+session's open questions. When it found anything it writes a
+`Recovered what the previous run left behind:` section to the build log. The
+run then continues with the stored dependency plan.
+
+A session that was **deciding** at the restart (one of its stories was waiting
+on a question) is marked **failed** by startup reconciliation, like any
+deciding session; its **Retry** goes through the same clean-up and continues
+the build with every merged story kept.
+
 ## The advisor
 
 Claude Code ships an experimental **advisor tool**: a second, stronger model the
