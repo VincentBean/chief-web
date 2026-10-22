@@ -21,6 +21,8 @@ import {
   fetchSettings,
   leaveQueue,
   markSessionReady,
+  MAX_PARALLEL_STORIES,
+  MIN_PARALLEL_STORIES,
   type Planning,
   recurringTaskPath,
   type PrdParseError,
@@ -32,6 +34,7 @@ import {
   setSessionClaudeAccount,
   setSessionCodeReview,
   setSessionEffort,
+  setSessionMaxParallelStories,
   setSessionOpenPullRequest,
   setSessionSchedule,
   startBuild,
@@ -624,6 +627,8 @@ export function Session() {
           <CodeReviewPanel session={session} busy={busy} onToggle={onCodeReview} />
 
           <EffortPanel session={session} onSaved={setSession} />
+
+          <ParallelStoriesPanel session={session} onSaved={setSession} />
 
           <AccountPanel session={session} onSaved={setSession} />
         </aside>
@@ -1706,6 +1711,109 @@ function EffortPanel({
       </div>
       {message !== null && <Notice kind="ok">{message}</Notice>}
       {error !== null && <Notice kind="error">{error}</Notice>}
+    </Panel>
+  );
+}
+
+/* ------------------------------------------------------ parallel stories */
+
+/**
+ * Why the parallel-story limit is frozen, per status — the mirror of the
+ * server's `MAX_PARALLEL_STORIES_LOCKED` (async stories US-001): past the
+ * story loop no story runs for the session again.
+ */
+const MAX_PARALLEL_STORIES_LOCKED: Partial<Record<SessionData['status'], string>> = {
+  reviewing: 'its stories are built and the review is running.',
+  fixing: 'its stories are built and the review feedback is being fixed.',
+  finished: 'this session has finished, so no story will run for it again.',
+  'pr-open': 'its stories are built and its pull request is open.',
+  merged: 'its pull request has already been merged.',
+};
+
+/**
+ * How many of this session's stories may build at the same time (async
+ * stories US-002). The number saves when the field loses focus or on Enter;
+ * a value the server refuses is reported as a toast and the field goes back
+ * to the saved value.
+ */
+function ParallelStoriesPanel({
+  session,
+  onSaved,
+}: {
+  readonly session: SessionData;
+  readonly onSaved: (session: SessionData) => void;
+}) {
+  const toast = useToast();
+  const saved = session.maxParallelStories;
+  /** What is typed, kept as text so the field can be cleared while editing. */
+  const [draft, setDraft] = useState(String(saved));
+  const [saving, setSaving] = useState(false);
+
+  // A poll or another tab can change the saved value under the field.
+  useEffect(() => setDraft(String(saved)), [saved]);
+
+  const locked = MAX_PARALLEL_STORIES_LOCKED[session.status];
+
+  const save = (): void => {
+    if (saving) return;
+    const trimmed = draft.trim();
+    // Clearing the field is not a value: put the saved one back.
+    if (trimmed === '' || Number(trimmed) === saved) {
+      setDraft(String(saved));
+      return;
+    }
+    setSaving(true);
+    setSessionMaxParallelStories(session.id, Number(trimmed))
+      .then((next) => {
+        onSaved(next);
+        setDraft(String(next.maxParallelStories));
+        toast.ok(
+          next.maxParallelStories === 1
+            ? 'Saved: this session now builds one story after another.'
+            : `Saved: up to ${next.maxParallelStories} stories of this session may build at the same time.`,
+        );
+      })
+      .catch((cause: unknown) => {
+        if (redirectIfUnauthorised(cause)) return;
+        setDraft(String(saved));
+        toast.error(describeError(cause));
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <Panel title="Parallel stories" icon="tasklist" meta={<Badge tone={saved === 1 ? 'neutral' : 'ready'}>{saved === 1 ? '1 at a time' : `up to ${saved}`}</Badge>}>
+      <form
+        className="field"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+      >
+        <label className="field__label" htmlFor="session-page-max-parallel-stories">
+          Stories building at once
+        </label>
+        <input
+          id="session-page-max-parallel-stories"
+          className="field__input"
+          type="number"
+          min={MIN_PARALLEL_STORIES}
+          max={MAX_PARALLEL_STORIES}
+          step={1}
+          value={draft}
+          disabled={locked !== undefined || saving}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+        />
+        <p className="field__hint">
+          {locked !== undefined
+            ? `The limit can no longer be changed: ${locked}`
+            : 'How many stories may build at the same time. 1 builds one story after another.'}
+          {locked === undefined && session.status === 'building'
+            ? ' A build is running: a change applies from the next story it starts.'
+            : ''}
+        </p>
+      </form>
     </Panel>
   );
 }

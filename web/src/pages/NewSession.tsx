@@ -5,11 +5,14 @@ import {
   ApiError,
   claudeSignedIn,
   createSession,
+  DEFAULT_PARALLEL_STORIES,
   EFFORT_LEVELS,
   type EffortLevel,
   featureBranchFor,
   fetchSettings,
   MAX_FEEDBACK_LENGTH,
+  MAX_PARALLEL_STORIES,
+  MIN_PARALLEL_STORIES,
   type PrTargetBranch,
   type SessionInput,
   sessionPath,
@@ -53,6 +56,8 @@ export function NewSession() {
   const [effort, setEffort] = useState<EffortLevel | ''>('');
   /** The global default for the "Default" label; undefined until it has loaded. */
   const [defaultEffort, setDefaultEffort] = useState<EffortLevel | null | undefined>(undefined);
+  /** Kept as typed so the field can be cleared while editing. */
+  const [maxParallelStories, setMaxParallelStories] = useState(String(DEFAULT_PARALLEL_STORIES));
   /** null follows the default account, which the server resolves at launch. */
   const [claudeAccountId, setClaudeAccountId] = useState<string | null>(null);
   /** The server refusing the chosen account, shown under the picker. */
@@ -114,6 +119,17 @@ export function NewSession() {
     // Still loading: say nothing and let the server apply the global default.
     else if (codeReview !== null) input.codeReview = codeReview;
     if (effort !== '') input.effort = effort;
+    const parallel = Number(maxParallelStories);
+    if (
+      maxParallelStories.trim() === '' ||
+      !Number.isInteger(parallel) ||
+      parallel < MIN_PARALLEL_STORIES ||
+      parallel > MAX_PARALLEL_STORIES
+    ) {
+      setError(`Parallel stories must be a whole number from ${MIN_PARALLEL_STORIES} to ${MAX_PARALLEL_STORIES}.`);
+      return;
+    }
+    input.maxParallelStories = parallel;
     if (claudeAccountId !== null) input.claudeAccountId = claudeAccountId;
     if (effectiveBase.trim() !== '') input.baseBranch = effectiveBase.trim();
     if (feedbackTooLong) {
@@ -262,28 +278,46 @@ export function NewSession() {
                   </div>
                 </div>
 
-                <div className="field">
-                  <label className="field__label" htmlFor="session-effort">
-                    Thinking effort
-                  </label>
-                  <select
-                    id="session-effort"
-                    className="field__input"
-                    value={effort}
-                    onChange={(event) => setEffort(event.target.value as EffortLevel | '')}
-                  >
-                    <option value="">
-                      {defaultEffort === undefined
-                        ? 'Default'
-                        : `Default (${defaultEffort ?? 'CLI default'})`}
-                    </option>
-                    {EFFORT_LEVELS.map((level) => (
-                      <option key={level} value={level}>
-                        {level}
+                <div className="field__row">
+                  <div className="field">
+                    <label className="field__label" htmlFor="session-effort">
+                      Thinking effort
+                    </label>
+                    <select
+                      id="session-effort"
+                      className="field__input"
+                      value={effort}
+                      onChange={(event) => setEffort(event.target.value as EffortLevel | '')}
+                    >
+                      <option value="">
+                        {defaultEffort === undefined
+                          ? 'Default'
+                          : `Default (${defaultEffort ?? 'CLI default'})`}
                       </option>
-                    ))}
-                  </select>
-                  <p className="field__hint">For planning and build. Default follows the setting on the Settings page.</p>
+                      {EFFORT_LEVELS.map((level) => (
+                        <option key={level} value={level}>
+                          {level}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="field__hint">For planning and build. Default follows the setting on the Settings page.</p>
+                  </div>
+                  <div className="field">
+                    <label className="field__label" htmlFor="session-max-parallel-stories">
+                      Parallel stories
+                    </label>
+                    <input
+                      id="session-max-parallel-stories"
+                      className="field__input"
+                      type="number"
+                      min={MIN_PARALLEL_STORIES}
+                      max={MAX_PARALLEL_STORIES}
+                      step={1}
+                      value={maxParallelStories}
+                      onChange={(event) => setMaxParallelStories(event.target.value)}
+                    />
+                    <p className="field__hint">How many stories may build at the same time. 1 builds one story after another.</p>
+                  </div>
                 </div>
 
                 <div className="field">

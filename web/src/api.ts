@@ -894,7 +894,17 @@ export interface SessionInput {
   effort?: EffortLevel | null;
   /** Omit or null to run on the default Claude account. */
   claudeAccountId?: string | null;
+  /**
+   * How many stories may build at the same time, `MIN_PARALLEL_STORIES` to
+   * `MAX_PARALLEL_STORIES`; omit for the server default of 3.
+   */
+  maxParallelStories?: number;
 }
+
+/** Mirror the server's parallel-story bounds and default (db/sessions.ts). */
+export const MIN_PARALLEL_STORIES = 1;
+export const MAX_PARALLEL_STORIES = 10;
+export const DEFAULT_PARALLEL_STORIES = 3;
 
 /** Mirrors the server's `MAX_FEEDBACK_LENGTH` (sessions/service.ts). */
 export const MAX_FEEDBACK_LENGTH = 4000;
@@ -1198,6 +1208,18 @@ export async function setSessionEffort(id: string, effort: EffortLevel | null): 
   return api<Session>(`/api/sessions/${encodeURIComponent(id)}/effort`, {
     method: 'PUT',
     body: JSON.stringify({ effort }),
+  });
+}
+
+/**
+ * Sets how many of this session's stories may build at the same time. It
+ * applies from the next story the build starts; refused (409) once the
+ * stories are built, and (400) outside 1–10.
+ */
+export async function setSessionMaxParallelStories(id: string, maxParallelStories: number): Promise<Session> {
+  return api<Session>(`/api/sessions/${encodeURIComponent(id)}/max-parallel-stories`, {
+    method: 'PUT',
+    body: JSON.stringify({ maxParallelStories }),
   });
 }
 
