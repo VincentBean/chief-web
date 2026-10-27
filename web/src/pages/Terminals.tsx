@@ -1,13 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 
 import { closeTerminal, type Container, createTerminal, fetchContainers, fetchTerminals, type Terminal } from '../api.ts';
-import { DESKTOP_QUERY, describeError, redirectIfUnauthorised, useMediaQuery } from '../data.tsx';
+import { describeError, redirectIfUnauthorised } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { replaceSearch, useLocation } from '../router.tsx';
 import { since } from '../schedule.ts';
 import type { PaneStatus } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, EmptyState, Notice, PageHeader, Panel, Skeleton } from '../ui.tsx';
+import { Badge, EmptyState, Notice, PageHeader, Panel, SideColumn, Skeleton } from '../ui.tsx';
 
 const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
 
@@ -37,9 +37,9 @@ export function Terminals() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [command, setCommand] = useState('');
-  // A PTY needs a keyboard and a screen wider than a phone, so below `lg`
-  // nothing here is rendered — not the manager, and not a fetch to fill it.
-  const desktop = useMediaQuery(DESKTOP_QUERY);
+  // Below `lg` the containers and open terminals fold away while a terminal
+  // is attached, so it gets the screen; with none attached they are the page.
+  const [listOpen, setListOpen] = useState(selected === null);
 
   const refresh = useCallback(async (signal?: AbortSignal): Promise<void> => {
     const [openTerminals, running] = await Promise.all([
@@ -55,7 +55,6 @@ export function Terminals() {
   }, []);
 
   useEffect(() => {
-    if (!desktop) return;
     const controller = new AbortController();
     refresh(controller.signal)
       .catch((cause: unknown) => {
@@ -67,10 +66,11 @@ export function Terminals() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [desktop, refresh]);
+  }, [refresh]);
 
   const attach = (id: string | null): void => {
     setStatus('connecting');
+    setListOpen(id === null);
     const params = new URLSearchParams(window.location.search);
     if (id === null) params.delete(TERMINAL_PARAM);
     else params.set(TERMINAL_PARAM, id);
@@ -103,19 +103,6 @@ export function Terminals() {
 
   const active = terminals.find((terminal) => terminal.id === selected) ?? null;
 
-  if (!desktop) {
-    return (
-      <div className="page page--narrow">
-        <PageHeader title="Terminals" subtitle="A shell inside a running container." />
-        <EmptyState icon="terminal" title="Terminals need a desktop">
-          A container shell is an interactive terminal: it wants a keyboard, copy and paste, and a screen wider than this one.
-          Open this page on a desktop to attach. Terminals you have already opened keep running on the server, so they are
-          waiting there when you do.
-        </EmptyState>
-      </div>
-    );
-  }
-
   return (
     <div className="page page--full">
       <PageHeader
@@ -126,7 +113,11 @@ export function Terminals() {
       {error !== null && <Notice kind="error">{error}</Notice>}
 
       <div className="grid grid--aside-main terminals">
-        <aside className="stack">
+        <SideColumn
+          label={`Containers and open terminals (${String(terminals.length)} open)`}
+          open={listOpen}
+          onToggle={setListOpen}
+        >
           <Panel title="Containers" icon="package" meta={<span className="panel__meta muted">{containers.length}</span>}>
             {loading ? (
               <Skeleton lines={3} />
@@ -204,14 +195,14 @@ export function Terminals() {
               </ul>
             )}
           </Panel>
-        </aside>
+        </SideColumn>
 
         <div className="stack">
           {selected === null ? (
             <EmptyState icon="terminal" title={terminals.length === 0 ? 'No terminal open' : 'Pick a terminal'}>
               {terminals.length === 0
                 ? 'Open a shell in a container to start. Copy with Ctrl+Shift+C, paste with Ctrl+Shift+V.'
-                : 'Select an open terminal on the left to attach to it.'}
+                : 'Select an open terminal to attach to it.'}
             </EmptyState>
           ) : (
             <Panel

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { type ReactNode, useId } from 'react';
 
 import type { RecurringTaskOutcome, Session, Story } from './api.ts';
 import { Icon, type IconName } from './Icon.tsx';
@@ -440,6 +440,44 @@ export function Panel({
       )}
       <div className="panel__body">{children}</div>
     </section>
+  );
+}
+
+/**
+ * A page's side column. At `lg` it sits beside the main one; below it, it
+ * would stack above or below the page's terminal at full length, so it folds
+ * behind one toggle instead. Folding only stops the body being displayed: the
+ * panels inside stay mounted and keep their state.
+ */
+export function SideColumn({
+  label,
+  open,
+  onToggle,
+  children,
+}: {
+  /** What the toggle says. The toggle only exists below `lg`. */
+  readonly label: ReactNode;
+  readonly open: boolean;
+  readonly onToggle: (open: boolean) => void;
+  readonly children: ReactNode;
+}) {
+  const body = useId();
+  return (
+    <aside className={`stack side${open ? ' side--open' : ''}`}>
+      <button
+        type="button"
+        className="button side__toggle"
+        aria-expanded={open}
+        aria-controls={body}
+        onClick={() => onToggle(!open)}
+      >
+        <Icon name="chevron-right" />
+        {label}
+      </button>
+      <div className="stack side__body" id={body}>
+        {children}
+      </div>
+    </aside>
   );
 }
 

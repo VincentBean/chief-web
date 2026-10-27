@@ -41,6 +41,9 @@ interface ServerMessage {
 
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
+/** Below `md` (48rem): a phone, where the terminal font is smaller. */
+const NARROW_QUERY = '(max-width: 47.99rem)';
+
 /**
  * An xterm.js view bound to a server-side PTY over a WebSocket.
  *
@@ -109,8 +112,11 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, r
         "ui-monospace, SFMono-Regular, Menlo, 'Cascadia Mono', monospace",
       ),
       // Matches --text-terminal: larger than --text-code so a long conversation
-      // reads comfortably. Keep the two in sync.
-      fontSize: 15,
+      // reads comfortably. Keep the two in sync. Below `md` that would leave a
+      // phone about 34 columns, too few for Claude Code's layout, so it drops
+      // to 12px there (about 45). Read once: a rotation refits the grid, it
+      // does not change the font.
+      fontSize: window.matchMedia(NARROW_QUERY).matches ? 12 : 15,
       // The browser keeps its own scrollback on top of the server's replay.
       scrollback: 5000,
       rightClickSelectsWord: true,
@@ -144,7 +150,9 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, r
     term.loadAddon(fit);
     term.open(host);
     fit.fit();
-    term.focus();
+    // On a touch screen focus raises the on-screen keyboard, which would
+    // cover the page the moment it loads; there the operator taps in instead.
+    if (!window.matchMedia('(pointer: coarse)').matches) term.focus();
 
     const encoder = new TextEncoder();
     let socket: WebSocket | null = null;
@@ -297,7 +305,9 @@ export function TerminalPane({ terminalId, size = 'default', onStatus, onExit, r
   return (
     <div className={size === 'tall' ? 'terminal terminal--tall' : 'terminal'}>
       {error === null ? null : <p className="notice notice--error">{error}</p>}
-      <div className="terminal__screen" ref={hostRef} />
+      <div className="terminal__screen">
+        <div className="terminal__host" ref={hostRef} />
+      </div>
     </div>
   );
 }

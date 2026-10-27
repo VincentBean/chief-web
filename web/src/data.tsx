@@ -279,8 +279,8 @@ export function useKeyChords(bindings: Record<string, () => void>): void {
 
 /**
  * `lg` (64rem), the breakpoint `shell.css` builds the frame around: below it
- * the sidebar is a drawer, every grid is one column, and the terminal panes
- * are not shown at all.
+ * the sidebar is a drawer, every grid is one column, and the Claude login
+ * terminal is not shown at all.
  */
 export const DESKTOP_QUERY = '(min-width: 64rem)';
 

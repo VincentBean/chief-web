@@ -2,7 +2,8 @@
  * The frame: sidebar, content column, page scaffolding and the grids pages
  * are laid out on. Everything responsive about the app's structure is here.
  * One breakpoint does nearly all the work: `lg` (64rem), below which the
- * sidebar becomes a drawer and every grid is one column.
+ * sidebar becomes a drawer, every grid is one column and a `SideColumn`
+ * folds behind its toggle.
  */
 @layer components {
   .shell {
@@ -557,6 +558,36 @@
 
   .stack--tight {
     gap: 0.75rem;
+  }
+
+  /*
+   * `SideColumn`: the side column of a page whose main column is a terminal.
+   * Below `lg` it folds behind a full-width toggle, so a phone gets the
+   * terminal instead of a screenful of panels to scroll past. At `lg` the
+   * toggle is gone and the column is always shown. The toggle is a `.button`,
+   * whose rules come later in the cascade, hence the extra `.side`.
+   */
+  .side > .side__toggle {
+    justify-content: flex-start;
+    width: 100%;
+
+    @variant lg {
+      display: none;
+    }
+  }
+
+  .side__toggle .icon {
+    transition: transform var(--motion-fast) var(--ease-standard);
+  }
+
+  .side--open .side__toggle .icon {
+    transform: rotate(90deg);
+  }
+
+  @variant max-lg {
+    .side:not(.side--open) > .side__body {
+      display: none;
+    }
   }
 
   .toolbar {

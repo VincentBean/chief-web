@@ -47,21 +47,13 @@ import {
 } from '../api.ts';
 import { BuildLog } from '../BuildLog.tsx';
 import { ConfirmDialog } from '../ConfirmDialog.tsx';
-import {
-  DESKTOP_QUERY,
-  describeError,
-  isCleanRun,
-  isEnded,
-  redirectIfUnauthorised,
-  useAppData,
-  useMediaQuery,
-} from '../data.tsx';
+import { describeError, isCleanRun, isEnded, redirectIfUnauthorised, useAppData } from '../data.tsx';
 import { Icon } from '../Icon.tsx';
 import { Link, navigate, sessionIdFromPath, useLocation } from '../router.tsx';
 import { countdown, fromLocalParts, localTime, normaliseTime, startsIn, toLocalInputParts } from '../schedule.ts';
 import type { PaneStatus, TerminalPaneHandle } from '../TerminalPane.tsx';
 import { useToast } from '../toast.tsx';
-import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, Skeleton, STORY_TONE, StatusBadge, type Tone } from '../ui.tsx';
+import { Badge, Facts, FeedbackBadge, Notice, PageHeader, Panel, Progress, SESSION_TONE, SideColumn, Skeleton, STORY_TONE, StatusBadge, type Tone } from '../ui.tsx';
 import { useCall } from '../voice/CallProvider.tsx';
 import { DeletionWarning } from './Sessions.tsx';
 
@@ -116,6 +108,8 @@ export function Session() {
   /** What the planning terminal was to start with while its voice agent is being confirmed away. */
   const [planningContext, setPlanningContext] = useState('');
   const [setupStderr, setSetupStderr] = useState<string | null>(null);
+  /** Below `lg` the details and settings column folds away, leaving the terminal the screen. */
+  const [asideOpen, setAsideOpen] = useState(false);
 
   useEffect(() => {
     if (id === null) {
@@ -598,7 +592,7 @@ export function Session() {
           )}
         </div>
 
-        <aside className="stack">
+        <SideColumn label="Details and settings" open={asideOpen} onToggle={setAsideOpen}>
           <Panel title="Details" icon="info">
             <Facts
               items={[
@@ -643,7 +637,7 @@ export function Session() {
           <ParallelStoriesPanel session={session} onSaved={setSession} />
 
           <AccountPanel session={session} onSaved={setSession} />
-        </aside>
+        </SideColumn>
       </div>
 
       {status !== 'pending' && <BuildLog sessionId={id} building={status === 'building'} />}
@@ -898,9 +892,6 @@ function PlanningPanel({
   }, [planning.terminalId, planning.running, closed]);
 
   const resume = planning.nextMode === 'edit' || planning.terminalId !== null;
-  // Below `lg` the pane is not rendered at all: mounting it would open a
-  // WebSocket onto a PTY nothing on screen could show or type into.
-  const desktop = useMediaQuery(DESKTOP_QUERY);
 
   const toast = useToast();
   const pane = useRef<TerminalPaneHandle>(null);
@@ -988,37 +979,30 @@ function PlanningPanel({
         </p>
       )}
 
-      {attached !== null &&
-        (desktop ? (
-          <Suspense fallback={<Skeleton lines={6} />}>
-            {planning.questions.length > 0 && (
-              <div className="field">
-                <div className="quick-questions">
-                  {planning.questions.map((question, index) => (
-                    <button
-                      // Questions may repeat, so the text alone is no key.
-                      key={`${String(index)}:${question}`}
-                      type="button"
-                      className="button button--small"
-                      onClick={() => ask(question)}
-                      disabled={!canAsk}
-                    >
-                      {question}
-                    </button>
-                  ))}
-                </div>
-                <p className="field__hint">Sends the question to Claude as if you typed it.</p>
+      {attached !== null && (
+        <Suspense fallback={<Skeleton lines={6} />}>
+          {planning.questions.length > 0 && (
+            <div className="field">
+              <div className="quick-questions">
+                {planning.questions.map((question, index) => (
+                  <button
+                    // Questions may repeat, so the text alone is no key.
+                    key={`${String(index)}:${question}`}
+                    type="button"
+                    className="button button--small"
+                    onClick={() => ask(question)}
+                    disabled={!canAsk}
+                  >
+                    {question}
+                  </button>
+                ))}
               </div>
-            )}
-            <TerminalPane ref={pane} terminalId={attached} size="tall" onStatus={setPaneStatus} />
-          </Suspense>
-        ) : (
-          <Notice kind="info">
-            <strong>Terminal access is available on desktop.</strong> Planning is an interactive Claude conversation, which
-            needs a keyboard and a screen this narrow cannot give it. The session keeps running on the server; everything
-            else on this page — stages, stories, the agent log and the PRD — works here.
-          </Notice>
-        ))}
+              <p className="field__hint">Sends the question to Claude as if you typed it.</p>
+            </div>
+          )}
+          <TerminalPane ref={pane} terminalId={attached} size="tall" onStatus={setPaneStatus} />
+        </Suspense>
+      )}
 
       {attached === null && planning.terminalId === null && (
         <p className="field__hint">
@@ -1253,7 +1237,6 @@ function DecisionPanel({
   }, [decision.id]);
 
   const discussing = discussable && planning.mode === 'decide' && planning.terminalId !== null;
-  const desktop = useMediaQuery(DESKTOP_QUERY);
   const expired = decision.waitingUntil !== null && new Date(decision.waitingUntil).getTime() <= now;
   const canSend = decision.waiting && !expired && answer.trim() !== '' && busy === null;
 
@@ -1365,17 +1348,11 @@ function DecisionPanel({
         </Notice>
       )}
 
-      {discussing &&
-        (desktop ? (
-          <Suspense fallback={<Skeleton lines={6} />}>
-            <TerminalPane terminalId={planning.terminalId ?? ''} size="tall" />
-          </Suspense>
-        ) : (
-          <Notice kind="info">
-            <strong>The discussion needs a desktop.</strong> It is an interactive Claude conversation, which needs a
-            keyboard and a wider screen. It keeps running on the server, and the decision can still be sent from here.
-          </Notice>
-        ))}
+      {discussing && (
+        <Suspense fallback={<Skeleton lines={6} />}>
+          <TerminalPane terminalId={planning.terminalId ?? ''} size="tall" />
+        </Suspense>
+      )}
     </Panel>
   );
 }

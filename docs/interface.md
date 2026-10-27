@@ -241,6 +241,14 @@ How it works:
   clipboard API, so Ctrl+Shift+V falls through to the browser's own paste.
   The terminal refits to the window on every layout change and tells the PTY its
   new size.
+- **It works on a phone.** Below the `lg` breakpoint the app's menu is a
+  drawer, and the side column beside a terminal — the container list here, the
+  details and settings on a session page — folds behind a toggle, so the
+  terminal (or the planning terminal) gets the screen. The font drops from
+  15px to 12px below `md`, which gives a phone about 40 columns. A PTY has one
+  size, so the last viewer to attach or resize sets it for everyone watching:
+  a desktop tab that is open at the same time shows output drawn at the
+  phone's width until that tab is resized or reloaded.
 
 `GET /api/containers` lists the running containers a terminal can target; once
 sessions exist (US-009) their containers show up there.

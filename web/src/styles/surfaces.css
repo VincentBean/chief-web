@@ -694,6 +694,17 @@
   }
 
   /*
+   * What xterm is opened on. The fit addon sizes the grid from its parent's
+   * computed height, which for the padded, border-box screen above includes
+   * the padding and border, so xterm drew past the bottom border whenever the
+   * rows divided that height evenly (a phone's 12px font did). This box has
+   * no padding: its height is exactly the room the grid has.
+   */
+  .terminal__host {
+    height: 100%;
+  }
+
+  /*
    * Both tall terminals share this height: the planning terminal, where the
    * operator reads and types into a long Claude Code conversation for as
    * long as the PRD takes, and the /terminal page's container shell. Each
