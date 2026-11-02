@@ -60,6 +60,12 @@ export interface BuildMcpConfigOptions {
   readonly command?: readonly string[];
 }
 
+/**
+ * How much longer than the question's own wait the CLI gives the call, so
+ * the tool's "nobody answered" is what ends it, never the CLI's abort.
+ */
+export const ASK_CALL_TIMEOUT_MARGIN_MS = 5 * 60_000;
+
 /** The `--mcp-config` JSON: one stdio server, with `ask_operator` turned on. */
 export function buildMcpConfig(options: BuildMcpConfigOptions): string {
   const argv = options.command ?? CHIEF_MCP_COMMAND;
@@ -69,6 +75,12 @@ export function buildMcpConfig(options: BuildMcpConfigOptions): string {
         type: 'stdio',
         command: argv[0] as string,
         args: argv.slice(1),
+        // Claude Code drops a stdio call that is silent for 30 minutes, and a
+        // question waits for hours. The tool reports progress while it waits,
+        // which keeps the call alive; this per-server timeout raises the idle
+        // limit as well, so the question still stands if progress ever stops
+        // counting. It is also a hard cap on the call, hence the margin.
+        timeout: options.askTimeoutMs + ASK_CALL_TIMEOUT_MARGIN_MS,
         env: {
           CHIEF_MCP_ASK_OPERATOR: '1',
           CHIEF_MCP_ASK_DIR: options.askDir ?? DECISION_ASK_DIR,
@@ -87,13 +99,22 @@ export function buildMcpConfig(options: BuildMcpConfigOptions): string {
  * Writes {@link buildMcpConfig} to {@link BUILD_MCP_CONFIG_FILE} as the build
  * agent's own user. The JSON goes in as a positional argument and is printed
  * with `printf '%s'`, so nothing in it is ever re-parsed by the shell.
+ *
+ * It also clears the ask directory of files an earlier agent left behind. An
+ * agent killed while it waited never deletes its request, and the server
+ * takes the newest request it has not seen as the question just asked. After
+ * a restart it has seen none, so a stale request could be shown as this
+ * agent's question. Only this agent uses the directory, and it has not
+ * started yet.
  */
 export function buildMcpConfigWriteSpec(options: BuildMcpConfigOptions): ExecSpec {
+  const askDir = options.askDir ?? DECISION_ASK_DIR;
   return {
     cmd: [
       '/bin/sh',
       '-c',
-      `mkdir -p ${options.askDir ?? DECISION_ASK_DIR} && printf '%s' "$1" > ${options.file ?? BUILD_MCP_CONFIG_FILE}`,
+      `mkdir -p ${askDir} && rm -f ${askDir}/*.request ${askDir}/*.answer ${askDir}/*.tmp && ` +
+        `printf '%s' "$1" > ${options.file ?? BUILD_MCP_CONFIG_FILE}`,
       'chief-build-mcp',
       buildMcpConfig(options),
     ],

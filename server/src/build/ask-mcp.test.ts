@@ -208,6 +208,67 @@ describe('runner/chief-mcp.js ask_operator (decisions US-002)', () => {
     assert.equal(String(request['recommendation']).length, 600);
   });
 
+  it('reports progress while it waits, so the CLI’s 30-minute idle timeout never aborts the question', async () => {
+    start({ CHIEF_MCP_ASK_HEARTBEAT_MS: '20' });
+    client.send({
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'ask_operator', arguments: { question: 'Which database?' }, _meta: { progressToken: 9 } },
+    });
+    await until(() => requestFiles().length === 1);
+    const progress = (): Record<string, unknown>[] =>
+      client.messages
+        .filter((message) => message['method'] === 'notifications/progress')
+        .map((message) => message['params'] as Record<string, unknown>);
+    await until(() => progress().length >= 3);
+    assert.ok(progress().every((params) => params['progressToken'] === 9));
+    const counts = progress().map((params) => Number(params['progress']));
+    assert.deepEqual(
+      counts,
+      [...counts].sort((a, b) => a - b),
+      'progress only ever increases',
+    );
+    assert.equal(new Set(counts).size, counts.length);
+
+    const request = JSON.parse(fs.readFileSync(path.join(askDir, requestFiles()[0] as string), 'utf8')) as {
+      id: string;
+    };
+    answer(request.id, { answered: true, answer: 'Postgres.' });
+    assert.equal(resultOf(await client.reply(9)).isError, false);
+    // Once answered, it stops: nothing more is reported against a finished call.
+    const settled = progress().length;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(progress().length, settled);
+  });
+
+  it('sends no progress for a call that came without a progress token', async () => {
+    start({ CHIEF_MCP_ASK_HEARTBEAT_MS: '20' });
+    await ask(10, { question: 'Which database?' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(client.messages.filter((message) => message['method'] === 'notifications/progress').length, 0);
+  });
+
+  it('refuses a second question while the first is still waiting, and keeps waiting on the first', async () => {
+    start();
+    const first = await ask(11, { question: 'May the rename migration keep the old name?' });
+    client.send({
+      id: 12,
+      method: 'tools/call',
+      params: { name: 'ask_operator', arguments: { question: 'May the unrelated failing test stay red?' } },
+    });
+    const second = resultOf(await client.reply(12));
+    assert.equal(second.isError, true);
+    assert.match(second.text, /already have a question waiting/);
+    assert.equal(requestFiles().length, 1, 'only the first question is in front of the operator');
+
+    answer(String(first['id']), { answered: true, answer: 'Yes, keep it.' });
+    assert.match(resultOf(await client.reply(11)).text, /Yes, keep it\./);
+
+    // With the first one answered, the agent may ask again.
+    client.send({ id: 13, method: 'tools/call', params: { name: 'ask_operator', arguments: { question: 'Next?' } } });
+    await until(() => requestFiles().length === 1);
+  });
+
   it('is not offered at all without CHIEF_MCP_ASK_OPERATOR=1: a voice agent keeps its own tools', async () => {
     start({ CHIEF_MCP_ASK_OPERATOR: '0' });
     client.send({ id: 8, method: 'tools/list' });

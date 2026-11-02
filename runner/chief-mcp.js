@@ -61,6 +61,16 @@ const ASK_DIR = process.env.CHIEF_MCP_ASK_DIR || '/tmp/.chief-build/ask';
  * this number in so the two cannot drift.
  */
 const ASK_TIMEOUT_MS = Number(process.env.CHIEF_MCP_ASK_TIMEOUT_MS) || 4 * 60 * 60_000;
+/**
+ * How often a waiting `ask_operator` tells the CLI it is still alive.
+ *
+ * Claude Code aborts a stdio MCP call that sends "no response or progress"
+ * for 30 minutes (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`). Without this, a
+ * question meant to stand for hours died after half an hour: the agent got an
+ * abort instead of an answer or {@link UNANSWERED}, while chief-web still
+ * showed the question as open.
+ */
+const ASK_HEARTBEAT_MS = Number(process.env.CHIEF_MCP_ASK_HEARTBEAT_MS) || 60_000;
 const POLL_MS = Number(process.env.CHIEF_MCP_POLL_MS) || 250;
 const CDP_URL = process.env.CHIEF_MCP_CDP_URL || 'http://127.0.0.1:9222';
 /** How long the page may take to appear, and to load. */
@@ -314,6 +324,40 @@ function askText(value, limit = MAX_QUESTION_CHARS) {
 class NotAsked extends Error {}
 
 /**
+ * The question this agent is already waiting on, if any.
+ *
+ * chief-web parks a session on one question per agent, so a second call made
+ * alongside the first (two `ask_operator` calls in one turn) would be a
+ * request file nobody ever shows the operator, and the agent would wait on it
+ * for the full timeout. It is refused at once instead, and the agent goes on
+ * waiting for the first.
+ */
+let asking = false;
+
+const ONE_AT_A_TIME =
+  'You already have a question waiting for the operator, and they see one question at a time. Do not ask ' +
+  'this one separately: wait for the answer to the first, and next time put everything you need decided ' +
+  'into a single question.';
+
+/**
+ * Tells the CLI the call is alive while it waits for a person (see
+ * {@link ASK_HEARTBEAT_MS}). The CLI sends a `progressToken` with every tool
+ * call; without one there is nothing to report against.
+ */
+function startHeartbeat(progressToken) {
+  if (typeof progressToken !== 'string' && typeof progressToken !== 'number') return () => {};
+  let beats = 0;
+  const timer = setInterval(() => {
+    beats += 1;
+    send({
+      method: 'notifications/progress',
+      params: { progressToken, progress: beats, message: 'Waiting for the operator to answer' },
+    });
+  }, ASK_HEARTBEAT_MS);
+  return () => clearInterval(timer);
+}
+
+/**
  * The question, and the operator's answer (decisions US-002).
  *
  * Unlike the other two tools this one can wait for hours, because what it is
@@ -322,11 +366,23 @@ class NotAsked extends Error {}
  * the agent is told to carry on rather than left hanging, because an iteration
  * that dies holding an unanswered question has thrown its story away.
  */
-async function askOperator(requestId, args) {
+async function askOperator(requestId, args, progressToken) {
   const question = askText(args.question);
   if (question === '') {
     throw new NotAsked('ask_operator needs a `question`. Say what you need decided, in one or two sentences.');
   }
+  if (asking) throw new NotAsked(ONE_AT_A_TIME);
+  asking = true;
+  const stopHeartbeat = startHeartbeat(progressToken);
+  try {
+    return await waitForOperator(requestId, args, question);
+  } finally {
+    stopHeartbeat();
+    asking = false;
+  }
+}
+
+async function waitForOperator(requestId, args, question) {
   const options = Array.isArray(args.options)
     ? args.options.map((option) => askText(option, 300)).filter((option) => option !== '').slice(0, MAX_OPTIONS)
     : [];
@@ -594,7 +650,8 @@ async function handle(message) {
     case 'tools/call': {
       if (params?.name === ASK_TOOL.name && ASK_OFFERED) {
         try {
-          send({ id, result: { content: [{ type: 'text', text: await askOperator(id, params.arguments ?? {}) }] } });
+          const text = await askOperator(id, params.arguments ?? {}, params._meta?.progressToken);
+          send({ id, result: { content: [{ type: 'text', text }] } });
         } catch (cause) {
           const text =
             cause instanceof NotAsked

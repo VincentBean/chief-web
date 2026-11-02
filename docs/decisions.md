@@ -106,6 +106,14 @@ The timeout is one number shared by both ends of the wait
 (`DECISION_TIMEOUT_MS` in `server/src/build/decisions.ts`), passed into the MCP
 server's environment so the two cannot drift apart.
 
+Claude Code has a clock of its own here as well: it aborts an MCP call that has
+been silent for 30 minutes. So while it waits, the tool sends the CLI a progress
+notification every minute, and the iteration's `--mcp-config` gives the `chief`
+server a `timeout` of the four hours plus five minutes. Either one alone keeps
+the call alive. Without them the CLI cut every question off after half an hour,
+before the operator could answer it or the agent could be told to carry on, and
+the story stalled until the session failed.
+
 ## What a restart does to it
 
 Nothing good, and the page says so plainly. The agent was blocked inside an
@@ -156,4 +164,11 @@ Each question is a row in `decisions`, keyed by the MCP request id — so an
 answer written for one question can never land on another — and it is `open`,
 `answered`, `expired` (nobody answered in time) or `abandoned` (the run that
 asked it ended first). A session has at most one open question: its agent is
-blocked on the one it asked, so there is nobody left to ask a second.
+blocked on the one it asked, so there is nobody left to ask a second. An agent
+that asks two in the same turn has the second one refused at once and keeps
+waiting on the first. Otherwise the second would be a question nobody is shown,
+and the agent would wait the full four hours for it.
+
+Each iteration starts with an empty ask directory. An agent killed mid-wait
+leaves its request file behind, and after a restart the server could take that
+stale file for the new agent's question.

@@ -19,7 +19,7 @@ import {
 import { ExecDeadline, type ExecChunk, type ExecOutput, type ExecSpec } from '../docker/index.js';
 import type { VoiceBusEvent } from '../voice/events.js';
 import { DecisionWatcher } from './decisions.js';
-import { BUILD_MCP_CONFIG_FILE, DECISION_ASK_DIR } from './mcp.js';
+import { ASK_CALL_TIMEOUT_MARGIN_MS, BUILD_MCP_CONFIG_FILE, DECISION_ASK_DIR } from './mcp.js';
 
 /**
  * The operator's half of `ask_operator` (decisions US-004, US-006, US-007).
@@ -48,7 +48,8 @@ class FakeContainer {
   runExec(_container: string, spec: ExecSpec): Promise<ExecOutput> {
     this.runs.push(spec);
     const command = spec.cmd.join(' ');
-    if (command.includes(`${DECISION_ASK_DIR}/*.request`)) {
+    // The listing, not the config write: that one clears the same files.
+    if (command.includes(`for f in ${DECISION_ASK_DIR}/*.request`)) {
       return Promise.resolve({
         exitCode: 0,
         stdout: this.requests.map((request) => `${JSON.stringify(request)}\n`).join(''),
@@ -327,6 +328,22 @@ describe('DecisionWatcher (decisions US-004, US-006, US-007)', () => {
     assert.match(json, /"CHIEF_MCP_ASK_TIMEOUT_MS":"123000"/);
     assert.match(json, /"CHIEF_MCP_START_BUILD":"0"/);
     assert.equal(spec?.user, '1000', 'written as the build agent, which has to read it');
+    // The CLI must not give up on the call before the tool's own wait is over.
+    const server = (JSON.parse(json) as { mcpServers: { chief: { timeout: number } } }).mcpServers.chief;
+    assert.equal(server.timeout, 123_000 + ASK_CALL_TIMEOUT_MARGIN_MS);
+  });
+
+  it('clears what an earlier agent left in the ask directory before the next one starts', async () => {
+    const stage = world();
+    await stage.watcher.prepare(stage.session.id, 'container-refactor');
+    const script = stage.container.runs.at(-1)?.cmd[2] ?? '';
+    assert.match(script, new RegExp(`rm -f ${DECISION_ASK_DIR}/\\*\\.request ${DECISION_ASK_DIR}/\\*\\.answer`));
+
+    // A story of a parallel run clears only its own directory.
+    await stage.watcher.prepare(stage.session.id, 'container-refactor', 'US-002');
+    const own = stage.container.runs.at(-1)?.cmd[2] ?? '';
+    assert.match(own, new RegExp(`rm -f ${DECISION_ASK_DIR}/US-002/\\*\\.request`));
+    assert.doesNotMatch(own, new RegExp(`rm -f ${DECISION_ASK_DIR}/\\*\\.request`));
   });
 
   it('launches the iteration without the flag rather than failing when the config cannot be written', async () => {
