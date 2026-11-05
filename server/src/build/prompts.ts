@@ -219,7 +219,17 @@ something — three of those in a row end the whole run. So:
 - Commit as soon as the story is actually done, rather than leaving the commit until after one
   last sweep of the suite. The commit is the only part of your work that survives being stopped.
 - If the budget is nearly gone, spend what is left on points 2 to 4 above — a committed
-  half-story the next iteration can pick up is worth more than a finished one nobody recorded.`,
+  half-story the next iteration can pick up is worth more than a finished one nobody recorded.
+
+### Memory is capped
+
+This container has a hard memory cap, and you share it with everything you start. When it is
+reached the kernel kills processes at random, you among them.
+
+- Run one test suite or static-analysis run at a time, one package after the other. Never start
+  several in parallel, and never put them in the background with \`&\`, \`nohup\` or \`setsid\`.
+- Anything you start and leave running is stopped when your iteration ends; database servers are
+  the exception.`,
   );
 
   const context = prdContext(input.prd);

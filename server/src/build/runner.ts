@@ -7,7 +7,9 @@ import {
   AGENT_SIGNALLED,
   agentExecSpec,
   agentSignalSpec,
+  agentTag,
   headShaSpec,
+  leftoverSignalSpec,
   mergeStorySpec,
   RECOVERY_MERGE_ABORTED,
   recoverStoryWorkspacesSpec,
@@ -212,9 +214,14 @@ export class ContainerAgentRunner implements AgentRunner {
       invocation.mcpConfigFile,
       invocation.story,
     );
+    const tag =
+      invocation.story == null
+        ? agentTag(invocation.sessionId, invocation.iteration)
+        : agentTag(invocation.sessionId, invocation.story.storyId, invocation.story.attempt);
     const stream = this.exec.streamExec?.bind(this.exec);
     if (stream === undefined) {
       const collected = await this.exec.runExec(invocation.containerId, spec, invocation.timeoutMs);
+      await this.sweepLeftovers(invocation.sessionId, invocation.containerId, tag);
       const output = renderWhole(collected);
       invocation.onOutput?.(output);
       return { exitCode: collected.exitCode, output: truncate(output), timedOut: collected.timedOut };
@@ -244,6 +251,7 @@ export class ContainerAgentRunner implements AgentRunner {
       },
     });
     emit(formatter.flush());
+    await this.sweepLeftovers(invocation.sessionId, invocation.containerId, tag);
 
     return { exitCode: result.exitCode, output, timedOut: result.timedOut };
   }
@@ -293,6 +301,34 @@ export class ContainerAgentRunner implements AgentRunner {
       // daemon that will not answer is not something the loop can act on.
       logger.warn('could not reap the build agent', {
         session: sessionId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
+
+  /**
+   * Ends whatever the agent tagged `tag` left running, however its iteration
+   * ended: SIGTERM, a grace period, then SIGKILL, like a reap. Database
+   * servers are spared (see `KEPT_DAEMONS`). Nothing to find is the normal
+   * case and costs one exec. Never throws.
+   *
+   * Why it runs on every iteration and not only on a timeout: an agent that
+   * exits — or is OOM-killed — after putting work in the background leaves no
+   * pid behind for a reap to aim at, and that work keeps the container at its
+   * memory cap. The retry then could not even create its worktree.
+   */
+  private async sweepLeftovers(sessionId: string, containerId: string, tag: string): Promise<void> {
+    try {
+      const termed = await this.exec.runExec(containerId, leftoverSignalSpec(tag, 'TERM'), SIGNAL_TIMEOUT_MS);
+      const count = termed.stdout.split(AGENT_SIGNALLED).length - 1;
+      if (count === 0) return;
+      logger.warn('stopped processes a build agent left running', { session: sessionId, agent: tag, count });
+      await pause(this.reapGraceMs);
+      await this.exec.runExec(containerId, leftoverSignalSpec(tag, 'KILL'), SIGNAL_TIMEOUT_MS);
+    } catch (cause) {
+      logger.warn('could not stop what a build agent left running', {
+        session: sessionId,
+        agent: tag,
         error: cause instanceof Error ? cause.message : String(cause),
       });
     }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -56,9 +56,13 @@ import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../ses
 import {
   addStoryWorktreeSpec,
   AGENT_SIGNALLED,
+  AGENT_TAG_VAR,
+  agentExecSpec,
   agentPidFile,
   agentPidGlob,
   agentSignalSpec,
+  agentTag,
+  leftoverSignalSpec,
   removeStoryWorktreeSpec,
   storyAgentPidFile,
   wrapAgentCommand,
@@ -115,6 +119,11 @@ const tempDirs: string[] = [];
 after(() => {
   for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
 });
+
+/** The last exec that started an agent, rather than the sweep that followed it. */
+function lastAgentExec(daemon: FakeDockerDaemon): ReturnType<FakeDockerDaemon['execs']>[number] | undefined {
+  return daemon.execs().findLast((exec) => exec.cmd[3] === 'chief-build');
+}
 
 function story(input: Partial<Story> & Pick<Story, 'storyId' | 'priority' | 'status'>): Story {
   return {
@@ -322,6 +331,41 @@ describe('the agent command', () => {
     assert.match(script, /grep -qa claude \/proc\/"\$pid"\/cmdline/);
     assert.match(script, /else rm -f "\$file"; fi/);
   });
+
+  it('tags the agent, and everything it starts, with its pid file name', () => {
+    assert.match(wrapAgentCommand('abc', 3, ['claude'])[2] ?? '', new RegExp(`export ${AGENT_TAG_VAR}='abc-3'; exec`));
+    const story = agentExecSpec('abc', 4, 'p', null, null, null, null, { storyId: 'US-002', attempt: 2, workingDir: '/w' });
+    assert.match(story.cmd[2] ?? '', new RegExp(`export ${AGENT_TAG_VAR}='abc-US-002-2'; exec`));
+    assert.equal(agentTag('abc', 'US-002', 2), 'abc-US-002-2');
+  });
+
+  it(
+    'signals what an agent left behind, spares database servers and other agents, and always exits 0',
+    { skip: process.platform !== 'linux' },
+    async () => {
+      // A process's comm is the name of the file it was exec'd from.
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'chief-sweep-'));
+      fs.symlinkSync(execFileSync('/bin/sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).trim(), path.join(bin, 'postgres'));
+      const started = (tag: string, binary: string): ReturnType<typeof spawn> =>
+        spawn(binary, ['30'], { detached: true, stdio: 'ignore', env: { ...process.env, [AGENT_TAG_VAR]: tag } });
+      const leftover = started('abc-US-002-2', 'sleep');
+      const otherAttempt = started('abc-US-002-21', 'sleep');
+      const database = started('abc-US-002-2', path.join(bin, 'postgres'));
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const output = execFileSync(leftoverSignalSpec('abc-US-002-2', 'KILL').cmd[2] ?? '', { shell: '/bin/sh', encoding: 'utf8' });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        assert.equal(output.split(AGENT_SIGNALLED).length - 1, 1);
+        assert.equal(leftover.signalCode, 'SIGKILL');
+        assert.equal(otherAttempt.exitCode ?? otherAttempt.signalCode, null);
+        assert.equal(database.exitCode ?? database.signalCode, null);
+      } finally {
+        for (const child of [leftover, otherAttempt, database]) child.kill('SIGKILL');
+        fs.rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the pid records until the pass that kills, then removes them', () => {
     // TERM leaves the file: the KILL pass after it has to have something left
@@ -2681,7 +2725,7 @@ describe('the container agent runner', () => {
     // What the session's error message would quote is what the log showed.
     assert.equal(result.output, log);
 
-    const exec = daemon.execs().at(-1);
+    const exec = lastAgentExec(daemon);
     assert.ok(exec);
     assert.equal(exec.cmd[3], 'chief-build');
     assert.ok(exec.cmd.includes('stream-json'));
@@ -2699,7 +2743,7 @@ describe('the container agent runner', () => {
       advisor: 'opus',
     });
 
-    const withAdvisor = daemon.execs().at(-1);
+    const withAdvisor = lastAgentExec(daemon);
     assert.ok(withAdvisor);
     assert.deepEqual(withAdvisor.cmd.slice(4, 9), [
       'claude',
@@ -2718,7 +2762,7 @@ describe('the container agent runner', () => {
       model: 'sonnet',
     });
 
-    const without = daemon.execs().at(-1);
+    const without = lastAgentExec(daemon);
     assert.ok(without);
     assert.equal(without.cmd.includes('--advisor'), false);
   });
@@ -2752,6 +2796,41 @@ describe('the container agent runner', () => {
     assert.equal(result.exitCode, 0);
     assert.ok(streamed.join('').includes(warning));
     daemon.onExec = null;
+  });
+
+  it('sweeps what the agent left running once its iteration is over', async () => {
+    daemon.onExec = (exec) => ((exec.cmd[2] ?? '').includes(AGENT_TAG_VAR) && exec.cmd[3] !== 'chief-build'
+      ? { stdout: `${AGENT_SIGNALLED}\n`, exitCode: 0 }
+      : { exitCode: 0 });
+    const before = daemon.execs().length;
+    await createAgentRunner(docker, 5).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 7,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+    });
+    daemon.onExec = null;
+
+    const sweeps = daemon.execs().slice(before).filter((exec) => exec.cmd[3] !== 'chief-build');
+    assert.deepEqual(
+      sweeps.map((exec) => exec.cmd[2] ?? ''),
+      [leftoverSignalSpec('session-1-7', 'TERM').cmd[2], leftoverSignalSpec('session-1-7', 'KILL').cmd[2]],
+    );
+  });
+
+  it('stops at one sweep when the agent left nothing running', async () => {
+    const before = daemon.execs().length;
+    await createAgentRunner(docker, 60_000).run({
+      sessionId: 'session-1',
+      containerId: 'container-1',
+      iteration: 8,
+      prompt: 'do the thing',
+      timeoutMs: 5000,
+    });
+
+    const sweeps = daemon.execs().slice(before).filter((exec) => exec.cmd[3] !== 'chief-build');
+    assert.equal(sweeps.length, 1);
   });
 
   it('reaps with SIGTERM, a grace period, and then SIGKILL', async () => {
@@ -4118,7 +4197,7 @@ describe('story worktrees (async stories US-006)', () => {
         timeoutMs: 5000,
         story: { storyId: 'US-002', attempt: 2, workingDir: WORKTREE },
       });
-      const exec = daemon.execs().at(-1);
+      const exec = lastAgentExec(daemon);
       assert.ok(exec);
       assert.equal(exec.workingDir, WORKTREE);
       assert.ok((exec.cmd[2] ?? '').includes(`> ${storyAgentPidFile('session-1', 'US-002', 2)};`));

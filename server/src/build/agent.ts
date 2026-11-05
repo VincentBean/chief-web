@@ -89,15 +89,87 @@ export function wrapAgentCommand(
   iteration: number,
   command: readonly string[],
 ): string[] {
-  return wrapWithPidFile(AGENT_PID_DIR, agentPidFile(sessionId, iteration), 'chief-build', command);
+  return wrapWithPidFile(AGENT_PID_DIR, agentPidFile(sessionId, iteration), 'chief-build', command, {
+    tag: agentTag(sessionId, iteration),
+  });
 }
 
 /**
  * The pid-file trick itself, for any directory: `label` is `$0` of the
  * wrapper shell. Session voice agents use it under `/tmp/.chief-voice`.
+ *
+ * With a `tag`, the command runs with {@link AGENT_TAG_VAR} set to it, and so
+ * does everything it starts; see {@link leftoverSignalSpec}.
  */
-export function wrapWithPidFile(dir: string, file: string, label: string, command: readonly string[]): string[] {
-  return ['/bin/sh', '-c', `mkdir -p ${dir} 2>/dev/null; echo $$ > ${file}; exec "$@"`, label, ...command];
+export function wrapWithPidFile(
+  dir: string,
+  file: string,
+  label: string,
+  command: readonly string[],
+  options: { readonly tag?: string } = {},
+): string[] {
+  const tag = options.tag === undefined ? '' : `export ${AGENT_TAG_VAR}=${shellQuote(options.tag)}; `;
+  return ['/bin/sh', '-c', `mkdir -p ${dir} 2>/dev/null; echo $$ > ${file}; ${tag}exec "$@"`, label, ...command];
+}
+
+/**
+ * Set on every build agent, and inherited by everything it starts.
+ *
+ * A pid file reaches the agent and, through its group and children, what is
+ * still attached to it. It does not reach what the agent detached: a command
+ * started as `(cmd &)` or under `nohup` is re-parented to the container's init
+ * and lives on after the agent is gone — including after the agent itself
+ * was OOM-killed, when there is no pid left to aim at. An environment variable
+ * survives all of that, so `/proc/<pid>/environ` is how those are found.
+ */
+export const AGENT_TAG_VAR = 'CHIEF_AGENT_TAG';
+
+/** The tag of one iteration's agent, or of one story attempt's. */
+export function agentTag(sessionId: string, iteration: number): string;
+export function agentTag(sessionId: string, storyId: string, attempt: number): string;
+export function agentTag(sessionId: string, iterationOrStory: number | string, attempt?: number): string {
+  return attempt === undefined
+    ? `${sessionId}-${String(iterationOrStory)}`
+    : `${sessionId}-${String(iterationOrStory)}-${String(attempt)}`;
+}
+
+/**
+ * Database servers an agent starts for its tests and later iterations keep
+ * using. Agents start them themselves and reuse them across iterations, so the
+ * leftover sweep leaves them running; matched on `/proc/<pid>/comm`.
+ */
+export const KEPT_DAEMONS: readonly string[] = ['postgres', 'redis-server', 'valkey-server', 'mysqld', 'mariadbd'];
+
+/**
+ * Sends `signal` to every process still carrying the agent tag `tag`, except
+ * the database servers in {@link KEPT_DAEMONS}. Prints {@link AGENT_SIGNALLED}
+ * once per process signalled and always exits 0, like {@link agentSignalSpec}.
+ *
+ * Run after an agent's iteration is over: anything still tagged is work the
+ * agent started and walked away from, such as a dozen static-analysis runs put
+ * in the background, which goes on eating the container's memory until the
+ * next iteration cannot even create its worktree.
+ */
+export function leftoverSignalSpec(tag: string, signal: string): ExecSpec {
+  return {
+    cmd: [
+      '/bin/sh',
+      '-c',
+      `self=$$; ` +
+        `for env in /proc/[0-9]*/environ; do ` +
+        `pid=\${env#/proc/}; pid=\${pid%/environ}; ` +
+        `[ "$pid" = "$self" ] && continue; ` +
+        `case " ${KEPT_DAEMONS.join(' ')} " in *" $(cat /proc/"$pid"/comm 2>/dev/null) "*) continue;; esac; ` +
+        `if tr '\\0' '\\n' < "$env" 2>/dev/null | grep -qxF ${shellQuote(`${AGENT_TAG_VAR}=${tag}`)}; then ` +
+        `kill -${signal} "$pid" 2>/dev/null && echo ${AGENT_SIGNALLED}; ` +
+        `fi; ` +
+        `done; exit 0`,
+    ],
+  };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 /**
@@ -129,7 +201,9 @@ export function agentExecSpec(
     cmd:
       story == null
         ? wrapAgentCommand(sessionId, iteration, command)
-        : wrapWithPidFile(AGENT_PID_DIR, storyAgentPidFile(sessionId, story.storyId, story.attempt), 'chief-build', command),
+        : wrapWithPidFile(AGENT_PID_DIR, storyAgentPidFile(sessionId, story.storyId, story.attempt), 'chief-build', command, {
+            tag: agentTag(sessionId, story.storyId, story.attempt),
+          }),
     workingDir: story?.workingDir ?? CONTAINER_REPO_DIR,
   };
 }
