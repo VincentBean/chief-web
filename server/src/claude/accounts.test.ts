@@ -103,8 +103,9 @@ describe('claude account directories', () => {
       assert.equal(account.nickname, null);
       assert.equal(account.position, 1);
       assert.deepEqual(listClaudeAccounts(db), [account]);
-      // It is the login every launch used until now: the explicit default.
-      assert.deepEqual(getDefaultClaudeAccount(db), { id: account.id, explicit: true });
+      // The default is left unpinned: with one account the automatic choice
+      // is that account, and one added later is used automatically.
+      assert.deepEqual(getDefaultClaudeAccount(db), { id: account.id, explicit: false });
 
       const dir = claudeAccountDir(config, account.id);
       assert.equal(modeOf(dir), 0o700);

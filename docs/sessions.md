@@ -218,23 +218,27 @@ status dot, its nickname or email, and its 5-hour and 7-day usage, marked *not
 signed in* or *sign in again* (those cannot be chosen) or *on hold* (it can be
 chosen; the work fails over or waits, see below).
 
-**The default.** The first choice is **Default (<name>)**: the session stores
-no account of its own and follows the default account, so a later change of
-the default reaches it too. The default is the account pinned with **Make
-default** in [Settings → Claude Code](claude-auth.md#make-default); with none
-pinned it is the first signed-in account, and the option reads **Default
-(first signed-in account)**. The account a launch uses is resolved in this
-order:
+**Automatic, or the default.** The first choice stores no account of its own,
+so a later change of the setting reaches the session too. With no default
+pinned it reads **Automatic**: chief-web picks the account at each launch of
+agent work — accounts without a 7-day limit first, then the lowest 7-day
+usage — and keeps the session on it until its 5-hour usage passes 95%
+([Automatic choice](claude-auth.md#automatic-choice)). The open list says which
+account it would pick now. With a default pinned by **Make default** in
+[Settings → Claude Code](claude-auth.md#make-default), it reads **Default
+(<name>)** and the session runs there. The account a launch uses is resolved in
+this order:
 
 1. **The session's own account**, if it has one.
-2. **The default account**, for a session left at **Default**.
+2. **The pinned default**, if there is one.
+3. **The automatic choice** otherwise.
 
 With no account signed in at all, no session can be created or planned. A
 session whose account is removed falls back to the default. Sessions created by
 a [recurring task](#sessions-a-recurring-task-started) run on the task's
 account, Sentry fix sessions on the Sentry account
-([Settings](claude-auth.md#settings)), and voice-created sessions on the
-default.
+([Settings](claude-auth.md#settings)), and voice-created sessions follow the
+default (automatic unless one is pinned).
 
 **Changing it on a running session.** The card saves on change. Nothing is
 interrupted: the account is read when agent work is launched, so the change
@@ -247,10 +251,12 @@ browser terminal open in the old container closes. The toast says so when the
 session has a container. Once a session is **finished** or merged its account
 can no longer be changed (`409 claude_account_locked`).
 
-**Failover.** When the session's account is held by its
+**Failover.** When the session's own or pinned account is held by its
 [usage limit](build-loop.md#the-usage-limit-hold), the session does not have to
 wait: it runs on another signed-in account that is not held and whose 5-hour
-usage is at most 95% — the least used one. The card's badge names the account
+usage is at most 95% — the first in the same drain order the automatic choice
+uses. (An automatic session needs no failover: its next launch is simply placed
+elsewhere, and the card reads **Chosen automatically: running on <name>**.) The card's badge names the account
 it is actually running on, the card reads **Running on <other> while <own> is
 on hold until <time>**, and the sessions list carries the same line without
 the time. As soon as its own account's

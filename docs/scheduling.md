@@ -173,8 +173,10 @@ earlier with **Resume now** on a waiting session's page.
 **Failover.** Work whose account is held is not simply stopped: the scheduler
 first looks for another account to run it on. An account qualifies when it is
 signed in, is not held itself, and its 5-hour usage is **at most 95%**; of
-those, the one with the lowest 5-hour usage is chosen, then the lowest 7-day
-usage, then the first in the list. A usage window with no reading counts as 0%.
+those, the first in the [drain order](claude-auth.md#automatic-choice) is
+chosen — no 7-day window first, then the lowest 7-day usage. Work that names no
+account and has no pinned default is placed by the automatic choice instead,
+and only waits while every signed-in account is held.
 The 95% ceiling is there because an account that close to its limit would only
 be refused minutes into the run. So for every due scheduled start, recurring
 task, queued build and pull request run:

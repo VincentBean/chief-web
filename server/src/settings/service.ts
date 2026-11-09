@@ -349,11 +349,16 @@ export function getSentryClaudeAccountId(db: Database): string | null {
 }
 
 /**
- * The account a launch runs on when nothing more specific was chosen (US-007):
+ * The account that stands for "the default" where one id is needed (US-007):
  * the operator's choice when there is one, otherwise the signed-in account
  * with the lowest position. With nobody signed in it is the first account all
  * the same, so "Sign in" and the launch guard have an account to talk about;
  * null only when there are no accounts at all.
+ *
+ * Only a pinned default (`explicit`) decides where work launches. Without
+ * one, work that follows the default runs on the automatic choice — see
+ * {@link pinnedClaudeAccountId} — and this account is merely the fallback a
+ * launch uses when the automatic choice has nothing to offer.
  */
 export function getDefaultClaudeAccount(db: Database): DefaultClaudeAccount | null {
   const chosen = getExplicitDefaultClaudeAccountId(db);
@@ -364,37 +369,54 @@ export function getDefaultClaudeAccount(db: Database): DefaultClaudeAccount | nu
 }
 
 /**
- * The account a session — or a recurring task's run — launches on (multiple
- * accounts US-009): its own choice, else the default. The one definition the
+ * The account a session — or a recurring task's run — is pinned to (multiple
+ * accounts US-009): its own choice, else the default the operator pinned.
+ * `null` means neither is set, and the account is **chosen automatically**
+ * at each launch (`UsageLimitHold.route(null)`). The one definition the
  * orchestrator, the session views and the usage-limit hold (US-014) share.
  */
-export function effectiveClaudeAccountId(
+export function pinnedClaudeAccountId(
   db: Database,
   owner: { readonly claudeAccountId: string | null },
 ): string | null {
-  return owner.claudeAccountId ?? getDefaultClaudeAccount(db)?.id ?? null;
+  return owner.claudeAccountId ?? getExplicitDefaultClaudeAccountId(db);
 }
 
 /**
  * The account a session's container last launched agent work on (multiple
  * accounts US-015): the failover account the orchestrator recorded while its
- * own account was held, else its effective account. What a refusal arms.
+ * pinned account was held, else its pinned account, else the account the
+ * automatic choice last launched it on. What a refusal arms, so it is never
+ * `null` while an account exists: an automatic session with nothing recorded
+ * yet reads as the stand-in default ({@link getDefaultClaudeAccount}), the
+ * account a launch falls back to.
  */
 export function runningClaudeAccountId(
   db: Database,
-  session: { readonly claudeAccountId: string | null; readonly failoverClaudeAccountId: string | null },
+  session: {
+    readonly claudeAccountId: string | null;
+    readonly failoverClaudeAccountId: string | null;
+    readonly automaticClaudeAccountId: string | null;
+  },
 ): string | null {
-  return session.failoverClaudeAccountId ?? effectiveClaudeAccountId(db, session);
+  return (
+    session.failoverClaudeAccountId ??
+    pinnedClaudeAccountId(db, session) ??
+    session.automaticClaudeAccountId ??
+    getDefaultClaudeAccount(db)?.id ??
+    null
+  );
 }
 
 /**
- * The account a PR automation run (review, feedback, conflict fix) launches on
- * when the caller names none (US-013): the PR automation choice, else the
- * default. `SessionOrchestrator.startPrRun` resolves exactly this way, so the
- * hold checked before a run is the hold of the account it will run on.
+ * The account a PR automation run (review, feedback, conflict fix) is pinned
+ * to when the caller names none (US-013): the PR automation choice, else the
+ * pinned default; `null` when it is chosen automatically.
+ * `SessionOrchestrator.startPrRun` resolves exactly this way, so the hold
+ * checked before a run is the hold of the account it will run on.
  */
 export function prRunClaudeAccountId(db: Database): string | null {
-  return getPrAutomationClaudeAccountId(db) ?? getDefaultClaudeAccount(db)?.id ?? null;
+  return getPrAutomationClaudeAccountId(db) ?? getExplicitDefaultClaudeAccountId(db);
 }
 
 /**

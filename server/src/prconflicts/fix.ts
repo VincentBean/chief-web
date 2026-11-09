@@ -89,6 +89,11 @@ interface RunState {
   /** Which of the {@link REVIEW_ATTEMPTS} attempts is running. */
   attempt: number;
   containerId: string | null;
+  /**
+   * The Claude account the container mounts — what a refusal holds. `null`
+   * until it is started, or when the container view does not say.
+   */
+  accountId: string | null;
   finished: Promise<unknown>;
 }
 
@@ -260,6 +265,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       phase: 'starting',
       attempt: 1,
       containerId: null,
+      accountId: null,
       finished: Promise.resolve(),
     };
     this.live.set(fix.id, state);
@@ -347,6 +353,7 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       return 'failed';
     }
     state.containerId = container.id;
+    state.accountId = container.accountId ?? null;
     updatePrConflictFix(this.db, fix.id, { containerId: container.id });
 
     // Three complete attempts, the same budget a review gets and for the same
@@ -559,8 +566,8 @@ export class PrConflictFixService implements ConflictFixStarter, ConflictFixLook
       // failure would keep the scan off this pull request until one of its two
       // SHAs moved, long after the hold had lifted.
       // The account the container mounted: the failover one while the PR
-      // automation account is held (US-015).
-      const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
+      // automation account is held (US-015), or the automatic choice.
+      const account = state.accountId ?? this.hold.launchAccount(prRunClaudeAccountId(this.db));
       const until = this.hold.arm(account);
       await this.runner.reap(fix.id, containerId);
       await abortMerge(this.exec, containerId, {

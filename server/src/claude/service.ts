@@ -10,7 +10,7 @@ import {
 } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { CLAUDE_ACCOUNT_LABEL, type HostPathTranslator } from '../runner/index.js';
-import { getDefaultClaudeAccount } from '../settings/index.js';
+import { getDefaultClaudeAccount, getExplicitDefaultClaudeAccountId } from '../settings/index.js';
 import { type CommandRunner, spawnCommand } from '../ssh/index.js';
 import { TerminalError, type TerminalManager } from '../terminal/index.js';
 import {
@@ -363,15 +363,15 @@ export class ClaudeService {
    * Removes an account: its row, its credentials directory, and every
    * reference to it, which then falls back to the default.
    *
-   * Refused while it is the default and another account could take over
-   * (`account_is_default`; the last account may go), and while a session or
+   * Refused while it is the pinned default and another account could take
+   * over (`account_is_default`; the last account may go), and while a session or
    * PR-run container mounting it is running (`account_in_use`). A login open
    * for it is closed first.
    */
   async remove(accountId: string): Promise<void> {
     const account = this.requireAccount(accountId);
     const name = account.nickname ?? account.email ?? accountId;
-    if (defaultClaudeAccountId(this.db) === accountId && listClaudeAccounts(this.db).length > 1) {
+    if (getExplicitDefaultClaudeAccountId(this.db) === accountId && listClaudeAccounts(this.db).length > 1) {
       throw new ClaudeError(
         409,
         'account_is_default',

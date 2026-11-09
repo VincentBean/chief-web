@@ -677,8 +677,9 @@ describe('session container lifecycle', () => {
     const usage = new Map<string, FailoverUsage>();
     const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
     orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
-    // Signed in, so it stays the default once the other accounts are added.
+    // The pinned default: failover is about work pinned to a held account.
     updateClaudeAccount(env.db, env.accountId, { authMethod: 'claude.ai' });
+    setDefaultClaudeAccount(env.db, env.accountId);
     const session = env.session();
     const first = await orchestrator.start(session);
     assert.equal(daemon.container(first.id)?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
@@ -724,14 +725,86 @@ describe('session container lifecycle', () => {
     const usage = new Map<string, FailoverUsage>();
     const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
     orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
-    // Signed in, so it stays the default once the other accounts are added.
+    // The pinned default: failover is about work pinned to a held account.
     updateClaudeAccount(env.db, env.accountId, { authMethod: 'claude.ai' });
+    setDefaultClaudeAccount(env.db, env.accountId);
     const other = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
     usage.set(other, { fiveHour: { utilization: 96 }, sevenDay: null });
     hold.arm(env.accountId);
 
     const view = await orchestrator.start(env.session(), { agentWork: true });
     assert.equal(daemon.container(view.id)?.labels[CLAUDE_ACCOUNT_LABEL], env.accountId);
+  });
+
+  it('places a session pinned to no account on the automatic choice, and keeps it there while it has room', async () => {
+    const usage = new Map<string, FailoverUsage>();
+    const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
+    const weekly = env.accountId;
+    updateClaudeAccount(env.db, weekly, { authMethod: 'claude.ai' });
+    const quiet = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    usage.set(weekly, { fiveHour: { utilization: 10 }, sevenDay: { utilization: 50 }, error: null });
+    usage.set(quiet, { fiveHour: { utilization: 0 }, sevenDay: { utilization: 20 }, error: null });
+
+    // The least-used 7-day account first.
+    const session = env.session();
+    const first = await orchestrator.start(session, { agentWork: true });
+    assert.equal(first.accountId, quiet);
+    assert.equal(daemon.container(first.id)?.labels[CLAUDE_ACCOUNT_LABEL], quiet);
+    const placed = getSession(env.db, session.id);
+    assert.equal(placed?.automaticClaudeAccountId, quiet);
+    assert.equal(placed?.failoverClaudeAccountId, null);
+    assert.equal(placed?.claudeAccountId, null);
+
+    // The other one ranks first now, but the container is not moved for that.
+    usage.set(quiet, { fiveHour: { utilization: 95 }, sevenDay: { utilization: 60 }, error: null });
+    const kept = await orchestrator.start(session, { agentWork: true });
+    assert.equal(kept.id, first.id);
+
+    // Past 95% of its 5-hour window it is nearly drained: the next agent moves.
+    usage.set(quiet, { fiveHour: { utilization: 96 }, sevenDay: { utilization: 60 }, error: null });
+    const moved = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(moved.id, first.id);
+    assert.equal(daemon.container(moved.id)?.labels[CLAUDE_ACCOUNT_LABEL], weekly);
+    assert.equal(getSession(env.db, session.id)?.automaticClaudeAccountId, weekly);
+
+    // Pinning the session clears the automatic record at its next launch.
+    updateSession(env.db, session.id, { claudeAccountId: weekly });
+    await orchestrator.start(session, { agentWork: true });
+    assert.equal(getSession(env.db, session.id)?.automaticClaudeAccountId, null);
+  });
+
+  it('does not move a container while sibling agents run in it', async () => {
+    const session = env.session();
+    const first = await orchestrator.start(session, { agentWork: true });
+    const other = addClaudeAccount(env.config, env.db).id;
+    updateSession(env.db, session.id, { claudeAccountId: other });
+
+    const sibling = await orchestrator.start(session, { agentWork: true, othersRunning: true });
+    assert.equal(sibling.id, first.id);
+    assert.equal(sibling.accountId, env.accountId);
+    assert.equal(daemon.container(first.id)?.running, true);
+
+    // Once it is alone, the next agent moves it.
+    const moved = await orchestrator.start(session, { agentWork: true });
+    assert.notEqual(moved.id, first.id);
+    assert.equal(moved.accountId, other);
+  });
+
+  it('starts a PR run on the automatic choice when asked for none', async () => {
+    const usage = new Map<string, FailoverUsage>();
+    const hold = new UsageLimitHold(env.db, null, { usage: (id) => usage.get(id) ?? null });
+    orchestrator = new SessionOrchestrator(env.config, env.db, new DockerApi(daemon.socketPath), hold);
+    updateClaudeAccount(env.db, env.accountId, { authMethod: 'claude.ai' });
+    const unlimited = addClaudeAccount(env.config, env.db, { authMethod: 'claude.ai' }).id;
+    usage.set(env.accountId, { fiveHour: { utilization: 0 }, sevenDay: { utilization: 0 }, error: null });
+    usage.set(unlimited, { fiveHour: { utilization: 40 }, sevenDay: null, error: null });
+    const repositoryId = env.session().repositoryId;
+
+    const implicit = await orchestrator.startPrRun({ id: 'run-auto', prNumber: 8, repositoryId });
+    assert.equal(implicit.accountId, unlimited);
+    const explicit = await orchestrator.startPrRun({ id: 'run-auto-2', prNumber: 9, repositoryId }, null);
+    assert.equal(daemon.container(explicit.id)?.labels[CLAUDE_ACCOUNT_LABEL], unlimited);
   });
 
   it('starts a PR run on the failover account while the PR automation account is held (US-015)', async () => {
@@ -803,6 +876,7 @@ describe('session container lifecycle', () => {
       name: sessionContainerName(session),
       running: true,
       state: 'running',
+      accountId: env.accountId,
     });
     assert.equal(await orchestrator.inspect('no-such-session'), null);
   });

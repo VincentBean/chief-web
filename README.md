@@ -90,9 +90,12 @@ background, instead of babysitting one terminal per feature.
   steps it saw into the PRD.
   [Voice calls](docs/voice.md)
 
-If Claude runs into its usage limit mid-build, the session carries on instead
-of failing: on another of your Claude accounts when one has room, otherwise
-once the limit lifts.
+With several Claude accounts, chief-web picks one for each piece of work
+itself: accounts without a weekly limit first, then the least-used one, moving
+on as each nears its 5-hour limit. If Claude runs into its usage limit
+mid-build anyway, the session carries on instead of failing: on another
+account when one has room, otherwise once the limit lifts.
+[Automatic account choice](docs/claude-auth.md#automatic-choice) ·
 [The hold](docs/build-loop.md#the-usage-limit-hold)
 
 **New here?** [What you need](#what-you-need) → [Setup](#setup) →
@@ -110,8 +113,8 @@ once the limit lifts.
   worked on, and create an access token.
 - **One or more Claude accounts** you can log into — a Pro/Max subscription or
   Anthropic Console. There is no API key to paste; you sign each one in once,
-  in the browser. With several, work moves to another account when one hits
-  its usage limit.
+  in the browser. With several, chief-web spreads the work over them by itself
+  and moves on when one nears its usage limit.
 - **Internet access** to GitHub (SSH and HTTPS) and to Anthropic.
 - **A few GB of disk** for the images and a full clone per session, plus enough
   RAM for the sessions you run at once. Each one is a container running an agent
@@ -261,8 +264,9 @@ appears and asks you to log in:
 The account is now listed as signed in, with its 5-hour and 7-day plan usage.
 You only do this once per account — the login is kept on the data volume and
 survives restarts and `docker compose down`. Add more accounts the same way:
-the first one signed in is the default, **Make default** picks another, and a
-session can be put on any of them. Upgrading from a version with a single
+chief-web then chooses between them by itself
+([how](docs/claude-auth.md#automatic-choice)); **Make default** pins one
+instead, and a session can be put on any of them. Upgrading from a version with a single
 login? It is imported as the first account on start; see
 [Claude authentication](docs/claude-auth.md#upgrading-from-a-single-account).
 
@@ -301,7 +305,7 @@ The rest of the manual is in [`docs/`](docs/):
 | [Sentry auto-fixer](docs/sentry.md) | linking a project, approving proposed fix plans, and what gets fixed |
 | [Web interface](docs/interface.md) | the pages, the shortcuts, the settings |
 | [Voice calls](docs/voice.md) | setting up a call with chief, what it can do by voice, providers and costs, privacy and latency |
-| [Claude authentication](docs/claude-auth.md) | Claude accounts: adding, removing, the default, usage, failover, upgrading from one login |
+| [Claude authentication](docs/claude-auth.md) | Claude accounts: adding, removing, the automatic choice, the default, usage, failover, upgrading from one login |
 | [Security model](docs/security.md) | what the password protects, and what it does not |
 | [Troubleshooting](docs/troubleshooting.md) | SSH and login failures, recovering a failed session |
 | [Development](docs/development.md) | running it from source |

@@ -14,7 +14,7 @@ import {
 import { logger } from '../../lib/logger.js';
 import { prdPathFor, readPrdStatus } from '../../prd/index.js';
 import { isCloned, type SessionContainers, sessionPrdFile } from '../../sessions/index.js';
-import { effectiveClaudeAccountId, getVoiceSettings } from '../../settings/index.js';
+import { pinnedClaudeAccountId, getVoiceSettings } from '../../settings/index.js';
 import { toolCardSummary } from './agent.js';
 import {
   INTERRUPT_GRACE_MS,
@@ -226,7 +226,7 @@ export class SessionAgentRegistry {
     if (!isCloned(this.deps.config, session.id)) {
       throw new SessionAgentError(409, 'session_not_cloned', `${session.name} has no clone yet, so there is nothing to plan against.`);
     }
-    const until = this.deps.hold.waitingUntil(effectiveClaudeAccountId(this.deps.db, session));
+    const until = this.deps.hold.waitingUntil(pinnedClaudeAccountId(this.deps.db, session));
     if (until !== null) {
       throw new SessionAgentError(
         409,

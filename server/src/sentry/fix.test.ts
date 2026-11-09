@@ -249,6 +249,7 @@ function view(session: Session): SessionView {
     queuePosition: null,
     stories: { total: 0, done: 0 },
     cloned: true,
+    automaticClaudeAccount: session.claudeAccountId === null,
     effectiveClaudeAccountId: session.claudeAccountId,
   };
 }

@@ -1,4 +1,4 @@
-import { effectiveClaudeAccountId } from '../../settings/index.js';
+import { pinnedClaudeAccountId } from '../../settings/index.js';
 import { SessionAgentError } from '../session-agent/registry.js';
 import { guarded } from './actions.js';
 import { type ChiefServices, type ChiefTool, isResult, SESSION_PARAM, sessionArg, type ToolContext, type ToolResult } from './tools.js';
@@ -39,7 +39,7 @@ export function focusSessionTool(services: ChiefServices): ChiefTool {
       guarded('Could not switch to the session', async () => {
         const session = sessionArg(services, args);
         if (isResult(session)) return session;
-        const holdUntil = services.hold.waitingUntil(effectiveClaudeAccountId(services.db, session));
+        const holdUntil = services.hold.waitingUntil(pinnedClaudeAccountId(services.db, session));
         if (holdUntil !== null) {
           return {
             ok: false,

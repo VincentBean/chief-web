@@ -89,6 +89,7 @@ export function Sessions() {
     if (session.failoverClaudeAccountId !== null && own !== null) {
       return `Running on ${nameOf(session.failoverClaudeAccountId)} while ${nameOf(own)} is on hold`;
     }
+    if (session.automaticClaudeAccount) return own === null ? 'Automatic' : `${nameOf(own)} (automatic)`;
     return own === null ? null : nameOf(own);
   };
   const params = new URLSearchParams(search);

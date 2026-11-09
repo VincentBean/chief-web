@@ -52,6 +52,12 @@ export interface StatsView extends Stats {
   readonly sentry: SentryBadgeView;
   /** Every Claude account's cached usage, in display order (multiple accounts US-005). */
   readonly accounts: readonly StatsAccountView[];
+  /**
+   * The account the automatic choice would start new work on right now — the
+   * first with room in the drain order — or `null` when no account can take
+   * work. What work pinned to no account launches on.
+   */
+  readonly automaticAccountId: string | null;
 }
 
 export interface StatsAccountView {
@@ -141,6 +147,7 @@ export function createStatsRouter(
         usage: usage.usage(account.id),
         holdUntil: hold.until(account.id),
       })),
+      automaticAccountId: hold.launchAccount(null),
     };
     res.status(200).json(view);
   });

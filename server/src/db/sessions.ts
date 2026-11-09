@@ -244,6 +244,13 @@ export interface Session {
    */
   readonly failoverClaudeAccountId: string | null;
   /**
+   * The account the automatic choice last launched the session's agent work
+   * on, while it is pinned to no account (neither its own nor a pinned
+   * default); null otherwise, and before its first launch. Written by the
+   * orchestrator at each agent launch.
+   */
+  readonly automaticClaudeAccountId: string | null;
+  /**
    * A PRD handed over with the session (send-to-chief US-006) that is still
    * waiting for a successful setup to be written into the clone; null once
    * it has been, and for every session created without one.
@@ -308,6 +315,7 @@ export interface UpdateSessionInput {
   readonly effort?: EffortLevel | null;
   readonly claudeAccountId?: string | null;
   readonly failoverClaudeAccountId?: string | null;
+  readonly automaticClaudeAccountId?: string | null;
   readonly pendingPrd?: string | null;
   readonly maxParallelStories?: number;
 }
@@ -338,6 +346,7 @@ const COLUMNS: Record<keyof UpdateSessionInput, string> = {
   effort: 'effort',
   claudeAccountId: 'claude_account_id',
   failoverClaudeAccountId: 'failover_claude_account_id',
+  automaticClaudeAccountId: 'automatic_claude_account_id',
   pendingPrd: 'pending_prd',
   maxParallelStories: 'max_parallel_stories',
 };
@@ -424,6 +433,7 @@ export function mapSession(row: Row): Session {
     effort: effortOf(row),
     claudeAccountId: nullableText(row, 'claude_account_id'),
     failoverClaudeAccountId: nullableText(row, 'failover_claude_account_id'),
+    automaticClaudeAccountId: nullableText(row, 'automatic_claude_account_id'),
     pendingPrd: nullableText(row, 'pending_prd'),
     maxParallelStories: maxParallelStoriesOf(row),
     createdAt: text(row, 'created_at'),
@@ -459,6 +469,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     effort: input.effort ?? null,
     claudeAccountId: input.claudeAccountId ?? null,
     failoverClaudeAccountId: null,
+    automaticClaudeAccountId: null,
     pendingPrd: input.pendingPrd ?? null,
     maxParallelStories: input.maxParallelStories ?? DEFAULT_PARALLEL_STORIES,
     createdAt: now,

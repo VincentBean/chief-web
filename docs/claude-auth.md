@@ -10,8 +10,10 @@ API key to configure.
 Every container the server spawns (sessions, PR runs, the login and status
 probes) mounts exactly **one** account's credentials at `~/.claude` in the
 runner image. Which account that is depends on the work: a session's own choice,
-the default account, the PR-automation or Sentry account, or — while an account
-is held by its usage limit — the account it [fails over](#failover) to.
+the PR-automation or Sentry account, a default you pinned, or — when none of
+those is set, which is the normal case — the account chief-web
+[chooses automatically](#automatic-choice). While an account is held by its
+usage limit, work pinned to it [fails over](#failover) to another.
 
 ## Where accounts live
 
@@ -40,11 +42,13 @@ workspaces. Session and PR-run containers carry the label
 
 **Settings → Claude Code** (`/settings#claude`) lists one row per account: a
 status dot, the nickname (or the email), email, organization and subscription,
-the 5-hour and 7-day usage with when each window resets, and a **Default**
-badge on the default account — **Default (automatic)** when no default has been
-chosen and the first signed-in account stands in. An account that is not
-signed in stays listed until it is removed; one whose probe failed shows the
-error and **Check again**.
+and the 5-hour and 7-day usage with when each window resets. With a default
+pinned, that row carries a **Default** badge and the panel offers **Choose
+automatically**; without one, the panel explains the
+[automatic choice](#automatic-choice) and the account it would start new work
+on right now carries **Next up**. An account that is not signed in stays listed
+until it is removed; one whose probe failed shows the error and **Check
+again**.
 
 ### Add an account
 
@@ -89,9 +93,10 @@ pick the new login up at their next agent launch. Nothing has to be restarted.
 
 **Make default** (`POST /api/claude/accounts/<id>/default`) pins the
 `default_claude_account_id` setting. Everything that names no account of its
-own runs on the default. Without a pinned default it is the signed-in account
-with the lowest position (else the first account). See
-[Settings](#settings).
+own then runs on that account, and moves only while it is held
+([failover](#failover)). **Choose automatically** (`PATCH /api/settings {
+"defaultClaudeAccountId": null }`) unpins it again, and the
+[automatic choice](#automatic-choice) takes over. See [Settings](#settings).
 
 ### Check again
 
@@ -104,14 +109,15 @@ ignoring the cache.
 to the account (`GET /api/claude/accounts/<id>/bindings`), then
 `DELETE /api/claude/accounts/<id>`:
 
-- `409 account_is_default` while it is the default and another account exists
-  — make another one the default first; the last account can always go;
+- `409 account_is_default` while it is the pinned default and another account
+  exists — make another one the default, or choose automatically, first; the
+  last account can always go;
 - `409 account_in_use` while a session or PR-run container labelled
   `chief-web.claude-account=<id>` is running — stop that work first;
 - otherwise the row, its directory and every reference to it are deleted →
   `204`. Sessions, recurring tasks and the PR-automation and Sentry settings
-  that named it fall back to the default account, and its usage-limit hold
-  goes with it.
+  that named it fall back to the default (or the automatic choice), and its
+  usage-limit hold goes with it.
 
 Removing an account deletes chief-web's copy of the login. It does not sign the
 login out at Anthropic.
@@ -157,9 +163,12 @@ expired, does the account read “sign in again” in Settings and the sidebar.
 ## Which account work runs on
 
 **Sessions.** A session stores `claudeAccountId` (`null` = follow the default);
-`GET /api/sessions[/<id>]` also returns `effectiveClaudeAccountId` (its own
-account, else the default) and `failoverClaudeAccountId` (the account it is
-running on instead while its own is held, else `null`). It is chosen on the
+`GET /api/sessions[/<id>]` also returns `automaticClaudeAccount` (true while
+it names no account and no default is pinned), `effectiveClaudeAccountId` (its
+own account, else the pinned default, else the account the automatic choice
+last launched it on — `null` before an automatic session's first launch) and
+`failoverClaudeAccountId` (the account it is running on instead while its
+pinned account is held, else `null`). It is chosen on the
 new-session form and changed in the **Claude account** card on the session page
 — see [Claude account](sessions.md#claude-account). `POST /api/sessions` and
 `PATCH /api/sessions/<id>/account { claudeAccountId }` answer `400
@@ -169,13 +178,17 @@ refused (`409 claude_account_locked`) once the session is finished or merged,
 like the thinking effort.
 
 When a session's account changes (a PATCH, a new default for a session that
-follows it, or a failover) its running container is left alone until the next
-launch of agent work — a build iteration, a planning terminal, a review or a
-description — which recreates it on the new account. The iteration already
-running is never interrupted.
+follows it, a failover, or the automatic choice moving on) its running
+container is left alone until the next launch of agent work — a build
+iteration, a planning terminal, a review or a description — which recreates it
+on the new account. The iteration already running is never interrupted, and
+neither are the other stories of a [parallel build](build-loop.md#parallel-stories):
+while any of them is running or merging in the container, a story that starts
+next to them stays on the container's account, and the move waits for the
+first launch with nothing else running.
 
 **Automated work.** Every other launcher has its own choice, `null` meaning
-the default account:
+the default account — the automatic choice unless a default is pinned:
 
 - a [recurring task](scheduling.md#recurring-tasks) stores `claudeAccountId`
   and passes it to each run it creates (an unset task's runs follow the
@@ -188,6 +201,44 @@ the default account:
   container;
 - sessions created by [voice](voice.md) name no account and follow the
   default.
+
+## Automatic choice
+
+With no default pinned, work that names no account — a session left at
+**Automatic**, a recurring task's runs, PR automation and Sentry work with no
+account set — is placed by chief-web itself, at every launch of agent work
+(`pickAutomaticAccount`, `server/src/claude/failover.ts`). It only considers
+accounts that are signed in and not [held](#the-usage-limit-hold), and drains
+them in this order:
+
+1. **accounts with no 7-day window** first. They have no weekly quota to save,
+   and 5-hour capacity left idle is simply lost;
+2. then the accounts with a 7-day window, **lowest 7-day usage first**, so they
+   drain about evenly over the week;
+3. then accounts whose usage is unknown — not read yet, or not a plan login
+   (an API-key or console account bills per token, so it goes last);
+4. ties go to the lower 5-hour usage, then to the position in the list.
+
+**A session stays where it is** while its account has room: a container's
+account is kept as long as that account is signed in, not held and its 5-hour
+usage is **at most 95%** — even when another account now ranks first. Moving a
+session means recreating its container, so it only moves once its account is
+nearly drained (or held, or signed out); the next agent launch after that puts
+it on the first account with room. A container that is not running gets the
+first account in the order straight away.
+
+**When every usable account is above 95%** the work still runs — on the
+account it is already on, else the one with the lowest 5-hour usage — because
+there is no hold to wait for; a refusal then holds that account as usual.
+**When every signed-in account is held** the work waits for the first hold to
+lift.
+
+A session records where the choice put it as `automaticClaudeAccountId`
+(column `automatic_claude_account_id`), which is what its page and the
+sessions list show — **<name> (automatic)** — and what a refusal holds. `GET
+/api/stats` reports `automaticAccountId`, the account new automatic work would
+start on right now: the **Next up** badge in Settings and the "now <name>" hint
+in the account picker.
 
 ## The usage-limit hold
 
@@ -210,17 +261,21 @@ accountId }` and lifts every hold when it is omitted.
 
 ### Failover
 
-Work whose own account is held does not have to wait: it **fails over** to
-another account, chosen by `pickFailoverAccount`
+Work pinned to an account that is held does not have to wait: it **fails
+over** to another account, chosen by `pickFailoverAccount`
 (`server/src/claude/failover.ts`):
 
 1. candidates are the other accounts that are signed in, not held, and whose
    5-hour usage is **at most 95%** — an account above that would only be
-   refused minutes later;
-2. the one with the lowest 5-hour usage wins, then the lowest 7-day usage, then
-   the position in the list;
-3. a window whose usage is unknown (no reading yet, or an API-key login)
-   counts as 0%.
+   refused minutes later (a 5-hour window with no reading counts as 0%);
+2. of those, the first in the [drain order](#automatic-choice) wins: no 7-day
+   window first, then the lowest 7-day usage, then unknown usage, ties to the
+   lower 5-hour usage and the position in the list;
+3. work whose container already fails over to an account stays on it while it
+   still qualifies, rather than being moved for a better-ranked one.
+
+Work pinned to no account does not fail over: the automatic choice simply
+places it on another account at its next launch.
 
 When no account qualifies the work waits for its own account's hold to expire,
 as with a single account, and the server logs once per account and reason why
@@ -244,12 +299,14 @@ claude_account_not_found` and saves nothing of the update:
 
 | Setting | Where | API field (`GET`/`PATCH /api/settings`) | Used by |
 | --- | --- | --- | --- |
-| Default account | **Make default** on an account row | `defaultClaudeAccountId` | everything that names no account of its own |
+| Default account | **Make default** on an account row; **Choose automatically** unpins it | `defaultClaudeAccountId` | everything that names no account of its own; `null` (the default) means the [automatic choice](#automatic-choice) |
 | PR automation account | Settings → GitHub → **Account for PR review, feedback and conflict fixes** | `prAutomationClaudeAccountId` | code review, PR feedback and merge-conflict fix runs |
 | Sentry account | Settings → Sentry → **Account for Sentry fixes** | `sentryClaudeAccountId` | Sentry planning and fix sessions |
 
 The default is also returned by `GET /api/claude` as `defaultAccountId`, with
-`defaultIsExplicit` saying whether it was pinned or stands in automatically.
+`defaultIsExplicit` saying whether it was pinned. When it was not, the id is
+only a stand-in — the first signed-in account, which a launch falls back to
+when the automatic choice has nothing to offer.
 
 ## Upgrading from a single account
 
@@ -260,9 +317,15 @@ volume is now only **imported**:
 - On start, when there are **no accounts at all** and
   `CLAUDE_AUTH_DIR/.credentials.json` exists (`/claude-auth`, the legacy volume
   mounted read-only into the server), the server creates an account, **copies**
-  the whole directory into `DATA_DIR/claude-accounts/<id>`, hands it to the
-  runner user and makes it the pinned default. The log says “imported the
-  existing Claude login as the first account”.
+  the whole directory into `DATA_DIR/claude-accounts/<id>`, and hands it to
+  the runner user. The default is left unpinned: with one account the
+  automatic choice is that account anyway. The log says “imported the existing
+  Claude login as the first account”.
+- Older versions pinned the imported account as the default. Migration
+  `0036_automatic_claude_account` lifts that pin on an install that still has
+  exactly one account — with one account the pin and the automatic choice
+  behave the same — so an account added later is used automatically. A
+  default pinned on an install with several accounts is left alone.
 - The volume is never written and no container mounts it.
 - If the copy fails, the half-made account is deleted again and the error
   logged; the next start retries. A bad volume never keeps the server from

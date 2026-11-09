@@ -506,9 +506,13 @@ export function describeClaudeUsage(usage: ClaudeUsage | null | undefined): stri
 export interface ClaudeState {
   /** Every account in display order. */
   accounts: ClaudeAccountStatus[];
-  /** The account a launch uses unless told otherwise; null when none exist. */
+  /**
+   * The pinned default when `defaultIsExplicit`; otherwise only a stand-in (the
+   * first signed-in account), because work that follows the default is then
+   * placed automatically. Null when no account exists.
+   */
   defaultAccountId: string | null;
-  /** False when nobody chose it: the signed-in account with the lowest position. */
+  /** True when the operator pinned a default; false when accounts are chosen automatically. */
   defaultIsExplicit: boolean;
   login: ClaudeLogin;
 }
@@ -818,8 +822,14 @@ export interface Session {
   effort: EffortLevel | null;
   /** The session's own Claude account; null follows the default account. */
   claudeAccountId: string | null;
-  /** The account its next container mounts; null only with no account at all. */
+  /**
+   * The account it runs on, failover aside: its own, else the pinned default,
+   * else the account the automatic choice last launched it on. Null for an
+   * automatic session that has not launched yet.
+   */
   effectiveClaudeAccountId: string | null;
+  /** True while it is pinned to no account, so each launch chooses one automatically. */
+  automaticClaudeAccount: boolean;
   /**
    * The account the session runs on while its own is on hold (failover,
    * US-015); null when it runs on its own account.
@@ -1486,6 +1496,11 @@ export interface Stats {
   sentry: { configured: boolean; awaitingDecision: number };
   /** Every Claude account's cached usage and hold, in display order (multiple accounts US-005). */
   accounts: { id: string; usage: ClaudeUsage | null; holdUntil: string | null }[];
+  /**
+   * The account the automatic choice would start new work on right now, or
+   * null when no account can take work.
+   */
+  automaticAccountId: string | null;
   /** Oldest first. */
   activity: DayActivity[];
   repositories: RepositoryStats[];

@@ -153,14 +153,17 @@ export interface BuildSlots {
 
 /** The slice of the orchestrator a run drives; the real one satisfies it. */
 export interface PrRunContainers {
-  /** `accountId` omitted: Settings → GitHub's PR automation account, else the default. */
+  /**
+   * `accountId` omitted: Settings → GitHub's PR automation account, else the
+   * pinned default, else the automatic choice; `null`: the automatic choice.
+   */
   startPrRun(
     run: {
       id: string;
       prNumber: number;
       repositoryId: string;
     },
-    accountId?: string,
+    accountId?: string | null,
   ): Promise<SessionContainerView>;
   removePrRun(runId: string): Promise<void>;
 }
@@ -661,8 +664,8 @@ export class PrFeedbackService {
       // because a feedback pass is single-shot and comes back through Retry
       // rather than resuming by itself.
       // The account the container mounted: the failover one while the PR
-      // automation account is held (US-015).
-      const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
+      // automation account is held (US-015), or the automatic choice.
+      const account = container.accountId ?? this.hold.launchAccount(prRunClaudeAccountId(this.db));
       const until = this.hold.arm(account);
       // The agent is still in the container with the checkout under it and this
       // exec is being walked away from; the retry checks the same branch out.

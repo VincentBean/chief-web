@@ -8,6 +8,8 @@ import {
   type FailoverUsage,
   failoverEligible,
   fiveHourOf,
+  heldAt,
+  pickAutomaticAccount,
   pickFailoverAccount,
 } from '../claude/failover.js';
 import { logger } from '../lib/logger.js';
@@ -53,16 +55,24 @@ export interface FailoverUsageReader {
 }
 
 /**
- * Where work owned by an account launches (multiple accounts US-015): the
- * account itself while it is not held, else the failover account, else
- * nowhere — the work waits until `waitingUntil`.
+ * Where work launches (multiple accounts US-015). Work pinned to an account
+ * launches on that account while it is not held, else on the failover
+ * account, else nowhere — it waits until `waitingUntil`. Work pinned to no
+ * account launches on the automatic choice, and waits only while every
+ * signed-in account is held.
  */
 export interface LaunchRoute {
-  /** The account to launch on; the owner itself while the work waits. */
+  /**
+   * The account to launch on; the pinned account itself while the work
+   * waits. `null` for automatic work no account can take, or when there are
+   * no accounts at all.
+   */
   readonly accountId: string | null;
-  /** True when `accountId` is a failover account rather than the owner. */
+  /** True when `accountId` is a failover account rather than the pinned one. */
   readonly failover: boolean;
-  /** The owner's hold expiry while no account can take the work, else `null`. */
+  /** True when the work is pinned to no account and `accountId` was chosen for it. */
+  readonly automatic: boolean;
+  /** When the work may launch, while no account can take it; else `null`. */
   readonly waitingUntil: string | null;
 }
 
@@ -94,8 +104,9 @@ export class UsageLimitHold {
      */
     private readonly events: VoiceEventSink | null = null,
     /**
-     * Plan usage for picking a failover account (US-015). Without one every
-     * window is unknown, which the choice counts as 0.
+     * Plan usage for picking the automatic and the failover account (US-015).
+     * Without one every account's usage is unknown, and the choice falls back
+     * to the order of the list.
      */
     private readonly usage: FailoverUsageReader | null = null,
   ) {}
@@ -104,43 +115,65 @@ export class UsageLimitHold {
   private readonly waitReasons = new Map<string, string>();
 
   /**
-   * Where work owned by `accountId` — the effective account of a session, a
-   * recurring task or a PR run — launches at `now` (multiple accounts US-015):
-   * the account itself while it is not held; else the least-used other
-   * account (`pickFailoverAccount`); else it waits on its own hold, as it did
-   * before failover existed.
+   * Where work pinned to `accountId` — a session's, a recurring task's or a
+   * PR run's own account, else the pinned default — launches at `now`
+   * (multiple accounts US-015): the account itself while it is not held; else
+   * the first other account in the drain order (`pickFailoverAccount`),
+   * staying on `current` while it qualifies; else it waits on its own hold, as
+   * it did before failover existed.
+   *
+   * `null` is work pinned to no account: it runs on the automatic choice
+   * (`pickAutomaticAccount`), staying on `current` — the account its
+   * container already mounts — while that one has room.
    */
-  route(accountId: string | null, now: Date = new Date()): LaunchRoute {
+  route(accountId: string | null, now: Date = new Date(), current: string | null = null): LaunchRoute {
+    if (accountId === null) return this.routeAutomatic(now, current);
     const until = this.until(accountId, now);
-    if (accountId === null || until === null) {
-      if (accountId !== null) this.waitReasons.delete(accountId);
-      return { accountId, failover: false, waitingUntil: null };
+    if (until === null) {
+      this.waitReasons.delete(accountId);
+      return { accountId, failover: false, automatic: false, waitingUntil: null };
     }
-    const accounts = this.failoverCandidates();
+    const accounts = this.candidates();
     const holds = this.list(now);
-    const failover = pickFailoverAccount(accounts, holds, now);
+    const failover = pickFailoverAccount(accounts, holds, now, current);
     if (failover !== null) {
       this.waitReasons.delete(accountId);
-      return { accountId: failover, failover: true, waitingUntil: null };
+      return { accountId: failover, failover: true, automatic: false, waitingUntil: null };
     }
     this.logWait(accountId, until, accounts, holds, now);
-    return { accountId, failover: false, waitingUntil: until };
-  }
-
-  /** The account work owned by `accountId` launches on now (see {@link route}). */
-  launchAccount(accountId: string | null, now: Date = new Date()): string | null {
-    return this.route(accountId, now).accountId;
+    return { accountId, failover: false, automatic: false, waitingUntil: until };
   }
 
   /**
-   * The expiry work owned by `accountId` waits for: its hold, but only while
-   * no other account can take the work over (US-015). `null` when it may go.
+   * The automatic choice. With no signed-in account free of a hold the work
+   * waits for the first hold to lift; with no signed-in account at all it
+   * does not wait — that is a sign-in problem, and the launch reports it.
+   */
+  private routeAutomatic(now: Date, current: string | null): LaunchRoute {
+    const picked = pickAutomaticAccount(this.candidates(), this.list(now), now, current);
+    return {
+      accountId: picked,
+      failover: false,
+      automatic: true,
+      waitingUntil: picked === null ? this.allHeldUntil(now) : null,
+    };
+  }
+
+  /** The account work pinned to `accountId` launches on now (see {@link route}). */
+  launchAccount(accountId: string | null, now: Date = new Date(), current: string | null = null): string | null {
+    return this.route(accountId, now, current).accountId;
+  }
+
+  /**
+   * The expiry work pinned to `accountId` (`null`: automatic) waits for: its
+   * hold, but only while no other account can take the work over (US-015).
+   * `null` when it may go.
    */
   waitingUntil(accountId: string | null, now: Date = new Date()): string | null {
     return this.route(accountId, now).waitingUntil;
   }
 
-  private failoverCandidates(): FailoverCandidate[] {
+  private candidates(): FailoverCandidate[] {
     return listClaudeAccounts(this.db).map((account) => ({
       id: account.id,
       position: account.position,
@@ -157,12 +190,7 @@ export class UsageLimitHold {
     holds: readonly AccountHold[],
     now: Date,
   ): void {
-    const held = new Set(
-      holds
-        .filter((hold) => hold.until !== null && Date.parse(hold.until) > now.getTime())
-        .map((hold) => hold.accountId),
-    );
-    const eligible = failoverEligible(accounts, held);
+    const eligible = failoverEligible(accounts, heldAt(holds, now));
     const reason =
       eligible.length === 0
         ? 'no other signed-in account is free of a usage-limit hold'

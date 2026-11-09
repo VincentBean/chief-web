@@ -1458,6 +1458,24 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE stories ADD COLUMN merge_sha TEXT;
     `,
   },
+  {
+    id: '0036_automatic_claude_account',
+    sql: `
+      -- The account the automatic choice last launched a session on, while
+      -- it is pinned to no account. NULL for a pinned session, and before an
+      -- automatic one first launches.
+      ALTER TABLE sessions ADD COLUMN automatic_claude_account_id TEXT;
+
+      -- Work that follows an unpinned default is now placed automatically.
+      -- An install with a single account had its default pinned by the
+      -- import of the old login, not by a choice between accounts; with one
+      -- account the pin and the automatic choice behave the same, so it is
+      -- lifted, and a second account added later is used automatically.
+      DELETE FROM settings
+       WHERE key = 'default_claude_account_id'
+         AND (SELECT COUNT(*) FROM claude_accounts) = 1;
+    `,
+  },
 ];
 
 /**

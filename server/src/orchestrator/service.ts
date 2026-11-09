@@ -19,11 +19,7 @@ import { logger } from '../lib/logger.js';
 import { defaultClaudeAccountId } from '../claude/accounts.js';
 import { claudeAccountDir } from '../runner/index.js';
 import { readPrivateKey } from '../ssh/index.js';
-import {
-  effectiveClaudeAccountId,
-  getGitIdentity,
-  getPrAutomationClaudeAccountId,
-} from '../settings/index.js';
+import { getGitIdentity, pinnedClaudeAccountId, prRunClaudeAccountId } from '../settings/index.js';
 import type { UsageLimitHold } from '../limits/index.js';
 import {
   CLAUDE_ACCOUNT_LABEL,
@@ -78,6 +74,12 @@ export interface SessionContainerView {
   readonly running: boolean;
   /** `running`, `exited`, … as the daemon names it. */
   readonly state: string;
+  /**
+   * The Claude account the container mounts (its `chief-web.claude-account`
+   * label), `null` when it carries none. Absent from views built by test
+   * doubles; callers fall back to the session row.
+   */
+  readonly accountId?: string | null;
 }
 
 /** How {@link SessionOrchestrator.start} is asked for a container. */
@@ -90,6 +92,13 @@ export interface SessionStartOptions {
    * not pull its container out from under it.
    */
   readonly agentWork?: boolean;
+  /**
+   * Other agents of the session are running in its container right now — the
+   * sibling stories of a parallel build (async stories US-009). The container
+   * then stays on the account it mounts, whatever the account choice says
+   * now: recreating it would kill them. Only meaningful with `agentWork`.
+   */
+  readonly othersRunning?: boolean;
 }
 
 /**
@@ -138,25 +147,36 @@ export class SessionOrchestrator {
    * container is therefore one more "other account" the next agent launch
    * recreates on. The record is cleared when the session next launches on its
    * own account.
+   *
+   * A session pinned to no account — no account of its own and no pinned
+   * default — runs on the automatic choice (`UsageLimitHold.route(null)`),
+   * recorded in `automaticClaudeAccountId`. The account its running container
+   * mounts is kept while it has room, so an automatic session only moves once
+   * that account is nearly drained or held.
    */
   async start(session: Session, options: SessionStartOptions = {}): Promise<SessionContainerView> {
     const current = getSession(this.db, session.id) ?? session;
-    const own = effectiveClaudeAccountId(this.db, current);
-    const wanted = this.hold === null ? own : this.hold.launchAccount(own);
-    const failover = wanted !== null && wanted !== own ? wanted : null;
+    const pinned = pinnedClaudeAccountId(this.db, current);
     const existing = await this.containersFor(session.id);
     const running = existing.find((container) => container.state === 'running');
+    const mounted = running?.labels[CLAUDE_ACCOUNT_LABEL] ?? null;
+    const wanted = this.hold === null ? pinned : this.hold.launchAccount(pinned, new Date(), mounted);
     if (running !== undefined) {
-      const mounted = running.labels[CLAUDE_ACCOUNT_LABEL];
-      if (options.agentWork !== true || wanted === null || mounted === wanted) {
+      const keep =
+        options.agentWork !== true ||
+        wanted === null ||
+        mounted === wanted ||
+        // Its sibling stories are running in it: the next launch after them moves it.
+        (options.othersRunning === true && mounted !== null);
+      if (keep) {
         this.recordContainer(session, running.id);
-        if (options.agentWork === true) this.recordFailover(current, failover);
+        if (options.agentWork === true) this.recordAccount(current, pinned, mounted);
         return toView(running);
       }
       logger.info('session container is on another claude account; recreating it', {
         session: session.id,
         container: running.id,
-        mounted: mounted ?? null,
+        mounted,
         account: wanted,
       });
       await this.notifyStopping(session.id);
@@ -198,16 +218,16 @@ export class SessionOrchestrator {
     }
 
     this.recordContainer(session, containerId);
-    this.recordFailover(current, failover);
+    this.recordAccount(current, pinned, account);
     logger.info('session container started', {
       session: session.id,
       container: containerId,
       name,
       workspace: workspaceDir,
       account,
-      ...(failover === null ? {} : { failoverFrom: own }),
+      ...(pinned === null ? { automatic: true } : account === pinned ? {} : { failoverFrom: pinned }),
     });
-    return { id: containerId, name, running: true, state: 'running' };
+    return { id: containerId, name, running: true, state: 'running', accountId: account };
   }
 
   /**
@@ -284,7 +304,7 @@ export class SessionOrchestrator {
    * id and outlives the container, so a second pass on the same pull request
    * reuses the clone.
    */
-  async startPrRun(run: PrRunIdentity, accountId?: string): Promise<SessionContainerView> {
+  async startPrRun(run: PrRunIdentity, accountId?: string | null): Promise<SessionContainerView> {
     const existing = await this.prRunContainersFor(run.id);
     const running = existing.find((container) => container.state === 'running');
     if (running !== undefined) return toView(running);
@@ -294,11 +314,12 @@ export class SessionOrchestrator {
     const keyPath =
       privateKey === null ? undefined : stageSessionKey(this.config, run.id, privateKey);
 
-    // Settings → GitHub's account for PR review, feedback and conflict fixes
-    // (US-013), else the default account — or, while that one is held, the
-    // failover account (US-015).
-    const own = accountId ?? getPrAutomationClaudeAccountId(this.db) ?? defaultClaudeAccountId(this.db);
-    const account = this.accountFor(this.hold === null ? own : this.hold.launchAccount(own));
+    // The account asked for — `null` meaning the automatic choice — or, when
+    // none is named, Settings → GitHub's account for PR review, feedback and
+    // conflict fixes (US-013), else the pinned default, else the automatic
+    // choice. While a pinned account is held, the failover account (US-015).
+    const pinned = accountId === undefined ? prRunClaudeAccountId(this.db) : accountId;
+    const account = this.accountFor(this.hold === null ? pinned : this.hold.launchAccount(pinned));
     const spec = prRunContainerSpec({
       run,
       accountId: account,
@@ -332,7 +353,7 @@ export class SessionOrchestrator {
       workspace: workspaceDir,
       account,
     });
-    return { id: containerId, name, running: true, state: 'running' };
+    return { id: containerId, name, running: true, state: 'running', accountId: account };
   }
 
   /**
@@ -433,15 +454,34 @@ export class SessionOrchestrator {
     return this.docker.listContainers({ all: true, labels: [sessionLabelFilter(sessionId)] });
   }
 
-  /** Records (or clears) the failover account the session runs on (US-015). */
-  private recordFailover(session: Session, failoverClaudeAccountId: string | null): void {
-    if (session.failoverClaudeAccountId === failoverClaudeAccountId) return;
-    updateSession(this.db, session.id, { failoverClaudeAccountId });
-    if (failoverClaudeAccountId !== null) {
+  /**
+   * Records which account the session's agent work launched on: a failover
+   * account while its pinned account is held (US-015), or the automatic
+   * choice when it is pinned to none. Each record is cleared when it no
+   * longer applies.
+   */
+  private recordAccount(session: Session, pinned: string | null, account: string | null): void {
+    const failoverClaudeAccountId = pinned !== null && account !== null && account !== pinned ? account : null;
+    const automaticClaudeAccountId = pinned === null ? account : null;
+    if (
+      session.failoverClaudeAccountId === failoverClaudeAccountId &&
+      session.automaticClaudeAccountId === automaticClaudeAccountId
+    ) {
+      return;
+    }
+    updateSession(this.db, session.id, { failoverClaudeAccountId, automaticClaudeAccountId });
+    if (failoverClaudeAccountId !== null && session.failoverClaudeAccountId !== failoverClaudeAccountId) {
       logger.info('session fails over to another claude account while its own is held', {
         session: session.id,
-        account: session.claudeAccountId ?? defaultClaudeAccountId(this.db),
+        account: pinned,
         failover: failoverClaudeAccountId,
+      });
+    }
+    if (automaticClaudeAccountId !== null && session.automaticClaudeAccountId !== automaticClaudeAccountId) {
+      logger.info('session runs on the automatically chosen claude account', {
+        session: session.id,
+        account: automaticClaudeAccountId,
+        previous: session.automaticClaudeAccountId,
       });
     }
   }
@@ -480,6 +520,7 @@ function toView(container: ContainerSummary): SessionContainerView {
     name: container.name,
     running: container.state === 'running',
     state: container.state,
+    accountId: container.labels[CLAUDE_ACCOUNT_LABEL] ?? null,
   };
 }
 

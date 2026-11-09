@@ -79,6 +79,7 @@ const SESSION_EFFORT_MIGRATION = '0024_session_effort';
 
 /** The migration under test in 'adds `max_parallel_stories` to existing sessions'. */
 const SESSION_MAX_PARALLEL_STORIES_MIGRATION = '0032_session_max_parallel_stories';
+const AUTOMATIC_ACCOUNT_MIGRATION = '0036_automatic_claude_account';
 
 function freshDb(): Database {
   return openDatabase(IN_MEMORY);
@@ -685,6 +686,68 @@ describe('session max parallel stories migration', () => {
     assert.equal(updateSession(db, id, { maxParallelStories: 1 })?.maxParallelStories, 1);
     assert.equal(updateSession(db, id, { status: 'ready' })?.maxParallelStories, 1);
 
+    closeDatabase(db);
+  });
+});
+
+describe('automatic claude account migration', () => {
+  /** A database migrated up to, but not including, the automatic-account migration. */
+  function beforeAutomatic(): Database {
+    const db = new DatabaseSync(IN_MEMORY) as Database;
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);');
+    const index = MIGRATIONS.findIndex((migration) => migration.id === AUTOMATIC_ACCOUNT_MIGRATION);
+    assert.ok(index > 0, `${AUTOMATIC_ACCOUNT_MIGRATION} is missing`);
+    for (const migration of MIGRATIONS.slice(0, index)) {
+      db.exec(migration.sql);
+      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+        migration.id,
+        '2026-11-01T00:00:00.000Z',
+      );
+    }
+    return db;
+  }
+
+  function addAccount(db: Database, id: string, position: number): void {
+    const at = '2026-11-01T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO claude_accounts (id, auth_method, position, created_at, updated_at)
+       VALUES (?, 'claude.ai', ?, ?, ?)`,
+    ).run(id, position, at, at);
+  }
+
+  it('lifts the default an import pinned on a single-account install', () => {
+    const db = beforeAutomatic();
+    addAccount(db, 'aaaaaaaaaaaaaaaa', 1);
+    setSetting(db, 'default_claude_account_id', 'aaaaaaaaaaaaaaaa');
+
+    assert.ok(runMigrations(db).includes(AUTOMATIC_ACCOUNT_MIGRATION));
+    assert.equal(getSetting(db, 'default_claude_account_id'), null);
+    closeDatabase(db);
+  });
+
+  it('keeps a default pinned among several accounts, and adds the column empty', () => {
+    const db = beforeAutomatic();
+    addAccount(db, 'aaaaaaaaaaaaaaaa', 1);
+    addAccount(db, 'bbbbbbbbbbbbbbbb', 2);
+    setSetting(db, 'default_claude_account_id', 'bbbbbbbbbbbbbbbb');
+    const repository = seedLegacyRepository(db);
+    const at = '2026-11-01T00:00:00.000Z';
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions
+         (id, repository_id, name, status, base_branch, feature_branch, pr_target_branch,
+          created_at, updated_at)
+       VALUES (?, ?, 'add-login', 'building', 'main', 'chief/add-login', 'main', ?, ?)`,
+    ).run(id, repository.id, at, at);
+
+    assert.ok(runMigrations(db).includes(AUTOMATIC_ACCOUNT_MIGRATION));
+    assert.equal(getSetting(db, 'default_claude_account_id'), 'bbbbbbbbbbbbbbbb');
+    assert.equal(getSession(db, id)?.automaticClaudeAccountId, null);
+    assert.equal(
+      updateSession(db, id, { automaticClaudeAccountId: 'aaaaaaaaaaaaaaaa' })?.automaticClaudeAccountId,
+      'aaaaaaaaaaaaaaaa',
+    );
     closeDatabase(db);
   });
 });

@@ -47,7 +47,8 @@ import {
  */
 /**
  * The task's Claude account in the facts: its own account by name, or the
- * default it follows — named only when the operator pinned one, as the picker does.
+ * default it follows — named only when the operator pinned one, as the picker
+ * does; without one each run's account is chosen automatically.
  */
 function accountFact(claude: ClaudeState | null, accountId: string | null): string {
   if (accountId !== null) {
@@ -55,9 +56,7 @@ function accountFact(claude: ClaudeState | null, accountId: string | null): stri
     return account === null ? `Account ${accountId.slice(0, 8)}` : claudeAccountName(account);
   }
   const fallback = claude === null ? null : claudeAccountStatus(claude, claude.defaultAccountId);
-  return fallback === null || !claude?.defaultIsExplicit
-    ? 'Default (first signed-in account)'
-    : `Default (${claudeAccountName(fallback)})`;
+  return fallback === null || !claude?.defaultIsExplicit ? 'Automatic' : `Default (${claudeAccountName(fallback)})`;
 }
 
 export function RecurringTask() {

@@ -39,7 +39,7 @@ import type {
   ReviewTarget,
 } from '../review/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, type SessionExecutor } from '../sessions/index.js';
-import { effectiveClaudeAccountId } from '../settings/index.js';
+import { runningClaudeAccountId } from '../settings/index.js';
 import { COMMIT_COUNT_SCRIPT, type CommitCount, commitCountExecSpec, countBranchCommits } from './commits.js';
 import { DescriptionStep, type SessionDescriber } from './description-step.js';
 import { pullRequestBody, pullRequestNumber, pullRequestTitle } from './pull-request.js';
@@ -1205,7 +1205,7 @@ describe('the code review of a delivery', () => {
     assert.equal(held.failureStage, null);
     assert.notEqual(held.waitingUntil, null);
     assert.equal(
-      new UsageLimitHold(world.db).active(effectiveClaudeAccountId(world.db, held)),
+      new UsageLimitHold(world.db).active(runningClaudeAccountId(world.db, held)),
       true,
       'the session’s account is held',
     );

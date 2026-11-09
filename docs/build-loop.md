@@ -489,9 +489,12 @@ out.
 With more than one account signed in, a session or PR run whose account is
 held does not have to wait for it. Before launching, chief-web looks for an
 account that is signed in, is not held, and whose 5-hour usage is **at most
-95%**, and runs the work there; when several qualify it takes the lowest 5-hour
-usage, then the lowest 7-day usage, then the first in the list (a window with
-no reading counts as 0%). The ceiling keeps work off an account that would be
+95%**, and runs the work there; when several qualify it takes the first in the
+drain order — no 7-day window first, then the lowest 7-day usage, then the
+lowest 5-hour usage and the first in the list. Work that names no account and
+has no pinned default does not fail over at all: the
+[automatic choice](claude-auth.md#automatic-choice) places each launch on an
+account with room in the first place. The ceiling keeps work off an account that would be
 refused minutes into the run. Only when nothing qualifies does the work wait
 for its own account, exactly as described above, and the server logs once why.
 

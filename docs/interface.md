@@ -267,8 +267,8 @@ the `settings` table so it can be changed without a restart:
   authenticates as, or GitHub's error.
 - **Account for PR review, feedback and conflict fixes** (Settings → GitHub) —
   the [Claude account](claude-auth.md#settings) code review, PR feedback and
-  merge-conflict fix runs mount. **Default** follows the default account.
-  Applies from the next run.
+  merge-conflict fix runs mount. **Automatic** (or **Default**, once a default
+  is pinned) follows the default account. Applies from the next run.
 - **Max concurrent building sessions** — the build concurrency cap.
   `MAX_CONCURRENT_SESSIONS` only supplies the default until a value is saved here.
 - **Agent timeout (minutes per iteration)** — how long one headless `claude -p`
@@ -350,10 +350,12 @@ the `settings` table so it can be changed without a restart:
   address your GitHub account owns if you want the commits linked to it.
 - **Claude Code** — the list of Claude accounts: add one (an interactive login
   in a browser terminal), rename it, sign it in again, re-check it, remove it,
-  and **Make default** to choose the **default account** everything without an
-  account of its own runs on. Each row shows the account's status and its
-  5-hour and 7-day usage. See [Claude authentication](claude-auth.md).
+  and **Make default** to pin the **default account** everything without an
+  account of its own runs on — or **Choose automatically** to let chief-web
+  place that work itself, the default, with the account it would use next
+  marked **Next up**. Each row shows the account's status and its 5-hour and
+  7-day usage. See [Claude authentication](claude-auth.md#automatic-choice).
 - **Account for Sentry fixes** (Settings → Sentry) — the Claude account Sentry
-  issue planning and fix sessions run on; **Default** follows the default
-  account. The rest of the Sentry settings are described in
+  issue planning and fix sessions run on; **Automatic** (or **Default**)
+  follows the default account. The rest of the Sentry settings are described in
   [Sentry](sentry.md#2-paste-it-into-settings).

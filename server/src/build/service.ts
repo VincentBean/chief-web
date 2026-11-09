@@ -46,7 +46,7 @@ import {
 import { ExecDeadline } from '../docker/index.js';
 import { logger } from '../lib/logger.js';
 import { isUsageLimitRefusal, UsageLimitHold } from '../limits/index.js';
-import { sessionWorkspaceDir } from '../orchestrator/index.js';
+import { type SessionContainerView, sessionWorkspaceDir } from '../orchestrator/index.js';
 import {
   type ParsedPrd,
   type PrdStatus,
@@ -66,7 +66,7 @@ import {
 import {
   ADVISOR_MODELS,
   type AdvisorModel,
-  effectiveClaudeAccountId,
+  pinnedClaudeAccountId,
   runningClaudeAccountId,
   effortFor,
   getAgentTimeoutMs,
@@ -316,12 +316,13 @@ interface RunState {
    */
   wake: () => void;
   /**
-   * The Claude account the run's container was started on (multiple accounts
+   * The Claude account the run's container runs on (multiple accounts
    * US-014): the one a refusal holds, and the one {@link BuildService.holdAll}
-   * matches against. Resolved at launch, because the container keeps that
-   * account until the next launch even if the session's choice changes.
+   * matches against. Taken from the container at every agent launch, because
+   * a launch may move the container to another account — a failover, or the
+   * automatic choice leaving a nearly drained one — while the run goes on.
    */
-  readonly accountId: string | null;
+  accountId: string | null;
   /** Resolves when the loop has finished; awaited by "Stop build". */
   finished: Promise<void>;
 }
@@ -584,7 +585,7 @@ export class BuildService {
       isRunning: (entry) => this.runs.has(entry.refId),
       accountId: (entry) => {
         const session = getSession(this.db, entry.refId);
-        return session === null ? null : effectiveClaudeAccountId(this.db, session);
+        return session === null ? null : pinnedClaudeAccountId(this.db, session);
       },
       start: async (entry) => {
         const session = this.requireSession(entry.refId);
@@ -762,7 +763,7 @@ export class BuildService {
     // once the hold lifts.
     // With a failover account free (US-015) it is not held at all: the
     // orchestrator launches it there.
-    const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
+    const until = this.hold.waitingUntil(pinnedClaudeAccountId(this.db, session));
     if (until !== null) {
       this.enqueueSession(session);
       throw new BuildError(429, 'usage_limit_hold', queuedForHoldMessage(session, until));
@@ -849,16 +850,21 @@ export class BuildService {
     // another account can take its work (US-015), so those are resumed before
     // their own expiry — re-evaluated on every tick, as usage changes. Nor
     // does a session parked by a refusal on its failover account: its
-    // `waiting_until` is that account's hold, not its own one's.
+    // `waiting_until` is that account's hold, not its own one's. A session
+    // pinned to no account was parked on the account the automatic choice
+    // gave it, so it goes as soon as the choice has another one to offer.
     const due = new Set(listDueWaitingSessions(this.db, now).map((session) => session.id));
     const at = new Date(now);
     return this.resume(
-      this.notHeld(listWaitingSessions(this.db), at).filter(
-        (session) =>
+      this.notHeld(listWaitingSessions(this.db), at).filter((session) => {
+        const pinned = pinnedClaudeAccountId(this.db, session);
+        return (
           due.has(session.id) ||
+          pinned === null ||
           session.failoverClaudeAccountId !== null ||
-          this.hold.active(effectiveClaudeAccountId(this.db, session), at),
-      ),
+          this.hold.active(pinned, at)
+        );
+      }),
     );
   }
 
@@ -911,7 +917,7 @@ export class BuildService {
     for (const session of listSessions(this.db, { status: 'building' })) {
       if (this.runs.has(session.id) || this.isStarting('session', session.id)) continue;
 
-      const until = this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session));
+      const until = this.hold.waitingUntil(pinnedClaudeAccountId(this.db, session));
       if (until !== null) {
         this.park(session, null, until);
         continue;
@@ -944,7 +950,7 @@ export class BuildService {
    */
   private notHeld(sessions: readonly Session[], now: Date = new Date()): Session[] {
     return sessions.filter(
-      (session) => this.hold.waitingUntil(effectiveClaudeAccountId(this.db, session), now) === null,
+      (session) => this.hold.waitingUntil(pinnedClaudeAccountId(this.db, session), now) === null,
     );
   }
 
@@ -1151,9 +1157,9 @@ export class BuildService {
     this.parked.delete(session.id);
     const startedSlot = this.claimStart('session', session.id);
     try {
-      let containerId: string;
+      let container: SessionContainerView;
       try {
-        containerId = (await this.containers.start(session, { agentWork: true })).id;
+        container = await this.containers.start(session, { agentWork: true });
       } catch (cause) {
         throw new BuildError(
           502,
@@ -1187,7 +1193,7 @@ export class BuildService {
           waitingUntil: null,
         }) ?? session;
       const state: RunState = {
-        containerId,
+        containerId: container.id,
         iteration: parked?.iteration ?? 0,
         attempts: parked?.attempts ?? 0,
         storyId: parked?.storyId ?? null,
@@ -1200,10 +1206,7 @@ export class BuildService {
         blocked: [],
         holdUntil: null,
         wake: () => undefined,
-        // The account `start` just resolved for the container: the row as it
-        // is now, which is what the orchestrator read and wrote — the failover
-        // account while the session's own is held (US-015).
-        accountId: runningClaudeAccountId(this.db, getSession(this.db, session.id) ?? session),
+        accountId: this.containerAccount(session, container),
         finished: Promise.resolve(),
       };
       this.runs.set(session.id, state);
@@ -1220,7 +1223,8 @@ export class BuildService {
       logger.info(parked === null ? 'build started' : 'build resumed after the usage-limit hold', {
         session: session.id,
         name: session.name,
-        container: containerId,
+        container: container.id,
+        account: state.accountId,
         stories: stories.length,
         iteration: state.iteration,
         story: state.storyId,
@@ -1768,6 +1772,26 @@ export class BuildService {
     }
   }
 
+  /**
+   * Brings the session's container up for an agent and notes where it runs:
+   * the container may have moved to another account on the way (a failover,
+   * or the automatic choice), and a refusal must hold the account the agent
+   * was actually on.
+   */
+  private async startForAgent(session: Session, state: RunState, othersRunning = false): Promise<void> {
+    const container = await this.containers.start(session, { agentWork: true, othersRunning });
+    state.containerId = container.id;
+    state.accountId = this.containerAccount(session, container);
+  }
+
+  /**
+   * The account a container just started for agent work mounts: its label,
+   * else what the orchestrator recorded on the session row.
+   */
+  private containerAccount(session: Session, container: SessionContainerView): string | null {
+    return container.accountId ?? runningClaudeAccountId(this.db, getSession(this.db, session.id) ?? session);
+  }
+
   /** The worktree, the mark and HEAD of one story attempt, before its agent runs. */
   private async prepareAttempt(
     session: Session,
@@ -1776,7 +1800,9 @@ export class BuildService {
     attempt: number,
     state: RunState,
   ): Promise<PreparedAttempt> {
-    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    // Sibling stories still running (or merging) in the container keep it on
+    // its account: moving it would kill them.
+    await this.startForAgent(session, state, state.phases.size > 0);
     const containerId = state.containerId;
     const workspace = await this.storyWorkspace(session, story, containerId, attempt);
     const before = this.markInProgress(session, story, workspace.prdFile);
@@ -1987,7 +2013,7 @@ export class BuildService {
     snapshot: PrdSnapshot,
     state: RunState,
   ): Promise<boolean> {
-    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    await this.startForAgent(session, state);
 
     // chief marks the story in-progress before invoking the agent, and so does
     // this: the status the loop leaves behind is what the *next* read is
@@ -2347,7 +2373,7 @@ export class BuildService {
       return true;
     }
 
-    state.containerId = (await this.containers.start(session, { agentWork: true })).id;
+    await this.startForAgent(session, state);
     const log = this.logs.begin(session, ANALYSIS_ITERATION, null);
     logger.info('dependency analysis started', {
       session: session.id,

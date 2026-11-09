@@ -204,8 +204,10 @@ export function deleteClaudeAccountAndReferences(db: Database, id: string): bool
     for (const key of CLAUDE_ACCOUNT_SETTING_KEYS) {
       db.prepare('DELETE FROM settings WHERE key = ? AND value = ?').run(key, id);
     }
-    // A session failed over onto it (US-015) falls back to its own account.
+    // A session failed over onto it (US-015) falls back to its own account,
+    // and one the automatic choice put on it is placed again at its next launch.
     db.prepare('UPDATE sessions SET failover_claude_account_id = NULL WHERE failover_claude_account_id = ?').run(id);
+    db.prepare('UPDATE sessions SET automatic_claude_account_id = NULL WHERE automatic_claude_account_id = ?').run(id);
     // The account's usage-limit hold (US-014) carries its id in the key.
     deleteSetting(db, claudeLimitKey(id));
     return deleteClaudeAccount(db, id);

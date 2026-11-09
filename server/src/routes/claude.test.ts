@@ -508,6 +508,9 @@ describe('claude api', () => {
 
     it('makes another account the default, after which the old default can go', async () => {
       const other = addClaudeAccount(config, db).id;
+      // Only a pinned default is protected: an unpinned one stands in for the
+      // automatic choice and nothing depends on it.
+      setSetting(db, 'default_claude_account_id', accountId);
       try {
         const refused = await call('DELETE', `/api/claude/accounts/${accountId}`);
         assert.equal(refused.status, 409);

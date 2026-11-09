@@ -221,6 +221,8 @@ describe('the session scheduler', () => {
     const other = createClaudeAccount(w.db, { authMethod: 'claude.ai' }).id;
     // Too close to its own limit to take the held account's work over (US-015).
     w.usage.set(other, { fiveHour: { utilization: 96 }, sevenDay: null });
+    // Pinned to the held account; an automatic one would go to `other`.
+    setSetting(w.db, 'default_claude_account_id', w.accountId);
     const onHeld = w.session({ at: PAST, name: 'on-held' });
     const onFree = w.session({ at: PAST, name: 'on-free' });
     updateSession(w.db, onFree.id, { claudeAccountId: other });

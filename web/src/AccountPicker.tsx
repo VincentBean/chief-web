@@ -31,6 +31,8 @@ import { Badge, claudeUsageTone, Gauge } from './ui.tsx';
  *
  * `null` means "whatever the default is at launch time", which is not the
  * same as the default's id: the session follows the setting if it changes.
+ * With no default pinned it is the automatic choice: each launch picks the
+ * account with the most room, so the choice is labelled "Automatic".
  */
 export interface AccountPickerProps {
   readonly value: string | null;
@@ -60,6 +62,8 @@ interface Choice {
   readonly label: string;
   readonly isDefault: boolean;
   readonly disabled: boolean;
+  /** Shown instead of the usage bars, for a choice that is no one account. */
+  readonly hint?: string;
 }
 
 export function AccountPicker({ value, onChange, accounts, defaultAccountId, disabled = false, id }: AccountPickerProps) {
@@ -81,26 +85,36 @@ export function AccountPicker({ value, onChange, accounts, defaultAccountId, dis
     };
   };
 
-  const defaultAccount = accounts.find((account) => account.id === defaultAccountId) ?? null;
-  // An implicit default is whichever account is signed in first at launch
-  // time, so naming today's pick would promise something it may not keep.
-  const defaultLabel =
-    defaultAccount === null || claude?.defaultIsExplicit === false
-      ? 'Default (first signed-in account)'
-      : `Default (${claudeAccountName(defaultAccount)})`;
+  // Only a pinned default is one account. Without one the null choice is the
+  // automatic choice, which may land on a different account at every launch,
+  // so naming today's pick would promise something it may not keep.
+  const pinnedDefault =
+    claude?.defaultIsExplicit === true ? (accounts.find((account) => account.id === defaultAccountId) ?? null) : null;
+  const automaticNow = accounts.find((account) => account.id === stats?.automaticAccountId) ?? null;
+  const followChoice: Choice =
+    pinnedDefault === null
+      ? {
+          value: null,
+          account: null,
+          label: 'Automatic',
+          isDefault: false,
+          disabled: false,
+          hint: automaticNow === null ? 'most room first' : `now ${claudeAccountName(automaticNow)}`,
+        }
+      : {
+          value: null,
+          account: pinnedDefault,
+          label: `Default (${claudeAccountName(pinnedDefault)})`,
+          isDefault: false,
+          disabled: false,
+        };
   const choices: readonly Choice[] = [
-    {
-      value: null,
-      account: defaultAccount,
-      label: defaultLabel,
-      isDefault: false,
-      disabled: false,
-    },
+    followChoice,
     ...accounts.map((account) => ({
       value: account.id,
       account,
       label: claudeAccountName(account),
-      isDefault: account.id === defaultAccountId,
+      isDefault: pinnedDefault?.id === account.id,
       // A held account stays choosable: failover moves the session on.
       disabled: !account.authenticated,
     })),
@@ -354,10 +368,14 @@ function ChoiceSummary({
       ) : held ? (
         <Badge tone="wait">on hold</Badge>
       ) : null}
-      <span className="account-picker__usage">
-        <UsageBar label="5h" name={name} window={live?.usage?.fiveHour ?? null} />
-        <UsageBar label="7d" name={name} window={live?.usage?.sevenDay ?? null} />
-      </span>
+      {account === null && choice.hint !== undefined ? (
+        <span className="account-picker__usage account-picker__muted">{choice.hint}</span>
+      ) : (
+        <span className="account-picker__usage">
+          <UsageBar label="5h" name={name} window={live?.usage?.fiveHour ?? null} />
+          <UsageBar label="7d" name={name} window={live?.usage?.sevenDay ?? null} />
+        </span>
+      )}
     </span>
   );
 }

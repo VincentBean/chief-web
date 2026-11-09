@@ -45,7 +45,7 @@ import {
 import {
   claudeAccountSignedIn,
   getCodeReviewDefault,
-  getDefaultClaudeAccount,
+  getExplicitDefaultClaudeAccountId,
 } from '../settings/index.js';
 import { hasPrivateKey } from '../ssh/index.js';
 import { runSessionSetup, type SessionExecutor, type SetupResult } from './setup.js';
@@ -185,10 +185,17 @@ export interface SessionView {
    */
   readonly claudeAccountId: string | null;
   /**
-   * The account its next container mounts: `claudeAccountId`, else the
-   * default. `null` only while no account is connected at all.
+   * The account it runs on, failover aside: `claudeAccountId`, else the
+   * pinned default, else — when it is placed automatically — the account the
+   * automatic choice last launched it on. `null` for an automatic session
+   * that has not launched yet, or while no account is connected at all.
    */
   readonly effectiveClaudeAccountId: string | null;
+  /**
+   * True while it is pinned to no account — neither its own nor a pinned
+   * default — so each launch chooses the account automatically.
+   */
+  readonly automaticClaudeAccount: boolean;
   /**
    * The account its container runs on instead while its own is on a
    * usage-limit hold (multiple accounts US-015), `null` when it runs on its own.
@@ -374,8 +381,8 @@ export class SessionService {
       this.db,
       repositoryId === undefined ? {} : { repositoryId },
     );
-    const defaultAccountId = this.defaultAccountId();
-    return sessions.map((session) => this.toView(session, defaultAccountId));
+    const pinnedDefault = this.pinnedDefaultAccountId();
+    return sessions.map((session) => this.toView(session, pinnedDefault));
   }
 
   get(id: string): SessionView | null {
@@ -772,9 +779,9 @@ export class SessionService {
     return this.toView(updated);
   }
 
-  /** The default account, resolved once per list rather than once per row. */
-  private defaultAccountId(): string | null {
-    return getDefaultClaudeAccount(this.db)?.id ?? null;
+  /** The pinned default account, resolved once per list rather than once per row. */
+  private pinnedDefaultAccountId(): string | null {
+    return getExplicitDefaultClaudeAccountId(this.db);
   }
 
   /** An account a session may be bound to: it exists and is signed in. */
@@ -995,7 +1002,8 @@ export class SessionService {
     }
   }
 
-  private toView(session: Session, defaultAccountId = this.defaultAccountId()): SessionView {
+  private toView(session: Session, pinnedDefault = this.pinnedDefaultAccountId()): SessionView {
+    const pinned = session.claudeAccountId ?? pinnedDefault;
     const repository = getRepository(this.db, session.repositoryId);
     return {
       id: session.id,
@@ -1026,7 +1034,8 @@ export class SessionService {
       feedback: session.feedback,
       effort: session.effort,
       claudeAccountId: session.claudeAccountId,
-      effectiveClaudeAccountId: session.claudeAccountId ?? defaultAccountId,
+      effectiveClaudeAccountId: pinned ?? session.automaticClaudeAccountId,
+      automaticClaudeAccount: pinned === null,
       failoverClaudeAccountId: session.failoverClaudeAccountId,
       maxParallelStories: session.maxParallelStories,
       stories: countStories(this.db, session.id),

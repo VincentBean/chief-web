@@ -85,9 +85,9 @@ export function removeClaudeAccount(
  *
  * A copy that fails half-way removes the account again: a row left behind
  * would make the next start skip the import, and the operator would have to
- * sign in after all. The imported account becomes the explicit default
- * (US-007): it is the login every launch used until now. Returns the imported
- * account, or null when nothing ran.
+ * sign in after all. The default is left unpinned: with one account the
+ * automatic choice is that account anyway, and an account added later is then
+ * used automatically. Returns the imported account, or null when nothing ran.
  */
 export function importLegacyClaudeAuth(
   config: Pick<Config, 'dataDir' | 'claudeAuthDir'>,
@@ -102,7 +102,6 @@ export function importLegacyClaudeAuth(
     const dir = claudeAccountDir(config, account.id);
     fs.cpSync(config.claudeAuthDir, dir, { recursive: true, preserveTimestamps: true });
     chownToRunner(dir);
-    setDefaultClaudeAccount(db, account.id);
   } catch (error) {
     if (account !== null) removeClaudeAccount(config, db, account.id);
     logger.error('could not import the existing Claude login as an account', {

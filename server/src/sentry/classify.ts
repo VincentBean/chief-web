@@ -16,7 +16,7 @@ import type { PrRunContainers } from '../prfeedback/index.js';
 import { RUNNER_WORKSPACE_DIR } from '../runner/index.js';
 import { CONTAINER_REPO_DIR, type SessionExecutor } from '../sessions/index.js';
 import {
-  getDefaultClaudeAccount,
+  getExplicitDefaultClaudeAccountId,
   getSentryClaudeAccountId,
   getSentryModel,
   getSentryPlansPerTick,
@@ -198,9 +198,9 @@ export class SentryClassifyService implements SentryClassifier {
     let container: SessionContainerView;
     try {
       // Planning is Sentry work too, so it runs on the Sentry account; unset
-      // means the default account, not the PR automation one.
-      const account =
-        getSentryClaudeAccountId(this.db) ?? getDefaultClaudeAccount(this.db)?.id ?? undefined;
+      // means the pinned default, else the automatic choice (`null`) — not
+      // the PR automation account.
+      const account = getSentryClaudeAccountId(this.db) ?? getExplicitDefaultClaudeAccountId(this.db);
       container = await this.containers.startPrRun(
         { id: runId, prNumber: 0, repositoryId },
         account,

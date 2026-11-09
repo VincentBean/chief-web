@@ -1717,7 +1717,9 @@ describe('the build loop', () => {
     const world = new World();
     const builds = serviceFor(world);
     // A session parked by an earlier run of the server: `waiting`, with an
-    // expiry, and no loop anywhere.
+    // expiry, and no loop anywhere. Pinned to its account, whose own hold has
+    // lifted: an automatic session would go as soon as any account is free.
+    setSetting(world.db, 'default_claude_account_id', world.accountId);
     updateSession(world.db, world.session.id, {
       status: 'waiting',
       waitingUntil: '2099-01-01T00:00:00.000Z',
@@ -2333,6 +2335,8 @@ describe('concurrency and the build queue', () => {
       release = resolve;
     });
     world.runner.behaviour = () => parkedAgent;
+    // Pinned to its account: an automatic session would not wait for it.
+    setSetting(world.db, 'default_claude_account_id', world.accountId);
     const until = hold.arm(world.accountId);
     updateSession(world.db, world.session.id, { status: 'waiting', waitingUntil: until });
 

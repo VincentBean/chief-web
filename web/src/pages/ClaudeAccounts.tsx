@@ -15,6 +15,7 @@ import {
   makeDefaultClaudeAccount,
   removeClaudeAccount,
   renameClaudeAccount,
+  saveSettings,
   startClaudeLogin,
   stopClaudeLogin,
 } from '../api.ts';
@@ -29,7 +30,7 @@ import { Badge, EmptyState, Gauge, Notice, Panel, Skeleton } from '../ui.tsx';
 // xterm.js only matters once an operator actually signs an account in.
 const TerminalPane = lazy(() => import('../TerminalPane.tsx').then((module) => ({ default: module.TerminalPane })));
 
-type Action = 'add' | 'login' | 'stop' | 'check' | 'check-all' | 'default' | 'rename' | 'remove';
+type Action = 'add' | 'login' | 'stop' | 'check' | 'check-all' | 'default' | 'automatic' | 'rename' | 'remove';
 
 /** What is running, and for which account (`null` for panel-wide actions). */
 interface Busy {
@@ -42,6 +43,12 @@ interface Removing {
   readonly account: ClaudeAccountStatus;
   readonly bindings: ClaudeAccountBindings | null;
 }
+
+/**
+ * The 5-hour usage past which an automatically placed session moves to
+ * another account; the server's `FAILOVER_MAX_FIVE_HOUR_UTILIZATION`.
+ */
+const AUTOMATIC_MAX_FIVE_HOUR = 95;
 
 function plural(count: number, noun: string): string {
   return `${String(count)} ${noun}${count === 1 ? '' : 's'}`;
@@ -58,7 +65,7 @@ function plural(count: number, noun: string): string {
  */
 export function ClaudeAccountsPanel() {
   const toast = useToast();
-  const { claude, setClaude } = useAppData();
+  const { claude, setClaude, stats } = useAppData();
   const [busy, setBusy] = useState<Busy | null>(null);
   // Kept apart from `claude.login.active` so the pane stays on screen (and
   // readable) after the login process itself has exited.
@@ -199,6 +206,14 @@ export function ClaudeAccountsPanel() {
     });
   };
 
+  const onChooseAutomatically = (): void => {
+    run('automatic', null, async () => {
+      await saveSettings({ defaultClaudeAccountId: null });
+      setClaude(await fetchClaudeState());
+      return { ok: true, text: 'Accounts are chosen automatically from the next agent run.' };
+    });
+  };
+
   const saveRename = (account: ClaudeAccountStatus): void => {
     if (renaming?.id !== account.id) return;
     const nickname = renaming.draft.trim() === '' ? null : renaming.draft.trim();
@@ -252,6 +267,10 @@ export function ClaudeAccountsPanel() {
   const signedIn = accounts?.filter((account) => account.authenticated).length ?? 0;
   const loginAccount = claude === null ? null : claudeAccountStatus(claude, claude.login.accountId);
   const loginOpen = loginTerminal !== null;
+  const pinnedDefault =
+    claude?.defaultIsExplicit === true
+      ? (accounts?.find((account) => account.id === claude.defaultAccountId) ?? null)
+      : null;
 
   const addButton = (primary: boolean) => (
     <button
@@ -311,9 +330,33 @@ export function ClaudeAccountsPanel() {
           </EmptyState>
         )
       ) : (
+        <>
+        {claude?.defaultIsExplicit === true ? (
+          <div className="row__line">
+            <p className="field__hint">
+              Work that names no account runs on the default
+              {pinnedDefault === null ? '' : `, ${claudeAccountName(pinnedDefault)}`}, and moves to another account
+              only while it is on hold.
+            </p>
+            <span className="toolbar__spacer" />
+            <button type="button" className="button button--small" onClick={onChooseAutomatically} disabled={busy !== null}>
+              <Icon name="sync" />
+              {isBusy('automatic') ? 'Saving…' : 'Choose automatically'}
+            </button>
+          </div>
+        ) : (
+          accounts.length > 1 && (
+            <p className="field__hint">
+              Work that names no account is placed automatically: accounts without a 7-day limit first, then the
+              one with the lowest 7-day usage. A session stays on its account until its 5-hour window passes{' '}
+              {String(AUTOMATIC_MAX_FIVE_HOUR)}%. Make an account the default to send everything there instead.
+            </p>
+          )
+        )}
         <ul className="rows rows--divided">
           {accounts.map((account) => {
-            const isDefault = account.id === claude?.defaultAccountId;
+            const isDefault = claude?.defaultIsExplicit === true && account.id === claude.defaultAccountId;
+            const isNext = !isDefault && claude?.defaultIsExplicit === false && accounts.length > 1 && account.id === stats?.automaticAccountId;
             const expired = claudeNeedsSignIn(account.usage);
             const tone = account.error !== null ? 'wait' : account.authenticated && !expired ? 'done' : 'danger';
             const name = claudeAccountName(account);
@@ -342,7 +385,8 @@ export function ClaudeAccountsPanel() {
                     ) : (
                       <span className="row__title">
                         {name}
-                        {isDefault && <Badge tone="active">{claude?.defaultIsExplicit === true ? 'Default' : 'Default (automatic)'}</Badge>}
+                        {isDefault && <Badge tone="active">Default</Badge>}
+                        {isNext && <Badge tone="active">Next up</Badge>}
                         {!account.authenticated && account.error === null && <Badge tone="danger">not signed in</Badge>}
                         {expired && <Badge tone="danger">sign in again</Badge>}
                       </span>
@@ -368,7 +412,7 @@ export function ClaudeAccountsPanel() {
                       <Icon name="key" />
                       {isBusy('login', account.id) ? 'Starting…' : 'Sign in again'}
                     </button>
-                    {(!isDefault || claude?.defaultIsExplicit === false) && (
+                    {!isDefault && (
                       <button
                         type="button"
                         className="button button--small"
@@ -416,6 +460,7 @@ export function ClaudeAccountsPanel() {
             );
           })}
         </ul>
+        </>
       )}
 
       {loginOpen && (

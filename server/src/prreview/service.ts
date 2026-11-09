@@ -551,8 +551,8 @@ export class PrReviewService {
         // straight back into the same wall, so hold the whole server, as a
         // feedback run does, and leave this one to be started again after.
         // The account the container mounted: the failover one while the PR
-        // automation account is held (US-015).
-        const account = this.hold.launchAccount(prRunClaudeAccountId(this.db));
+        // automation account is held (US-015), or the automatic choice.
+        const account = container.accountId ?? this.hold.launchAccount(prRunClaudeAccountId(this.db));
         const until = this.hold.arm(account);
         reasons.push(`Attempt ${String(attempt)}: ${pass.message}`);
         this.fail(

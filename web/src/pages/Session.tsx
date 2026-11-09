@@ -1905,7 +1905,11 @@ function AccountPanel({
     setSessionClaudeAccount(session.id, claudeAccountId)
       .then((next) => {
         onSaved(next);
-        const name = next.effectiveClaudeAccountId === null ? 'the default account' : nameOf(next.effectiveClaudeAccountId);
+        const name = next.automaticClaudeAccount
+          ? 'an automatically chosen account'
+          : next.effectiveClaudeAccountId === null
+            ? 'the default account'
+            : nameOf(next.effectiveClaudeAccountId);
         toast.ok(
           hadContainer
             ? `Saved: ${name} is used from the next agent run; the current container is restarted first.`
@@ -1925,7 +1929,7 @@ function AccountPanel({
       icon="key"
       meta={
         runningOn === null ? (
-          <Badge tone="danger">no account</Badge>
+          session.automaticClaudeAccount ? <Badge>automatic</Badge> : <Badge tone="danger">no account</Badge>
         ) : (
           <Badge tone={failover !== null ? 'wait' : session.claudeAccountId === null ? 'neutral' : 'ready'}>{nameOf(runningOn)}</Badge>
         )
@@ -1946,9 +1950,15 @@ function AccountPanel({
         <p className="field__hint">
           {locked !== undefined
             ? `The account can no longer be changed: ${locked}`
-            : session.claudeAccountId === null
-              ? 'Following the default account from Settings.'
-              : 'Set for this session; choose Default to follow the default account from Settings again.'}
+            : session.automaticClaudeAccount
+              ? runningOn === null
+                ? 'Chosen automatically at the next agent run: the account with the most room.'
+                : `Chosen automatically: running on ${nameOf(runningOn)} until its 5-hour window is nearly used up.`
+              : session.claudeAccountId === null
+                ? 'Following the default account from Settings.'
+                : claude?.defaultIsExplicit === false
+                  ? 'Set for this session; choose Automatic to let chief-web pick the account again.'
+                  : 'Set for this session; choose Default to follow the default account from Settings again.'}
         </p>
       </div>
       {failover !== null && effective !== null && (

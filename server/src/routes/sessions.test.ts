@@ -16,6 +16,7 @@ import {
   type Database,
   deleteSession,
   deleteSetting,
+  getSession,
   IN_MEMORY,
   listSessions,
   openDatabase,
@@ -467,12 +468,31 @@ describe('sessions api', () => {
     };
     const defaultId = (): string | null => getDefaultClaudeAccount(db)?.id ?? null;
 
-    it('follows the default account when the session names none', async () => {
+    it('is placed automatically when it names no account and no default is pinned', async () => {
       const { status, body } = await create();
 
       assert.equal(status, 201);
       assert.equal(body.session.claudeAccountId, null);
-      assert.equal(body.session.effectiveClaudeAccountId, defaultId());
+      assert.equal(body.session.automaticClaudeAccount, true);
+      // The account the automatic choice launched it on, once it has.
+      assert.equal(
+        body.session.effectiveClaudeAccountId,
+        getSession(db, body.session.id)?.automaticClaudeAccountId ?? null,
+      );
+    });
+
+    it('follows a pinned default when the session names none', async () => {
+      const id = account(true);
+      setDefaultClaudeAccount(db, id);
+      try {
+        const { body } = await create();
+        assert.equal(body.session.claudeAccountId, null);
+        assert.equal(body.session.automaticClaudeAccount, false);
+        assert.equal(body.session.effectiveClaudeAccountId, id);
+        assert.equal(defaultId(), id);
+      } finally {
+        deleteSetting(db, 'default_claude_account_id');
+      }
     });
 
     it('stores an account on create and returns it from get and list', async () => {
@@ -530,7 +550,7 @@ describe('sessions api', () => {
       assert.equal(cleared.status, 200);
       const view = (await cleared.json()) as SessionView;
       assert.equal(view.claudeAccountId, null);
-      assert.equal(view.effectiveClaudeAccountId, defaultId());
+      assert.equal(view.automaticClaudeAccount, true);
     });
 
     it('reports a default change for a session that follows the default', async () => {
