@@ -53,6 +53,7 @@ import type { FailoverUsage } from '../claude/failover.js';
 import { parsePrd, prdPathFor, type PrdStory, setStoryStatus } from '../prd/index.js';
 import { planRetry } from '../recovery/index.js';
 import { CONTAINER_REPO_DIR, type SessionContainers, storyInputOf } from '../sessions/index.js';
+import { pinnedClaudeAccountId } from '../settings/index.js';
 import {
   addStoryWorktreeSpec,
   AGENT_SIGNALLED,
@@ -643,6 +644,51 @@ function serviceFor(world: World, completion?: BuildCompletion, decisions?: Deci
     decisions,
   );
 }
+
+/**
+ * Session containers that pick their Claude account the way the orchestrator
+ * does (multiple accounts US-015): every agent launch mounts the account
+ * `UsageLimitHold.route` gives, keeping the mounted one while it may stay —
+ * and while sibling stories still run in it. The container id ends with the
+ * account, so an agent's invocation says where it ran.
+ */
+function routedContainers(world: World, hold: UsageLimitHold): SessionContainers {
+  const mounted = new Map<string, string>();
+  return {
+    start: (session, options): Promise<SessionContainerView> => {
+      world.containerStarts.push(session.id);
+      const was = mounted.get(session.id) ?? null;
+      const pinned = pinnedClaudeAccountId(world.db, getSession(world.db, session.id) ?? session);
+      const keep = was !== null && (options?.agentWork !== true || options.othersRunning === true);
+      const account = keep ? was : (hold.launchAccount(pinned, new Date(), was) ?? world.accountId);
+      mounted.set(session.id, account);
+      return Promise.resolve({
+        id: `container-${session.name}-${account}`,
+        name: `chief-web-${session.name}`,
+        running: true,
+        state: 'running',
+        accountId: account,
+      });
+    },
+    remove: (): Promise<void> => Promise.resolve(),
+  };
+}
+
+/** A build service whose containers follow `hold` ({@link routedContainers}). */
+function routedServiceFor(world: World, hold: UsageLimitHold = new UsageLimitHold(world.db)) {
+  return createBuildService(
+    world.config,
+    world.db,
+    routedContainers(world, hold),
+    world.runner,
+    undefined,
+    createBuildLogStore(world.config, world.db),
+    hold,
+  );
+}
+
+/** Claude's refusal for the usage limit, as the CLI prints it. */
+const REFUSED: AgentResult = { exitCode: 1, output: 'Claude AI usage limit reached|1756700000', timedOut: false };
 
 /**
  * The session container's side of `ask_operator` (decisions US-004): the
@@ -1593,6 +1639,62 @@ describe('the build loop', () => {
     assert.match(world.error() ?? '', /usage limit was reached/i);
   });
 
+  it('carries a refused build on on another account instead of holding it', async () => {
+    const world = new World();
+    const other = createClaudeAccount(world.db, { authMethod: 'claude.ai' }).id;
+    const builds = routedServiceFor(world);
+    // What the story's retry counter and the build's status were as each agent started.
+    const seen: [number, string][] = [];
+    world.runner.behaviour = (invocation): AgentResult => {
+      seen.push([builds.status(world.session.id).attempts, world.status()]);
+      if (!invocation.containerId.endsWith(other)) return REFUSED;
+      world.markDone('US-002');
+      world.markDone('US-001');
+      world.runner.commit();
+      return { exitCode: 0, output: '', timedOut: false };
+    };
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    assert.equal(world.status(), 'finished');
+    const session = getSession(world.db, world.session.id);
+    assert.equal(session?.waitingUntil, null);
+    assert.equal(session?.lastError, null);
+    // Refused on the first account, then the same story again on the other —
+    // straight away, still building, and with no attempt and no iteration spent.
+    const [refused, retried] = world.runner.invocations;
+    assert.equal(refused?.containerId.endsWith(world.accountId), true);
+    assert.equal(retried?.containerId.endsWith(other), true);
+    assert.deepEqual(seen, [
+      [0, 'building'],
+      [0, 'building'],
+    ]);
+    assert.equal(retried?.iteration, 1);
+    // The refused account is held for the hour; the other is not.
+    const hold = new UsageLimitHold(world.db);
+    assert.equal(hold.active(world.accountId), true);
+    assert.equal(hold.active(other), false);
+    const log = fs.readFileSync(path.join(world.repoDir, '.chief/prds/add-login/agent.log'), 'utf8');
+    assert.match(log, /carries on with the same story on another account/);
+  });
+
+  it('parks a build whose container stays on the refused account rather than trying it again and again', async () => {
+    // A second account could take the work, but the container never moves to it.
+    const world = new World();
+    createClaudeAccount(world.db, { authMethod: 'claude.ai' });
+    world.runner.result = REFUSED;
+    const builds = serviceFor(world);
+
+    await builds.start(world.session.id);
+    await builds.whenIdle(world.session.id);
+
+    // One move, which did not take, and then the hold.
+    assert.equal(world.runner.invocations.length, 2);
+    assert.equal(world.status(), 'waiting');
+    assert.match(world.error() ?? '', /usage limit was reached/i);
+  });
+
   it('stops a held session back to ready with its commits intact (US-009)', async () => {
     const world = new World();
     world.runner.behaviour = (): void => {
@@ -1853,7 +1955,15 @@ describe('concurrency and the build queue', () => {
     readonly containers = new Map<string, string>();
     private readonly gates = new Map<string, Gate>();
 
-    constructor(cap: number, names: readonly string[]) {
+    /**
+     * `hold` is the usage-limit hold the service reads; with `routed` the
+     * containers follow it from account to account ({@link routedContainers}).
+     */
+    constructor(
+      cap: number,
+      names: readonly string[],
+      options: { readonly hold?: (db: Database) => UsageLimitHold; readonly routed?: boolean } = {},
+    ) {
       this.world = new World();
       for (const name of names) this.world.addSession(name);
       setSettingNumber(this.world.db, 'max_concurrent_sessions', cap);
@@ -1868,7 +1978,16 @@ describe('concurrency and the build queue', () => {
         this.world.markDone('US-001', session);
         this.world.runner.commit();
       };
-      this.builds = serviceFor(this.world);
+      const hold = options.hold?.(this.world.db) ?? new UsageLimitHold(this.world.db);
+      this.builds = createBuildService(
+        this.world.config,
+        this.world.db,
+        options.routed === true ? routedContainers(this.world, hold) : this.world.containers,
+        this.world.runner,
+        undefined,
+        createBuildLogStore(this.world.config, this.world.db),
+        hold,
+      );
     }
 
     session(id: string): Session {
@@ -2262,12 +2381,19 @@ describe('concurrency and the build queue', () => {
   });
 
   it('parks only the sessions on the refused account; another account keeps building (US-014)', async () => {
-    const fleet = new Fleet(3, ['add-billing', 'add-payments', 'add-search']);
+    // The second account is above the 95% failover ceiling, so the sessions on
+    // the refused one have nowhere to move to and wait for their own.
+    const usage = new Map<string, FailoverUsage>();
+    const fleet = new Fleet(3, ['add-billing', 'add-payments', 'add-search'], {
+      hold: (db) => new UsageLimitHold(db, null, { usage: (id) => usage.get(id) ?? null }),
+    });
     const login = fleet.named('add-login');
     const billing = fleet.named('add-billing');
     const payments = fleet.named('add-payments');
-    // payments runs on a second signed-in account; the others follow the default.
+    // payments runs on a second signed-in account; the others are pinned to the default.
     const other = createClaudeAccount(fleet.world.db, { authMethod: 'claude.ai' }).id;
+    usage.set(other, { fiveHour: { utilization: 97 }, sevenDay: null });
+    setSetting(fleet.world.db, 'default_claude_account_id', fleet.world.accountId);
     updateSession(fleet.world.db, payments.id, { claudeAccountId: other });
 
     fleet.world.runner.behaviour = async (invocation): Promise<void> => {
@@ -2312,6 +2438,93 @@ describe('concurrency and the build queue', () => {
     await fleet.builds.start(search.id);
     assert.equal(fleet.session(search.id).status, 'building');
     await fleet.builds.stop(search.id);
+  });
+
+  it('moves every running build off a refused account and keeps it building on another', async () => {
+    const fleet = new Fleet(3, ['add-billing'], { routed: true });
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const other = createClaudeAccount(fleet.world.db, { authMethod: 'claude.ai' }).id;
+    const statuses = new Set<string>();
+
+    // On the first account login is refused, and billing works until it is
+    // signalled; on the other account both finish their PRD.
+    fleet.world.runner.behaviour = async (invocation): Promise<AgentResult> => {
+      fleet.entered.push(invocation.sessionId);
+      for (const session of [login, billing]) statuses.add(fleet.session(session.id).status);
+      const session = fleet.session(invocation.sessionId);
+      if (!invocation.containerId.endsWith(other)) {
+        if (session.id === login.id) return REFUSED;
+        await fleet.gate(session.id).promise;
+        return { exitCode: 143, output: 'terminated', timedOut: false };
+      }
+      fleet.world.markDone('US-002', session);
+      fleet.world.markDone('US-001', session);
+      fleet.world.runner.commit();
+      return { exitCode: 0, output: '', timedOut: false };
+    };
+    fleet.world.runner.stop = (sessionId: string): Promise<void> => {
+      fleet.world.runner.stops.push(sessionId);
+      fleet.gate(sessionId).release();
+      return Promise.resolve();
+    };
+
+    await fleet.builds.start(billing.id);
+    await until('billing is running', () => fleet.entered.length === 1);
+    await fleet.builds.start(login.id);
+    await fleet.builds.whenIdle(login.id);
+    await fleet.builds.whenIdle(billing.id);
+
+    // Both finished on the other account, without ever waiting for the hold.
+    assert.equal(fleet.session(login.id).status, 'finished');
+    assert.equal(fleet.session(billing.id).status, 'finished');
+    assert.equal(statuses.has('waiting'), false);
+    const ran = (session: Session): string[] =>
+      fleet.world.runner.invocations
+        .filter((invocation) => invocation.sessionId === session.id)
+        .map((invocation) => (invocation.containerId.endsWith(other) ? 'other' : 'first'));
+    assert.deepEqual(ran(login), ['first', 'other']);
+    assert.deepEqual(ran(billing), ['first', 'other']);
+    // billing came off its agent once, because login was refused; nobody else did.
+    assert.deepEqual(fleet.world.runner.stops, [billing.id]);
+    // The refused account is held; the one the work moved to is not.
+    const hold = new UsageLimitHold(fleet.world.db);
+    assert.equal(hold.active(fleet.world.accountId), true);
+    assert.equal(hold.active(other), false);
+  });
+
+  it('moves two builds refused on one account at the same moment without either waiting for the other', async () => {
+    const fleet = new Fleet(3, ['add-billing'], { routed: true });
+    const login = fleet.named('add-login');
+    const billing = fleet.named('add-billing');
+    const other = createClaudeAccount(fleet.world.db, { authMethod: 'claude.ai' }).id;
+    // Both meet the wall in the same tick, so each is refused before either
+    // has taken the other off the account.
+    const wall = gate();
+    let onFirst = 0;
+    fleet.world.runner.behaviour = async (invocation): Promise<AgentResult> => {
+      const session = fleet.session(invocation.sessionId);
+      if (!invocation.containerId.endsWith(other)) {
+        onFirst += 1;
+        if (onFirst === 2) wall.release();
+        await wall.promise;
+        return REFUSED;
+      }
+      fleet.world.markDone('US-002', session);
+      fleet.world.markDone('US-001', session);
+      fleet.world.runner.commit();
+      return { exitCode: 0, output: '', timedOut: false };
+    };
+
+    await fleet.builds.start(login.id);
+    await fleet.builds.start(billing.id);
+    // Well inside the stop timeout either of them would otherwise sit out.
+    await until('both builds finished', () =>
+      [login, billing].every((session) => fleet.session(session.id).status === 'finished'),
+    );
+    await fleet.builds.whenIdle(login.id);
+    await fleet.builds.whenIdle(billing.id);
+    assert.equal(fleet.world.runner.invocations.filter((invocation) => invocation.containerId.endsWith(other)).length, 2);
   });
 
   it('resumes a held session on another account as soon as one is eligible (US-015)', async () => {
@@ -3774,6 +3987,46 @@ describe('story worktrees (async stories US-006)', () => {
       assert.equal(statusOf(world, 'US-002'), 'todo');
       assert.deepEqual([...removed].sort(), added.map((entry) => entry.split(' ')[2]).sort());
       assert.equal(events.some((event) => event.startsWith('merge')), false);
+    });
+
+    it('moves the whole session to another account when one agent is refused, and finishes there', async () => {
+      let other = '';
+      const run = scheduling(PRD, 3, '{"dependencies": {}}', async (storyId, invocation) => {
+        if (invocation.containerId.endsWith(other)) {
+          // On the other account every story is finished.
+          const file = worktreePrd(run.world, storyId);
+          fs.writeFileSync(file, setStoryStatus(fs.readFileSync(file, 'utf8'), storyId, 'done').content);
+          run.world.runner.commit();
+          return ok('');
+        }
+        if (storyId !== 'US-002') return null;
+        await until('US-001 is running', () => run.running.has('US-001'));
+        return REFUSED;
+      });
+      const { world, events, release } = run;
+      other = createClaudeAccount(world.db, { authMethod: 'claude.ai' }).id;
+      const builds = routedServiceFor(world);
+
+      await builds.start(world.session.id);
+      await until('the other agent was signalled', () => world.runner.stops.length > 0);
+      release('US-001');
+      await builds.whenIdle(world.session.id);
+
+      assert.equal(world.status(), 'finished');
+      assert.equal(getSession(world.db, world.session.id)?.waitingUntil, null);
+      // Both stories ran twice — on the first account, then on the other —
+      // and were merged once, from the other.
+      assert.equal(events.filter((event) => event === 'start US-002').length, 2);
+      assert.equal(events.filter((event) => event === 'start US-001').length, 2);
+      assert.deepEqual(events.filter((event) => event.startsWith('merge')).sort(), ['merge US-001', 'merge US-002']);
+      const stories = world.runner.invocations.filter((invocation) => !isAnalysis(invocation));
+      assert.deepEqual(
+        stories.map((invocation) => invocation.containerId.endsWith(other)),
+        [false, false, true, true],
+      );
+      // The iterations the hold cut short were given back.
+      assert.deepEqual(stories.slice(2).map((invocation) => invocation.iteration).sort(), [1, 2]);
+      assert.equal(new UsageLimitHold(world.db).active(world.accountId), true);
     });
 
     describe('one story failing or asking (US-010)', () => {

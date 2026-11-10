@@ -285,11 +285,14 @@ Failover applies to sessions (builds, planning, reviews, descriptions,
 scheduled starts, recurring-task runs) and to PR runs. A session records the
 account it fails over to as `failoverClaudeAccountId`, and its page and the
 sessions list read **Running on <failover> while <own> is on hold until
-<time>**. Failover never pre-empts running work: a refused session is parked at
-**waiting** and the next scheduler tick resumes it on the failover account,
-where its container is recreated. It goes back to its own account at the first
-agent launch after that account's hold has expired. A refusal on the failover
-account holds the failover account, not the session's own.
+<time>**. A build that is running when its account is held moves straight
+away: its agents come off the held account and it carries on, still
+**building**, on the failover account, where the next agent launch recreates its
+container ([details](build-loop.md#failover-to-another-account)). Only a build
+with nowhere to go is parked at **waiting**; the next scheduler tick resumes it
+on a failover account as soon as one qualifies. It goes back to its own account
+at the first agent launch after that account's hold has expired. A refusal on
+the failover account holds the failover account, not the session's own.
 
 ## Settings
 
