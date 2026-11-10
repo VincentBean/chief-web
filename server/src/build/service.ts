@@ -323,6 +323,20 @@ interface RunState {
    * automatic choice leaving a nearly drained one — while the run goes on.
    */
   accountId: string | null;
+  /**
+   * The held account this run last moved off while running, until an agent
+   * launch has actually put it somewhere else. A run whose container stayed
+   * on that account — the orchestrator disagreed, or sibling stories kept it
+   * there — parks on its next hold rather than moving again, so a container
+   * that cannot move never turns into a loop of refusals.
+   */
+  movedFrom: string | null;
+  /**
+   * Called when the run carries on on another account instead of parking on a
+   * hold someone else armed: what {@link BuildService.holdRun} waits on
+   * besides {@link finished}, because a run that moved does not finish.
+   */
+  moved: () => void;
   /** Resolves when the loop has finished; awaited by "Stop build". */
   finished: Promise<void>;
 }
@@ -1207,6 +1221,8 @@ export class BuildService {
         holdUntil: null,
         wake: () => undefined,
         accountId: this.containerAccount(session, container),
+        movedFrom: null,
+        moved: () => undefined,
         finished: Promise.resolve(),
       };
       this.runs.set(session.id, state);
@@ -1326,11 +1342,9 @@ export class BuildService {
       }
       // Another session was refused while this one was between iterations
       // (US-005). Nothing is in flight, so there is nothing to reap: the run
-      // simply parks on the same expiry as the session that hit the wall.
-      if (state.holdUntil !== null) {
-        this.park(session, state, state.holdUntil);
-        return;
-      }
+      // carries on on another account when one can take it, and otherwise
+      // parks on the same expiry as the session that hit the wall.
+      if (state.holdUntil !== null && !this.moveOrPark(session, state, state.holdUntil)) return;
       if (session.status !== 'building') return;
 
       let snapshot: PrdSnapshot;
@@ -1391,10 +1405,16 @@ export class BuildService {
       } catch (cause) {
         // The exec this run was in was killed to put the session on the hold
         // (US-005), so whatever it threw on the way out describes our own
-        // signal rather than a broken build. Park it.
+        // signal rather than a broken build. Move it, or park it.
         if (state.holdUntil !== null) {
-          this.park(session, state, state.holdUntil);
-          return;
+          if (state.stopping || !this.canMove(session, state)) {
+            this.park(session, state, state.holdUntil);
+            return;
+          }
+          // Whatever the killed exec left running must not meet the next agent.
+          await this.runner.reap(sessionId, state.containerId);
+          if (!this.moveOrPark(session, state, state.holdUntil)) return;
+          continue;
         }
         this.fail(
           session,
@@ -1545,6 +1565,20 @@ export class BuildService {
 
         if (active.size === 0) {
           if (session === null) return;
+          // Every agent is off the held account: the run carries on on another
+          // one when it can (its iterations were given back as they came in),
+          // after taking the account's other builds off it too.
+          const held = state.holdUntil;
+          if (held !== null && live && !state.stopping) {
+            const from = state.accountId;
+            const to = this.moveTarget(session, state);
+            if (to !== null) {
+              this.move(session, state, to, false);
+              if (refused) await this.holdOthers(sessionId, from, held);
+              refused = false;
+              continue;
+            }
+          }
           if (state.stopping) {
             this.returnToReady(session);
           } else if (state.holdUntil !== null) {
@@ -1782,6 +1816,8 @@ export class BuildService {
     const container = await this.containers.start(session, { agentWork: true, othersRunning });
     state.containerId = container.id;
     state.accountId = this.containerAccount(session, container);
+    // The move took: a later hold on this account may move the run again.
+    if (state.accountId !== state.movedFrom) state.movedFrom = null;
   }
 
   /**
@@ -1914,7 +1950,7 @@ export class BuildService {
     // Held while this agent ran — by another session, or by a sibling story
     // that was refused — and so signalled: its output is not evidence.
     if (state.holdUntil !== null) {
-      log.write(`\n${holdMessage(state.holdUntil)}\n`);
+      log.write(`\n${this.holdLine(session, state, state.holdUntil)}\n`);
       log.end(result.exitCode);
       await this.runner.reap(session.id, containerId, storyId);
       await giveUp();
@@ -1924,7 +1960,7 @@ export class BuildService {
       // Set before anything is awaited, so no sibling arms a second hour.
       const until = this.hold.arm(state.accountId);
       state.holdUntil = until;
-      log.write(`\n${holdMessage(until)}\n`);
+      log.write(`\n${this.holdLine(session, state, until)}\n`);
       log.end(result.exitCode);
       await this.runner.reap(session.id, containerId, storyId);
       await giveUp();
@@ -1968,7 +2004,7 @@ export class BuildService {
           // The resolution agent was refused: a hold, like a refused story.
           if (state.holdUntil === null) {
             state.holdUntil = this.hold.arm(state.accountId);
-            log.write(`\n${holdMessage(state.holdUntil)}\n`);
+            log.write(`\n${this.holdLine(session, state, state.holdUntil)}\n`);
             return { code: 'held' };
           }
           return { code: 'interrupted' };
@@ -2122,12 +2158,21 @@ export class BuildService {
     // which would push the shared expiry another hour into the future.
     if (state.holdUntil !== null) {
       const held = state.holdUntil;
-      log.write(`\n${holdMessage(held)}\n`);
+      // Decided once, here, so the log line and what the run does agree.
+      const to = state.stopping ? null : this.moveTarget(session, state);
+      log.write(`\n${to === null ? holdMessage(held) : movedMessage(held)}\n`);
       log.end(result.exitCode);
       await this.runner.reap(session.id, state.containerId, workspace.story?.storyId);
       await this.abandonWorktree(session, state, workspace);
-      if (state.stopping) this.returnToReady(session);
-      else this.park(session, state, held);
+      if (state.stopping) {
+        this.returnToReady(session);
+        return false;
+      }
+      if (to !== null) {
+        this.move(session, state, to);
+        return true;
+      }
+      this.park(session, state, held);
       return false;
     }
 
@@ -2136,13 +2181,16 @@ export class BuildService {
     // allowed to start it. `classifyIteration` would see no commit and no
     // status change, call the iteration stalled and spend one of the story's
     // two retries on a wall the session cannot climb — and two more iterations
-    // would hit it within seconds. So the run is parked on a global hold
-    // instead and picks the same story up again when the hold lifts.
+    // would hit it within seconds. So the run moves to another account and
+    // tries the same story again there straight away, or, with no account to
+    // move to, is parked on the hold and picks the story up when it lifts.
     if (isUsageLimitRefusal(result)) {
-      const until = this.hold.arm(state.accountId);
+      const from = state.accountId;
+      const until = this.hold.arm(from);
+      const to = state.stopping ? null : this.moveTarget(session, state);
       // Inside this iteration's own markers, so the per-iteration history
       // explains the gap rather than showing a section that stops mid-air.
-      log.write(`\n${holdMessage(until)}\n`);
+      log.write(`\n${to === null ? holdMessage(until) : movedMessage(until)}\n`);
       log.end(result.exitCode);
 
       // The same reasoning as the timeout path: the loop is walking away from
@@ -2155,16 +2203,18 @@ export class BuildService {
       // wins — the hold is armed either way, because the limit is on the
       // account rather than on this session, but the session goes back to
       // `ready` rather than waiting for an hour nobody asked it to wait.
+      const moved = !state.stopping && to !== null;
       if (state.stopping) this.returnToReady(session);
+      else if (to !== null) this.move(session, state, to);
       else this.park(session, state, until);
 
       // The limit belongs to the account, not to this session, so every other
       // run on that account is about to be refused for the same reason
       // (US-005, US-014). They come off the agent now, on this expiry, rather
-      // than each discovering the wall for itself; runs on other accounts
-      // carry on.
-      await this.holdOthers(session.id, state.accountId, until);
-      return false;
+      // than each discovering the wall for itself — and move with it when
+      // they can; runs on other accounts carry on.
+      await this.holdOthers(session.id, from, until);
+      return moved;
     }
 
     // A worktree's section stays open until its merge is done, so the merge's
@@ -2254,12 +2304,16 @@ export class BuildService {
           // The conflict-resolution agent hit the usage limit: the same hold as
           // a refused story iteration, and no attempt of the story is spent.
           await this.abandonWorktree(session, state, workspace);
-          const until = this.hold.arm(state.accountId);
-          log.write(`\n${holdMessage(until)}\n`);
+          const from = state.accountId;
+          const until = this.hold.arm(from);
+          const to = state.stopping ? null : this.moveTarget(session, state);
+          log.write(`\n${to === null ? holdMessage(until) : movedMessage(until)}\n`);
+          const moved = !state.stopping && to !== null;
           if (state.stopping) this.returnToReady(session);
+          else if (to !== null) this.move(session, state, to);
           else this.park(session, state, until);
-          await this.holdOthers(session.id, state.accountId, until);
-          return false;
+          await this.holdOthers(session.id, from, until);
+          return moved;
         }
         mergeFailed = merged.reason;
       }
@@ -2425,22 +2479,39 @@ export class BuildService {
     if (interrupted || result?.timedOut === true) await this.runner.reap(session.id, state.containerId);
     await this.discardAnalysisChanges(session, state, before, log);
 
+    // A run that moves to another account analyses again there: `planned` is
+    // put back, so the loop's next pass starts the analysis over.
     if (state.holdUntil !== null) {
       const held = state.holdUntil;
-      log.write(`\n${holdMessage(held)}\n`);
+      const to = state.stopping ? null : this.moveTarget(session, state);
+      log.write(`\n${to === null ? holdMessage(held) : movedMessage(held)}\n`);
       log.end(result?.exitCode ?? null);
-      if (state.stopping) this.returnToReady(session);
-      else this.park(session, state, held, false);
+      if (state.stopping) {
+        this.returnToReady(session);
+        return false;
+      }
+      if (to !== null) {
+        this.move(session, state, to, false);
+        state.planned = false;
+        return true;
+      }
+      this.park(session, state, held, false);
       return false;
     }
     if (refused) {
-      const until = this.hold.arm(state.accountId);
-      log.write(`\n${holdMessage(until)}\n`);
+      const from = state.accountId;
+      const until = this.hold.arm(from);
+      const to = state.stopping ? null : this.moveTarget(session, state);
+      log.write(`\n${to === null ? holdMessage(until) : movedMessage(until)}\n`);
       log.end(result?.exitCode ?? null);
+      const moved = !state.stopping && to !== null;
       if (state.stopping) this.returnToReady(session);
-      else this.park(session, state, until, false);
-      await this.holdOthers(session.id, state.accountId, until);
-      return false;
+      else if (to !== null) {
+        this.move(session, state, to, false);
+        state.planned = false;
+      } else this.park(session, state, until, false);
+      await this.holdOthers(session.id, from, until);
+      return moved;
     }
     if (state.stopping) {
       log.end(result?.exitCode ?? null);
@@ -2786,6 +2857,10 @@ export class BuildService {
       const state = this.runs.get(session.id);
       const account = state?.accountId ?? runningClaudeAccountId(this.db, session);
       if (account !== accountId) continue;
+      // Already on its way off this account: it moved, and is taking the
+      // account's other builds off it itself. Waiting for it here would have
+      // two builds refused at once each waiting for the other.
+      if (state !== undefined && state.movedFrom === accountId) continue;
       if (state === undefined) {
         this.park(session, null, until);
         continue;
@@ -2794,26 +2869,108 @@ export class BuildService {
     }
   }
 
-  /** Takes one live run off the agent and parks it on `until` (US-005). */
+  /**
+   * Takes one live run off the agent on its held account (US-005): the loop
+   * then carries on on another account when one can take it, and parks on
+   * `until` otherwise.
+   */
   private async holdRun(session: Session, state: RunState, until: string): Promise<void> {
     state.holdUntil = until;
+    // The container the agent is in now: a run that moves is in another one
+    // by the time a late reap would come, and that one must be left alone.
+    const containerId = state.containerId;
+    // Chained, so a second hold on the same run hears the move as well.
+    const before = state.moved;
+    const moved = new Promise<void>((resolve) => {
+      state.moved = () => {
+        before();
+        resolve();
+      };
+    });
     try {
-      await this.runner.stop(session.id, state.containerId);
+      await this.runner.stop(session.id, containerId);
     } catch (cause) {
       logger.warn('could not signal a build agent for the usage-limit hold', {
         session: session.id,
         error: describe(cause),
       });
     }
-    // The loop parks itself when it sees `holdUntil`; this is only how long we
-    // are prepared to wait for it to get there.
-    await settle(state.finished, this.config.buildStopTimeoutMs);
-    await this.runner.reap(session.id, state.containerId);
+    // The loop moves or parks itself when it sees `holdUntil`; this is only
+    // how long we are prepared to wait for it to get there.
+    await settle(Promise.race([state.finished, moved]), this.config.buildStopTimeoutMs);
+    // It moved on, and reaped its own agent on the way out.
+    if (state.holdUntil === null) return;
+    await this.runner.reap(session.id, containerId);
 
     // Normally the loop has already parked it. A run that outlasted the stop
     // timeout has not, and must not be left `building` on a held account.
     const current = getSession(this.db, session.id) ?? session;
-    if (current.status === 'building') this.park(current, state, until);
+    if (current.status === 'building' && state.holdUntil !== null) this.park(current, state, until);
+  }
+
+  /**
+   * The account a running build can carry on on now that the account under it
+   * is held, or `null` when it has to wait: no other account can take the work
+   * right now (the same rule a launch follows, `UsageLimitHold.route`), or the
+   * run already moved off this account once and its container stayed there.
+   */
+  private moveTarget(session: Session, state: RunState): string | null {
+    const from = state.accountId;
+    if (from === null || state.movedFrom === from) return null;
+    const current = getSession(this.db, session.id) ?? session;
+    const route = this.hold.route(pinnedClaudeAccountId(this.db, current), new Date(), from);
+    if (route.waitingUntil !== null || route.accountId === null || route.accountId === from) return null;
+    return route.accountId;
+  }
+
+  /** Whether the run would move rather than park; see {@link moveTarget}. */
+  private canMove(session: Session, state: RunState): boolean {
+    return this.moveTarget(session, state) !== null;
+  }
+
+  /**
+   * Carries the run on on another account instead of parking it. The session
+   * stays `building`; the iteration the hold cut short is given back, as a
+   * park gives it back, and the story keeps its attempts. Nothing is
+   * recreated here: the next agent launch puts the container on `to`.
+   */
+  private move(session: Session, state: RunState, to: string, redo = true): void {
+    if (redo) state.iteration -= 1;
+    logger.info('build carries on on another claude account: its own hit the usage limit', {
+      session: session.id,
+      name: session.name,
+      from: state.accountId,
+      to,
+      story: state.storyId,
+      until: state.holdUntil,
+    });
+    state.movedFrom = state.accountId;
+    state.holdUntil = null;
+    state.moved();
+    state.moved = () => undefined;
+  }
+
+  /**
+   * {@link move} when the run can, {@link park} when it cannot. Returns true
+   * when the run carries on.
+   */
+  private moveOrPark(session: Session, state: RunState, until: string, redo = true): boolean {
+    const to = this.moveTarget(session, state);
+    if (to === null) {
+      this.park(session, state, until, redo);
+      return false;
+    }
+    this.move(session, state, to, redo);
+    return true;
+  }
+
+  /**
+   * The line a story's log gets when the hold takes its agent off: whether the
+   * build moves on or waits is decided once every agent of the run is off, so
+   * this says what would happen now.
+   */
+  private holdLine(session: Session, state: RunState, until: string): string {
+    return this.canMove(session, state) ? movedMessage(until) : holdMessage(until);
   }
 
   /**
@@ -3210,6 +3367,15 @@ function holdMessage(until: string): string {
     'Claude’s usage limit was reached, so this build is held until ' +
     `${until}. No retry and no iteration were spent on it: the session resumes ` +
     'on the same story by itself once the hold lifts.'
+  );
+}
+
+/** What a build's log says when the hold moves it to another account instead. */
+function movedMessage(until: string): string {
+  return (
+    'Claude’s usage limit was reached on this account, which is held until ' +
+    `${until}. No retry and no iteration were spent on it: the build carries on ` +
+    'with the same story on another account.'
   );
 }
 

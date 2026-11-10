@@ -83,9 +83,10 @@ account is out of usage has produced neither a status change nor a commit, so it
 looks exactly like a stalled story, and it was cut off part-way, so it looks
 something like an iteration that ran out of time. It is neither. Nothing is
 wrong with the build, nothing would be different if it were tried again
-immediately, and there is nothing for an operator to fix — so the session is
-**paused**, not failed, and the pause costs it neither a retry nor an iteration.
-See [The usage-limit hold](#the-usage-limit-hold).
+immediately on the same account, and there is nothing for an operator to fix —
+so the build **moves to another Claude account** and carries on when one can
+take it, and is **paused**, not failed, when none can. Neither costs it a retry
+or an iteration. See [The usage-limit hold](#the-usage-limit-hold).
 
 A **failed** session shows the stored reason at the top of its page, along with
 the **stage** it failed at, and one **Retry** button. See
@@ -224,8 +225,8 @@ files in a state the checks refuse — is aborted, the clone goes back to where
 it was, and the story's worktree is thrown away. That counts as a **failed
 attempt** of the story: it starts again in a fresh worktree from the updated
 session branch, which now contains the change it collided with. A resolver
-refused for the usage limit costs no attempt; the session goes on
-[hold](#the-usage-limit-hold).
+refused for the usage limit costs no attempt; the session moves to another
+account or goes on [hold](#the-usage-limit-hold).
 
 ### Failure, questions and the iteration cap
 
@@ -260,13 +261,15 @@ session goes back to **building** when its last open question is answered.
 ### Usage limits
 
 A usage-limit refusal from any of the session's agents — a story or a merge
-resolver — puts the whole session on [hold](#the-usage-limit-hold): the other
-running stories are signalled and given the stop timeout, everything left is
-reaped, every worktree is removed, and the session is parked **waiting**. Every
-story that was not merged goes back to `todo`, and its work in the worktree is
-discarded; merged stories stay `done`. As with a sequential build, the hold
-costs no attempt and no iteration, and the stored plan is reused when it
-resumes.
+resolver — takes the whole session off its account: the other running stories
+are signalled and given the stop timeout, everything left is reaped, and every
+worktree is removed. Every story that was not merged goes back to `todo`, and
+its work in the worktree is discarded; merged stories stay `done`. Then the run
+[moves to another account](#failover-to-another-account) and starts its
+stories again there with the same plan, or, with no account to move to, is
+parked **waiting** on the [hold](#the-usage-limit-hold) and reuses the stored
+plan when it resumes. As with a sequential build, neither costs an attempt or
+an iteration.
 
 ### Stop and restart
 
@@ -440,15 +443,16 @@ some idle time an operator can end with one click.
 it holds the account the refused run was on. A 5-hour or 7-day usage window
 reported at 100% also holds its account, until that window's `resetsAt`. So:
 
-- the refused session is parked at **waiting**, with `waiting_until` carrying
-  the moment it may resume;
-- every *other* `building` session on the same account is unwound the same
-  way — its loop is told to stop, its agent is reaped, and it is parked on the
-  same expiry — because they are all spending that account; sessions on other
-  accounts keep building;
+- the refused session [moves to another account](#failover-to-another-account)
+  and carries on when one can take the work; otherwise it is parked at
+  **waiting**, with `waiting_until` carrying the moment it may resume;
+- every *other* `building` session on the same account is taken off it the
+  same way — its loop is told to stop, its agent is reaped — because they are
+  all spending that account, and then moves on or is parked on the same expiry
+  by the same rule; sessions on other accounts keep building;
 - a PR-feedback run is refused up front with `409 usage_limit_hold`, before it
   costs a container, a checkout or a GitHub call; one refused mid-run arms the
-  hold and parks the builds on its account too;
+  hold and takes the builds on its account off it too;
 - **Start build** on a held account with nowhere to fail over to enqueues the
   session and answers `429 usage_limit_hold`; the
   [queue](scheduling.md#concurrency-and-the-build-queue) skips such entries
@@ -462,8 +466,9 @@ a full usage window expires at that window's reset time, as the usage endpoint
 reports it. If both apply, the later one wins. It expires by itself — the next
 scheduler tick picks the waiting work back up — or earlier with **Resume now**.
 
-**It costs no retry and no iteration.** The refused iteration is given back, the
-story's attempt count is left exactly where it was, and `prd.md` is untouched —
+**It costs no retry and no iteration** — whether the build moves or waits. The
+refused iteration is given back, the story's attempt count is left exactly where
+it was, and `prd.md` is untouched —
 the story keeps the `in-progress` the loop wrote before the agent ran. A session
 that had already stalled twice is still one attempt away from failing when it
 comes back, not zero. A held session also keeps its **build slot**: it counts
@@ -498,14 +503,28 @@ account with room in the first place. The ceiling keeps work off an account that
 refused minutes into the run. Only when nothing qualifies does the work wait
 for its own account, exactly as described above, and the server logs once why.
 
-Failover does not pre-empt running work. A refused session is parked as above;
-the next scheduler tick resumes it on the failover account, recreating its
-container there (the workspace, story and counters are kept). The session
-records the account (`failoverClaudeAccountId`) and its page reads *Running on
-<other> while <own> is on hold until <time>*. A refusal on the failover account
-holds that account in turn. Once the session's own account is no longer held,
-the next agent launch takes it back home. The full rules are in
-[Claude authentication](claude-auth.md#failover).
+**A running build moves too.** When the account under a build is held while
+it runs — its own agent was refused, or another build or PR run on the same
+account was — the build does not wait: once its agents are off the account, it
+asks the same question a launch asks, and when another account can take the
+work it stays **building** and tries the same story again straight away. The
+next agent launch recreates its container on that account (the workspace,
+story and counters are kept), and the iteration log says *the build carries on
+with the same story on another account*. A parallel run restarts every story
+that was not merged, with the plan it already has; a dependency analysis that
+was cut short runs again. Only when no account can take the work is the build
+parked as above. A build whose container did not actually leave the held
+account — the launch put it back there — is parked on its next refusal rather
+than moved again, so a move that cannot happen never turns into a run of
+refusals.
+
+The session records the account (`failoverClaudeAccountId`) and its page reads
+*Running on <other> while <own> is on hold until <time>*. A refusal on the
+failover account holds that account in turn, and the build moves again if a
+third account can take it. A session parked while no account could take it is
+resumed on the failover account by the next scheduler tick once one can. Once
+the session's own account is no longer held, the next agent launch takes it
+back home. The full rules are in [Claude authentication](claude-auth.md#failover).
 
 ## Push and pull request
 
